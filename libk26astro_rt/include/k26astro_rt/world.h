@@ -131,6 +131,16 @@ const char *k26astro_body_name(const K26AstroBody *b);
  * and IAS15 (near) via the quintic switching function K(y). */
 int  k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s);
 
+/* Advance the world by exactly sim_dt_s of simulated time. Same
+ * scheduler dispatch as k26astro_world_step, but the tick layer's
+ * wallclock clamps do not apply: those clamps drop excess wall time
+ * on render hitches, and dropping simulated time would silently
+ * shorten a propagation (a 3600 s request through the clamped path
+ * advances only 0.5 s). Callers whose dt is simulated time (batch
+ * propagation, external stepping) use this entry. Returns 0 on
+ * success. */
+int  k26astro_world_step_exact(K26AstroWorld *world, double sim_dt_s);
+
 /* Single-body Kepler advance. Propagates `body_idx`'s state forward
  * by `dt` (seconds) on a Keplerian orbit around its parent_body_idx
  * (SOI parent). Falls back to body 0 (heliocentric convention) when

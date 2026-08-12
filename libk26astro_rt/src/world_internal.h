@@ -5,6 +5,7 @@
 #define K26ASTRO_RT_WORLD_INTERNAL_H
 
 #include "k26astro_rt/world.h"
+#include "k26compute.h"
 #include "k26tick.h"
 
 #define K26ASTRO_WORLD_FRAME_MAX 64
@@ -60,6 +61,12 @@ struct K26AstroWorld {
     K26TickChannel  chan_render;
     double          spin_hz;
     double          render_hz;
+
+    /* World-seeded RNG (world_rng.h). calloc'd world => seeded == 0,
+     * so an unseeded world keeps the NULL mean-only noise path. */
+    K26CRng  rng;
+    uint64_t seed;
+    uint8_t  seeded;
 
     /* MERCURIUS encounter session state. */
     K26AstroEncounter *encounters;

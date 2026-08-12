@@ -71,6 +71,15 @@ double k26tick_channel_get_hz(const K26TickWorld *w, K26TickChannel ch);
  * between two physics states. Returns 0.0 if no fixed channels exist. */
 double k26tick_advance(K26TickWorld *w, double wallclock_dt_s);
 
+/* Advance the world by exactly sim_dt_s of simulated time: same
+ * dispatch as k26tick_advance, no spiral-of-death clamp and no 0.5 s
+ * cap. The clamps exist to drop excess wallclock time on render
+ * hitches; a caller whose dt is simulated time (batch propagation,
+ * external stepping) must never have time dropped, so this entry
+ * skips them. A 3600 s advance on a 60 s channel fires 60 steps.
+ * Same return value as k26tick_advance. */
+double k26tick_advance_exact(K26TickWorld *w, double sim_dt_s);
+
 /* Monotonic-clock helper. Seconds since first call (or some fixed
  * baseline). Replaces nav_now_s. CLOCK_MONOTONIC backed. */
 double k26tick_now_s(void);

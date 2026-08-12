@@ -4,6 +4,7 @@
  * Body storage is owned by the world (the world's reallocating buffer
  * is what grav_state's `bodies` pointer points at). */
 #include "k26astro_rt/world.h"
+#include "k26astro_rt/world_rng.h"
 #include "k26astro_rt/scheduler.h"
 #include "k26astro_rt/referenced.h"
 #include "k26astro_conics/kepler.h"
@@ -222,6 +223,38 @@ int k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s)
     k26astro_rt_ref_emit_step_begin(world, wallclock_dt_s);
     (void)k26tick_advance(world->tick, wallclock_dt_s);
     /* World time after the step — seconds-past-J2000 (TDB). */
+    double t_s = (double)world->grav.t.days_since_J2000 * 86400.0
+               + world->grav.t.seconds_of_day;
+    k26astro_rt_ref_emit_step_end(world, t_s);
+    return K26ASTRO_RT_OK;
+}
+
+/* World-seeded RNG (world_rng.h) --------------------------------- */
+
+int k26astro_world_set_seed(K26AstroWorld *world, uint64_t seed)
+{
+    if (!world) return -K26ASTRO_RT_E_NULL;
+    world->seed = seed;
+    k26c_rng_init(&world->rng, seed);
+    world->seeded = 1;
+    return K26ASTRO_RT_OK;
+}
+
+K26CRng *k26astro_world_rng(K26AstroWorld *world)
+{
+    if (!world || !world->seeded) return NULL;
+    return &world->rng;
+}
+
+int k26astro_world_step_exact(K26AstroWorld *world, double sim_dt_s)
+{
+    if (!world) return -K26ASTRO_RT_E_NULL;
+    if (!(sim_dt_s >= 0.0)) return -K26ASTRO_RT_E_BAD_ARG;
+    /* The op-log ops are the same as k26astro_world_step's; on this
+     * path the requested dt is also the applied dt, because the
+     * unclamped advance drops nothing. */
+    k26astro_rt_ref_emit_step_begin(world, sim_dt_s);
+    (void)k26tick_advance_exact(world->tick, sim_dt_s);
     double t_s = (double)world->grav.t.days_since_J2000 * 86400.0
                + world->grav.t.seconds_of_day;
     k26astro_rt_ref_emit_step_end(world, t_s);

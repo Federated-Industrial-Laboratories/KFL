@@ -69,6 +69,38 @@ int main(void)
     double t1 = k26tick_now_s();
     ASSERT(t1 >= t0);
 
+    /* ---- Exact advance: simulated dt, no clamps. ----------------- */
+    K26TickWorld *we = k26tick_open();
+    ASSERT(we);
+    K26TickChannel co = k26tick_add_channel(we, "orbit", 1.0, cb_phys, NULL);
+    K26TickChannel cr = k26tick_add_channel(we, "render", 0.0, cb_frame, NULL);
+    (void)co; (void)cr;
+
+    /* The clamped entry drops a 3600 s request to the 0.5 s hard cap:
+     * zero 1 s steps fire. That is the wallclock guard doing its job,
+     * and exactly what a simulated-time caller must not get. */
+    g_n_phys = 0; g_n_frame = 0;
+    k26tick_advance(we, 3600.0);
+    ASSERT(g_n_phys == 0);
+
+    /* The exact entry drops nothing: the 0.5 s residue plus 3599.5 s
+     * more is 3600 whole 1 s steps, and the render-rate channel sees
+     * the full simulated dt once. */
+    g_n_phys = 0; g_n_frame = 0;
+    k26tick_advance_exact(we, 3599.5);
+    ASSERT(g_n_phys == 3600);
+    ASSERT(g_n_frame == 1);
+    ASSERT(g_last_phys_dt == 1.0);
+
+    /* Remainder carries across exact advances. */
+    g_n_phys = 0;
+    k26tick_advance_exact(we, 0.75);
+    ASSERT(g_n_phys == 0);
+    k26tick_advance_exact(we, 0.25);
+    ASSERT(g_n_phys == 1);
+
+    k26tick_close(we);
+
     k26tick_close(w);
     printf("test_tick: all assertions passed\n");
     return 0;

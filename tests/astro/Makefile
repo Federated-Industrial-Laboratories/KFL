@@ -38,15 +38,17 @@ BIN_DIR = bin
 # Gates: two_body_kepler, two_body_wh, burrau_ias15, mercury_gr_ppn1,
 # inner_ss_100yr, coord_stress, frame_roundtrip, snapshot_roundtrip,
 # test_referenced_replay, test_outer_ss_100jup, test_kozai_lidov,
-# test_sj_s_10kyr. The light_time test lives in libk26astro_ephem/tests;
-# the KFL snapshot round-trip lives in kflc/Makefile.
+# test_sj_s_10kyr, test_world_step_exact, test_world_seed. The
+# light_time test lives in libk26astro_ephem/tests; the KFL snapshot
+# round-trip lives in kflc/Makefile.
 TESTS = $(BIN_DIR)/two_body_kepler $(BIN_DIR)/two_body_wh \
         $(BIN_DIR)/burrau_ias15 $(BIN_DIR)/mercury_gr_ppn1 \
         $(BIN_DIR)/inner_ss_100yr $(BIN_DIR)/coord_stress \
         $(BIN_DIR)/frame_roundtrip $(BIN_DIR)/snapshot_roundtrip \
         $(BIN_DIR)/test_referenced_replay \
         $(BIN_DIR)/test_outer_ss_100jup $(BIN_DIR)/test_kozai_lidov \
-        $(BIN_DIR)/test_sj_s_10kyr
+        $(BIN_DIR)/test_sj_s_10kyr \
+        $(BIN_DIR)/test_world_step_exact $(BIN_DIR)/test_world_seed
 
 .PHONY: all run clean
 all: $(TESTS)
@@ -108,6 +110,12 @@ $(BIN_DIR)/test_kozai_lidov: test_kozai_lidov.c $(LIBS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(INC) -o $@ $< $(LIBS) $(LDLIBS)
 
 $(BIN_DIR)/test_sj_s_10kyr: test_sj_s_10kyr.c $(LIBS) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(INC) -o $@ $< $(LIBS) $(LDLIBS)
+
+$(BIN_DIR)/test_world_step_exact: test_world_step_exact.c $(LIBS) | $(BIN_DIR)
+	$(CC) $(CFLAGS) $(INC) -o $@ $< $(LIBS) $(LDLIBS)
+
+$(BIN_DIR)/test_world_seed: test_world_seed.c $(LIBS) | $(BIN_DIR)
 	$(CC) $(CFLAGS) $(INC) -o $@ $< $(LIBS) $(LDLIBS)
 
 clean:

@@ -19,6 +19,7 @@ CFLAGS  += -I../libk26astro_atmos/include
 CFLAGS  += -I../libk26astro_vehicle/include
 CFLAGS  += -I../libk26tick/include
 CFLAGS  += -I../libk26m3d/include
+CFLAGS  += -I../libk26compute/include
 CFLAGS  += -ffp-contract=off -fexcess-precision=standard -frounding-math
 CFLAGS  += -fPIC
 

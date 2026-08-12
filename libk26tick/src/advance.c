@@ -11,6 +11,44 @@
 #include "k26tick.h"
 #include "tick_internal.h"
 
+/* Shared dispatch body: accumulate and fire every enabled channel by
+ * dt_s, no clamping. Both entry points funnel here so the two paths
+ * cannot drift apart in dispatch semantics. */
+static double dispatch_(K26TickWorld *w, double dt_s)
+{
+    double slowest_step = 0.0;
+    double slowest_accum_after = 0.0;
+
+    for (size_t i = 0; i < w->n_channels; i++) {
+        K26TickChan *c = &w->ch[i];
+        if (!c->enabled) continue;
+
+        if (c->hz <= 0.0) {
+            /* Render-rate channel — one call per advance. */
+            c->fn(dt_s, c->user);
+            continue;
+        }
+
+        c->accum_s += dt_s;
+        while (c->accum_s >= c->step_dt_s) {
+            c->fn(c->step_dt_s, c->user);
+            c->accum_s -= c->step_dt_s;
+        }
+        if (c->step_dt_s > slowest_step) {
+            slowest_step = c->step_dt_s;
+            slowest_accum_after = c->accum_s;
+        }
+    }
+
+    if (slowest_step > 0.0) {
+        double alpha = slowest_accum_after / slowest_step;
+        if (alpha < 0.0) alpha = 0.0;
+        if (alpha > 1.0) alpha = 1.0;
+        return alpha;
+    }
+    return 0.0;
+}
+
 double k26tick_advance(K26TickWorld *w, double wallclock_dt_s)
 {
     if (!w) return 0.0;
@@ -30,35 +68,15 @@ double k26tick_advance(K26TickWorld *w, double wallclock_dt_s)
      * fixed channel exists to bound longest_step_dt_s. */
     if (wallclock_dt_s > 0.5) wallclock_dt_s = 0.5;
 
-    double slowest_step = 0.0;
-    double slowest_accum_after = 0.0;
+    return dispatch_(w, wallclock_dt_s);
+}
 
-    for (size_t i = 0; i < w->n_channels; i++) {
-        K26TickChan *c = &w->ch[i];
-        if (!c->enabled) continue;
-
-        if (c->hz <= 0.0) {
-            /* Render-rate channel — one call per advance. */
-            c->fn(wallclock_dt_s, c->user);
-            continue;
-        }
-
-        c->accum_s += wallclock_dt_s;
-        while (c->accum_s >= c->step_dt_s) {
-            c->fn(c->step_dt_s, c->user);
-            c->accum_s -= c->step_dt_s;
-        }
-        if (c->step_dt_s > slowest_step) {
-            slowest_step = c->step_dt_s;
-            slowest_accum_after = c->accum_s;
-        }
-    }
-
-    if (slowest_step > 0.0) {
-        double alpha = slowest_accum_after / slowest_step;
-        if (alpha < 0.0) alpha = 0.0;
-        if (alpha > 1.0) alpha = 1.0;
-        return alpha;
-    }
-    return 0.0;
+double k26tick_advance_exact(K26TickWorld *w, double sim_dt_s)
+{
+    if (!w) return 0.0;
+    if (sim_dt_s < 0.0) sim_dt_s = 0.0;
+    /* No clamps: the caller's dt is simulated time and dropping any
+     * of it would silently shorten the simulation (the clamps guard
+     * wallclock hitches, a hazard this path does not have). */
+    return dispatch_(w, sim_dt_s);
 }
