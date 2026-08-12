@@ -164,7 +164,13 @@ int main(int argc, char **argv)
         const char *cxx    = getenv("CXX");
         if (!cxx) cxx = "c++";
         const char *cflags = getenv("KFLC_CFLAGS");
-        if (!cflags) cflags = "-O2 -g -std=c++11 -Wno-format-truncation";
+        /* The FP flags match every numeric library's own build (for
+         * example libk26astro_core/Makefile): without them the emitted
+         * arithmetic may contract into FMA and diverge from the
+         * libraries it links, between compilers, and between runs of
+         * nominally identical binaries. */
+        if (!cflags) cflags = "-O2 -g -std=c++11 -Wno-format-truncation "
+                              "-ffp-contract=off -fexcess-precision=standard";
         const char *ldlibs = getenv("KFLC_LDLIBS");
         if (!ldlibs) ldlibs = "-lm";
 

@@ -159,6 +159,7 @@ int kfl_is_reserved_future(const char *name)
     static const char *const RESERVED[] = {
         "thread", "join", "mutex", "lock", "unlock",
         "parallel_for", "bind", "import",
+        "action", "objective", "episode",
         NULL
     };
     for (int i = 0; RESERVED[i]; i++) {

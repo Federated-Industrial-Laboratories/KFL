@@ -83,10 +83,10 @@ int       kfl_emit_stmt(FILE *out, const KflcNode *s,
 
 /* Returns 1 if `name` matches a keyword reserved for a future KFL
  * grammar version (thread / join / mutex / lock / unlock /
- * parallel_for / bind / import). Callers should pair the check with a
- * `kflc_diag_warnf` so authors get a deprecation-style heads-up before
- * the keyword starts being enforced. Used by the `arg` parser and the
- * `let`/`const` parser. */
+ * parallel_for / bind / import / action / objective / episode).
+ * Callers should pair the check with a `kflc_diag_warnf` so authors
+ * get a deprecation-style heads-up before the keyword starts being
+ * enforced. Used by the `arg` parser and the `let`/`const` parser. */
 int       kfl_is_reserved_future(const char *name);
 
 /* Block-scope tracker for heap-typed `let`s. The fn-body root level

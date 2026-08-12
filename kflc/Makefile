@@ -58,13 +58,32 @@ MEMORY_QUAL_TEST = tests/test_memory_qualifiers
 $(MEMORY_QUAL_TEST): tests/test_memory_qualifiers.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
-test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(BIN)
+# Gate for the reserved-keyword warning list: identifiers that will
+# become keywords in a future grammar version warn today, so authors
+# rename before the keyword lands and binds.
+RESERVED_KW_TEST = tests/test_reserved_keywords
+$(RESERVED_KW_TEST): tests/test_reserved_keywords.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+
+test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(MANIFEST_TEST)
 	./$(BODY_BINDING_TEST)
 	./$(W8_ARENA_TEST)
 	./$(MEMORY_QUAL_TEST)
+	./$(RESERVED_KW_TEST)
+	@printf 'form PROBE\n    fn double f()\n        return 1.0\n    end\nend\n' \
+	     > /tmp/kflc_flags_probe.kfl; \
+	 env -u KFLC_CFLAGS ./$(BIN) /tmp/kflc_flags_probe.kfl \
+	     -o /tmp/kflc_flags_probe > /tmp/kflc_flags_probe.log 2>&1; \
+	 if grep -q -- '-ffp-contract=off -fexcess-precision=standard' \
+	     /tmp/kflc_flags_probe.log; then \
+	     echo 'default cflags carry the FP determinism flags: OK'; \
+	 else \
+	     echo 'default cflags missing the FP determinism flags: FAIL'; \
+	     cat /tmp/kflc_flags_probe.log; exit 1; \
+	 fi
 
 $(LIB): $(LIB_OBJS)
 	$(AR) rcs $@ $^
