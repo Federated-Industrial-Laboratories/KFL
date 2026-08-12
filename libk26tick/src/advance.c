@@ -74,7 +74,10 @@ double k26tick_advance(K26TickWorld *w, double wallclock_dt_s)
 double k26tick_advance_exact(K26TickWorld *w, double sim_dt_s)
 {
     if (!w) return 0.0;
-    if (sim_dt_s < 0.0) sim_dt_s = 0.0;
+    /* !(x >= 0) also catches NaN: a NaN dt would poison every
+     * channel's accumulator permanently, and this entry is the one
+     * externally driven dt reaches. */
+    if (!(sim_dt_s >= 0.0)) sim_dt_s = 0.0;
     /* No clamps: the caller's dt is simulated time and dropping any
      * of it would silently shorten the simulation (the clamps guard
      * wallclock hitches, a hazard this path does not have). */

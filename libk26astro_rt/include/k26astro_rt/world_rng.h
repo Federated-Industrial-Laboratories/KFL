@@ -1,10 +1,11 @@
 /* world_rng.h - the world-seeded deterministic RNG.
  *
  * The detect, softkill, and impactor noise generators take a
- * K26CRng* and document bit-identical replay under "a world-seeded
- * RNG"; this header is where that RNG lives. It is separate from
- * world.h so that consumers who never thread noise do not pull
- * libk26compute into their include path.
+ * K26CRng*; detect.h documents bit-identical replay under "a
+ * world-seeded RNG", and the other two document the same mechanism
+ * in their own words. This header is where that RNG lives. It is
+ * separate from world.h so that consumers who never thread noise do
+ * not pull libk26compute into their include path.
  *
  * An unseeded world has no RNG: k26astro_world_rng returns NULL, and
  * passing NULL to the noise generators keeps their documented

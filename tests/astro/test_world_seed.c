@@ -52,6 +52,23 @@ int main(void)
     }
     ASSERT(differs);
 
+    /* The replay property itself: a second world instance under the
+     * same seed draws the identical stream. A stream that depended on
+     * world identity (address, allocation order) would pass every
+     * single-world assertion above and still break cross-process
+     * replay, which is what the seed exists for. */
+    K26AstroWorld *w2 = k26astro_world_create(K26ASTRO_MODE_PORTABLE,
+                                              K26ASTRO_COORDS_SECTOR_GRID);
+    ASSERT(w2);
+    ASSERT(k26astro_world_set_seed(w2, 0x4B464C5F524Cu) == 0);
+    K26CRng *r2 = k26astro_world_rng(w2);
+    ASSERT(r2 != NULL);
+    for (int i = 0; i < N_DRAWS; i++) {
+        double d = k26c_rng_uniform(r2);
+        ASSERT(d == first[i]);
+    }
+    k26astro_world_destroy(w2);
+
     k26astro_world_destroy(w);
     printf("test_world_seed: all assertions passed\n");
     return 0;

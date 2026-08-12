@@ -13,12 +13,16 @@
  * Wire: see kflc/Makefile RESERVED_KW_TEST + test target.
  */
 #define _GNU_SOURCE
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+
+/* NDEBUG-immune: a gate built with release flags must still gate. */
+#define ASSERT(cond) do { if (!(cond)) { \
+    fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+    exit(1); } } while (0)
 
 static void write_fixture_(const char *path, const char *content)
 {
@@ -67,9 +71,9 @@ static void expect_warns_(const char *name)
     char *err = NULL;
     int rc = run_check_(path, &err);
     /* Warn, not enforce: the program still checks clean. */
-    assert(rc == 0);
-    assert(strstr(err, "reserved for a future KFL") != NULL);
-    assert(strstr(err, name) != NULL);
+    ASSERT(rc == 0);
+    ASSERT(strstr(err, "reserved for a future KFL") != NULL);
+    ASSERT(strstr(err, name) != NULL);
     free(err);
     unlink(path);
     n_pass++;
@@ -93,8 +97,8 @@ int main(void)
                    "end\n");
     char *err = NULL;
     int rc = run_check_("/tmp/kflc_reserved_clean.kfl", &err);
-    assert(rc == 0);
-    assert(strstr(err, "reserved for a future KFL") == NULL);
+    ASSERT(rc == 0);
+    ASSERT(strstr(err, "reserved for a future KFL") == NULL);
     free(err);
     unlink("/tmp/kflc_reserved_clean.kfl");
     n_pass++;
