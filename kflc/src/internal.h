@@ -105,6 +105,14 @@ int       kfl_emit_rl_cxx(FILE *out, const KflcNode *form,
  * reserved-future warning behaviour. */
 void      kfl_stmt_set_world_ctx(int in_world);
 
+/* Float-literal pinning for the reinforcement learning translation
+ * unit (expr.c). The RL emitter sets this to 1 around its whole
+ * emission and back to 0 after: %.17g renders a fractionless double
+ * as a C++ integer literal, which must not reach environment
+ * arithmetic; the 3.1 path stays byte-identical by never seeing the
+ * flag. */
+void      kfl_expr_set_float_pin(int on);
+
 /* Block-scope tracker for heap-typed `let`s. The fn-body root level
  * (depth 0) is folded in too, so this tracker is the single source of
  * truth for "what heap-typed locals are live and how do we free them

@@ -206,24 +206,16 @@ int main(int argc, char **argv)
 
         /* For a reinforcement learning program, write the version
          * script beside the emitted source: kept with -c, temporary
-         * otherwise, exactly like the source itself. */
+         * otherwise, exactly like the source itself. The kept name
+         * derives from the output path so two programs compiled into
+         * one directory each keep their own script and nothing
+         * pre-existing is clobbered. */
         char map_path[600];
         map_path[0] = '\0';
         if (is_rl) {
             if (keep_cxx) {
-                /* Fixed name beside the output, the tree's export-map
-                 * convention. */
-                char dir[512];
-                snprintf(dir, sizeof dir, "%s", output);
-                char *slash = strrchr(dir, '/');
-                if (slash) {
-                    *slash = '\0';
-                    snprintf(map_path, sizeof map_path,
-                             "%s/k26rl_exports.map", dir);
-                } else {
-                    snprintf(map_path, sizeof map_path,
-                             "k26rl_exports.map");
-                }
+                snprintf(map_path, sizeof map_path,
+                         "%s.exports.map", output);
             } else {
                 snprintf(map_path, sizeof map_path,
                          "/tmp/kflc-%d.map", (int)getpid());

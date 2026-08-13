@@ -1073,11 +1073,12 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
     fputs("static int kflrl_build_world_(K26AstroWorld *world, "
           "K26RngKey _kfl_key,\n"
           "                              uint32_t _kfl_envi, "
-          "double *_kfl_wscal)\n"
+          "double *_kfl_wscal,\n"
+          "                              double *_kfl_dr0)\n"
           "{\n"
           "    const uint32_t _kfl_ep = 0;\n"
           "    (void)_kfl_key; (void)_kfl_envi; (void)_kfl_ep; "
-          "(void)_kfl_wscal;\n", out);
+          "(void)_kfl_wscal; (void)_kfl_dr0;\n", out);
 
     /* Known-body index locals, the batch emitter's convention, so the
      * shared statement emitter resolves parent/observe targets. A
@@ -1170,8 +1171,10 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                     continue;
                 }
                 /* Distribution-valued attribute: episode-0 draw at
-                 * this parameter's coordinates. The same value is
-                 * re-drawn (identically) by kflrl_apply_draws_. */
+                 * this parameter's coordinates, the coordinate's only
+                 * consumption at create; the value is handed out
+                 * through _kfl_dr0 so kflrl_apply_draws_ records it
+                 * without re-drawing. */
                 int dr_slot = -1;
                 for (int d = 0; d < m->n_dr; d++) {
                     if (m->dr[d].attr == a) dr_slot = d;
@@ -1183,6 +1186,8 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                         return 1;
                     }
                     fputs(";\n", out);
+                    fprintf(out, "            if (_kfl_dr0) "
+                                 "_kfl_dr0[%d] = _kfl_v;\n", dr_slot);
                     rl_emit_body_write_var_(out, 12, "_kfl_b.", a->name,
                                             "_kfl_v");
                     fputs("        }\n", out);
@@ -1228,10 +1233,11 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
           "K26RngKey _kfl_key,\n"
           "                               uint32_t _kfl_envi, "
           "uint32_t _kfl_ep,\n"
-          "                               double *rec)\n"
+          "                               double *rec,\n"
+          "                               const double *_kfl_dr0)\n"
           "{\n"
           "    (void)world; (void)_kfl_key; (void)_kfl_envi; "
-          "(void)_kfl_ep; (void)rec;\n", out);
+          "(void)_kfl_ep; (void)rec; (void)_kfl_dr0;\n", out);
 
     for (int i = 0; i < m->n_resets; i++) {
         fprintf(out, "    rec[%d] = ", i);
@@ -1241,13 +1247,18 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
         }
         fputs(";\n", out);
     }
+    /* At create the attribute draws were consumed while the world was
+     * built; _kfl_dr0 hands their values in so each (seed, coordinate)
+     * pair is drawn exactly once per handle. Boundary resets pass
+     * null and draw at the new episode index. */
     for (int i = 0; i < m->n_dr; i++) {
-        fprintf(out, "    rec[%d] = ", m->n_resets + i);
+        fprintf(out, "    rec[%d] = _kfl_dr0 ? _kfl_dr0[%d] : (",
+                m->n_resets + i, i);
         if (rl_emit_draw_(out, m->dr[i].dist, 0x0002u, m->dr[i].channel,
                           arg_ctx, diag)) {
             return 1;
         }
-        fputs(";\n", out);
+        fputs(");\n", out);
     }
 
     for (int i = 0; i < m->n_dr; i++) {
@@ -1661,9 +1672,9 @@ static void rl_emit_env_core_(FILE *out)
 "    (void)k26astro_world_set_seed(w, h->seed);\n"
 "#if KFLRL_N_REC > 0\n"
 "    kflrl_apply_draws_(w, h->key, e, ep,\n"
-"                       h->dr_vals + (size_t)e * KFLRL_N_REC);\n"
+"                       h->dr_vals + (size_t)e * KFLRL_N_REC, NULL);\n"
 "#else\n"
-"    kflrl_apply_draws_(w, h->key, e, ep, NULL);\n"
+"    kflrl_apply_draws_(w, h->key, e, ep, NULL, NULL);\n"
 "#endif\n"
 "    h->episode[e] = ep;\n"
 "    h->steps[e]   = 0;\n"
@@ -1880,8 +1891,13 @@ static void rl_emit_env_core_(FILE *out)
 "            return K26RL_E_INTERNAL;\n"
 "        }\n"
 "        (void)k26astro_world_set_seed(h->worlds[e], seed);\n"
+"#if KFLRL_N_DR > 0\n"
+"        double dr0[KFLRL_N_DR];\n"
+"#else\n"
+"        double *dr0 = NULL;\n"
+"#endif\n"
 "        if (kflrl_build_world_(h->worlds[e], h->key, e,\n"
-"                h->wscal + (size_t)e * KFLRL_N_WSCAL) != 0) {\n"
+"                h->wscal + (size_t)e * KFLRL_N_WSCAL, dr0) != 0) {\n"
 "            kflrl_free_handle_(h);\n"
 "            return K26RL_E_INTERNAL;\n"
 "        }\n"
@@ -1900,9 +1916,9 @@ static void rl_emit_env_core_(FILE *out)
 "        }\n"
 "#if KFLRL_N_REC > 0\n"
 "        kflrl_apply_draws_(h->worlds[e], h->key, e, 0,\n"
-"                           h->dr_vals + (size_t)e * KFLRL_N_REC);\n"
+"                           h->dr_vals + (size_t)e * KFLRL_N_REC, dr0);\n"
 "#else\n"
-"        kflrl_apply_draws_(h->worlds[e], h->key, e, 0, NULL);\n"
+"        kflrl_apply_draws_(h->worlds[e], h->key, e, 0, NULL, dr0);\n"
 "#endif\n"
 "        kflrl_observe_(h->worlds[e],\n"
 "                       h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
@@ -2074,24 +2090,37 @@ static void rl_emit_env_core_(FILE *out)
 "            continue;\n"
 "        }\n"
 "\n"
+"        /* Terminal adjustment on termination only; truncation\n"
+"         * carries none. Evaluated before the transition commits so\n"
+"         * a non-finite adjusted reward faults like a non-finite\n"
+"         * reward, never reaching the recorded stream. */\n"
+"        int term = kflrl_terminated_(h->scratch, aslice, ns, wslice);\n"
+"        double tadj = 0.0;\n"
+"        if (term) {\n"
+"            tadj = kflrl_terminal_(h->scratch, aslice, ns, wslice);\n"
+"            r += tadj;\n"
+"            if (!std::isfinite(r)) {\n"
+"                K26RlStatus fst = kflrl_fault_(\n"
+"                    h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);\n"
+"                if (fst != K26RL_OK) return fst;\n"
+"                continue;\n"
+"            }\n"
+"        }\n"
+"\n"
 "", out);
     fputs(
-"        /* The transition commits. */\n"
+"        /* The transition commits. Termination and truncation are\n"
+"         * distinct outcomes: termination wins when both land on one\n"
+"         * step, and the flag word agrees in kind with the episode\n"
+"         * file's end reason. */\n"
 "        h->steps[e] = ns;\n"
 "        memcpy(h->obs + (size_t)e * KFLRL_OBS_TOTAL, h->scratch,\n"
 "               sizeof(double) * KFLRL_OBS_TOTAL);\n"
 "        uint32_t f = 0;\n"
-"        int term = kflrl_terminated_(h->scratch, aslice, ns, wslice);\n"
-"        if (term) f |= K26RL_FLAG_TERMINATED;\n"
-"        if (h->horizon != 0 && ns >= h->horizon) {\n"
-"            f |= K26RL_FLAG_TRUNCATED;\n"
-"        }\n"
-"        double tadj = 0.0;\n"
 "        if (term) {\n"
-"            /* Terminal adjustment on termination only; truncation\n"
-"             * carries none. */\n"
-"            tadj = kflrl_terminal_(h->scratch, aslice, ns, wslice);\n"
-"            r += tadj;\n"
+"            f |= K26RL_FLAG_TERMINATED;\n"
+"        } else if (h->horizon != 0 && ns >= h->horizon) {\n"
+"            f |= K26RL_FLAG_TRUNCATED;\n"
 "        }\n"
 "        h->rew[e] = r;\n"
 "        h->flags[e] = f;\n"
@@ -2279,6 +2308,22 @@ static void rl_emit_batch_main_(FILE *out, const KflcNode *form)
 "    return 2;\n"
 "}\n"
 "\n"
+"/* Full-token non-negative integer, or a clear diagnostic. A run\n"
+" * silently defaulting a mistyped seed would be indistinguishable\n"
+" * from the intended one. */\n"
+"static int kflrl_arg_u64_(const char *prog, const char *flag,\n"
+"                          const char *val, unsigned long long *out_v)\n"
+"{\n"
+"    char *end = NULL;\n"
+"    if (val && val[0] >= '0' && val[0] <= '9') {\n"
+"        unsigned long long v = strtoull(val, &end, 10);\n"
+"        if (end && *end == '\\0') { *out_v = v; return 0; }\n"
+"    }\n"
+"    fprintf(stderr, \"%s: %s expects a non-negative integer,\"\n"
+"            \" got `%s`\\n\", prog, flag, val ? val : \"\");\n"
+"    return -1;\n"
+"}\n"
+"\n"
 "int main(int argc, char **argv)\n"
 "{\n"
 "    uint32_t n_envs = 1;\n"
@@ -2286,13 +2331,35 @@ static void rl_emit_batch_main_(FILE *out, const KflcNode *form)
 "    uint64_t seed = 0;\n"
 "    const char *out_path = NULL;\n"
 "    for (int i = 1; i < argc; i++) {\n"
-"        if (strcmp(argv[i], \"--envs\") == 0 && i + 1 < argc) {\n"
-"            n_envs = (uint32_t)strtoul(argv[++i], NULL, 10);\n"
-"        } else if (strcmp(argv[i], \"--episodes\") == 0 && i + 1 < argc) {\n"
-"            episodes = strtoull(argv[++i], NULL, 10);\n"
-"        } else if (strcmp(argv[i], \"--seed\") == 0 && i + 1 < argc) {\n"
-"            seed = strtoull(argv[++i], NULL, 10);\n"
-"        } else if (strcmp(argv[i], \"--out\") == 0 && i + 1 < argc) {\n"
+"        if (strcmp(argv[i], \"--envs\") == 0 ||\n"
+"            strcmp(argv[i], \"--episodes\") == 0 ||\n"
+"            strcmp(argv[i], \"--seed\") == 0 ||\n"
+"            strcmp(argv[i], \"--out\") == 0) {\n"
+"            if (i + 1 >= argc) {\n"
+"                fprintf(stderr, \"%s: %s is missing its value\\n\",\n"
+"                        argv[0], argv[i]);\n"
+"                return kflrl_usage_(argv[0]);\n"
+"            }\n"
+"        }\n"
+"        if (strcmp(argv[i], \"--envs\") == 0) {\n"
+"            unsigned long long v = 0;\n"
+"            if (kflrl_arg_u64_(argv[0], \"--envs\", argv[++i], &v)\n"
+"                != 0) return 2;\n"
+"            if (v > 0xFFFFFFFFull) {\n"
+"                fprintf(stderr, \"%s: --envs exceeds the largest\"\n"
+"                        \" supported environment count\\n\", argv[0]);\n"
+"                return 2;\n"
+"            }\n"
+"            n_envs = (uint32_t)v;\n"
+"        } else if (strcmp(argv[i], \"--episodes\") == 0) {\n"
+"            if (kflrl_arg_u64_(argv[0], \"--episodes\", argv[++i],\n"
+"                               &episodes) != 0) return 2;\n"
+"        } else if (strcmp(argv[i], \"--seed\") == 0) {\n"
+"            unsigned long long v = 0;\n"
+"            if (kflrl_arg_u64_(argv[0], \"--seed\", argv[++i], &v)\n"
+"                != 0) return 2;\n"
+"            seed = (uint64_t)v;\n"
+"        } else if (strcmp(argv[i], \"--out\") == 0) {\n"
 "            out_path = argv[++i];\n"
 "        }\n", out);
     /* Form-argument overrides keep their batch spelling. */
@@ -2419,12 +2486,28 @@ static void rl_emit_batch_main_(FILE *out, const KflcNode *form)
 
 /* ---- Entry ---------------------------------------------------------- */
 
+static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
+                                  KflcDiag *diag);
+
 int kfl_emit_rl_cxx(FILE *out, const KflcNode *form, KflcDiag *diag)
 {
     if (!form || form->kind != KFLN_FORM) {
         kflc_diag_errorf(diag, 0, "emit: not a form node");
         return 1;
     }
+    /* Every expression in this translation unit is environment code
+     * (reward, termination, on_step, prefix), so float literals are
+     * pinned for the whole emission; the flag is cleared on every
+     * return so 3.1 emission never sees it. */
+    kfl_expr_set_float_pin(1);
+    int rl_rc_ = kfl_emit_rl_cxx_inner_(out, form, diag);
+    kfl_expr_set_float_pin(0);
+    return rl_rc_;
+}
+
+static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
+                                  KflcDiag *diag)
+{
 
     KflcArena *arena = kflc_arena_create();
     RlModel m;

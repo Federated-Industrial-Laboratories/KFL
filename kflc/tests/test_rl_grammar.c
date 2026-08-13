@@ -348,6 +348,175 @@ int main(void)
         "end\n",
         1, "`gains` is not a scalar", NULL);
 
+    /* A negative horizon is a checker error, not a silent unbounded
+     * episode; the never-ends warning must not fire beside it. */
+    expect_("neghorizon",
+        "form NEG_H\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon -3\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward 0.0 - track_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "`horizon` must be non-negative", "can never end");
+
+    /* A fractional horizon has no meaning as a step count. */
+    expect_("frachorizon",
+        "form FRAC_H\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 2.5\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward 0.0 - track_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "whole number of steps", NULL);
+
+    /* An action name colliding with a derived observation component
+     * is a KFL diagnostic, not a C++ redeclaration error. */
+    expect_("nscollide",
+        "form NS_COLLIDE\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "    end\n"
+        "    action track_range box -1.0 1.0\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward track_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "collides with the `track_range` component", NULL);
+
+    /* A channel name too long for the spec's 64-byte name entries is
+     * refused at compile time, never silently truncated. */
+    expect_("longchan",
+        "form LONG_CHAN\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as"
+        " channel_name_padded_out_to_be_conspicuously_longer_than_58_bytes\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "longer than 58 bytes", NULL);
+
+    /* A world binding silently shadowed by an observation component
+     * would read back the wrong value with no diagnostic; the
+     * collision is an error instead. */
+    expect_("wbindcollide",
+        "form WB_COLLIDE\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    let track_range: double = 1.0\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward track_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "collides with a world binding", NULL);
+
+    /* Same rule between an action and a form argument. */
+    expect_("argcollide",
+        "form ARG_COLLIDE\n"
+        "arg thrust default 9.0\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "    end\n"
+        "    action thrust box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward thrust\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "collides with form argument `thrust`", NULL);
+
+    /* And between an action and a top-level world binding. */
+    expect_("actbindcollide",
+        "form AB_COLLIDE\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    let thrust: double = 1.0\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "    end\n"
+        "    action thrust box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward thrust\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "collides with a world binding", NULL);
+
+    /* A binding inside a nested block was never readable in the
+     * evaluators, so it may share an action's name freely. */
+    expect_("nestedbindok",
+        "form NB_OK\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    if 1.0 > 0.0\n"
+        "        let thrust: double = 1.0\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "    end\n"
+        "    action thrust box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward thrust\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "collides");
+
     printf("test_rl_grammar: %d case(s) passed\n", n_pass);
     return 0;
 }

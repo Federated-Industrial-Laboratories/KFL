@@ -16,13 +16,10 @@
  *      batch program with no trace of the environment surface. The
  *      six scalar state keys stay valid with constant values, being
  *      an additive 3.1 extension.
- *   3. Baseline byte-identity: every 3.1 example and integration
- *      fixture emits byte-identical C++ through today's kflc and
- *      through kflc built from the pre-RL base commit (53a4452). A
- *      fixture that fails to emit (opaque types provided by installed
- *      manifests) must fail identically on both. Skipped with a note
- *      when the repository history is not available; gates 1 and 2
- *      run regardless.
+ * The baseline byte-identity comparison against the pre-RL base
+ * commit lives in test_rl_31_baseline, whose skip (history absent)
+ * is the harness's own 77 rather than a silent pass; the pins here
+ * carry no external dependency and always run.
  *
  * Pattern: run ./bin/kflc via system() on fixtures, assert on the
  * captured output (test_rl_grammar's harness style).
@@ -197,57 +194,58 @@ int main(void)
     printf("gate 2: constructs removed leaves a plain 3.1 batch"
            " program: OK\n");
 
-    /* Gate 3: baseline byte-identity against the pre-RL base. */
-    if (run_("git -C .. rev-parse --verify --quiet "
-             BASE_COMMIT "^{commit} > /dev/null 2>&1") != 0) {
-        printf("gate 3: baseline comparison skipped (base commit "
-               BASE_COMMIT " not available)\n");
-        printf("test_rl_31_pin: gates passed (baseline skipped)\n");
-        return 0;
+    /* Gate 3: the emitted reset path restores the create-time
+     * baseline whole. The four restorations below are load-bearing
+     * for re-simulation, but today's fixtures cannot all witness
+     * them behaviourally (a two-body geometric observable reads
+     * neither the epoch nor the integrator predictor carry), so
+     * their presence is pinned textually, the step-lowering pin's
+     * technique: deleting any of them is a red gate, not a silent
+     * pass. */
+    {
+        char *cc = slurp_(WORK_DIR "/rl_min.cc");
+        ASSERT(strstr(cc, "memcpy(b0, h->baseline") != NULL);
+        ASSERT(strstr(cc, "g->t = h->baseline_t[e];") != NULL);
+        ASSERT(strstr(cc, "g->dt_last = 0.0;") != NULL);
+        ASSERT(strstr(cc, "g->ias15_dt_last = 0.0;") != NULL);
+        ASSERT(strstr(cc, "k26astro_grav_ias15_reset(g);") != NULL);
+        ASSERT(strstr(cc, "k26astro_world_set_seed(w, h->seed);")
+               != NULL);
+        free(cc);
     }
-    ASSERT(run_("git -C .. archive " BASE_COMMIT " kflc | tar -x -C "
-                WORK_DIR) == 0);
-    ASSERT(run_("make -C " WORK_DIR "/kflc bin/kflc > "
-                WORK_DIR "/oldbuild.log 2>&1") == 0);
-
-    glob_t g;
-    memset(&g, 0, sizeof g);
-    ASSERT(glob("examples/*.kfl", 0, NULL, &g) == 0);
-    ASSERT(glob("integration_tests/astro_w*.kfl", GLOB_APPEND, NULL, &g)
-           == 0);
-    int n_same = 0, n_diag = 0;
-    for (size_t i = 0; i < g.gl_pathc; i++) {
-        const char *kfl = g.gl_pathv[i];
-        int rc_old = emit_(WORK_DIR "/kflc/bin/kflc", kfl,
-                           WORK_DIR "/old.cc", WORK_DIR "/old.err");
-        int rc_new = emit_("./bin/kflc", kfl,
-                           WORK_DIR "/new.cc", WORK_DIR "/new.err");
-        if (rc_old != rc_new) {
-            fprintf(stderr, "%s: exit %d (base) vs %d (now)\n", kfl,
-                    rc_old, rc_new);
-            ASSERT(0);
-        }
-        if (rc_old == 0) {
-            if (!files_equal_(WORK_DIR "/old.cc", WORK_DIR "/new.cc")) {
-                fprintf(stderr, "%s: emitted C++ differs from the"
-                        " base\n", kfl);
-                ASSERT(0);
-            }
-            n_same++;
-        } else {
-            /* Both refuse; the diagnostics must match too. */
-            if (!files_equal_(WORK_DIR "/old.err", WORK_DIR "/new.err")) {
-                fprintf(stderr, "%s: emit diagnostics differ from the"
-                        " base\n", kfl);
-                ASSERT(0);
-            }
-            n_diag++;
-        }
+    /* Same technique for the create-time draw handoff: the world
+     * build hands its attribute-draw values out through _kfl_dr0 and
+     * the record step reads them back instead of re-drawing, so each
+     * (seed, coordinate) pair is consumed once per create. A re-draw
+     * would yield the identical value, so no behavioural gate can
+     * see this; the pin can. */
+    {
+        static const char *const draws_kfl =
+            "form RL_PIN_DRAWS\n"
+            "fn world w\n"
+            "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+            "    astro_body craft gm=1.0 parent=earth"
+            " pos_x=uniform(6.6e6, 7.0e6) vel_y=7350.0\n"
+            "    episode\n"
+            "        control_dt 0.1\n"
+            "        horizon 4\n"
+            "    end\n"
+            "    observe craft from earth mode=geometric as trk\n"
+            "end\n"
+            "end\n";
+        write_file_(WORK_DIR "/pin_draws.kfl", draws_kfl);
+        ASSERT(emit_("./bin/kflc", WORK_DIR "/pin_draws.kfl",
+                     WORK_DIR "/pin_draws.cc",
+                     WORK_DIR "/pin_draws.err") == 0);
+        char *cc = slurp_(WORK_DIR "/pin_draws.cc");
+        ASSERT(strstr(cc, "if (_kfl_dr0) _kfl_dr0[0] = _kfl_v;")
+               != NULL);
+        ASSERT(strstr(cc, "_kfl_dr0 ? _kfl_dr0[0] : (") != NULL);
+        free(cc);
     }
-    globfree(&g);
-    ASSERT(n_same >= 12);
-    printf("gate 3: %d fixture(s) byte-identical to the pre-RL base,"
-           " %d refused identically on both: OK\n", n_same, n_diag);
+    printf("gate 3: the emitted reset restores the baseline whole"
+           " (epoch, step sizes, predictor carry, noise stream), and"
+           " create consumes each draw coordinate once: OK\n");
 
     printf("test_rl_31_pin: 3 gates passed\n");
     return 0;

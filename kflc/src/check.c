@@ -354,14 +354,38 @@ static const char *suffixed_(KflcArena *arena, const char *base,
     return out;
 }
 
-/* Constant-zero horizon: `horizon 0` (or 0.0) can never end the
- * episode any more than an absent horizon can. */
-static int horizon_is_zero_(const KflcAttr *hz)
+/* Constant-fold a horizon expression. The horizon is an episode-count
+ * bound baked into the artifact's spec, so it must be decidable at
+ * compile time: literals and + - * / arithmetic over them. Returns 1
+ * with the value in *out, 0 when the expression is not constant. */
+static int horizon_const_eval_(const KflcExpr *e, double *out)
 {
-    if (!hz || !hz->expr) return 0;
-    if (hz->expr->kind == KFLE_INT_LIT   && hz->expr->u.i == 0)   return 1;
-    if (hz->expr->kind == KFLE_FLOAT_LIT && hz->expr->u.f == 0.0) return 1;
-    return 0;
+    if (!e) return 0;
+    switch (e->kind) {
+    case KFLE_INT_LIT:   *out = (double)e->u.i; return 1;
+    case KFLE_FLOAT_LIT: *out = e->u.f;         return 1;
+    case KFLE_UNARY: {
+        double v;
+        if (!horizon_const_eval_(e->u.un.operand, &v)) return 0;
+        if (e->u.un.op == KFLOP_NEG) { *out = -v; return 1; }
+        if (e->u.un.op == KFLOP_POS) { *out =  v; return 1; }
+        return 0;
+    }
+    case KFLE_BINARY: {
+        double a, b;
+        if (!horizon_const_eval_(e->u.bin.lhs, &a)) return 0;
+        if (!horizon_const_eval_(e->u.bin.rhs, &b)) return 0;
+        switch (e->u.bin.op) {
+        case KFLOP_ADD: *out = a + b; return 1;
+        case KFLOP_SUB: *out = a - b; return 1;
+        case KFLOP_MUL: *out = a * b; return 1;
+        case KFLOP_DIV: if (b == 0.0) return 0; *out = a / b; return 1;
+        default: return 0;
+        }
+    }
+    default:
+        return 0;
+    }
 }
 
 /* ---- Per-world check ------------------------------------------------ */
@@ -421,6 +445,112 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
         }
     }
 
+    /* Channel names are published in the artifact's spec, whose name
+     * entries carry at most 64 bytes; the longest derived component
+     * suffix is 6 bytes, so the base name is bounded at 58. Refusing
+     * here keeps every published component name exact. */
+    for (int i = 0; i < st.observes_as.n; i++) {
+        const char *ni = observe_as_name_(st.observes_as.items[i]);
+        if (ni && strlen(ni) > 58) {
+            kflc_diag_errorf(diag, st.observes_as.items[i]->line,
+                "observe ... as `%s`: channel name is longer than 58 "
+                "bytes, so its derived component names would not fit "
+                "the published spec's 64-byte name entries", ni);
+        }
+    }
+
+    /* Actions, derived observation components, world bindings, and
+     * form arguments all share the evaluator scope (and the generated
+     * code's namespace), so a name may appear in at most one of the
+     * sets the episode machinery introduces, and neither of the two
+     * pre-existing sets may reuse one of those names: an action or a
+     * component silently shadowing a user's `let` or `arg` would read
+     * back the wrong value with no diagnostic at all. */
+    static const char *const comp_sfx_[4] =
+        { "_dir_x", "_dir_y", "_dir_z", "_range" };
+    NameList comps;
+    memset(&comps, 0, sizeof comps);
+    for (int j = 0; j < st.observes_as.n; j++) {
+        const char *base = observe_as_name_(st.observes_as.items[j]);
+        if (!base) continue;
+        for (int k = 0; k < 4; k++) {
+            namelist_push_(&comps, suffixed_(arena, base, comp_sfx_[k]),
+                           arena);
+        }
+    }
+    for (int i = 0; i < st.actions.n; i++) {
+        const char *an = st.actions.items[i]->name;
+        if (!an) continue;
+        for (int j = 0; j < comps.n; j++) {
+            if (strcmp(an, comps.names[j]) == 0) {
+                kflc_diag_errorf(diag, st.actions.items[i]->line,
+                    "action `%s`: name collides with the `%s` component "
+                    "of an observation channel; rename one",
+                    an, comps.names[j]);
+            }
+        }
+    }
+    /* Top-level bindings only: those are the ones the evaluator scope
+     * captures, so only they can be silently shadowed. A binding
+     * inside a nested block was never readable there and may share a
+     * name freely. */
+    NameList wbind;
+    memset(&wbind, 0, sizeof wbind);
+    for (const KflcNode *s = world->children; s; s = s->next) {
+        if ((s->kind == KFLN_STMT_LET || s->kind == KFLN_STMT_CONST) &&
+            s->name)
+        {
+            namelist_push_(&wbind, s->name, arena);
+        }
+    }
+    NameList argn;
+    memset(&argn, 0, sizeof argn);
+    for (const KflcNode *c = form->children; c; c = c->next) {
+        if (c->kind == KFLN_ARG && c->name) {
+            namelist_push_(&argn, c->name, arena);
+        }
+    }
+    for (int i = 0; i < st.actions.n; i++) {
+        const char *an = st.actions.items[i]->name;
+        if (!an) continue;
+        for (int j = 0; j < wbind.n; j++) {
+            if (strcmp(an, wbind.names[j]) == 0) {
+                kflc_diag_errorf(diag, st.actions.items[i]->line,
+                    "action `%s`: name collides with a world binding of "
+                    "the same name; rename one", an);
+                break;
+            }
+        }
+        for (int j = 0; j < argn.n; j++) {
+            if (strcmp(an, argn.names[j]) == 0) {
+                kflc_diag_errorf(diag, st.actions.items[i]->line,
+                    "action `%s`: name collides with form argument `%s`; "
+                    "rename one", an, an);
+                break;
+            }
+        }
+    }
+    for (int i = 0; i < comps.n; i++) {
+        for (int j = 0; j < wbind.n; j++) {
+            if (strcmp(comps.names[i], wbind.names[j]) == 0) {
+                kflc_diag_errorf(diag, world->line,
+                    "observation channel component `%s` collides with a "
+                    "world binding of the same name; rename one",
+                    comps.names[i]);
+                break;
+            }
+        }
+        for (int j = 0; j < argn.n; j++) {
+            if (strcmp(comps.names[i], argn.names[j]) == 0) {
+                kflc_diag_errorf(diag, world->line,
+                    "observation channel component `%s` collides with "
+                    "form argument `%s`; rename one",
+                    comps.names[i], comps.names[i]);
+                break;
+            }
+        }
+    }
+
     check_no_stepping_(world->children, wname, diag);
     check_dist_positions_(world->children, form, diag);
 
@@ -468,14 +598,43 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
                                     tm->line, diag);
     }
 
-    /* Termination reachability: with no positive horizon and no
-     * `terminated when`, nothing ever ends the episode. Warning, not
-     * error: the program still checks clean. */
+    /* Horizon validity and termination reachability. The horizon is a
+     * step-count bound published in the artifact's spec, so it must
+     * const-evaluate to a non-negative integer at compile time; a
+     * negative or fractional bound has no meaning there. With no
+     * positive horizon and no `terminated when`, nothing ever ends
+     * the episode: warning, not error, since the program still
+     * checks clean. */
     if (st.episodes.n > 0) {
         const KflcNode *ep = st.episodes.items[0];
         const KflcAttr *hz = node_attr_(ep, "horizon");
         const KflcAttr *tw = node_attr_(ep, "terminated_when");
-        if (!tw && (!hz || horizon_is_zero_(hz))) {
+        double hv = 0.0;
+        int hz_bad = 0;
+        if (hz && hz->expr) {
+            if (!horizon_const_eval_(hz->expr, &hv)) {
+                kflc_diag_errorf(diag, hz->line,
+                    "episode: `horizon` must be a compile-time constant "
+                    "expression");
+                hz_bad = 1;
+            } else if (hv < 0.0) {
+                kflc_diag_errorf(diag, hz->line,
+                    "episode: `horizon` must be non-negative (evaluates "
+                    "to %g)", hv);
+                hz_bad = 1;
+            } else if (hv > 4294967295.0) {
+                kflc_diag_errorf(diag, hz->line,
+                    "episode: `horizon` exceeds the largest supported "
+                    "step count (evaluates to %g)", hv);
+                hz_bad = 1;
+            } else if (hv != (double)(unsigned long long)hv) {
+                kflc_diag_errorf(diag, hz->line,
+                    "episode: `horizon` must be a whole number of steps "
+                    "(evaluates to %g)", hv);
+                hz_bad = 1;
+            }
+        }
+        if (!tw && !hz_bad && (!hz || hv <= 0.0)) {
             kflc_diag_warnf(diag, ep->line,
                 "episode: without a positive `horizon` or a "
                 "`terminated when` condition the episode can never end");

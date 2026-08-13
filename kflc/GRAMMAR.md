@@ -440,6 +440,15 @@ of every episode: `<body>` names an `astro_body` declared in the same
 world, `<key>` is one of the six state keys (below), and the value must
 be a distribution expression.
 
+The `horizon` is published in the compiled artifact's spec, so it must
+be decidable when the program is compiled: a constant expression of
+literals and arithmetic over them, evaluating to a whole number of
+steps from 0 to 4294967295. A value that is negative, fractional, out
+of range, or not compile-time constant is an error; in particular a
+`horizon` read from an `arg` is rejected. `control_dt` stays an
+ordinary expression, validated at run time (finite and positive) when
+the environment is created.
+
 With neither a positive `horizon` nor a `terminated when` condition the
 episode can never end. The compiler warns, and the batch executable
 refuses to run such a program; the environment library still serves it,
@@ -489,7 +498,14 @@ objective and termination expressions:
 | `<name>_dir_x`, `<name>_dir_y`, `<name>_dir_z`  | Unit direction from observer to target, after the observation mode's corrections. |
 | `<name>_range`                                  | Distance from the observer to the corrected target position, in metres. |
 
-Channel names must be unique within the world.
+Channel names must be unique within the world and at most 58 bytes
+long (the compiled artifact's spec carries each derived component name
+in a 64-byte entry). Every name readable in the objective and
+termination expressions lives in one scope, so a derived component may
+not collide with an action, a top-level world binding, or a form
+argument, and an action may not collide with any of those either; the
+compiler rejects the program rather than letting one silently shadow
+another.
 
 ### The `objective` block
 

@@ -759,6 +759,21 @@ static int emit_compute_call(FILE *out, const ComputeFn *cf,
     return 0;
 }
 
+/* Float-literal pinning for the reinforcement learning translation
+ * unit: %.17g renders a fractionless double as a C++ integer literal
+ * (`1.0` becomes `1`), which turns user arithmetic like `1.0 / 2.0`
+ * into integer division inside the generated environment. Pinned
+ * emission appends `.0` when the rendering carries no `.`, exponent,
+ * or non-finite marker. Off by default: the 3.1 emitter's output is
+ * pinned byte-identical against the pre-RL compiler, so the default
+ * path must not change. */
+static int emit_float_pin_ = 0;
+
+void kfl_expr_set_float_pin(int on)
+{
+    emit_float_pin_ = on;
+}
+
 static int emit_expr_rec(FILE *out, const KflcExpr *e,
                           const KflcExprCtx *ctx, KflcDiag *diag)
 {
@@ -769,6 +784,16 @@ static int emit_expr_rec(FILE *out, const KflcExpr *e,
         return 0;
     case KFLE_FLOAT_LIT:
         /* %.17g gives full double precision round-trip. */
+        if (emit_float_pin_) {
+            char fb[64];
+            snprintf(fb, sizeof fb, "%.17g", e->u.f);
+            if (strpbrk(fb, ".eEnN") == NULL) {
+                fprintf(out, "(%s.0)", fb);
+            } else {
+                fprintf(out, "(%s)", fb);
+            }
+            return 0;
+        }
         fprintf(out, "(%.17g)", e->u.f);
         return 0;
     case KFLE_VEC_LIT:

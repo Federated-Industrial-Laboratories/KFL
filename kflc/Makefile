@@ -123,17 +123,48 @@ $(RL_RESIM_TEST): tests/test_rl_resim.c tests/rl_gate_util.h \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# Golden draw coordinates: every recorded domain-randomisation pair
+# in a batch file is recomputed straight through libk26rng at the
+# documented (class, channel, environment, episode, draw 0)
+# coordinates and compared bitwise, tags included. Skips (77) when
+# the sibling stack archives are not built.
+RL_DRAWS_TEST = tests/test_rl_draws
+$(RL_DRAWS_TEST): tests/test_rl_draws.c tests/rl_gate_util.h \
+                  ../libk26rl/include/k26rl_env.h \
+                  ../libk26rl/include/k26rl_episode.h \
+                  ../libk26rng/include/k26rng.h
+	$(CC) $(CFLAGS) -I../libk26rl/include -I../libk26rng/include \
+	    -o $@ $< ../libk26rl/libk26rl.a ../libk26rng/libk26rng.a \
+	    -ldl -lm
+
 # Grammar 3.1 pins: the 3.1 `step` statement still lowers to the
 # clamped stepping entry (the exact-dt entry belongs to the episode
-# machinery alone), a reinforcement learning program stripped of its
-# constructs emits as a plain 3.1 program, and 3.1 emission is
-# byte-identical against the pre-RL base commit when the repository
-# history is available. Needs only the built kflc.
+# machinery alone), and a reinforcement learning program stripped of
+# its constructs emits as a plain 3.1 program. Needs only the built
+# kflc; always runs.
 RL_31_PIN_TEST = tests/test_rl_31_pin
 $(RL_31_PIN_TEST): tests/test_rl_31_pin.c
 	$(CC) $(CFLAGS) -o $@ $<
 
-test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_31_PIN_TEST) $(BIN)
+# Grammar 3.1 baseline byte-identity against the pre-RL base commit.
+# Its own binary so that "history unavailable" is the harness's skip
+# code (77), never a silent pass beside the always-runnable pins.
+RL_31_BASE_TEST = tests/test_rl_31_baseline
+$(RL_31_BASE_TEST): tests/test_rl_31_baseline.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+# The drive gates link the sibling stack archives at build time, so
+# their build (not just their run) must be conditional: with the
+# archives absent, `make test` still completes, reporting each drive
+# gate as skipped instead of dying at link.
+RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
+ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST)
+else
+RL_DRIVE_GATES =
+endif
+
+test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_DRIVE_GATES) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
@@ -143,31 +174,26 @@ test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMOR
 	./$(MEMORY_QUAL_TEST)
 	./$(RESERVED_KW_TEST)
 	./$(RL_GRAMMAR_TEST)
-	@./$(RL_EMIT_TEST); rc=$$?; \
-	 if [ $$rc -eq 77 ]; then \
-	     echo 'test_rl_emit: SKIP (stack libraries not built)'; \
-	 elif [ $$rc -ne 0 ]; then \
-	     exit $$rc; \
-	 fi
-	@./$(RL_DET_TEST); rc=$$?; \
-	 if [ $$rc -eq 77 ]; then \
-	     echo 'test_rl_determinism: SKIP (stack libraries not built)'; \
-	 elif [ $$rc -ne 0 ]; then \
-	     exit $$rc; \
-	 fi
-	@./$(RL_FAULT_TEST); rc=$$?; \
-	 if [ $$rc -eq 77 ]; then \
-	     echo 'test_rl_fault: SKIP (stack libraries not built)'; \
-	 elif [ $$rc -ne 0 ]; then \
-	     exit $$rc; \
-	 fi
-	@./$(RL_RESIM_TEST); rc=$$?; \
-	 if [ $$rc -eq 77 ]; then \
-	     echo 'test_rl_resim: SKIP (stack libraries not built)'; \
-	 elif [ $$rc -ne 0 ]; then \
-	     exit $$rc; \
-	 fi
+	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
+	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST); do \
+	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
+	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
+	         continue; \
+	     fi; \
+	     ./$$t; rc=$$?; \
+	     if [ $$rc -eq 77 ]; then \
+	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
+	     elif [ $$rc -ne 0 ]; then \
+	         exit $$rc; \
+	     fi; \
+	 done
 	./$(RL_31_PIN_TEST)
+	@./$(RL_31_BASE_TEST); rc=$$?; \
+	 if [ $$rc -eq 77 ]; then \
+	     echo 'test_rl_31_baseline: SKIP (base commit not in history)'; \
+	 elif [ $$rc -ne 0 ]; then \
+	     exit $$rc; \
+	 fi
 	@printf 'form PROBE\n    fn double f()\n        return 1.0\n    end\nend\n' \
 	     > /tmp/kflc_flags_probe.kfl; \
 	 env -u KFLC_CFLAGS ./$(BIN) /tmp/kflc_flags_probe.kfl \
@@ -218,5 +244,6 @@ clean:
 	      $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) \
 	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) \
 	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
-	      $(RL_31_PIN_TEST) tests/bench_parse
+	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
+	      tests/bench_parse
 	rm -rf bin

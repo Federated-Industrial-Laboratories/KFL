@@ -293,7 +293,111 @@ int main(void)
     printf("gate 5: episode index monotonicity (0,1,2 per"
            " environment): OK\n");
 
+    /* Gate 6: termination and truncation landing on one step are one
+     * outcome, not two. Termination wins; the flag word is exactly
+     * the terminated bit and agrees in kind with the recorded end
+     * reason. */
+    {
+        static const char *const cofire_kfl =
+            "form RL_COFIRE\n"
+            "fn world w\n"
+            "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+            "    astro_body craft gm=1.0 parent=earth"
+            " pos_x=7.0e6 vel_y=7350.0\n"
+            "    episode\n"
+            "        control_dt 0.1\n"
+            "        horizon 3\n"
+            "        terminated when episode.steps > 2\n"
+            "    end\n"
+            "    action push box -1.0 1.0 default 0.0\n"
+            "    observe craft from earth mode=geometric as trk\n"
+            "    objective\n"
+            "        reward 1.0\n"
+            "    end\n"
+            "end\n"
+            "end\n";
+        rl_write_file_(WORK_DIR "/cofire.kfl", cofire_kfl);
+        rl_compile_(WORK_DIR "/cofire.kfl", WORK_DIR "/cofire", WORK_DIR);
+        void *so3 = rl_dlopen_(WORK_DIR "/cofire.rlenv.so");
+        RlSurface c;
+        rl_resolve_surface_(so3, &c);
+        K26RlEnv *ce = NULL;
+        ASSERT(c.create(7, 1, &ce) == K26RL_OK);
+        ASSERT(c.output(ce, WORK_DIR "/cofire.k26epi") == K26RL_OK);
+        double a1[1] = { 0.0 };
+        uint32_t f1 = 0;
+        for (int k = 0; k < 3; k++) ASSERT(c.step(ce, a1) == K26RL_OK);
+        ASSERT(c.flags(ce, &f1) == K26RL_OK);
+        ASSERT(f1 == K26RL_FLAG_TERMINATED);
+        c.destroy(ce);
+        dlclose(so3);
+
+        K26RlEpisodeReader *rd = NULL;
+        ASSERT(k26rl_episode_reader_open(WORK_DIR "/cofire.k26epi", &rd)
+               == K26RL_OK);
+        K26RlEpisodeData ep;
+        ASSERT(k26rl_episode_read(rd, 0, 0, 0, &ep) == K26RL_OK);
+        ASSERT(ep.end_reason == K26RL_END_TERMINATED);
+        ASSERT(ep.flags[2] == K26RL_FLAG_TERMINATED);
+        k26rl_episode_free(&ep);
+        k26rl_episode_reader_close(rd);
+    }
+    printf("gate 6: simultaneous termination and truncation resolve"
+           " to terminated alone: OK\n");
+
+    /* Gate 7: user arithmetic over fractionless float literals is
+     * double arithmetic (reward 1.0 / 2.0 is exactly 0.5 through the
+     * surface), and a non-finite terminal adjustment faults the
+     * episode instead of crashing the process or reaching the
+     * recorded stream. */
+    {
+        static const char *const arith_kfl =
+            "form RL_ARITH\n"
+            "fn world w\n"
+            "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+            "    astro_body craft gm=1.0 parent=earth"
+            " pos_x=7.0e6 vel_y=7350.0\n"
+            "    episode\n"
+            "        control_dt 0.1\n"
+            "        horizon 100\n"
+            "        terminated when episode.steps > 1\n"
+            "    end\n"
+            "    action push box -1.0 1.0 default 0.0\n"
+            "    observe craft from earth mode=geometric as trk\n"
+            "    objective\n"
+            "        reward 1.0 / 2.0\n"
+            "        terminal 1.0 / 0.0\n"
+            "    end\n"
+            "end\n"
+            "end\n";
+        rl_write_file_(WORK_DIR "/arith.kfl", arith_kfl);
+        rl_compile_(WORK_DIR "/arith.kfl", WORK_DIR "/arith", WORK_DIR);
+        void *so4 = rl_dlopen_(WORK_DIR "/arith.rlenv.so");
+        RlSurface a;
+        rl_resolve_surface_(so4, &a);
+        K26RlEnv *ae = NULL;
+        ASSERT(a.create(11, 1, &ae) == K26RL_OK);
+        double a1[1] = { 0.0 };
+        double r1 = 0.0;
+        uint32_t f1 = 0;
+        uint16_t c1 = 0;
+        ASSERT(a.step(ae, a1) == K26RL_OK);
+        ASSERT(a.reward(ae, &r1) == K26RL_OK);
+        ASSERT(r1 == 0.5);
+        ASSERT(a.step(ae, a1) == K26RL_OK);
+        ASSERT(a.flags(ae, &f1) == K26RL_OK);
+        ASSERT(f1 == K26RL_FLAG_FAULT);
+        ASSERT(a.fault_codes(ae, &c1) == K26RL_OK);
+        ASSERT(c1 == (uint16_t)K26RL_E_ENV_INTERNAL);
+        ASSERT(a.reward(ae, &r1) == K26RL_OK);
+        ASSERT(r1 == 0.0);
+        a.destroy(ae);
+        dlclose(so4);
+    }
+    printf("gate 7: fractionless literals stay double arithmetic;"
+           " a non-finite terminal faults: OK\n");
+
     dlclose(so);
-    printf("test_rl_fault: 5 gates passed\n");
+    printf("test_rl_fault: 7 gates passed\n");
     return 0;
 }
