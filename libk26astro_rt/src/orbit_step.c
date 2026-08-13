@@ -53,14 +53,21 @@ static void commit_vehicle_mass_(K26AstroWorld *world, double dt_s)
 /* Fill the world's preallocated pair-weight buffer from
  * world->encounters and return it; *out_n holds the count. The
  * buffer is sized for every distinct body pair at body-add time
- * (k26astro_rt_encounter_reserve) and n_encounters can never exceed
- * that, so this path neither allocates nor fails. Returns NULL on
+ * (k26astro_rt_encounter_reserve), and the in-step fallback grows
+ * both session buffers together, so n_encounters cannot exceed the
+ * pair-weight capacity; this path neither allocates nor fails.
+ * Should that invariant ever break, the fill clamps to the
+ * pair-weight capacity: an unweighted pair is simply treated as a
+ * non-encounter (full force in the FAR pass, zero in the NEAR
+ * pass), which keeps the force split an identity. Returns NULL on
  * n=0. */
 static K26AstroPairWeight *build_pair_weights_(K26AstroWorld *world,
                                                 int *out_n)
 {
     int n = world->n_encounters;
     *out_n = 0;
+    if (n <= 0) return NULL;
+    if (n > world->cap_pair_weights) n = world->cap_pair_weights;
     if (n <= 0) return NULL;
     K26AstroPairWeight *w = world->pair_weights;
     for (int k = 0; k < n; k++) {
@@ -94,7 +101,7 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
         return;
     }
 
-    /* Paper-faithful MERCURIUS split (Rein-Tamayo 2019 eq. 12-14).
+    /* Paper-faithful MERCURIUS split (Rein et al. 2019 eq. 12-14).
      * n_enc > 0 here, so the preallocated buffer always comes back
      * non-NULL; the old alloc-failure fallback to a single-
      * integrator step is gone along with the allocation. */

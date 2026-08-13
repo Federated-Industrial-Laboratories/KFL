@@ -20,6 +20,42 @@ static void normalise_axis_(int64_t *sec, double *loc)
      * for two reasons: (a) the loop body is usually executed zero
      * times after a small substep, (b) the integer-divide path
      * (lroundf etc.) sometimes generates worse code on -O0 / -Og. */
+    double x = *loc;
+    if (!(fabs(x) < 4.0 * S)) {
+        /* Off the loop's practical range. A diverged trajectory can
+         * land here with an offset of 1e20 m or more (the loop would
+         * take |loc|/S iterations), with an offset at or beyond
+         * 2^89 m (where loc -/+ S rounds back to loc and the loop
+         * stops advancing at all), or with a non-finite offset
+         * (inf -/+ S stays inf). Fold in one step instead so the
+         * caller always gets its step result back and its own
+         * divergence handling can act; the fold must never be where
+         * a run wedges.
+         *
+         * S is a power of two, so below 2^88 the remainder, the
+         * multiple subtracted, and the sector count are all exact
+         * and the result is bit-identical to the loop's. At or
+         * beyond 2^88, and for non-finite offsets, the offset stays
+         * unfolded: sector*S + offset still names the same point,
+         * and no sane trajectory is within 17 orders of magnitude
+         * of it. */
+        if (!(fabs(x) < 0x1p88)) return;
+        double r = fmod(x, S);
+        if      (r >=  0.5 * S) r -= S;
+        else if (r <  -0.5 * S) r += S;
+        /* The loop leaves +0.0 on exact multiples; fmod keeps the
+         * sign of x. */
+        if (r == 0.0) r = 0.0;
+        double n = (x - r) / S;
+        /* A sector count the index cannot absorb leaves the offset
+         * unfolded rather than overflowing (same rationale as the
+         * 2^88 bound; unreachable short of divergence). */
+        if ((n > 0.0 && *sec >  INT64_MAX - (int64_t)n) ||
+            (n < 0.0 && *sec <  INT64_MIN - (int64_t)n)) return;
+        *sec += (int64_t)n;
+        *loc  = r;
+        return;
+    }
     while (*loc >=  0.5 * S) { *loc -= S; (*sec)++; }
     while (*loc <  -0.5 * S) { *loc += S; (*sec)--; }
 }

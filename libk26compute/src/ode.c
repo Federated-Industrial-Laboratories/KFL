@@ -223,6 +223,10 @@ K26CStatus k26c_ode_rk45(K26CRhsFn rhs, void *user,
                          K26CVector *y)
 {
     if (!rhs || !y || !y->data) return K26C_ERR_INVAL;
+    /* No-op interval: short-circuit before the workspace allocation
+     * so the call succeeds under memory pressure, exactly as the
+     * pre-workspace entry point did. */
+    if (t1 == t0) return K26C_OK;
     size_t ws_len = K26C_ODE_RK45_WS(y->n);
     double *ws = (double *)malloc(ws_len * sizeof(double));
     if (!ws) return K26C_ERR_OOM;

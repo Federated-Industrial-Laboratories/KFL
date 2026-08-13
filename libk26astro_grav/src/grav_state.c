@@ -108,55 +108,64 @@ int k26astro_grav_state_reserve(K26AstroGravState *state)
     if (rc != 0) return rc;
 
     /* IAS15 carry: b/e/g coefficient rows plus the predictor's
-     * per-call scratch. Grown by release-and-realloc exactly as the
-     * step-time guard used to (a capacity change resets the carry;
-     * a body-count change invalidates the predictor seed anyway). */
+     * per-call scratch. Grown by allocating the replacement before
+     * releasing the old carry, so a failed grow leaves the previous
+     * carry sized as before (the contract in grav.h). The
+     * replacement starts as a fresh carry: a capacity change resets
+     * the predictor seed, exactly as the old release-and-realloc
+     * did (a body-count change invalidates the seed anyway). The
+     * geometric target makes a body-by-body build-up allocate a new
+     * carry a logarithmic number of times instead of every add. */
     if (!state->ias15_carry || state->ias15_carry->capacity < n) {
-        if (state->ias15_carry) {
-            k26_ias15_carry_release(state->ias15_carry);
-            state->ias15_carry = NULL;
-        }
-        rc = k26_ias15_carry_alloc(&state->ias15_carry, n);
+        int want = k26_grav_grow_target_(
+            state->ias15_carry ? state->ias15_carry->capacity : 0, n);
+        K26AstroIAS15Carry *fresh = NULL;
+        rc = k26_ias15_carry_alloc(&fresh, want);
         if (rc != 0) return rc;
+        if (state->ias15_carry) k26_ias15_carry_release(state->ias15_carry);
+        state->ias15_carry = fresh;
     }
 
     /* IAS15 reject-rollback snapshot. */
     if (state->ias15_snapshot_cap < n) {
+        int want = k26_grav_grow_target_(state->ias15_snapshot_cap, n);
         K26AstroBody *fresh = realloc(state->ias15_snapshot,
-                                       (size_t)n * sizeof(K26AstroBody));
+                                       (size_t)want * sizeof(K26AstroBody));
         if (!fresh) return K26ASTRO_E_ALLOC;
         state->ias15_snapshot     = fresh;
-        state->ias15_snapshot_cap = n;
+        state->ias15_snapshot_cap = want;
     }
 
     /* Event-time root-finding snapshot. */
     if (state->event_snapshot_cap < n) {
+        int want = k26_grav_grow_target_(state->event_snapshot_cap, n);
         K26AstroBody *fresh = realloc(state->event_snapshot,
-                                       (size_t)n * sizeof(K26AstroBody));
+                                       (size_t)want * sizeof(K26AstroBody));
         if (!fresh) return K26ASTRO_E_ALLOC;
         state->event_snapshot     = fresh;
-        state->event_snapshot_cap = n;
+        state->event_snapshot_cap = want;
     }
 
     /* Verlet / RK step scratch (sizing rule documented in grav.h). */
     if (state->scratch_cap < n) {
+        int want = k26_grav_grow_target_(state->scratch_cap, n);
         K26V3        *accel  = realloc(state->scratch_accel,
-                                        (size_t)n * sizeof(K26V3));
+                                        (size_t)want * sizeof(K26V3));
         if (!accel) return K26ASTRO_E_ALLOC;
         state->scratch_accel = accel;
         K26AstroBody *bodies = realloc(state->scratch_bodies,
-                                        (size_t)n * sizeof(K26AstroBody));
+                                        (size_t)want * sizeof(K26AstroBody));
         if (!bodies) return K26ASTRO_E_ALLOC;
         state->scratch_bodies = bodies;
         double       *y      = realloc(state->scratch_y,
-                                        (size_t)(6 * n) * sizeof(double));
+                                        (size_t)(6 * want) * sizeof(double));
         if (!y) return K26ASTRO_E_ALLOC;
         state->scratch_y = y;
         double       *ws     = realloc(state->scratch_ws,
-            K26C_ODE_RK45_WS((size_t)(6 * n)) * sizeof(double));
+            K26C_ODE_RK45_WS((size_t)(6 * want)) * sizeof(double));
         if (!ws) return K26ASTRO_E_ALLOC;
         state->scratch_ws  = ws;
-        state->scratch_cap = n;
+        state->scratch_cap = want;
     }
 
     return K26ASTRO_E_OK;

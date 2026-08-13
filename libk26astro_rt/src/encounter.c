@@ -13,7 +13,9 @@
 
 #include "k26astro_core/pos.h"
 
+#include <limits.h>
 #include <math.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -53,44 +55,67 @@ double k26astro_mercurius_hill_radius(const K26AstroBody *i,
     return a_ij * cbrt(m_sum / (3.0 * m_central));
 }
 
-int k26astro_rt_encounter_reserve(K26AstroWorld *world, int n_bodies)
+/* Largest per-buffer entry count the int capacity fields and a
+ * size_t byte count can both represent, across both session buffer
+ * element types. */
+static uint64_t pair_cap_bound_(void)
 {
-    if (!world) return -1;
-    if (n_bodies < 2) return 0;
-    /* Worst case: every distinct pair in the transition region. */
-    int pairs = (n_bodies * (n_bodies - 1)) / 2;
-    if (world->cap_encounters < pairs) {
+    uint64_t bound   = (uint64_t)INT_MAX;
+    uint64_t enc_max = (uint64_t)(SIZE_MAX / sizeof(K26AstroEncounter));
+    uint64_t pw_max  = (uint64_t)(SIZE_MAX / sizeof(K26AstroPairWeight));
+    if (enc_max < bound) bound = enc_max;
+    if (pw_max  < bound) bound = pw_max;
+    return bound;
+}
+
+/* Grow BOTH MERCURIUS session buffers to at least `need` entries.
+ * Growing them together enforces by construction the invariant the
+ * pair-weight build relies on: any encounter slot the detect can
+ * record has a matching pair-weight slot. The new capacity at least
+ * doubles the current one so repeated single-body adds copy an
+ * amortised-constant number of entries per add instead of a full
+ * quadratic buffer each time. Returns 0, or -1 when `need` is not
+ * representable or an allocation fails; on failure every buffer
+ * keeps its previous size and its capacity field stays truthful. */
+static int grow_pair_buffers_(K26AstroWorld *world, uint64_t need)
+{
+    if (need <= (uint64_t)world->cap_encounters
+        && need <= (uint64_t)world->cap_pair_weights) return 0;
+    uint64_t bound = pair_cap_bound_();
+    if (need > bound) return -1;
+    uint64_t cur = (uint64_t)(world->cap_encounters < world->cap_pair_weights
+                              ? world->cap_encounters
+                              : world->cap_pair_weights);
+    uint64_t new_cap = cur * 2u;
+    if (new_cap < need)  new_cap = need;
+    if (new_cap > bound) new_cap = need;   /* need <= bound, checked above */
+    if ((uint64_t)world->cap_encounters < new_cap) {
         K26AstroEncounter *p = (K26AstroEncounter *)realloc(
-            world->encounters, (size_t)pairs * sizeof(K26AstroEncounter));
+            world->encounters, (size_t)new_cap * sizeof(K26AstroEncounter));
         if (!p) return -1;
         world->encounters     = p;
-        world->cap_encounters = pairs;
+        world->cap_encounters = (int)new_cap;
     }
-    if (world->cap_pair_weights < pairs) {
+    if ((uint64_t)world->cap_pair_weights < new_cap) {
         K26AstroPairWeight *w = (K26AstroPairWeight *)realloc(
-            world->pair_weights, (size_t)pairs * sizeof(K26AstroPairWeight));
+            world->pair_weights, (size_t)new_cap * sizeof(K26AstroPairWeight));
         if (!w) return -1;
         world->pair_weights     = w;
-        world->cap_pair_weights = pairs;
+        world->cap_pair_weights = (int)new_cap;
     }
     return 0;
 }
 
-/* Grow the world's encounter buffer in-place. With the body-add
- * reserve above, the per-step detect finds sufficient capacity and
- * this is a no-op; the grow branch survives as a fallback for
- * worlds whose bodies were grown without the reserve. */
-static int ensure_encounter_capacity_(K26AstroWorld *world, int need)
+int k26astro_rt_encounter_reserve(K26AstroWorld *world, int n_bodies)
 {
-    if (need <= world->cap_encounters) return 0;
-    int new_cap = world->cap_encounters ? world->cap_encounters * 2 : 8;
-    while (new_cap < need) new_cap *= 2;
-    K26AstroEncounter *p = (K26AstroEncounter *)realloc(
-        world->encounters, (size_t)new_cap * sizeof(K26AstroEncounter));
-    if (!p) return -1;
-    world->encounters     = p;
-    world->cap_encounters = new_cap;
-    return 0;
+    if (!world) return -1;
+    if (n_bodies < 2) return 0;
+    /* Worst case: every distinct pair in the transition region.
+     * Computed in 64-bit: n*(n-1)/2 overflows int from n = 46342. A
+     * pair count the capacity fields cannot represent refuses the
+     * add (the caller maps -1 onto its OOM error). */
+    uint64_t pairs = (uint64_t)n_bodies * ((uint64_t)n_bodies - 1u) / 2u;
+    return grow_pair_buffers_(world, pairs);
 }
 
 int k26astro_mercurius_detect(K26AstroWorld *world)
@@ -125,7 +150,11 @@ int k26astro_mercurius_detect(K26AstroWorld *world)
                                               world->mercurius_hill_factor,
                                               world->mercurius_outer_factor);
             int slot = world->n_encounters;
-            if (ensure_encounter_capacity_(world, slot + 1) != 0) {
+            /* In-step fallback for worlds whose bodies were grown
+             * without the body-add reserve; with the reserve it is a
+             * no-op. Grows both session buffers together, keeping
+             * the pair-weight invariant intact. */
+            if (grow_pair_buffers_(world, (uint64_t)slot + 1u) != 0) {
                 return slot;
             }
             world->encounters[slot] = (K26AstroEncounter){

@@ -31,6 +31,7 @@
  * is deterministic given the FPU pin established by grav_state_init. */
 #include "k26astro_grav/ias15.h"
 #include "ias15_internal.h"
+#include "grav_step_internal.h"
 #include "k26astro_core/pos.h"
 #include "k26astro_core/epoch.h"
 
@@ -61,11 +62,19 @@ static int ensure_carry_(K26AstroGravState *state)
 {
     if (state->ias15_carry && state->ias15_carry->capacity >= state->n_bodies)
         return 0;
-    if (state->ias15_carry) {
-        k26_ias15_carry_release(state->ias15_carry);
-        state->ias15_carry = NULL;
-    }
-    return k26_ias15_carry_alloc(&state->ias15_carry, state->n_bodies);
+    /* Allocate the replacement before releasing the old carry, so a
+     * failed grow leaves the previous carry sized as before (the
+     * contract in grav.h). The replacement starts as a fresh carry;
+     * a capacity change resets the predictor seed either way. */
+    int want = k26_grav_grow_target_(
+        state->ias15_carry ? state->ias15_carry->capacity : 0,
+        state->n_bodies);
+    K26AstroIAS15Carry *fresh = NULL;
+    int rc = k26_ias15_carry_alloc(&fresh, want);
+    if (rc != 0) return rc;
+    if (state->ias15_carry) k26_ias15_carry_release(state->ias15_carry);
+    state->ias15_carry = fresh;
+    return 0;
 }
 
 /* Explicit body-state snapshot/restore around each PC iteration.

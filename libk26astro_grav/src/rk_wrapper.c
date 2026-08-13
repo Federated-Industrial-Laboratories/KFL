@@ -105,6 +105,19 @@ int k26astro_grav_step_rk(K26AstroGravState *state, double dt)
 {
     if (!state) return K26ASTRO_E_NULL;
     int n = state->n_bodies;
+
+    /* Zero-dimension step: nothing to integrate, but the epoch still
+     * advances by dt. The pre-workspace path reached the same result
+     * through the ODE driver (its calloc(0) state vector was accepted
+     * and every per-component loop was empty); the workspace path
+     * would instead hand the driver a NULL data pointer, so the case
+     * is short-circuited here to keep the observable behaviour. */
+    if (n < 1) {
+        k26astro_epoch_add_seconds(&state->t, dt);
+        state->dt_last = dt;
+        return K26ASTRO_E_OK;
+    }
+
     size_t dim = (size_t)(6 * n);
 
     /* State vector, RHS shadow, and stage workspace live in the

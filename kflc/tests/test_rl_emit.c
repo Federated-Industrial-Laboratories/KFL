@@ -20,6 +20,14 @@
  *      carriers (flag bit 2, fault code, pre-step observations, zero
  *      reward), auto-resets on the next step, and faults again in the
  *      next episode (a fault-reset-fault sequence).
+ *   6. Batch completion under diverging draws: two seed/configuration
+ *      pairs whose episode resets draw the craft close enough to the
+ *      central body that the trajectory blows up must still complete
+ *      within a generous walltime bound, with every environment
+ *      recording its requested episode count. Pins the fix for the
+ *      sector fold in k26astro_pos_normalise, which used to walk a
+ *      diverged offset back one sector per loop iteration and wedge
+ *      the batch executable inside a single step.
  *
  * Pattern: run ./bin/kflc via system() with the stack's include and
  * archive paths, then drive the artifacts directly. Requires the
@@ -192,6 +200,29 @@ static int file_exists_(const char *path)
 {
     struct stat st;
     return stat(path, &st) == 0;
+}
+
+/* Open a batch episode file and require a clean close and at least
+ * `need` completed episodes for each of `n_envs` environments. */
+static void check_batch_counts_(const char *path, uint32_t n_envs,
+                                uint32_t need)
+{
+    K26RlEpisodeReader *rd = NULL;
+    ASSERT(k26rl_episode_reader_open(path, &rd) == K26RL_OK);
+    K26RlEpisodeInfo info;
+    ASSERT(k26rl_episode_reader_info(rd, &info) == K26RL_OK);
+    ASSERT(info.clean_close == 1);
+    ASSERT(info.n_envs == n_envs);
+    uint32_t counts[16] = { 0 };
+    ASSERT(n_envs <= 16);
+    for (uint32_t k = 0; k < info.episode_count; k++) {
+        uint32_t ord = 0, env = 0, ep = 0;
+        ASSERT(k26rl_episode_reader_at(rd, k, &ord, &env, &ep) == K26RL_OK);
+        ASSERT(env < n_envs);
+        counts[env]++;
+    }
+    for (uint32_t e = 0; e < n_envs; e++) ASSERT(counts[e] >= need);
+    k26rl_episode_reader_close(rd);
 }
 
 /* ---- Spec TLV walk -------------------------------------------------- */
@@ -525,6 +556,28 @@ int main(void)
 
     dlclose(so2);
     dlclose(so);
+
+    /* Gate 6: batch completion under diverging draws. Both
+     * configurations used to wedge inside a single step: the episode
+     * reset can draw the craft essentially at the central body's
+     * centre, the near-singular dynamics throw a coordinate out by
+     * around 1e23 m, and the sector fold walked it back one 2^36 m
+     * sector per iteration (and never finished at all once an offset
+     * went non-finite). The 120 s bound is generous walltime for
+     * runs that take about a second when healthy, not a performance
+     * assertion. */
+    run_or_die_("timeout 120 " WORK_DIR "/rl_pointing"
+                " --envs 2 --episodes 3 --seed 123456789"
+                " --out " WORK_DIR "/diverge1.k26epi > /dev/null");
+    check_batch_counts_(WORK_DIR "/diverge1.k26epi", 2, 3);
+    run_or_die_("timeout 120 " WORK_DIR "/rl_pointing"
+                " --envs 4 --episodes 6 --seed 20260813"
+                " --out " WORK_DIR "/diverge2.k26epi > /dev/null");
+    check_batch_counts_(WORK_DIR "/diverge2.k26epi", 4, 6);
+    n_pass++;
+    printf("gate 6: diverging-draw batch runs complete with full"
+           " episode counts: OK\n");
+
     printf("test_rl_emit: %d gates passed\n", n_pass);
     return 0;
 }

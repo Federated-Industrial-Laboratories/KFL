@@ -48,28 +48,35 @@
 int k26astro_grav_wh_carry_ensure(K26AstroGravState *state)
 {
     if (state->wh_carry && state->wh_carry->capacity >= state->n_bodies) return 0;
+    /* Allocate the replacement carry before releasing the old one,
+     * so a failed grow leaves the previous carry sized as before
+     * (the contract in grav.h). The WH carry holds per-step kick
+     * scratch only, so the replacement starts zeroed rather than
+     * copied; the geometric target makes a body-by-body build-up
+     * allocate a new carry a logarithmic number of times instead of
+     * every add. */
+    int want = k26_grav_grow_target_(
+        state->wh_carry ? state->wh_carry->capacity : 0, state->n_bodies);
+    K26AstroWHCarry *fresh = calloc(1, sizeof(K26AstroWHCarry));
+    if (!fresh) return K26ASTRO_E_ALLOC;
+    fresh->p_bary  = calloc((size_t)want, sizeof(K26V3));
+    fresh->r_helio = calloc((size_t)want, sizeof(K26V3));
+    fresh->a_int   = calloc((size_t)want, sizeof(K26V3));
+    if (!fresh->p_bary || !fresh->r_helio || !fresh->a_int) {
+        free(fresh->p_bary);
+        free(fresh->r_helio);
+        free(fresh->a_int);
+        free(fresh);
+        return K26ASTRO_E_ALLOC;
+    }
+    fresh->capacity = want;
     if (state->wh_carry) {
         free(state->wh_carry->p_bary);
         free(state->wh_carry->r_helio);
         free(state->wh_carry->a_int);
         free(state->wh_carry);
-        state->wh_carry = NULL;
     }
-    state->wh_carry = calloc(1, sizeof(K26AstroWHCarry));
-    if (!state->wh_carry) return K26ASTRO_E_ALLOC;
-    state->wh_carry->p_bary  = calloc((size_t)state->n_bodies, sizeof(K26V3));
-    state->wh_carry->r_helio = calloc((size_t)state->n_bodies, sizeof(K26V3));
-    state->wh_carry->a_int   = calloc((size_t)state->n_bodies, sizeof(K26V3));
-    if (!state->wh_carry->p_bary || !state->wh_carry->r_helio
-        || !state->wh_carry->a_int) {
-        free(state->wh_carry->p_bary);
-        free(state->wh_carry->r_helio);
-        free(state->wh_carry->a_int);
-        free(state->wh_carry);
-        state->wh_carry = NULL;
-        return K26ASTRO_E_ALLOC;
-    }
-    state->wh_carry->capacity = state->n_bodies;
+    state->wh_carry = fresh;
     return 0;
 }
 

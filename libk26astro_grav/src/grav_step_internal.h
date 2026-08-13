@@ -8,7 +8,20 @@
 #ifndef K26ASTRO_GRAV_STEP_INTERNAL_H
 #define K26ASTRO_GRAV_STEP_INTERNAL_H
 
+#include <limits.h>
+
 #include "k26astro_grav/grav.h"
+
+/* Capacity growth target shared by the carry and scratch guards: at
+ * least double the current capacity, never less than the immediate
+ * need. Growing geometrically makes a body-by-body build-up perform
+ * amortised-constant allocator work per add; growing to the exact
+ * need would re-copy (and re-zero) every buffer on every add. */
+static inline int k26_grav_grow_target_(int cur_cap, int need)
+{
+    int dbl = (cur_cap > 0 && cur_cap <= INT_MAX / 2) ? cur_cap * 2 : need;
+    return dbl > need ? dbl : need;
+}
 
 /* Dispatch the configured integrator for a single step of duration
  * `dt`. Mirrors the original k26astro_grav_step body before the
