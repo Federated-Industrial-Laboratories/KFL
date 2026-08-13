@@ -22,7 +22,7 @@ GIT_SHA         := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknow
 
 # ----- Build dependency ordering (topological) ---------------------
 
-BEDROCK     = libk26util libk26m3d libk26compute libk26tick
+BEDROCK     = libk26util libk26m3d libk26compute libk26tick libk26rng
 AUX_ALWAYS  = libk26plot libk26geo
 AUX_CURL    = libk26http   # needs libcurl4-openssl-dev; skipped if absent
 AUX         = $(AUX_ALWAYS) $(AUX_CURL)
@@ -168,7 +168,14 @@ tools: astro
 
 # ----- Tests -------------------------------------------------------
 
-test: test-tick test-compiler test-astro test-defense
+test: test-tick test-rl test-compiler test-astro test-defense
+
+# The deterministic sampling tier. Wired into `test` explicitly:
+# test-units is not a prerequisite of test, so a per-lib target alone
+# would never run on the default gate.
+test-rl: bedrock
+	@echo "==> libk26rng test"
+	@$(MAKE) -C libk26rng test $(EXPORTS)
 
 # Per-lib unit tests for libs that have a 'test' target.
 test-units: bedrock aux $(ASTRO_CORE)
