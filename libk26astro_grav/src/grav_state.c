@@ -5,7 +5,9 @@
 #include "k26astro_grav/wisdom_holman.h"
 #include "k26astro_grav/ias15.h"
 #include "k26astro_grav/verlet.h"
+#include "k26compute.h"
 #include "grav_step_internal.h"
+#include "ias15_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -70,9 +72,92 @@ int k26astro_grav_state_init(K26AstroGravState *state,
     state->ias15_snapshot_cap   = 0;
     state->ias15_wall_budget_s  = 0.0;
     state->mercurius            = NULL;
+    state->scratch_accel        = NULL;
+    state->scratch_bodies       = NULL;
+    state->scratch_y            = NULL;
+    state->scratch_ws           = NULL;
+    state->scratch_cap          = 0;
 
     /* Pin FPU rounding + denormal mode for cross-platform determinism. */
     k26astro_grav_fpu_pin();
+
+    /* Preallocate every integrator's carry and scratch so the first
+     * step after init touches preallocated memory only. */
+    int rc = k26astro_grav_state_reserve(state);
+    if (rc != K26ASTRO_E_OK) {
+        k26astro_grav_state_destroy(state);
+        return rc;
+    }
+
+    return K26ASTRO_E_OK;
+}
+
+/* Preallocate integrator carries, snapshots, and step scratch for
+ * the current n_bodies. See grav.h for the per-body sizing rule.
+ * Reached only from non-step times on the supported path (state
+ * init, the rt world's body add); the step functions call it as an
+ * off-reserve capacity fallback. */
+int k26astro_grav_state_reserve(K26AstroGravState *state)
+{
+    if (!state) return K26ASTRO_E_NULL;
+    int n = state->n_bodies;
+    if (n < 1) return K26ASTRO_E_OK;
+
+    /* WH carry (p_bary, r_helio, a_int). */
+    int rc = k26astro_grav_wh_carry_ensure(state);
+    if (rc != 0) return rc;
+
+    /* IAS15 carry: b/e/g coefficient rows plus the predictor's
+     * per-call scratch. Grown by release-and-realloc exactly as the
+     * step-time guard used to (a capacity change resets the carry;
+     * a body-count change invalidates the predictor seed anyway). */
+    if (!state->ias15_carry || state->ias15_carry->capacity < n) {
+        if (state->ias15_carry) {
+            k26_ias15_carry_release(state->ias15_carry);
+            state->ias15_carry = NULL;
+        }
+        rc = k26_ias15_carry_alloc(&state->ias15_carry, n);
+        if (rc != 0) return rc;
+    }
+
+    /* IAS15 reject-rollback snapshot. */
+    if (state->ias15_snapshot_cap < n) {
+        K26AstroBody *fresh = realloc(state->ias15_snapshot,
+                                       (size_t)n * sizeof(K26AstroBody));
+        if (!fresh) return K26ASTRO_E_ALLOC;
+        state->ias15_snapshot     = fresh;
+        state->ias15_snapshot_cap = n;
+    }
+
+    /* Event-time root-finding snapshot. */
+    if (state->event_snapshot_cap < n) {
+        K26AstroBody *fresh = realloc(state->event_snapshot,
+                                       (size_t)n * sizeof(K26AstroBody));
+        if (!fresh) return K26ASTRO_E_ALLOC;
+        state->event_snapshot     = fresh;
+        state->event_snapshot_cap = n;
+    }
+
+    /* Verlet / RK step scratch (sizing rule documented in grav.h). */
+    if (state->scratch_cap < n) {
+        K26V3        *accel  = realloc(state->scratch_accel,
+                                        (size_t)n * sizeof(K26V3));
+        if (!accel) return K26ASTRO_E_ALLOC;
+        state->scratch_accel = accel;
+        K26AstroBody *bodies = realloc(state->scratch_bodies,
+                                        (size_t)n * sizeof(K26AstroBody));
+        if (!bodies) return K26ASTRO_E_ALLOC;
+        state->scratch_bodies = bodies;
+        double       *y      = realloc(state->scratch_y,
+                                        (size_t)(6 * n) * sizeof(double));
+        if (!y) return K26ASTRO_E_ALLOC;
+        state->scratch_y = y;
+        double       *ws     = realloc(state->scratch_ws,
+            K26C_ODE_RK45_WS((size_t)(6 * n)) * sizeof(double));
+        if (!ws) return K26ASTRO_E_ALLOC;
+        state->scratch_ws  = ws;
+        state->scratch_cap = n;
+    }
 
     return K26ASTRO_E_OK;
 }
@@ -101,22 +186,14 @@ void k26astro_grav_state_destroy(K26AstroGravState *state)
     }
 
     if (state->ias15_carry) {
-        for (int k = 0; k < 7; k++) {
-            free(state->ias15_carry->b[k]);
-            free(state->ias15_carry->e[k]);
-            free(state->ias15_carry->g[k]);
-        }
-        free(state->ias15_carry->at0);
-        free(state->ias15_carry->r_sub);
-        free(state->ias15_carry->v_sub);
-        free(state->ias15_carry->a_sub);
-        free(state->ias15_carry);
+        k26_ias15_carry_release(state->ias15_carry);
         state->ias15_carry = NULL;
     }
 
     if (state->wh_carry) {
         free(state->wh_carry->p_bary);
         free(state->wh_carry->r_helio);
+        free(state->wh_carry->a_int);
         free(state->wh_carry);
         state->wh_carry = NULL;
     }
@@ -126,6 +203,16 @@ void k26astro_grav_state_destroy(K26AstroGravState *state)
         state->ias15_snapshot     = NULL;
         state->ias15_snapshot_cap = 0;
     }
+
+    free(state->scratch_accel);
+    free(state->scratch_bodies);
+    free(state->scratch_y);
+    free(state->scratch_ws);
+    state->scratch_accel  = NULL;
+    state->scratch_bodies = NULL;
+    state->scratch_y      = NULL;
+    state->scratch_ws     = NULL;
+    state->scratch_cap    = 0;
 }
 
 int k26astro_grav_set_integrator(K26AstroGravState *state,

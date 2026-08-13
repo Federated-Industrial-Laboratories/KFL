@@ -78,9 +78,11 @@ typedef struct K26AstroGravState {
     K26AstroPerturbList *perturbs;       /* heap-owned registry */
     K26AstroEventList   *events;         /* heap-owned event registry */
 
-    /* Event-time root-finding snapshot. Lazy-allocated by the
-     * advance-with-events wrapper; grown if n_bodies exceeds capacity.
-     * Reused across event-bearing steps within one state's lifetime. */
+    /* Event-time root-finding snapshot. Allocated by
+     * k26astro_grav_state_reserve at non-step times; the advance-
+     * with-events wrapper grows it only for a caller that grew
+     * n_bodies without the reserve. Reused across event-bearing
+     * steps within one state's lifetime. */
     K26AstroBody        *event_snapshot;
     int                  event_snapshot_cap;
 
@@ -88,8 +90,13 @@ typedef struct K26AstroGravState {
      * 1e-6 s; clamp to >= 0. */
     double               event_tol_s;
 
-    K26AstroIAS15Carry  *ias15_carry;    /* heap; lazy init on first IAS15 step */
-    K26AstroWHCarry     *wh_carry;       /* heap; lazy init on first WH step */
+    /* Integrator carries. Heap; allocated by
+     * k26astro_grav_state_reserve at non-step times (state init,
+     * body add). The per-step ensure checks in the integrators are
+     * capacity guards only: they allocate nothing once the reserve
+     * has sized the carry for the current n_bodies. */
+    K26AstroIAS15Carry  *ias15_carry;
+    K26AstroWHCarry     *wh_carry;
 
     /* IAS15 step-size controller (Rein-Spiegel 2015 §4). */
     double   ias15_tol;            /* epsilon; per-step relative error budget */
@@ -117,8 +124,8 @@ typedef struct K26AstroGravState {
      * b-coefficient carry is reused as predictor seed for the
      * smaller dt, but the body array is also byte-restored from
      * this snapshot so rejected-step state is bit-identical to
-     * pre-step. Lazy-allocated on first ias15 substep; reused
-     * thereafter. Reallocated if n_bodies grows past cap. */
+     * pre-step. Allocated by k26astro_grav_state_reserve at
+     * non-step times; reused across substeps. */
     K26AstroBody *ias15_snapshot;  /* heap; size = ias15_snapshot_cap */
     int           ias15_snapshot_cap;
 
@@ -136,6 +143,23 @@ typedef struct K26AstroGravState {
      * WH-far or IAS15-near substep, then cleared. NULL = standard
      * full-force integration (no MERCURIUS active). */
     const K26AstroMercuriusContext *mercurius;
+
+    /* Integrator step scratch. Heap; sized for scratch_cap bodies
+     * and allocated or grown ONLY at non-step times by
+     * k26astro_grav_state_reserve (state init, body add). Sizing
+     * rule per body: scratch_accel one K26V3 (Verlet kick and RK
+     * right-hand-side acceleration), scratch_bodies one
+     * K26AstroBody (RK right-hand-side shadow unpack), scratch_y
+     * six doubles (RK state vector), scratch_ws sixty doubles (ten
+     * RK45 stage vectors of six doubles; RK4 uses the first five).
+     * On the supported path the step functions never allocate
+     * these; their capacity checks grow the scratch only for a
+     * caller that grew n_bodies without calling the reserve. */
+    K26V3        *scratch_accel;
+    K26AstroBody *scratch_bodies;
+    double       *scratch_y;
+    double       *scratch_ws;
+    int           scratch_cap;
 } K26AstroGravState;
 
 /* ---- Error codes ------------------------------------------------ */
@@ -159,9 +183,21 @@ int  k26astro_grav_state_init(K26AstroGravState *state,
                                K26AstroBody *bodies,
                                int n_bodies);
 
-/* Release perturbation registry, IAS15 carry, WH carry. Does NOT
- * free the body array (caller-owned). */
+/* Release perturbation registry, IAS15 carry, WH carry, step
+ * scratch. Does NOT free the body array (caller-owned). */
 void k26astro_grav_state_destroy(K26AstroGravState *state);
+
+/* Preallocate every integrator's carry, snapshot, and step scratch
+ * for the state's current n_bodies, so the stepping hot path
+ * touches preallocated memory only. Covers all integrators
+ * regardless of the current selection (the MERCURIUS orchestrator
+ * switches integrators inside a step). Called by
+ * k26astro_grav_state_init; callers that grow n_bodies afterwards
+ * (the rt world's body add) must call it again before the next
+ * step. Idempotent when capacity is already sufficient. Returns
+ * K26ASTRO_E_OK or K26ASTRO_E_ALLOC; on failure the state remains
+ * destroyable and previously sized scratch is retained. */
+int k26astro_grav_state_reserve(K26AstroGravState *state);
 
 /* ---- Step + dispatch ------------------------------------------- */
 

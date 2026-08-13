@@ -126,6 +126,26 @@ K26CStatus k26c_ode_rk45(K26CRhsFn rhs, void *user,
                          double rtol, double atol,
                          K26CVector *y);
 
+/* Workspace variants: identical arithmetic to k26c_ode_rk4 /
+ * k26c_ode_rk45, but the per-stage vectors are carved out of a
+ * caller-provided buffer so the call performs no heap allocation.
+ * `ws` must hold at least K26C_ODE_RK4_WS(dim) doubles for rk4_ws
+ * and K26C_ODE_RK45_WS(dim) doubles for rk45_ws, where dim = y->n;
+ * a shorter buffer returns K26C_ERR_INVAL. The workspace is zeroed
+ * on entry (the plain entry points allocate their stage vectors
+ * with calloc), so results do not depend on prior contents. */
+#define K26C_ODE_RK4_WS(dim)  ((size_t)5  * (dim))
+#define K26C_ODE_RK45_WS(dim) ((size_t)10 * (dim))
+K26CStatus k26c_ode_rk4_ws (K26CRhsFn rhs, void *user,
+                            double t0, double t1, size_t n_steps,
+                            K26CVector *y,
+                            double *ws, size_t ws_len);
+K26CStatus k26c_ode_rk45_ws(K26CRhsFn rhs, void *user,
+                            double t0, double t1,
+                            double rtol, double atol,
+                            K26CVector *y,
+                            double *ws, size_t ws_len);
+
 /* ---- Optimisation ---- */
 typedef double (*K26CObj1Fn)(double x, void *user);
 typedef double (*K26CObjNFn)(const K26CVector *x, void *user);

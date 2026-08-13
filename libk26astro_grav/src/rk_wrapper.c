@@ -21,7 +21,6 @@
 #include "k26astro_core/epoch.h"
 #include "k26compute.h"
 
-#include <stdlib.h>
 #include <string.h>
 
 /* RHS callback: derivative of y = [x, y, z, vx, vy, vz, ...] is
@@ -38,9 +37,11 @@ static int rhs_(double t, const K26CVector *y, K26CVector *dydt, void *user)
 
     /* Unpack y into state->bodies (positions as offsets from sector
      * origin; velocities directly). We use a temporary K26AstroBody
-     * shallow-copy so we don't disturb the user's state. */
-    K26AstroBody *scratch = (K26AstroBody *)malloc(sizeof(K26AstroBody) * (size_t)n);
-    if (!scratch) return 2;
+     * shallow-copy so we don't disturb the user's state. The copy
+     * lives in the state's preallocated step scratch (sized by
+     * k26astro_grav_state_reserve; k26astro_grav_step_rk checks the
+     * capacity before the driver ever calls back into here). */
+    K26AstroBody *scratch = state->scratch_bodies;
     memcpy(scratch, state->bodies, sizeof(K26AstroBody) * (size_t)n);
 
     for (int i = 0; i < n; i++) {
@@ -56,8 +57,9 @@ static int rhs_(double t, const K26CVector *y, K26CVector *dydt, void *user)
     K26AstroGravState shadow = *state;
     shadow.bodies = scratch;
 
-    K26V3 *accel = (K26V3 *)calloc((size_t)n, sizeof(K26V3));
-    if (!accel) { free(scratch); return 3; }
+    /* accel_total zeroes the buffer before writing, so reusing the
+     * scratch is bit-identical to a fresh zeroed allocation. */
+    K26V3 *accel = state->scratch_accel;
     k26astro_grav_accel_total(&shadow, accel);
 
     for (int i = 0; i < n; i++) {
@@ -69,8 +71,6 @@ static int rhs_(double t, const K26CVector *y, K26CVector *dydt, void *user)
         dydt->data[6*i + 5] = accel[i].z;
     }
 
-    free(accel);
-    free(scratch);
     return 0;
 }
 
@@ -107,25 +107,36 @@ int k26astro_grav_step_rk(K26AstroGravState *state, double dt)
     int n = state->n_bodies;
     size_t dim = (size_t)(6 * n);
 
+    /* State vector, RHS shadow, and stage workspace live in the
+     * state's preallocated step scratch; the reserve call is the
+     * off-reserve fallback and allocates nothing when capacity is
+     * sufficient. pack_ writes every entry of y before the driver
+     * reads it, so reuse is bit-identical to a fresh zeroed
+     * allocation. */
+    if (state->scratch_cap < n) {
+        int rc = k26astro_grav_state_reserve(state);
+        if (rc != K26ASTRO_E_OK) return rc;
+    }
+
     K26CVector y;
     y.n = dim;
-    y.data = (double *)calloc(dim, sizeof(double));
-    if (!y.data) return K26ASTRO_E_ALLOC;
+    y.data = state->scratch_y;
 
     pack_(state->bodies, n, &y);
 
     K26CStatus rc;
     if (state->integrator == K26ASTRO_INTEGRATOR_RK4) {
-        rc = k26c_ode_rk4(rhs_, state, 0.0, dt, /*n_steps*/ 1, &y);
+        rc = k26c_ode_rk4_ws(rhs_, state, 0.0, dt, /*n_steps*/ 1, &y,
+                             state->scratch_ws, K26C_ODE_RK45_WS(dim));
     } else {
         /* RK45 (Dormand-Prince) with reasonable default tolerances. */
-        rc = k26c_ode_rk45(rhs_, state, 0.0, dt, /*rtol*/ 1e-9,
-                            /*atol*/ 1e-12, &y);
+        rc = k26c_ode_rk45_ws(rhs_, state, 0.0, dt, /*rtol*/ 1e-9,
+                              /*atol*/ 1e-12, &y,
+                              state->scratch_ws, K26C_ODE_RK45_WS(dim));
     }
-    if (rc != K26C_OK) { free(y.data); return K26ASTRO_E_NO_CONVERGE; }
+    if (rc != K26C_OK) return K26ASTRO_E_NO_CONVERGE;
 
     unpack_(state->bodies, n, &y);
-    free(y.data);
 
     k26astro_epoch_add_seconds(&state->t, dt);
     state->dt_last = dt;

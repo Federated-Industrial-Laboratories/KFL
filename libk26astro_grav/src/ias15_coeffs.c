@@ -155,6 +155,16 @@ int k26_ias15_carry_alloc(K26AstroIAS15Carry **out, int n)
     if (!c->at0 || !c->r_sub || !c->v_sub || !c->a_sub) {
         k26_ias15_carry_release(c); return K26ASTRO_E_ALLOC;
     }
+    c->x0          = calloc((size_t)n, sizeof(K26V3));
+    c->pos_saved   = calloc((size_t)n, sizeof(K26AstroPos));
+    c->b6_prev     = calloc((size_t)n, sizeof(K26V3));
+    c->r_com       = calloc((size_t)n, sizeof(double));
+    c->v_mag       = calloc((size_t)n, sizeof(double));
+    c->body_active = calloc((size_t)n, sizeof(char));
+    if (!c->x0 || !c->pos_saved || !c->b6_prev
+        || !c->r_com || !c->v_mag || !c->body_active) {
+        k26_ias15_carry_release(c); return K26ASTRO_E_ALLOC;
+    }
     c->capacity = n;
     c->initialised = 0;
     c->dt_proposed = 0.0;
@@ -169,5 +179,7 @@ void k26_ias15_carry_release(K26AstroIAS15Carry *c)
         free(c->b[k]); free(c->e[k]); free(c->g[k]);
     }
     free(c->at0); free(c->r_sub); free(c->v_sub); free(c->a_sub);
+    free(c->x0); free(c->pos_saved); free(c->b6_prev);
+    free(c->r_com); free(c->v_mag); free(c->body_active);
     free(c);
 }

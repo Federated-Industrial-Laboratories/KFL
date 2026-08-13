@@ -33,6 +33,7 @@
 #include "k26astro_grav/grav.h"
 #include "k26astro_grav/forces.h"
 #include "k26astro_grav/perturb.h"
+#include "grav_step_internal.h"
 #include "k26astro_conics/kepler.h"
 #include "k26astro_core/pos.h"
 #include "k26astro_core/epoch.h"
@@ -40,12 +41,17 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int ensure_wh_carry_(K26AstroGravState *state)
+/* Capacity guard, shared with k26astro_grav_state_reserve (which
+ * calls it at non-step times: state init, body add). On the
+ * supported path the step-time call finds sufficient capacity and
+ * allocates nothing. */
+int k26astro_grav_wh_carry_ensure(K26AstroGravState *state)
 {
     if (state->wh_carry && state->wh_carry->capacity >= state->n_bodies) return 0;
     if (state->wh_carry) {
         free(state->wh_carry->p_bary);
         free(state->wh_carry->r_helio);
+        free(state->wh_carry->a_int);
         free(state->wh_carry);
         state->wh_carry = NULL;
     }
@@ -53,9 +59,12 @@ static int ensure_wh_carry_(K26AstroGravState *state)
     if (!state->wh_carry) return K26ASTRO_E_ALLOC;
     state->wh_carry->p_bary  = calloc((size_t)state->n_bodies, sizeof(K26V3));
     state->wh_carry->r_helio = calloc((size_t)state->n_bodies, sizeof(K26V3));
-    if (!state->wh_carry->p_bary || !state->wh_carry->r_helio) {
+    state->wh_carry->a_int   = calloc((size_t)state->n_bodies, sizeof(K26V3));
+    if (!state->wh_carry->p_bary || !state->wh_carry->r_helio
+        || !state->wh_carry->a_int) {
         free(state->wh_carry->p_bary);
         free(state->wh_carry->r_helio);
+        free(state->wh_carry->a_int);
         free(state->wh_carry);
         state->wh_carry = NULL;
         return K26ASTRO_E_ALLOC;
@@ -127,15 +136,16 @@ int k26astro_grav_step_wh(K26AstroGravState *state, double dt)
     if (!state) return K26ASTRO_E_NULL;
     if (state->n_bodies < 1) return K26ASTRO_E_BAD_INPUT;
 
-    int rc = ensure_wh_carry_(state);
+    int rc = k26astro_grav_wh_carry_ensure(state);
     if (rc != 0) return rc;
 
     int n = state->n_bodies;
     K26AstroBody *b = state->bodies;
 
-    /* Step 1: Kick(dt/2); interaction kick. */
-    K26V3 *a_int = calloc((size_t)n, sizeof(K26V3));
-    if (!a_int) return K26ASTRO_E_ALLOC;
+    /* Step 1: Kick(dt/2); interaction kick. The kick scratch lives
+     * in the carry (interaction_accel_ zeroes it before writing), so
+     * this path allocates nothing. */
+    K26V3 *a_int = state->wh_carry->a_int;
     interaction_accel_(state, a_int);
     for (int i = 1; i < n; i++) {
         b[i].vel.x += 0.5 * dt * a_int[i].x;
@@ -161,7 +171,7 @@ int k26astro_grav_step_wh(K26AstroGravState *state, double dt)
         int prc = k26astro_kepler_propagate(&r_new, &v_new,
                                               r_helio, b[i].vel,
                                               mu0, dt, 64);
-        if (prc != 0) { free(a_int); return K26ASTRO_E_NO_CONVERGE; }
+        if (prc != 0) return K26ASTRO_E_NO_CONVERGE;
         /* Reconstruct absolute pos: body[0].pos + r_new (heliocentric). */
         b[i].pos = b[0].pos;
         k26astro_pos_add(&b[i].pos, r_new);
@@ -175,7 +185,6 @@ int k26astro_grav_step_wh(K26AstroGravState *state, double dt)
         b[i].vel.y += 0.5 * dt * a_int[i].y;
         b[i].vel.z += 0.5 * dt * a_int[i].z;
     }
-    free(a_int);
 
     k26astro_epoch_add_seconds(&state->t, dt);
     state->dt_last = dt;

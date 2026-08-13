@@ -36,6 +36,13 @@ double k26astro_mercurius_hill_radius(const K26AstroBody *i,
  * active encounters. */
 int k26astro_mercurius_detect(K26AstroWorld *world);
 
+/* Size world->encounters and world->pair_weights for the worst case
+ * of n_bodies*(n_bodies-1)/2 pairs. Called from the world's body-add
+ * path so the per-step detect and the MERCURIUS split build never
+ * allocate. Returns 0, or -1 on allocation failure (existing
+ * capacities are retained). */
+int k26astro_rt_encounter_reserve(K26AstroWorld *world, int n_bodies);
+
 #ifdef __cplusplus
 }
 #endif

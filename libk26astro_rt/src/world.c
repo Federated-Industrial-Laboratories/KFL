@@ -13,6 +13,7 @@
 #include "k26astro_grav/perturb.h"
 #include "k26astro_grav/forces.h"
 #include "world_internal.h"
+#include "encounter_internal.h"
 
 #include <math.h>
 #include <stdlib.h>
@@ -121,6 +122,10 @@ void k26astro_world_destroy(K26AstroWorld *world)
     world->n_encounters   = 0;
     world->cap_encounters = 0;
 
+    free(world->pair_weights);
+    world->pair_weights     = NULL;
+    world->cap_pair_weights = 0;
+
     /* Vehicles are non-owning; just drop the pointer array. */
     free(world->vehicles);
     world->vehicles     = NULL;
@@ -160,6 +165,17 @@ int k26astro_world_add_body(K26AstroWorld *world, K26AstroBody b)
     grown[n] = b;
     world->grav.bodies   = grown;
     world->grav.n_bodies = n + 1;
+
+    /* Body add is the world's non-step allocation point: size the
+     * integrator carries, step scratch, and MERCURIUS session
+     * buffers here so the stepping hot path touches preallocated
+     * memory only. On failure the add is rolled back (the grown
+     * body buffer is retained as capacity). */
+    if (k26astro_grav_state_reserve(&world->grav) != K26ASTRO_E_OK
+        || k26astro_rt_encounter_reserve(world, n + 1) != 0) {
+        world->grav.n_bodies = n;
+        return -K26ASTRO_RT_E_OOM;
+    }
     return n;
 }
 

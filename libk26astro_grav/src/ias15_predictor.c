@@ -19,7 +19,6 @@
 #include "k26astro_core/pos.h"
 
 #include <math.h>
-#include <stdlib.h>
 #include <string.h>
 
 /* Position predictor at substep h:
@@ -132,27 +131,25 @@ int k26_ias15_pc_iterate(K26AstroGravState *state, double dt,
 {
     K26AstroIAS15Carry *carry = state->ias15_carry;
     int n = state->n_bodies;
-    if (!carry || n < 1) return -1;
+    if (!carry || carry->capacity < n || n < 1) return -1;
 
     k26_ias15_init_matrices();
     const double *c  = k26_ias15_c();
     const double *rr = k26_ias15_rr();
 
-    /* Snapshot initial state. */
-    K26V3 *x0 = malloc((size_t)n * sizeof(K26V3));
-    K26V3 *v0 = malloc((size_t)n * sizeof(K26V3));
-    K26V3 *a0 = malloc((size_t)n * sizeof(K26V3));
-    K26AstroPos *pos_saved = malloc((size_t)n * sizeof(K26AstroPos));
-    K26V3 *a_n = malloc((size_t)n * sizeof(K26V3));
-    K26V3 *r_pred = malloc((size_t)n * sizeof(K26V3));
+    /* Snapshot + scratch buffers live in the carry, sized at
+     * non-step time by k26astro_grav_state_reserve; nothing on this
+     * path allocates. a0 aliases carry->at0, which apply_step_updates_
+     * reads after this call returns. */
+    K26V3 *x0 = carry->x0;
+    K26V3 *v0 = carry->v_sub;
+    K26V3 *a0 = carry->at0;
+    K26AstroPos *pos_saved = carry->pos_saved;
+    K26V3 *a_n = carry->a_sub;
+    K26V3 *r_pred = carry->r_sub;
     /* α-fail-safe scratch: per-body active flag + characteristic
      * length |x_i - COM|. */
-    char *body_active = malloc((size_t)n * sizeof(char));
-    if (!x0 || !v0 || !a0 || !pos_saved || !a_n || !r_pred || !body_active) {
-        free(x0); free(v0); free(a0); free(pos_saved); free(a_n); free(r_pred);
-        free(body_active);
-        return -1;
-    }
+    char *body_active = carry->body_active;
 
     /* Initial position-in-metres + velocity snapshot for the predictor. */
     K26AstroPos origin = state->bodies[0].pos;
@@ -197,10 +194,8 @@ int k26_ias15_pc_iterate(K26AstroGravState *state, double dt,
             }
         }
         double max_motion_ratio = 0.0;
-        double r_com_arr[64];   /* small-n optimization, scratch overflow guarded */
-        double v_mag_arr[64];
-        double *r_com = (n <= 64) ? r_com_arr : malloc((size_t)n * sizeof(double));
-        double *v_mag = (n <= 64) ? v_mag_arr : malloc((size_t)n * sizeof(double));
+        double *r_com = carry->r_com;
+        double *v_mag = carry->v_mag;
         for (int i = 0; i < n; i++) {
             double rx = x0[i].x - com_offset.x;
             double ry = x0[i].y - com_offset.y;
@@ -223,12 +218,11 @@ int k26_ias15_pc_iterate(K26AstroGravState *state, double dt,
                 body_active[i] = 1;
             }
         }
-        if (n > 64) { free(r_com); free(v_mag); }
     }
 
-    /* Initial acceleration (a_0) at the start of the step. */
+    /* Initial acceleration (a_0) at the start of the step, computed
+     * straight into carry->at0 (a0 aliases it). */
     k26astro_grav_accel_total(state, a0);
-    memcpy(carry->at0, a0, (size_t)n * sizeof(K26V3));
 
     /* Predictor seed: existing b's from previous step (zero on
      * first call; caller must have initialised carry->b to zero). */
@@ -247,8 +241,7 @@ int k26_ias15_pc_iterate(K26AstroGravState *state, double dt,
     }
     for (iter = 0; iter < max_iter; iter++) {
         /* Stash b[6] for convergence check. */
-        K26V3 *b6_prev = malloc((size_t)n * sizeof(K26V3));
-        if (!b6_prev) { iter = -1; break; }
+        K26V3 *b6_prev = carry->b6_prev;
         memcpy(b6_prev, carry->b[6], (size_t)n * sizeof(K26V3));
 
         /* For each substep h_1..h_7: predict, evaluate, update g. */
@@ -320,7 +313,6 @@ int k26_ias15_pc_iterate(K26AstroGravState *state, double dt,
                               + carry->b[6][i].z*carry->b[6][i].z);
             if (b6mag > max_b6) max_b6 = b6mag;
         }
-        free(b6_prev);
         if (max_b6 > 0.0) {
             resid = max_db / max_b6;
         } else {
@@ -339,8 +331,6 @@ int k26_ias15_pc_iterate(K26AstroGravState *state, double dt,
     if (out_max_b6) *out_max_b6 = max_b6;
     if (out_max_a0) *out_max_a0 = max_a0;
 
-    free(x0); free(v0); free(a0); free(pos_saved); free(a_n); free(r_pred);
-    free(body_active);
     return (resid < tol) ? iter + 1 : -1;
 }
 

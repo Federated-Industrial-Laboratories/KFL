@@ -53,6 +53,10 @@ static const union { uint64_t u; double d; } K26_IAS15_INV_SEVEN_BITS =
     { .u = 0x3FC2492492492492ULL };
 #define K26_IAS15_INV_SEVEN (K26_IAS15_INV_SEVEN_BITS.d)
 
+/* Capacity guard. k26astro_grav_state_reserve sizes the carry at
+ * non-step times (state init, body add), so on the supported path
+ * the check passes without allocating; the grow branch is reached
+ * only by a caller that grew n_bodies without the reserve. */
 static int ensure_carry_(K26AstroGravState *state)
 {
     if (state->ias15_carry && state->ias15_carry->capacity >= state->n_bodies)
@@ -69,7 +73,9 @@ static int ensure_carry_(K26AstroGravState *state)
  * snapshot is a belt-and-braces defence, making rollback semantics
  * provably bit-exact at the driver level, independent of predictor
  * internals. The snapshot is a byte-copy of K26AstroBody so the
- * restore is bit-identical (no float arithmetic involved). */
+ * restore is bit-identical (no float arithmetic involved).
+ * Preallocated by k26astro_grav_state_reserve; the grow branch here
+ * is the same off-reserve fallback as ensure_carry_'s. */
 static int ensure_snapshot_(K26AstroGravState *state)
 {
     if (state->ias15_snapshot && state->ias15_snapshot_cap >= state->n_bodies)

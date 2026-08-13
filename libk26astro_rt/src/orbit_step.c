@@ -37,8 +37,6 @@
 #include "k26astro_grav/ias15.h"
 #include "k26astro_vehicle/vehicle.h"
 
-#include <stdlib.h>
-
 /* Walk the world's vehicle registry and consume each per-substep
  * mass accumulator. Propulsion thrust callbacks add into the
  * accumulator during accel_total; this is the closing step that
@@ -52,18 +50,19 @@ static void commit_vehicle_mass_(K26AstroWorld *world, double dt_s)
     }
 }
 
-/* Build a contiguous K26AstroPairWeight array from world->encounters.
- * Returns a heap-allocated buffer the caller must free; *out_n holds
- * the count. Returns NULL on n=0 or allocation failure. */
-static K26AstroPairWeight *build_pair_weights_(const K26AstroWorld *world,
+/* Fill the world's preallocated pair-weight buffer from
+ * world->encounters and return it; *out_n holds the count. The
+ * buffer is sized for every distinct body pair at body-add time
+ * (k26astro_rt_encounter_reserve) and n_encounters can never exceed
+ * that, so this path neither allocates nor fails. Returns NULL on
+ * n=0. */
+static K26AstroPairWeight *build_pair_weights_(K26AstroWorld *world,
                                                 int *out_n)
 {
     int n = world->n_encounters;
     *out_n = 0;
     if (n <= 0) return NULL;
-    K26AstroPairWeight *w = (K26AstroPairWeight *)
-        malloc((size_t)n * sizeof(K26AstroPairWeight));
-    if (!w) return NULL;
+    K26AstroPairWeight *w = world->pair_weights;
     for (int k = 0; k < n; k++) {
         w[k].i = world->encounters[k].i;
         w[k].j = world->encounters[k].j;
@@ -95,15 +94,12 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
         return;
     }
 
-    /* Paper-faithful MERCURIUS split (Rein-Tamayo 2019 eq. 12-14). */
+    /* Paper-faithful MERCURIUS split (Rein-Tamayo 2019 eq. 12-14).
+     * n_enc > 0 here, so the preallocated buffer always comes back
+     * non-NULL; the old alloc-failure fallback to a single-
+     * integrator step is gone along with the allocation. */
     int n_w = 0;
     K26AstroPairWeight *w = build_pair_weights_(world, &n_w);
-    if (!w) {
-        /* Fallback: full single-integrator step on alloc failure. */
-        (void)k26astro_grav_step(&world->grav, dt_s);
-        commit_vehicle_mass_(world, dt_s);
-        return;
-    }
 
     K26AstroMercuriusContext far_ctx  = {
         .mode = K26ASTRO_MERCURIUS_FAR, .pair_weights = w, .n_pair_weights = n_w };
@@ -123,7 +119,6 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     (void)k26astro_grav_set_integrator(&world->grav, base);
 
     world->grav.mercurius = NULL;
-    free(w);
 
     /* MERCURIUS split: commit mass once per outer substep (FAR pass).
      * The NEAR sub-step is internal to IAS15 and shouldn't double-count

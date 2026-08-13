@@ -19,4 +19,10 @@ int k26astro_grav_step_inner_dispatch(K26AstroGravState *state, double dt);
  * when the event registry is non-empty. */
 int k26astro_grav_step_with_events(K26AstroGravState *state, double dt);
 
+/* Wisdom-Holman carry capacity guard (wisdom_holman.c). Allocates
+ * only when the carry is missing or under-sized; called from
+ * k26astro_grav_state_reserve at non-step times and from the WH
+ * step as a fallback. */
+int k26astro_grav_wh_carry_ensure(K26AstroGravState *state);
+
 #endif /* K26ASTRO_GRAV_STEP_INTERNAL_H */

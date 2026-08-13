@@ -53,7 +53,33 @@ double k26astro_mercurius_hill_radius(const K26AstroBody *i,
     return a_ij * cbrt(m_sum / (3.0 * m_central));
 }
 
-/* Grow the world's encounter buffer in-place. */
+int k26astro_rt_encounter_reserve(K26AstroWorld *world, int n_bodies)
+{
+    if (!world) return -1;
+    if (n_bodies < 2) return 0;
+    /* Worst case: every distinct pair in the transition region. */
+    int pairs = (n_bodies * (n_bodies - 1)) / 2;
+    if (world->cap_encounters < pairs) {
+        K26AstroEncounter *p = (K26AstroEncounter *)realloc(
+            world->encounters, (size_t)pairs * sizeof(K26AstroEncounter));
+        if (!p) return -1;
+        world->encounters     = p;
+        world->cap_encounters = pairs;
+    }
+    if (world->cap_pair_weights < pairs) {
+        K26AstroPairWeight *w = (K26AstroPairWeight *)realloc(
+            world->pair_weights, (size_t)pairs * sizeof(K26AstroPairWeight));
+        if (!w) return -1;
+        world->pair_weights     = w;
+        world->cap_pair_weights = pairs;
+    }
+    return 0;
+}
+
+/* Grow the world's encounter buffer in-place. With the body-add
+ * reserve above, the per-step detect finds sufficient capacity and
+ * this is a no-op; the grow branch survives as a fallback for
+ * worlds whose bodies were grown without the reserve. */
 static int ensure_encounter_capacity_(K26AstroWorld *world, int need)
 {
     if (need <= world->cap_encounters) return 0;

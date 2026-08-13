@@ -30,7 +30,12 @@ extern "C" {
 
 /* IAS15 carry-over: the b-coefficients of the Gauss-Radau expansion
  * (predictor seed for the next step), e-coefficients (predictor
- * error tracking), and substep scratch buffers. */
+ * error tracking), and substep scratch buffers.
+ *
+ * Every array is sized for `capacity` bodies and allocated in one
+ * place (k26_ias15_carry_alloc), reached only from non-step times
+ * via k26astro_grav_state_reserve; the predictor-corrector runs on
+ * these buffers and allocates nothing per substep. */
 struct K26AstroIAS15Carry {
     /* Per-body G-coefficients across the 7 internal Gauss-Radau nodes. */
     K26V3 *b[7];   /* arrays of length n_bodies, indexed [k][i] */
@@ -38,9 +43,17 @@ struct K26AstroIAS15Carry {
     K26V3 *g[7];   /* Gauss-Radau substep acceleration values */
 
     K26V3 *at0;    /* acceleration at the start of the step */
-    K26V3 *r_sub;  /* position scratch */
-    K26V3 *v_sub;  /* velocity scratch */
-    K26V3 *a_sub;  /* acceleration scratch */
+    K26V3 *r_sub;  /* predicted-position scratch */
+    K26V3 *v_sub;  /* start-of-step velocity snapshot */
+    K26V3 *a_sub;  /* substep acceleration scratch */
+
+    /* Predictor-corrector per-call scratch. */
+    K26V3       *x0;          /* start-of-step positions, metres from origin */
+    K26AstroPos *pos_saved;   /* body position stash across a substep */
+    K26V3       *b6_prev;     /* previous iteration's b[6] for convergence */
+    double      *r_com;       /* fail-safe: distance from system barycentre */
+    double      *v_mag;       /* fail-safe: velocity magnitude */
+    char        *body_active; /* fail-safe: per-body inclusion flag */
 
     double dt_proposed;   /* step-size controller's next proposal */
     int    capacity;

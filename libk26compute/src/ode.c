@@ -24,20 +24,24 @@ static int call_rhs(K26CRhsFn rhs, void *user, double t,
     return rhs(t, y, dydt, user);
 }
 
-K26CStatus k26c_ode_rk4(K26CRhsFn rhs, void *user,
-                        double t0, double t1, size_t n_steps,
-                        K26CVector *y)
+K26CStatus k26c_ode_rk4_ws(K26CRhsFn rhs, void *user,
+                           double t0, double t1, size_t n_steps,
+                           K26CVector *y,
+                           double *ws, size_t ws_len)
 {
     if (!rhs || !y || !y->data || n_steps == 0) return K26C_ERR_INVAL;
     size_t dim = y->n;
+    if (!ws || ws_len < K26C_ODE_RK4_WS(dim)) return K26C_ERR_INVAL;
     double h   = (t1 - t0) / (double)n_steps;
 
-    K26CVector k1, k2, k3, k4, ytmp;
-    if (k26c_vec_alloc(&k1,   dim) != K26C_OK) return K26C_ERR_OOM;
-    if (k26c_vec_alloc(&k2,   dim) != K26C_OK) { k26c_vec_free(&k1); return K26C_ERR_OOM; }
-    if (k26c_vec_alloc(&k3,   dim) != K26C_OK) { k26c_vec_free(&k1); k26c_vec_free(&k2); return K26C_ERR_OOM; }
-    if (k26c_vec_alloc(&k4,   dim) != K26C_OK) { k26c_vec_free(&k1); k26c_vec_free(&k2); k26c_vec_free(&k3); return K26C_ERR_OOM; }
-    if (k26c_vec_alloc(&ytmp, dim) != K26C_OK) { k26c_vec_free(&k1); k26c_vec_free(&k2); k26c_vec_free(&k3); k26c_vec_free(&k4); return K26C_ERR_OOM; }
+    /* Stage vectors carved from the workspace; zeroed to match the
+     * calloc-backed k26c_vec_alloc path of the plain entry point. */
+    memset(ws, 0, K26C_ODE_RK4_WS(dim) * sizeof(double));
+    K26CVector k1   = { ws + 0 * dim, dim };
+    K26CVector k2   = { ws + 1 * dim, dim };
+    K26CVector k3   = { ws + 2 * dim, dim };
+    K26CVector k4   = { ws + 3 * dim, dim };
+    K26CVector ytmp = { ws + 4 * dim, dim };
 
     double t = t0;
     K26CStatus rc = K26C_OK;
@@ -54,8 +58,20 @@ K26CStatus k26c_ode_rk4(K26CRhsFn rhs, void *user,
         t += h;
     }
 
-    k26c_vec_free(&k1); k26c_vec_free(&k2); k26c_vec_free(&k3);
-    k26c_vec_free(&k4); k26c_vec_free(&ytmp);
+    return rc;
+}
+
+K26CStatus k26c_ode_rk4(K26CRhsFn rhs, void *user,
+                        double t0, double t1, size_t n_steps,
+                        K26CVector *y)
+{
+    if (!rhs || !y || !y->data || n_steps == 0) return K26C_ERR_INVAL;
+    size_t ws_len = K26C_ODE_RK4_WS(y->n);
+    double *ws = (double *)malloc(ws_len * sizeof(double));
+    if (!ws) return K26C_ERR_OOM;
+    K26CStatus rc = k26c_ode_rk4_ws(rhs, user, t0, t1, n_steps, y,
+                                    ws, ws_len);
+    free(ws);
     return rc;
 }
 
@@ -87,30 +103,38 @@ static const double DP_B1 = 35.0/384.0,    DP_B3 = 500.0/1113.0,   DP_B4 = 125.0
 static const double DP_BS1 = 5179.0/57600.0,  DP_BS3 = 7571.0/16695.0, DP_BS4 = 393.0/640.0,
                     DP_BS5 = -92097.0/339200.0, DP_BS6 = 187.0/2100.0,  DP_BS7 = 1.0/40.0;
 
-K26CStatus k26c_ode_rk45(K26CRhsFn rhs, void *user,
-                         double t0, double t1,
-                         double rtol, double atol,
-                         K26CVector *y)
+K26CStatus k26c_ode_rk45_ws(K26CRhsFn rhs, void *user,
+                            double t0, double t1,
+                            double rtol, double atol,
+                            K26CVector *y,
+                            double *ws, size_t ws_len)
 {
     if (!rhs || !y || !y->data) return K26C_ERR_INVAL;
     if (rtol <= 0.0) rtol = 1e-6;
     if (atol <  0.0) atol = 1e-9;
-    if (t1 == t0)    return K26C_OK;
 
     size_t dim = y->n;
+    if (!ws || ws_len < K26C_ODE_RK45_WS(dim)) return K26C_ERR_INVAL;
+    if (t1 == t0)    return K26C_OK;
+
     int direction = (t1 > t0) ? 1 : -1;
     double h = (t1 - t0) / 100.0;            /* initial step guess */
     if (h == 0.0) h = direction * 1e-3;
 
-    /* Per-stage k vectors + ytmp + y_new + err. */
-    K26CVector k1, k2, k3, k4, k5, k6, k7, ytmp, y_new, y_err;
-    K26CVector *vs[] = { &k1, &k2, &k3, &k4, &k5, &k6, &k7, &ytmp, &y_new, &y_err };
-    for (size_t i = 0; i < sizeof(vs)/sizeof(vs[0]); i++) {
-        if (k26c_vec_alloc(vs[i], dim) != K26C_OK) {
-            for (size_t j = 0; j < i; j++) k26c_vec_free(vs[j]);
-            return K26C_ERR_OOM;
-        }
-    }
+    /* Per-stage k vectors + ytmp + y_new + err, carved from the
+     * workspace; zeroed to match the calloc-backed k26c_vec_alloc
+     * path of the plain entry point. */
+    memset(ws, 0, K26C_ODE_RK45_WS(dim) * sizeof(double));
+    K26CVector k1    = { ws + 0 * dim, dim };
+    K26CVector k2    = { ws + 1 * dim, dim };
+    K26CVector k3    = { ws + 2 * dim, dim };
+    K26CVector k4    = { ws + 3 * dim, dim };
+    K26CVector k5    = { ws + 4 * dim, dim };
+    K26CVector k6    = { ws + 5 * dim, dim };
+    K26CVector k7    = { ws + 6 * dim, dim };
+    K26CVector ytmp  = { ws + 7 * dim, dim };
+    K26CVector y_new = { ws + 8 * dim, dim };
+    K26CVector y_err = { ws + 9 * dim, dim };
 
     double t = t0;
     size_t max_steps = 100000;     /* belt-and-braces ceiling */
@@ -190,6 +214,20 @@ K26CStatus k26c_ode_rk45(K26CRhsFn rhs, void *user,
         h *= factor;
     }
 
-    for (size_t i = 0; i < sizeof(vs)/sizeof(vs[0]); i++) k26c_vec_free(vs[i]);
+    return rc;
+}
+
+K26CStatus k26c_ode_rk45(K26CRhsFn rhs, void *user,
+                         double t0, double t1,
+                         double rtol, double atol,
+                         K26CVector *y)
+{
+    if (!rhs || !y || !y->data) return K26C_ERR_INVAL;
+    size_t ws_len = K26C_ODE_RK45_WS(y->n);
+    double *ws = (double *)malloc(ws_len * sizeof(double));
+    if (!ws) return K26C_ERR_OOM;
+    K26CStatus rc = k26c_ode_rk45_ws(rhs, user, t0, t1, rtol, atol, y,
+                                     ws, ws_len);
+    free(ws);
     return rc;
 }

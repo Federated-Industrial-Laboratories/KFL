@@ -5,6 +5,7 @@
 #define K26ASTRO_RT_WORLD_INTERNAL_H
 
 #include "k26astro_rt/world.h"
+#include "k26astro_grav/forces.h"
 #include "k26compute.h"
 #include "k26tick.h"
 
@@ -68,10 +69,16 @@ struct K26AstroWorld {
     uint64_t seed;
     uint8_t  seeded;
 
-    /* MERCURIUS encounter session state. */
+    /* MERCURIUS encounter session state. Both buffers are sized for
+     * the worst case of n_bodies*(n_bodies-1)/2 pairs by
+     * k26astro_rt_encounter_reserve at body-add time, so the
+     * per-step detect and pair-weight build touch preallocated
+     * memory only. */
     K26AstroEncounter *encounters;
     int                n_encounters;
     int                cap_encounters;
+    K26AstroPairWeight *pair_weights;      /* orbit_step.c split scratch */
+    int                 cap_pair_weights;
     double             mercurius_hill_factor;   /* y_inner */
     double             mercurius_outer_factor;  /* y_outer */
 

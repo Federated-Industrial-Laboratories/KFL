@@ -36,6 +36,7 @@ extern "C" {
 struct K26AstroWHCarry {
     K26V3 *p_bary;   /* barycentric momenta (n_bodies) */
     K26V3 *r_helio;  /* heliocentric position scratch */
+    K26V3 *a_int;    /* interaction-kick acceleration scratch */
     int    capacity;
 };
 
