@@ -71,7 +71,12 @@ K26AstroPos k26astro_pos_from_m(double x, double y, double z);
 
 /* Folds |lx|, |ly|, |lz| back into the [-EDGE/2, EDGE/2) range,
  * carrying the overflow into the sector index. Idempotent. Call
- * after every integrator substep on every body. */
+ * after every integrator substep on every body. Three cases are left
+ * unfolded so the call always terminates: a non-finite offset, an
+ * offset at or beyond 2^88 m (past exact fold arithmetic), and a
+ * fold whose sector index would overflow; sector*EDGE + offset still
+ * names the same point in all three, and callers treating such
+ * states as divergence do so by their own policy. */
 void k26astro_pos_normalise(K26AstroPos *p);
 
 /* Relative displacement vector: `a - b`. Returns a K26V3 in metres,

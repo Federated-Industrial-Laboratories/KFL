@@ -27,7 +27,12 @@
  *      recording its requested episode count. Pins the fix for the
  *      sector fold in k26astro_pos_normalise, which used to walk a
  *      diverged offset back one sector per loop iteration and wedge
- *      the batch executable inside a single step.
+ *      the batch executable inside a single step. This gate pins
+ *      termination and episode accounting ONLY: the recorded
+ *      episodes carry large finite observations with no fault code,
+ *      because the divergence detector keys on finiteness, and
+ *      whether large-but-finite magnitudes should fault is an open
+ *      policy question outside this gate's claim.
  *
  * Pattern: run ./bin/kflc via system() with the stack's include and
  * archive paths, then drive the artifacts directly. Requires the

@@ -5,7 +5,12 @@
  * pathological chaotic regions (e.g. Burrau-style triple close
  * encounters at impossibly tight tol) can spend minutes accepting
  * picosecond substeps in the IEEE-754 truncation-noise regime;
- * the budget exists as a developer-facing safety net.
+ * the budget exists as a developer-facing safety net. That
+ * truncation-noise regime itself is no longer exercised by any
+ * test: the fixture below stalls on legitimate volume of work
+ * instead, a consciously accepted coverage reduction (the earlier
+ * regime-based fixture's stall came from a since-fixed defect, not
+ * from the regime).
  *
  * Strategy: integrate a tight two-body orbit (98-minute period)
  * over a 100-year horizon in one call. The controller legitimately

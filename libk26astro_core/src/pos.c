@@ -28,9 +28,11 @@ static void normalise_axis_(int64_t *sec, double *loc)
          * 2^89 m (where loc -/+ S rounds back to loc and the loop
          * stops advancing at all), or with a non-finite offset
          * (inf -/+ S stays inf). Fold in one step instead so the
-         * caller always gets its step result back and its own
-         * divergence handling can act; the fold must never be where
-         * a run wedges.
+         * caller always gets its step result back; the fold must
+         * never be where a run wedges. Whether anything downstream
+         * treats such an offset as divergence is that layer's own
+         * policy (finiteness checks do not fire on large finite
+         * values); this function only guarantees termination.
          *
          * S is a power of two, so below 2^88 the remainder, the
          * multiple subtracted, and the sector count are all exact

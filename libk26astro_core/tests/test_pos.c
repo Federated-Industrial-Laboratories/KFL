@@ -103,6 +103,36 @@ int main(void)
     }
     assert(p2.sx == 1000000);
 
-    printf("test_pos: OK (sector grid + Q64.64 + stress 1e6 normalisations)\n");
+    /* ---- Diverged-offset normalisation ------------------------- */
+    /* A very large finite offset folds in one step (no per-sector
+     * walk), lands in range, and the fold is idempotent. */
+    K26AstroPos big = k26astro_pos_zero();
+    big.lx = 5.0e23;
+    k26astro_pos_normalise(&big);
+    assert(fabs(big.lx) < 0.5 * K26ASTRO_SECTOR_EDGE_M);
+    K26AstroPos big2 = big;
+    k26astro_pos_normalise(&big2);
+    assert(big2.sx == big.sx && big2.lx == big.lx);
+
+    /* The three escape hatches leave the offset unfolded and always
+     * terminate: past exact fold arithmetic (2^88 m), non-finite,
+     * and a fold that would overflow the sector index. */
+    K26AstroPos huge = k26astro_pos_zero();
+    huge.lx = 0x1p90;
+    k26astro_pos_normalise(&huge);
+    assert(huge.sx == 0 && huge.lx == 0x1p90);
+    K26AstroPos infp = k26astro_pos_zero();
+    infp.ly = INFINITY;
+    infp.lz = -NAN;
+    k26astro_pos_normalise(&infp);
+    assert(isinf(infp.ly) && isnan(infp.lz));
+    K26AstroPos ovf = k26astro_pos_zero();
+    ovf.sx = INT64_MAX - 1;
+    ovf.lx = 2.0 * K26ASTRO_SECTOR_EDGE_M * 4.0;
+    k26astro_pos_normalise(&ovf);
+    assert(ovf.sx == INT64_MAX - 1);
+
+    printf("test_pos: OK (sector grid + Q64.64 + stress 1e6"
+           " normalisations + diverged-offset hatches)\n");
     return 0;
 }

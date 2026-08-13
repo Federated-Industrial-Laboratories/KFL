@@ -75,8 +75,11 @@ static uint64_t pair_cap_bound_(void)
  * doubles the current one so repeated single-body adds copy an
  * amortised-constant number of entries per add instead of a full
  * quadratic buffer each time. Returns 0, or -1 when `need` is not
- * representable or an allocation fails; on failure every buffer
- * keeps its previous size and its capacity field stays truthful. */
+ * representable or an allocation fails; on failure the pair-weight
+ * buffer keeps its previous size (the encounter list may already
+ * have grown, harmlessly: the caller records nothing on failure, so
+ * n_encounters never exceeds the smaller capacity) and every
+ * capacity field stays truthful. */
 static int grow_pair_buffers_(K26AstroWorld *world, uint64_t need)
 {
     if (need <= (uint64_t)world->cap_encounters
