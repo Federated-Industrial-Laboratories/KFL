@@ -370,6 +370,305 @@ KFLC_LDLIBS="-lk26astro_rt -lk26astro_grav -lk26astro_conics \
     kflc astro_apophis_2029.kfl -o apophis
 ```
 
+A `fn world` can also declare a stepped decision environment instead of a
+scripted simulation; see *Reinforcement learning (Grammar 3.2)*.
+
+---
+
+## Reinforcement learning (Grammar 3.2)
+
+Grammar 3.2 lets a `fn world` declare a stepped decision environment: the
+program states what a control step is, which scalar inputs an external
+caller sets each step, what that caller observes, and what the reward is.
+The compiler then produces an artifact an outside training loop can drive
+step by step (see *The compiled artifact* below).
+
+Five constructs carry the surface, all of them statements inside a
+`fn world` body:
+
+| Construct                     | Purpose                                                    |
+|-------------------------------|-------------------------------------------------------------|
+| `episode` ... `end`           | The episode frame: control period, length bound, termination, per-episode state draws. |
+| `action <name> ...`           | A scalar input channel, set from outside before each step.  |
+| `on_step` ... `end`           | A statement block run once per control step.                |
+| `observe ... as <name>`       | A named observation channel, recomputed each step.          |
+| `objective` ... `end`         | The reward, and an optional terminal adjustment.            |
+
+These words bind as keywords only at statement position inside a
+`fn world` body. Everywhere else they stay ordinary identifiers, so
+existing programs that use them as names keep compiling. (`episode`,
+`action`, and `objective` sit on the compiler's reserved-name list, so a
+`let`, `const`, or `arg` that binds one of them draws a warning.)
+
+A program that uses any of these constructs, or a distribution-valued
+`astro_body` attribute (below), is a reinforcement learning program. Such
+a program must declare an `episode` block, admits exactly one `fn world`,
+and gives up the statements the episode machinery replaces:
+
+- `step` and `propagate` are rejected inside the world: the stepping
+  belongs to the episode machinery.
+- `plot` declarations and `fn data` producers are rejected: the compiled
+  environment has no figure output.
+- `arena` declarations are rejected.
+- `astro_body` declarations must be top level in the world body, not
+  inside an `if`, `while`, or `for_each` block: the body set is part of
+  the compiled program's identity.
+
+The world body's remaining statements are its prefix. The prefix runs
+once per environment when the environment is created and builds the
+initial world.
+
+### The `episode` block
+
+```
+episode
+    control_dt <expr>                  # required
+    horizon <expr>
+    terminated when <expr>
+    reset <body>.<key> <distribution>
+end
+```
+
+At most one `episode` block per world, and each line except `reset` at
+most once. `control_dt` is required: the simulated seconds the world
+advances on every control step. `horizon` bounds the episode at that many
+steps; an episode that reaches it ends as truncated. `terminated when`
+gives a termination predicate, evaluated after each step in the scope
+described under *Expression scope*; an episode that satisfies it ends as
+terminated. Each `reset` line redraws one body-state scalar at the start
+of every episode: `<body>` names an `astro_body` declared in the same
+world, `<key>` is one of the six state keys (below), and the value must
+be a distribution expression.
+
+With neither a positive `horizon` nor a `terminated when` condition the
+episode can never end. The compiler warns, and the batch executable
+refuses to run such a program; the environment library still serves it,
+for consumers that reset externally.
+
+### Actions
+
+```
+action <name> box <low> <high> [default <expr>]
+action <name> discrete <count> [default <expr>]
+```
+
+Each `action` declares one scalar input channel that the outside caller
+sets before every step. `box` declares a continuous channel with the
+given bounds; `discrete` declares an integer-valued channel with
+`<count>` choices. The bounds, count, and default are
+whitespace-separated expressions (balanced parentheses and brackets keep
+a spaced expression together). Action names must be unique within the
+world. The `default` value, 0 when omitted, is what the batch executable
+drives at every step; the declared bounds and kinds are published in the
+compiled artifact's spec.
+
+### The `on_step` block
+
+The `on_step` body runs once per control step, before the world advances,
+identically in batch mode and through the environment library. The
+declared action names are in scope as read-only scalars. The body admits
+ordinary statements only: world construction (`astro_body`), stepping
+(`step`, `propagate`), `observe`, nested reinforcement learning
+constructs, and `print` are all rejected; the stepping path performs no
+I/O.
+
+### Observation channels
+
+```
+observe <target> from <observer> [key=value ...] as <name>
+```
+
+The `observe` statement of the simulation surface takes a trailing
+`as <name>` clause, which must be the last clause on the line. Instead of
+printing, the observation becomes a named channel recomputed after every
+step. Each channel contributes four components, readable by name in the
+objective and termination expressions:
+
+| Component                                       | Value                                                        |
+|-------------------------------------------------|--------------------------------------------------------------|
+| `<name>_dir_x`, `<name>_dir_y`, `<name>_dir_z`  | Unit direction from observer to target, after the observation mode's corrections. |
+| `<name>_range`                                  | Distance from the observer to the corrected target position, in metres. |
+
+Channel names must be unique within the world.
+
+### The `objective` block
+
+```
+objective
+    reward <expr>                      # required
+    terminal <expr>
+end
+```
+
+At most one `objective` block per world; `reward` is required and
+`terminal` optional, each at most once. The reward is evaluated once per
+step, after the world advances; a step whose reward is not finite ends
+the episode as faulted. `terminal` is a terminal adjustment: when the
+`terminated when` condition fires, its value is added to that final
+step's reward. A truncated episode carries no terminal adjustment.
+
+### Expression scope
+
+`terminated when`, `reward`, and `terminal` are evaluated by the episode
+machinery, outside the world prefix, and read a fixed scope:
+
+- the declared action names;
+- the four components of every `as`-bound observation channel;
+- `episode.steps`, the count of control steps taken in the current
+  episode, the step being evaluated included;
+- the world body's top-level scalar `let` / `const` bindings (`double`,
+  `int`, `bool`), captured once per environment when the world is built;
+  a binding declared inside a nested block, or one of vector, matrix, or
+  string type, is not readable here, and the compiler says so;
+- `arg` globals, and the literals `true` / `false`.
+
+Any other name is an error.
+
+### Distribution expressions
+
+```
+uniform(<low>, <high>)
+normal(<mean>, <stddev>)
+```
+
+A distribution expression is valid in exactly two positions: as the whole
+value of an `astro_body` attribute, and as the value of an episode
+`reset` line. Anywhere else it is an error, and an `astro_body` value
+that buries a distribution inside a larger expression is an error too: a
+drawn parameter is the whole value or nothing.
+
+Distributions are not random calls at run time. Every drawn parameter is
+a deterministic function of the run's seed and the draw's coordinates
+(the environment index, the episode index, and the parameter's position
+in the source), so the same seed reproduces the same values, environment
+by environment and episode by episode. A distribution-valued `astro_body`
+attribute is redrawn at the start of every episode, exactly as `reset`
+lines are; when both target the same field, the `reset` line wins.
+
+A program that declares its own `fn uniform` or `fn normal` turns that
+name back into an ordinary function call everywhere except `reset` lines,
+which accept only distribution expressions. A Grammar 3.1 program with
+its own `uniform` therefore keeps its meaning, distribution-free.
+
+### Body state keys
+
+Six scalar keys name an `astro_body`'s state components directly:
+`pos_x`, `pos_y`, `pos_z` (position) and `vel_x`, `vel_y`, `vel_z`
+(velocity). They are accepted in two places: as `astro_body` attribute
+initialisers, with a constant value or a distribution, and as the targets
+of episode `reset` lines. Constant-valued state keys are plain Grammar
+3.1; using them does not make a program a reinforcement learning program.
+
+### The compiled artifact
+
+`kflc program.kfl -o program` on a reinforcement learning program
+produces two artifacts from one emitted translation unit:
+
+- `program`, the batch executable;
+- `program.rlenv.so`, a shared object exporting the k26rl environment
+  ABI.
+
+Both are compiled from the same generated source, so batch runs and
+library consumers step the same environment code by construction.
+
+**The batch executable.** The generated `main()` is the episode loop; it
+does not call `run()`. It steps `--envs` environments in lockstep,
+driving every action at its declared default, until each environment has
+completed `--episodes` episodes. An episode completes by termination,
+truncation, or fault; the environment then resets automatically and keeps
+stepping until every environment has reached the count.
+
+| Flag              | Meaning                                                       |
+|-------------------|---------------------------------------------------------------|
+| `--envs <N>`      | Environments stepped side by side (default 1).                |
+| `--episodes <K>`  | Episodes to complete per environment (default 1).             |
+| `--seed <S>`      | The run's seed (default 0).                                   |
+| `--out <path>`    | Record an episode file at `<path>`; the path must not exist.  |
+
+Declared `arg` globals keep their `--<name>` flags (see *Command-line
+arguments*).
+
+**The environment library.** `program.rlenv.so` exports the k26rl
+environment ABI and nothing else: the create, reset, step, observation,
+reward, flags, fault, spec, and destroy calls plus the version and status
+helpers declared in `k26rl_env.h` (shipped with `libk26rl`). A consumer
+dlopens the shared object, checks `k26rl_abi_version()`, reads the
+environment's geometry (channel counts and names, action bounds and
+kinds, `control_dt`, `horizon`) from the `k26rl_env_spec` blob, and steps
+every environment in the handle through flat arrays of doubles. The
+header carries the full contract.
+
+**Determinism.** Given the same compiled artifact, the same seed, and the
+same action stream, the observation, reward, and flag streams are
+bit-identical across runs, and two identical batch runs write
+byte-identical episode files. Each environment's episodes are a pure
+function of the seed, the environment index, and the episode index; an
+environment's streams do not change when neighbours run beside it in the
+same handle. A recorded episode file re-simulates: creating a fresh
+environment with the recorded seed, resetting to the recorded episode,
+and replaying the recorded actions reproduces that episode's observation,
+reward, and flag streams bitwise.
+
+**Grammar 3.1 compatibility.** The surface is additive. A program that
+uses none of the constructs in this section compiles exactly as before,
+byte for byte, with no trace of the environment machinery.
+
+### Worked example
+
+An environment that randomises a craft's initial state each episode,
+exposes a continuous and a discrete action, observes the craft from the
+body it orbits, and rewards closing the range. This is the shape of
+`integration_tests/rl_pointing.kfl`:
+
+```
+form RL_POINTING
+
+    fn world pointing_world
+        astro_body earth gm=3.986004418e14 mass=5.972e24
+        astro_body craft gm=1.0 parent=earth pos_x=uniform(-7.0e6,7.0e6) pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=normal(0.0,10.0) vel_z=0.0
+
+        episode
+            control_dt 0.1
+            horizon 1000
+            terminated when episode.steps > 900
+            reset craft.pos_x uniform(-7.0e6, 7.0e6)
+            reset craft.vel_y normal(0.0, 10.0)
+        end
+
+        action thrust box -1.0 1.0 default 0.0
+        action gear discrete 3 default 0
+
+        on_step
+            let damping: double = 0.99
+        end
+
+        observe craft from earth mode=astrometric as track
+
+        objective
+            reward 0.0 - track_range + thrust
+            terminal track_range < 0.5
+        end
+    end
+
+end
+```
+
+A reinforcement learning program links the astronomy libraries plus
+`libk26rl` and `libk26rng`:
+
+```
+KFLC_LDLIBS="-lk26rl -lk26rng -lk26astro_rt -lk26astro_vehicle \
+    -lk26astro_atmos -lk26astro_grav -lk26astro_conics -lk26astro_body \
+    -lk26astro_ephem -lk26astro_core -lk26compute -lk26tick -lk26m3d \
+    -lgfortran -lm" \
+    kflc rl_pointing.kfl -o pointing
+./pointing --envs 8 --episodes 4 --seed 42 --out pointing.k26epi
+```
+
+The first command writes `pointing` and `pointing.rlenv.so`; the second
+records eight environments for four episodes each into
+`pointing.k26epi`.
+
 ---
 
 ## Command-line arguments
