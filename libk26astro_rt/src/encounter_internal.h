@@ -21,13 +21,16 @@ extern "C" {
  * Coefficients are exact integers; bit-identical across libm. */
 double k26astro_mercurius_K(double y, double y_inner, double y_outer);
 
-/* Pairwise Hill radius. R_hill_ij = a_ij * cbrt( (m_i + m_j) / (3 * M_central) )
- * where M_central is the dominant mass in the system (Sun in v0.1;
- * for general systems take the largest-GM body). Returns 0 if
- * inputs are degenerate. */
+/* Pairwise mutual Hill radius,
+ *   R_hill_ij = ((a_i + a_j) / 2) * cbrt( (m_i + m_j) / (3 * M_central) ),
+ * where a_i and a_j are the bodies' osculating semi-major axes about
+ * `central` (vis-viva), falling back to the body's current distance
+ * from `central` for unbound or degenerate relative states. The full
+ * criterion statement and the citation live at the definition
+ * (encounter.c). Returns 0 if inputs are degenerate. */
 double k26astro_mercurius_hill_radius(const K26AstroBody *i,
                                        const K26AstroBody *j,
-                                       double m_central);
+                                       const K26AstroBody *central);
 
 /* Scan all pairs; populate world->encounters with pairs whose
  * y < world->mercurius_outer_factor. Each session record carries

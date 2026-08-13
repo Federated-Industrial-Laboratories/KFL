@@ -129,13 +129,15 @@ const char *k26astro_body_name(const K26AstroBody *b);
  *
  * Orbit substeps go through the MERCURIUS close-encounter handoff
  * (Rein, Hernandez, Tamayo et al. 2019, MNRAS 485(4):5490-5497): on
- * a Verlet base integrator, pairs within `mercurius_outer`
- * Hill-radius units have their pairwise force smoothly partitioned
- * between the Verlet far pass and an IAS15 near pass via the
- * quintic switching function K(y). Every other base integrator
- * takes a single full-force step; in particular a Wisdom-Holman
- * base never splits, because the WH interaction kick applies
- * unweighted pair forces (rationale at orbit_step.c).
+ * a Verlet base, or a Wisdom-Holman base whose largest mass is body
+ * 0 (the WH drift's Kepler primary), pairs within `mercurius_outer`
+ * mutual-Hill-radius units (semi-major-axis based; criterion at
+ * encounter.c) have their pairwise force smoothly partitioned by
+ * the quintic switching function K(y): the (1-K) portion is applied
+ * as half-step kicks around an IAS15 drift that integrates the
+ * K-weighted encounter forces at the evolving positions. Every
+ * other configuration takes a single full-force step (admission
+ * rationale at orbit_step.c).
  *
  * Substep failures are not reported through this entry (interactive
  * 3.1 callers discard its return; a failing orbit substep ends that
@@ -167,14 +169,14 @@ int  k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s);
  * failing substep are governed by the failing integrator's own
  * contract. A subsequent step call starts fresh from that state.
  *
- * One caveat on the split path (a Verlet base with active
- * close-encounter pairs): the outer far pass bills the substep's
- * full dt before the inner near pass runs, so a near-pass failure
- * leaves the epoch advanced by that dt with the near-pass force
- * contribution absent (or partial, per the inner integrator's
- * contract). Without rollback the epoch cannot reflect partial
- * physics exactly; on this path the epoch is exact at substep
- * granularity only.
+ * One caveat on the split path (an admitted base with active
+ * close-encounter pairs): the substep opens with a half-step kick
+ * of the far-field forces before the drift bills any time, so a
+ * drift failure leaves that velocity half-impulse applied with the
+ * epoch reflecting only the drift's completed internal progress.
+ * Without rollback the state cannot be unwound to the substep
+ * boundary; the half-kick is the failed substep's partial write,
+ * governed by this documented contract.
  *
  * Re-entrant advances (a step call issued from inside a tick
  * callback of an outer advance) do not report substep status: the

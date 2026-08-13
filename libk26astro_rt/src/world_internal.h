@@ -81,6 +81,12 @@ struct K26AstroWorld {
     int                 cap_pair_weights;
     double             mercurius_hill_factor;   /* y_inner */
     double             mercurius_outer_factor;  /* y_outer */
+    /* Central-body index found by the last k26astro_mercurius_detect
+     * call (-1 before any detect, or when no body has positive
+     * mass). The split admission in orbit_step.c reads it: a
+     * Wisdom-Holman base joins the split only when this index is 0,
+     * the WH drift's hard-wired Kepler primary. */
+    int                mercurius_central_idx;
 
     /* Observer-correction mode. */
     K26AstroObserverMode observer_mode;

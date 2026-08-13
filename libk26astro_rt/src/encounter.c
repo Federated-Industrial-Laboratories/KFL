@@ -37,27 +37,63 @@ double k26astro_mercurius_K(double y, double y_inner, double y_outer)
     return 1.0 - s;
 }
 
+/* Osculating length scale of `b` about `central` for the Hill-radius
+ * build: the semi-major axis from vis-viva,
+ *   a = 1 / (2/r - v^2/mu),   mu = central->gm,
+ * with r and v the body's position and velocity relative to the
+ * central body. Fallback rule, stated: when the relative state is
+ * unbound or degenerate (2/r - v^2/mu <= 0, i.e. parabolic or
+ * hyperbolic, or mu or r non-positive, or a non-finite result), the
+ * scale is the body's CURRENT distance from the central body. An
+ * unbound body has no finite semi-major axis, and the Hill argument
+ * is local: r * cbrt(m / 3M) is the tidal sphere at the distance the
+ * body actually occupies. The fallback is the central-relative
+ * distance, never the pair separation, so the closeness ratio
+ * y = d / r_hill stays separation-dependent in every branch. */
+static double hill_length_scale_(const K26AstroBody *b,
+                                 const K26AstroBody *central)
+{
+    K26V3 rel = k26astro_pos_sub(&b->pos, &central->pos);
+    double r = sqrt(rel.x * rel.x + rel.y * rel.y + rel.z * rel.z);
+    if (!(r > 0.0)) return 0.0;
+    double mu = central->gm;
+    if (!(mu > 0.0)) return r;
+    double vx = b->vel.x - central->vel.x;
+    double vy = b->vel.y - central->vel.y;
+    double vz = b->vel.z - central->vel.z;
+    double v2 = vx * vx + vy * vy + vz * vz;
+    double inv_a = 2.0 / r - v2 / mu;
+    if (!(inv_a > 0.0)) return r;
+    double a = 1.0 / inv_a;
+    if (!isfinite(a)) return r;
+    return a;
+}
+
 double k26astro_mercurius_hill_radius(const K26AstroBody *i,
                                        const K26AstroBody *j,
-                                       double m_central)
+                                       const K26AstroBody *central)
 {
-    if (!i || !j) return 0.0;
-    /* Semi-major axis approximated by the current separation (the
-     * exact value would require fitting an osculating conic, which
-     * is too expensive per-pair per-step). Known recorded defect:
-     * with a_ij equal to the separation, the detector's ratio
-     * y = d / r_hill is separation-independent (the distance
-     * cancels), so this heuristic classifies pairs by mass ratio
-     * alone and never measures closeness; a pair massive enough to
-     * cross the threshold splits at every separation. The redesign
-     * is scoped as its own follow-up item. */
-    K26V3 r = k26astro_pos_sub(&i->pos, &j->pos);
-    double a_ij = sqrt(r.x * r.x + r.y * r.y + r.z * r.z);
-    if (!(a_ij > 0.0))      return 0.0;
+    if (!i || !j || !central) return 0.0;
+    /* Mutual Hill radius per Rein, Hernandez, Tamayo et al. (2019),
+     * MNRAS 485(4):5490-5497, section 2: the switching function's
+     * length unit is built from the bodies' SEMI-MAJOR AXES about
+     * the central body, not from their current separation,
+     *   R_hill_ij = ((a_i + a_j) / 2) * cbrt((m_i + m_j) / (3 M)),
+     * with a_i, a_j from vis-viva and the unbound fallback stated at
+     * hill_length_scale_ above. The previous revision approximated
+     * a_ij by the pair separation, which cancelled the distance out
+     * of y = d / r_hill entirely: pairs were classified by mass
+     * ratio alone, at any separation. With the semi-major axes in
+     * the unit, y is a genuine closeness measure: distant pairs do
+     * not split, near passes do. */
+    double m_central = central->mass;
     if (!(m_central > 0.0)) return 0.0;
     double m_sum = i->mass + j->mass;
     if (!(m_sum > 0.0))     return 0.0;
-    return a_ij * cbrt(m_sum / (3.0 * m_central));
+    double a_i = hill_length_scale_(i, central);
+    double a_j = hill_length_scale_(j, central);
+    if (!(a_i > 0.0) || !(a_j > 0.0)) return 0.0;
+    return 0.5 * (a_i + a_j) * cbrt(m_sum / (3.0 * m_central));
 }
 
 /* Largest per-buffer entry count the int capacity fields and a
@@ -129,12 +165,16 @@ int k26astro_rt_encounter_reserve(K26AstroWorld *world, int n_bodies)
 int k26astro_mercurius_detect(K26AstroWorld *world)
 {
     if (!world) return 0;
+    world->mercurius_central_idx = -1;
     int n = world->grav.n_bodies;
     if (n < 2) { world->n_encounters = 0; return 0; }
 
     /* Central body = the largest mass. In the solar system this is
      * the Sun; for moon-around-planet sub-systems the caller should
-     * set up a hierarchical world (out of scope in v0.1). */
+     * set up a hierarchical world (out of scope in v0.1). The index
+     * is recorded on the world for the split admission: a
+     * Wisdom-Holman base may only split when this index is 0, the
+     * WH drift's hard-wired Kepler primary (orbit_step.c). */
     double m_central   = 0.0;
     int    idx_central = -1;
     for (int k = 0; k < n; k++) {
@@ -142,6 +182,7 @@ int k26astro_mercurius_detect(K26AstroWorld *world)
         if (m > m_central) { m_central = m; idx_central = k; }
     }
     if (!(m_central > 0.0)) { world->n_encounters = 0; return 0; }
+    world->mercurius_central_idx = idx_central;
 
     world->n_encounters = 0;
     for (int i = 0; i < n; i++) {
@@ -150,18 +191,18 @@ int k26astro_mercurius_detect(K26AstroWorld *world)
              * pairs. What the exclusion means depends on the base
              * integrator:
              *
-             * - Wisdom-Holman base (currently never admitted to
-             *   the split; see the admission note in orbit_step.c):
-             *   MERCURIUS K-weights the planet-planet interaction
-             *   terms only (Rein et al. 2019, section 2, eqs 4-5).
-             *   The central pull is the Kepler part the drift
-             *   integrates exactly ONLY when the largest mass is
-             *   body 0, the drift's hard-wired primary
-             *   (wisdom_holman.c, mu0 = b[0].gm). When the largest
-             *   mass sits elsewhere the drift still orbits body 0,
-             *   the exclusion is an approximation, and the split's
-             *   correctness there is an open question recorded with
-             *   the detector follow-up item.
+             * - Wisdom-Holman base: MERCURIUS K-weights the
+             *   planet-planet interaction terms only (Rein et al.
+             *   2019, section 2, eqs 4-5); the central pull is the
+             *   Kepler part owned by the drift. That statement is
+             *   true ONLY when the largest mass is body 0, the
+             *   drift's hard-wired primary (wisdom_holman.c,
+             *   mu0 = b[0].gm), so the split admission in
+             *   orbit_step.c requires mercurius_central_idx == 0
+             *   for a WH base; otherwise WH takes single full-force
+             *   steps, where the drift's primary choice is WH's own
+             *   pre-existing approximation and no split arithmetic
+             *   depends on it.
              *
              * - Verlet base: there is no Kepler part; every force
              *   lives in the pair sum. The exclusion is right for
@@ -169,18 +210,13 @@ int k26astro_mercurius_detect(K26AstroWorld *world)
              *   the FAR pass at full weight. Including central
              *   pairs zero-weighted the central force there (K = 1
              *   near the primary), so the FAR pass integrated a
-             *   straight-line drift with no central gravity at all.
-             *   Excluding them corrected that, changing Verlet-base
-             *   split trajectories; only WH-base configurations are
-             *   byte-identical across the change.
-             *
-             * The mutual-Hill heuristic's degeneracy is structural
-             * for ALL pairs, not specific to central ones: see the
-             * recorded defect at k26astro_mercurius_hill_radius. */
+             *   straight-line drift with no central gravity at
+             *   all. */
             if (i == idx_central || j == idx_central) continue;
             const K26AstroBody *bi = &world->grav.bodies[i];
             const K26AstroBody *bj = &world->grav.bodies[j];
-            double rh = k26astro_mercurius_hill_radius(bi, bj, m_central);
+            double rh = k26astro_mercurius_hill_radius(
+                    bi, bj, &world->grav.bodies[idx_central]);
             if (!(rh > 0.0)) continue;
             K26V3 r = k26astro_pos_sub(&bi->pos, &bj->pos);
             double d = sqrt(r.x * r.x + r.y * r.y + r.z * r.z);

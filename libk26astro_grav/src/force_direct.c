@@ -24,6 +24,7 @@
 #include "k26astro_grav/forces.h"
 #include "k26astro_grav/grav.h"
 #include "k26astro_grav/perturb.h"
+#include "grav_step_internal.h"
 #include "k26astro_core/sum.h"
 #include "k26astro_core/pos.h"
 
@@ -142,9 +143,11 @@ void k26astro_grav_force_direct_softened(const K26AstroGravView *view,
 
 /* Look up the K weight for pair (i, j) in the weight list. Linear
  * scan; encounters typically number 0-20 even in dense systems.
- * Returns 0.0 if the pair is not in the encounter list. */
-static double mercurius_pair_weight_(
-        const K26AstroPairWeight *weights, int n_weights, int i, int j)
+ * Returns 0.0 if the pair is not in the encounter list. Shared with
+ * the Wisdom-Holman interaction kick (grav_step_internal.h) so every
+ * consumer of the split context resolves weights identically. */
+double k26_grav_mercurius_pair_weight(const K26AstroPairWeight *weights,
+                                       int n_weights, int i, int j)
 {
     /* Canonical pair order: smaller index first. */
     if (i > j) { int t = i; i = j; j = t; }
@@ -179,7 +182,8 @@ void k26astro_grav_force_direct_weighted(
             double inv_r3 = 1.0 / (r2 * r_mag);
             double s_i =  b[j].gm * inv_r3;
             double s_j = -b[i].gm * inv_r3;
-            double K_ij = mercurius_pair_weight_(weights, n_weights, i, j);
+            double K_ij = k26_grav_mercurius_pair_weight(weights, n_weights,
+                                                          i, j);
             double w_far  = 1.0 - K_ij;
             double w_near = K_ij;
             if (out_far) {
@@ -212,6 +216,7 @@ static void force_direct_mercurius_(
     int n = view->n;
     const K26AstroBody *b = view->bodies;
     int near_mode = (ctx->mode == K26ASTRO_MERCURIUS_NEAR);
+    int central   = ctx->central_plus1 - 1;   /* -1 = none */
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
             K26V3 r_ij = k26astro_pos_sub(&b[j].pos, &b[i].pos);
@@ -220,9 +225,18 @@ static void force_direct_mercurius_(
             double inv_r3 = 1.0 / (r2 * r_mag);
             double s_i =  b[j].gm * inv_r3;
             double s_j = -b[i].gm * inv_r3;
-            double K_ij = mercurius_pair_weight_(ctx->pair_weights,
-                                                  ctx->n_pair_weights, i, j);
-            double w = near_mode ? K_ij : (1.0 - K_ij);
+            double w;
+            if (central >= 0 && (i == central || j == central)) {
+                /* Drift-owned central pair: zero in FAR (the base
+                 * integrator's central drift already carries it),
+                 * full in NEAR (the near integrator replaces that
+                 * drift). See the field comment in forces.h. */
+                w = near_mode ? 1.0 : 0.0;
+            } else {
+                double K_ij = k26_grav_mercurius_pair_weight(
+                        ctx->pair_weights, ctx->n_pair_weights, i, j);
+                w = near_mode ? K_ij : (1.0 - K_ij);
+            }
             if (w == 0.0) continue;
             accel[i].x += w * s_i * r_ij.x;
             accel[i].y += w * s_i * r_ij.y;

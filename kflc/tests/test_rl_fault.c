@@ -498,19 +498,19 @@ int main(void)
            " fault, end to end: OK\n");
 
     /* Gate 9: the healthy counterpart of gate 8. Pluto, Charon, and
-     * a small probe with JPL GM and mass values: the Charon+probe
-     * pair's combined mass is 12 percent of Pluto's, above the
-     * close-encounter detector's mass threshold (3/125 of the
-     * central mass), so the detector reports the pair at every
-     * separation. On the default Wisdom-Holman base the pair must
-     * NOT push the step into the MERCURIUS split: the WH kick
-     * applies unweighted pair forces, so the split contributes
-     * nothing and its NEAR pass can only manufacture failure
-     * statuses. The episode must run its declared horizon with no
-     * fault and end truncated. This gate sits at the compiled-
-     * environment level because that is where the defect surfaced:
-     * it covers detection, split admission, the exact stepping
-     * status, and the fault mapping in one path. */
+     * a small probe with JPL GM and mass values. The Charon+probe
+     * pair is a genuine close pair by the semi-major-axis Hill
+     * criterion (y near 1.16, inside the transition window's inner
+     * edge), so on the default Wisdom-Holman base with Pluto at
+     * body 0 the MERCURIUS split runs on every step, carrying the
+     * pair force in the IAS15 drift at full weight. The episode
+     * must run its declared horizon with no fault and end
+     * truncated. This gate sits at the compiled-environment level
+     * because that is where the historical defect surfaced (a
+     * failing near pass manufacturing failure statuses on a healthy
+     * world): it covers detection, split admission, the split
+     * composition, the exact stepping status, and the fault mapping
+     * in one path. */
     {
         static const char *const pluto_kfl =
             "form RL_PLUTO\n"

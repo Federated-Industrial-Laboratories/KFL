@@ -88,11 +88,24 @@ typedef enum {
 /* MERCURIUS orchestration context. Caller sets state->mercurius to
  * point at one of these for the duration of a step, then clears.
  * `pair_weights` is a caller-owned array; the integrator does not
- * mutate it. */
+ * mutate it.
+ *
+ * `central_plus1`: index + 1 of the body whose pair forces belong to
+ * the base integrator's central drift rather than to the kick's pair
+ * sum (the Wisdom-Holman Kepler primary). Pairs containing that body
+ * contribute zero in FAR mode (the drift already carries them) and
+ * full weight in NEAR mode (the near integrator replaces the drift,
+ * so it must carry the central attraction itself). 0 means no such
+ * body: every pair is weighted by its K entry alone, with central
+ * pairs staying in FAR at full weight (the Verlet-style bases, where
+ * all forces live in the pair sum). Encoded plus-one so a designated
+ * initializer that omits the field keeps the no-drift-central
+ * behaviour. */
 struct K26AstroMercuriusContext {
     K26AstroMercuriusMode      mode;
     const K26AstroPairWeight  *pair_weights;
     int                        n_pair_weights;
+    int                        central_plus1;
 };
 
 /* Pair-by-pair weighted direct N². Caller-side decomposition

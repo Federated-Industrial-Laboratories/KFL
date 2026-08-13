@@ -4,37 +4,46 @@
  * the world's integrator (WH, IAS15, Verlet, RK4, RK45, or MERCURIUS).
  *
  * Paper-faithful MERCURIUS split, after Rein, Hernandez, Tamayo
- * et al. 2019 (MNRAS 485(4):5490-5497) eq. 12-14:
+ * et al. 2019 (MNRAS 485(4):5490-5497), section 2:
  *   1. Detect close-encounter pairs (k26astro_mercurius_detect).
  *      Each pair carries a K(y) weight computed at detect time.
- *   2. If no encounters or the active integrator is not Verlet:
- *      single full-force step (the integrator handles dynamics
- *      uniformly). A WH base never splits; the admission note at
- *      do_split below says why.
- *   3. Otherwise (paper-faithful split):
- *        a. Set state->mercurius = { FAR, weights, n }.
- *        b. Run the Verlet outer integrator over dt; it sees only
- *           the (1-K)-weighted portion of each encounter pair plus
- *           full-force on non-encounter pairs. This handles the
- *           smooth bulk dynamics.
- *        c. Set state->mercurius = { NEAR, weights, n }.
- *        d. Run IAS15 over the same dt — it sees only the
- *           K-weighted portion of each encounter pair (zero for
- *           non-encounter pairs). This handles the encounter
- *           dynamics with adaptive precision.
- *        e. Clear state->mercurius.
+ *   2. If no encounters, or the base integrator is not admitted to
+ *      the split (admission note at do_split below): single
+ *      full-force step.
+ *   3. Otherwise, one kick-drift-kick composition of the substep's
+ *      dt, splitting the acceleration field into
+ *        a_far  = (1-K)-weighted encounter pairs + full weight on
+ *                 every other kicked pair + perturbations,
+ *        a_near = K-weighted encounter pairs (+ the central pairs
+ *                 at full weight on a WH base, which owns them in
+ *                 the drift; central_plus1 in forces.h),
+ *      with a_far + a_near summing to the unsplit total by
+ *      construction:
+ *        a. Half-kick: v += (dt/2) * a_far at the current
+ *           positions (state->mercurius = FAR context).
+ *        b. Drift: one IAS15 step over the full dt on the NEAR
+ *           context's field. This is the only pass that advances
+ *           positions and the epoch; it carries the kinetic motion
+ *           and resolves the encounter-pair forces adaptively at
+ *           the evolving positions.
+ *        c. Half-kick: v += (dt/2) * a_far at the drifted
+ *           positions. Clear state->mercurius.
  *
- *      The two integrators contribute additively to position +
- *      velocity because (a) they integrate disjoint pieces of the
- *      total acceleration (Σ((1-K)+K) = Σ identity) and (b) the
- *      MERCURIUS context applies its K filter inside accel_total,
- *      so each integrator's internal kick/drift sees the right
- *      force field. Position and velocity updates accumulate in
- *      place — no separate delta-summation buffer needed. */
+ *      This is the paper's operator structure with the encounter
+ *      terms integrated inside the drift. The previous revision ran
+ *      the base integrator over dt (FAR field) and then IAS15 over
+ *      the same dt (NEAR field) as two FULL steps in sequence; the
+ *      force weights summed to the identity, but each pass advanced
+ *      positions by its own kinetic drift, so every position moved
+ *      at twice its velocity on split substeps (measured ratio
+ *      2.0000 over one substep). The kick-drift-kick composition
+ *      integrates the kinetic term exactly once. The force
+ *      arithmetic (split accelerations summing to the unsplit
+ *      total, and the split step landing on the single-step
+ *      trajectory) is gated by test_mercurius_force_arithmetic. */
 #include "encounter_internal.h"
 
 #include "k26astro_grav/grav.h"
-#include "k26astro_grav/close_encounter.h"
 #include "k26astro_grav/forces.h"
 #include "k26astro_grav/ias15.h"
 #include "k26astro_vehicle/vehicle.h"
@@ -96,25 +105,24 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     int n_enc = k26astro_mercurius_detect(world);
 
     K26AstroIntegrator base = world->grav.integrator;
-    /* Split admission: Verlet base only. Verlet evaluates forces
-     * through k26astro_grav_accel_total, which applies the MERCURIUS
-     * context's K weights (force_direct.c), so its FAR pass
-     * genuinely integrates the (1-K) portion. A WH base is excluded
-     * because the WH interaction kick computes its own pair sum
-     * (interaction_accel_, wisdom_holman.c) and never consults
-     * state->mercurius, which breaks the split in both directions:
-     * the FAR pass applies the full pair force, so a converging
-     * NEAR pass would add the K-weighted portion again on top
-     * (double-counting), and a failing NEAR pass fails the substep
-     * while having contributed nothing, surfacing an integrator
-     * failure on a healthy world. Combined with the detection
-     * heuristic's separation-independence (the recorded defect at
-     * k26astro_mercurius_hill_radius), any pair above the mass
-     * threshold split on every WH step, so both directions were
-     * live. Restoring a WH split means teaching the kick the pair
-     * weights; that is scoped with the detector follow-up item. */
+    /* Split admission. Verlet: always (all its forces live in the
+     * pair sum, so the FAR/NEAR field split covers everything).
+     * Wisdom-Holman: only when the detector's central body is body
+     * 0, the Kepler primary hard-wired into the WH drift
+     * (wisdom_holman.c, mu0 = b[0].gm). The split's field
+     * partition hands the central pairs to the drift side
+     * (central_plus1 below); when the largest mass is not body 0
+     * the detector's exclusion set and the drift's primary disagree
+     * about which pairs those are, so the partition would drop the
+     * largest body's pair forces from one side without the other
+     * picking them up. In that configuration WH takes single
+     * full-force steps, where its primary choice is its own
+     * pre-existing approximation and no split arithmetic depends on
+     * it. IAS15 resolves encounters itself; RK4/RK45 stay whole. */
+    int wh_split_ok = (base == K26ASTRO_INTEGRATOR_WH)
+        && (world->mercurius_central_idx == 0);
     int do_split = (n_enc > 0)
-        && (base == K26ASTRO_INTEGRATOR_VERLET);
+        && (base == K26ASTRO_INTEGRATOR_VERLET || wh_split_ok);
 
     if (!do_split) {
         /* Standard single-integrator step. On failure the substep
@@ -130,62 +138,84 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
         return;
     }
 
-    /* Paper-faithful MERCURIUS split (Rein et al. 2019 eq. 12-14).
+    /* Paper-faithful MERCURIUS split (Rein et al. 2019, section 2).
      * n_enc > 0 here, so the preallocated buffer always comes back
      * non-NULL; the old alloc-failure fallback to a single-
      * integrator step is gone along with the allocation. */
     int n_w = 0;
     K26AstroPairWeight *w = build_pair_weights_(world, &n_w);
 
+    int central_plus1 = (base == K26ASTRO_INTEGRATOR_WH) ? 1 : 0;
     K26AstroMercuriusContext far_ctx  = {
-        .mode = K26ASTRO_MERCURIUS_FAR, .pair_weights = w, .n_pair_weights = n_w };
+        .mode = K26ASTRO_MERCURIUS_FAR, .pair_weights = w,
+        .n_pair_weights = n_w, .central_plus1 = central_plus1 };
     K26AstroMercuriusContext near_ctx = {
-        .mode = K26ASTRO_MERCURIUS_NEAR, .pair_weights = w, .n_pair_weights = n_w };
+        .mode = K26ASTRO_MERCURIUS_NEAR, .pair_weights = w,
+        .n_pair_weights = n_w, .central_plus1 = central_plus1 };
 
-    /* Step 1: outer (Verlet) on FAR. On failure, stop before
-     * the NEAR pass: the split's two integrations are halves of one
-     * substep, and running the second half over the first's failed
-     * state would step past the failure. The mercurius pointer is
-     * always cleared before returning (it aims at stack locals). */
+    /* The far-field kick writes through the grav state's kick
+     * scratch (the same buffer Verlet's kick uses; no integrator
+     * runs while the kick reads it). With the state reserved at
+     * body-add time this allocates nothing. */
+    int n = world->grav.n_bodies;
+    if (world->grav.scratch_cap < n) {
+        int rrc = k26astro_grav_state_reserve(&world->grav);
+        if (rrc != K26ASTRO_E_OK) {
+            world->substep_status = rrc;
+            return;
+        }
+    }
+    K26V3 *a_far = world->grav.scratch_accel;
+    K26AstroBody *b = world->grav.bodies;
+
+    /* Half-kick on the far field at the current positions. The
+     * mercurius pointer aims at stack locals; every return path
+     * below clears it. */
     world->grav.mercurius = &far_ctx;
+    k26astro_grav_accel_total(&world->grav, a_far);
+    for (int i = 0; i < n; i++) {
+        b[i].vel.x += 0.5 * dt_s * a_far[i].x;
+        b[i].vel.y += 0.5 * dt_s * a_far[i].y;
+        b[i].vel.z += 0.5 * dt_s * a_far[i].z;
+    }
+
+    /* Drift: one IAS15 step over the substep's full dt on the NEAR
+     * field. The only pass that advances positions, and the only
+     * one that bills the epoch: the kicks are instantaneous. On
+     * failure the substep is incomplete; the latched status stops
+     * the advance at this substep, the epoch reflects the drift's
+     * completed internal progress (the inner integrator's own
+     * contract), and the first half-kick stands as the failed
+     * substep's partial write, with no time billed for it. */
+    world->grav.mercurius = &near_ctx;
+    (void)k26astro_grav_set_integrator(&world->grav,
+                                         K26ASTRO_INTEGRATOR_IAS15);
     int rc = k26astro_grav_step(&world->grav, dt_s);
+    (void)k26astro_grav_set_integrator(&world->grav, base);
     if (rc != K26ASTRO_E_OK) {
+        /* The half-kick's uncommitted dot_m stays in the vehicle
+         * accumulators: the substep did not complete, so its mass
+         * step is not taken. */
         world->grav.mercurius = NULL;
         world->substep_status = rc;
         return;
     }
 
-    /* Step 2: IAS15 sub-step on NEAR. Switch the integrator for
-     * the inner pass, then restore. The restore and clear run on
-     * the failure path too, so a latched failure never leaves the
-     * split's temporary integrator or context behind.
-     *
-     * Epoch accounting: the two passes are halves of ONE substep
-     * over the same dt_s, but each integrator bills its own dt
-     * against state->t. The FAR pass above already billed the
-     * substep's dt, so the NEAR pass's epoch advance is cancelled
-     * by restoring t around it (on failure too: a failed NEAR pass
-     * with partial internal progress must not add its partial bill
-     * on top of the FAR pass's full one). One substep advances
-     * simulated time once. */
-    K26AstroEpoch t_billed = world->grav.t;
-    world->grav.mercurius = &near_ctx;
-    (void)k26astro_grav_set_integrator(&world->grav,
-                                         K26ASTRO_INTEGRATOR_IAS15);
-    rc = k26astro_grav_step(&world->grav, dt_s);
-    (void)k26astro_grav_set_integrator(&world->grav, base);
+    /* Half-kick on the far field at the drifted positions. */
+    world->grav.mercurius = &far_ctx;
+    k26astro_grav_accel_total(&world->grav, a_far);
     world->grav.mercurius = NULL;
-    world->grav.t = t_billed;
-    if (rc != K26ASTRO_E_OK) {
-        /* The FAR pass's uncommitted dot_m stays in the vehicle
-         * accumulators: the substep did not complete, so its mass
-         * step is not taken. */
-        world->substep_status = rc;
-        return;
+    for (int i = 0; i < n; i++) {
+        b[i].vel.x += 0.5 * dt_s * a_far[i].x;
+        b[i].vel.y += 0.5 * dt_s * a_far[i].y;
+        b[i].vel.z += 0.5 * dt_s * a_far[i].z;
     }
 
-    /* MERCURIUS split: commit mass once per outer substep (FAR pass).
-     * The NEAR sub-step is internal to IAS15 and shouldn't double-count
-     * the dot_m accumulator. */
-    commit_vehicle_mass_(world, dt_s);
+    /* Commit mass once per substep. The far field was evaluated
+     * twice (once per half-kick), so any propulsion dot_m callback
+     * ran twice; committing half the substep's dt keeps the mass
+     * step at one substep's worth of accumulated flow, matching a
+     * single-evaluation unsplit step. The NEAR drift is internal to
+     * IAS15 and runs no user perturbations (accel_total's rule). */
+    commit_vehicle_mass_(world, 0.5 * dt_s);
 }

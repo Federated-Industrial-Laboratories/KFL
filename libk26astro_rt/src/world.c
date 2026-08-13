@@ -117,6 +117,7 @@ K26AstroWorld *k26astro_world_create(K26AstroWorldMode  mode,
      * 485(4):5490-5497, section 2. */
     world->mercurius_hill_factor  = 3.0;
     world->mercurius_outer_factor = 5.0;
+    world->mercurius_central_idx  = -1;
 
     world->observer_mode  = K26ASTRO_OBS_ASTROMETRIC;
     world->atmos          = NULL;
