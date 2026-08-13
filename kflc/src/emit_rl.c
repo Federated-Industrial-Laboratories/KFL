@@ -25,6 +25,10 @@
  *     (dir_x, dir_y, dir_z, range per channel, source order), the
  *     reward from the objective block, termination from the episode
  *     block, and applies action channels in the on_step block;
+ *   - captures the world prefix's top-level scalar bindings per
+ *     environment at create, so objective and termination expressions
+ *     read them with no allocation and no prefix re-run on the step
+ *     path;
  *   - emits the episode record format through the libk26rl writer
  *     when output is enabled, and performs no I/O otherwise.
  */
@@ -47,6 +51,7 @@
 #define RL_MAX_OBSERVES 256
 #define RL_MAX_RESETS   256
 #define RL_MAX_DR       256
+#define RL_MAX_WSCAL    256
 
 /* The six scalar state keys astro_body and reset lines share. Order
  * matters nowhere; membership does. */
@@ -97,6 +102,14 @@ typedef struct {
 
     RlDrParam       dr[RL_MAX_DR];
     int             n_dr;
+
+    /* Top-level scalar (double, int, bool) let/const bindings of the
+     * world prefix. Their values are captured per environment when the
+     * world is built at create, so the objective and termination
+     * expressions can read them without re-running the prefix and
+     * without allocating on the step path. */
+    const KflcNode *wscal[RL_MAX_WSCAL];
+    int             n_wscal;
 
     const KflcAttr *control_dt;
     const KflcAttr *horizon;          /* or NULL */
@@ -197,6 +210,61 @@ static KflcExpr *rl_attr_dist_(const KflcAttr *a, const KflcNode *form,
             "value (`%s=uniform(lo, hi)` or `%s=normal(mu, sigma)`), not "
             "part of a larger expression", a->name, a->name, a->name);
         *out_error = 1;
+    }
+    return NULL;
+}
+
+static int rl_is_scalar_type_(KflcType t)
+{
+    return t == KFLT_DOUBLE || t == KFLT_INT || t == KFLT_BOOL;
+}
+
+/* True when `name` is already claimed by the RL expression scope: an
+ * action channel, an observation channel component, or the episode
+ * step counter. A world binding with such a name is shadowed there and
+ * never captured. */
+static int rl_scope_name_taken_(const RlModel *m, const char *name)
+{
+    if (!name) return 0;
+    if (strcmp(name, "episode.steps") == 0) return 1;
+    for (int i = 0; i < m->n_actions; i++) {
+        const char *an = m->actions[i]->name;
+        if (an && strcmp(an, name) == 0) return 1;
+    }
+    static const char *const comp[4] = {
+        "_dir_x", "_dir_y", "_dir_z", "_range"
+    };
+    for (int i = 0; i < m->n_observes; i++) {
+        const char *base = rl_observe_as_(m->observes[i]);
+        if (!base) continue;
+        size_t bl = strlen(base);
+        if (strncmp(name, base, bl) != 0) continue;
+        for (int c = 0; c < 4; c++) {
+            if (strcmp(name + bl, comp[c]) == 0) return 1;
+        }
+    }
+    return 0;
+}
+
+/* Find a let/const named `name` anywhere in the world subtree.
+ * out_top reports whether the hit is a direct child of the world
+ * (the prefix's own scope) rather than nested inside a block. */
+static const KflcNode *rl_find_world_binding_(const KflcNode *stmts,
+                                              const char *name, int depth,
+                                              int *out_top)
+{
+    for (const KflcNode *s = stmts; s; s = s->next) {
+        if ((s->kind == KFLN_STMT_LET || s->kind == KFLN_STMT_CONST) &&
+            s->name && strcmp(s->name, name) == 0) {
+            *out_top = (depth == 0);
+            return s;
+        }
+        const KflcNode *hit =
+            rl_find_world_binding_(s->children, name, depth + 1, out_top);
+        if (hit) return hit;
+        hit = rl_find_world_binding_(s->else_children, name, depth + 1,
+                                     out_top);
+        if (hit) return hit;
     }
     return NULL;
 }
@@ -368,6 +436,33 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
             m->dr[m->n_dr].channel = m->n_dr;
             m->n_dr++;
         }
+    }
+
+    /* World scalars readable by the objective and termination
+     * expressions: top-level prefix let/const bindings of scalar type,
+     * captured per environment at create. Names the action channels or
+     * observation components already claim are shadowed there and not
+     * captured. A duplicate top-level name is left to the emitted
+     * C++'s own redeclaration error, as the batch emitter leaves it. */
+    for (const KflcNode *s = m->world->children; s; s = s->next) {
+        if (s->kind != KFLN_STMT_LET && s->kind != KFLN_STMT_CONST) {
+            continue;
+        }
+        if (!s->name || !rl_is_scalar_type_(s->type)) continue;
+        if (rl_scope_name_taken_(m, s->name)) continue;
+        int dup = 0;
+        for (int j = 0; j < m->n_wscal; j++) {
+            const char *wn = m->wscal[j]->name;
+            if (wn && strcmp(wn, s->name) == 0) dup = 1;
+        }
+        if (dup) continue;
+        if (m->n_wscal == RL_MAX_WSCAL) {
+            kflc_diag_errorf(diag, s->line,
+                "too many world scalar bindings (limit %d)",
+                RL_MAX_WSCAL);
+            return 1;
+        }
+        m->wscal[m->n_wscal++] = s;
     }
 
     /* Reset lines must name a declared top-level body. */
@@ -552,9 +647,10 @@ static void rl_rewrite_steps_(KflcExpr *e, KflcArena *arena)
  *
  * The `terminated when`, `reward`, and `terminal` expressions read
  * action channels, observation channel components, `episode.steps`,
- * and form arguments. Emission declares one const double local per
- * action and channel component so the expression emitter resolves the
- * KFL names as ordinary scalar bindings. */
+ * world scalar bindings, and form arguments. Emission declares one
+ * const double local per action, channel component, and captured
+ * world scalar so the expression emitter resolves the KFL names as
+ * ordinary scalar bindings. */
 
 static void rl_emit_scope_prelude_(FILE *out, const RlModel *m, int indent)
 {
@@ -576,6 +672,12 @@ static void rl_emit_scope_prelude_(FILE *out, const RlModel *m, int indent)
                 "const double %s%s = _kfl_obs_v[%d]; (void)%s%s;\n",
                 base, comp[c], i * 4 + c, base, comp[c]);
         }
+    }
+    for (int i = 0; i < m->n_wscal; i++) {
+        rl_emit_indent_(out, indent);
+        fprintf(out,
+            "const double %s = _kfl_world_v[%d]; (void)%s;\n",
+            m->wscal[i]->name, i, m->wscal[i]->name);
     }
     rl_emit_indent_(out, indent);
     fputs("const double _kfl_episode_steps = (double)_kfl_nsteps; "
@@ -606,6 +708,10 @@ static void rl_scope_bindings_(const RlModel *m, const KflcNode *form,
             rl_push_binding_(arena, live, live_n, live_cap, nm,
                              KFLT_DOUBLE);
         }
+    }
+    for (int i = 0; i < m->n_wscal; i++) {
+        rl_push_binding_(arena, live, live_n, live_cap,
+                         m->wscal[i]->name, KFLT_DOUBLE);
     }
     rl_push_binding_(arena, live, live_n, live_cap,
                      "_kfl_episode_steps", KFLT_DOUBLE);
@@ -708,12 +814,13 @@ static void rl_emit_prologue_(FILE *out, const RlModel *m,
         "#define KFLRL_N_RESET %d\n"
         "#define KFLRL_N_DR %d\n"
         "#define KFLRL_N_REC %d\n"
+        "#define KFLRL_N_WSCAL %d\n"
         "#define KFLRL_HAS_TERMINATED %d\n"
         "#define KFLRL_MAGIC 0x4b524c45u\n"
         "\n",
         m->n_bodies, m->n_observes * 4, m->n_actions,
         m->n_resets, m->n_dr, m->n_resets + m->n_dr,
-        m->terminated_when ? 1 : 0);
+        m->n_wscal, m->terminated_when ? 1 : 0);
 
     /* Domain-randomisation record tags, ascending (class, channel):
      * reset-state entries (class 0x0001) then domain-randomisation
@@ -965,10 +1072,12 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
 {
     fputs("static int kflrl_build_world_(K26AstroWorld *world, "
           "K26RngKey _kfl_key,\n"
-          "                              uint32_t _kfl_envi)\n"
+          "                              uint32_t _kfl_envi, "
+          "double *_kfl_wscal)\n"
           "{\n"
           "    const uint32_t _kfl_ep = 0;\n"
-          "    (void)_kfl_key; (void)_kfl_envi; (void)_kfl_ep;\n", out);
+          "    (void)_kfl_key; (void)_kfl_envi; (void)_kfl_ep; "
+          "(void)_kfl_wscal;\n", out);
 
     /* Known-body index locals, the batch emitter's convention, so the
      * shared statement emitter resolves parent/observe targets. A
@@ -1097,6 +1206,13 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
         }
     }
     kfl_emit_stmt_drain_root(out, 4);
+    /* Capture the world scalars for the objective and termination
+     * evaluators: the prefix runs once per environment at create, and
+     * these are its final values. */
+    for (int i = 0; i < m->n_wscal; i++) {
+        fprintf(out, "    _kfl_wscal[%d] = (double)(%s);\n",
+                i, m->wscal[i]->name);
+    }
     fputs("    return 0;\n}\n\n", out);
     return diag->errors ? 1 : 0;
 }
@@ -1316,6 +1432,86 @@ static int rl_emit_on_step_(FILE *out, const RlModel *m,
     return diag->errors ? 1 : 0;
 }
 
+/* Names an objective or termination expression may read that the
+ * emitted scope resolves. A world binding the capture pass skipped
+ * (nested in a block, or not scalar) gets a precise diagnostic here
+ * instead of an unknown-identifier failure downstream. Every other
+ * unknown name is left to the expression emitter's own resolution
+ * (builtins, user fns). */
+static void rl_check_objective_names_(const RlModel *m,
+                                      const KflcNode *form,
+                                      const KflcExpr *e,
+                                      const char *ctx_word, int line,
+                                      KflcDiag *diag)
+{
+    if (!e) return;
+    switch (e->kind) {
+    case KFLE_IDENT: {
+        const char *id = e->u.ident;
+        if (!id) return;
+        if (strcmp(id, "episode.steps") == 0 ||
+            strcmp(id, "true") == 0 || strcmp(id, "false") == 0) {
+            return;
+        }
+        if (rl_scope_name_taken_(m, id)) return;   /* action / channel */
+        for (int i = 0; i < m->n_wscal; i++) {
+            const char *wn = m->wscal[i]->name;
+            if (wn && strcmp(wn, id) == 0) return;
+        }
+        for (const KflcNode *c = form->children; c; c = c->next) {
+            if (c->kind == KFLN_ARG && c->name &&
+                strcmp(c->name, id) == 0) {
+                return;
+            }
+        }
+        int top = 0;
+        const KflcNode *b =
+            rl_find_world_binding_(m->world->children, id, 0, &top);
+        if (b && !top) {
+            kflc_diag_errorf(diag, line,
+                "%s: `%s` is declared inside a nested block of the "
+                "world body and is not in scope here; declare it at "
+                "the top level of `fn world` to read it", ctx_word, id);
+        } else if (b && !rl_is_scalar_type_(b->type)) {
+            kflc_diag_errorf(diag, line,
+                "%s: `%s` is not a scalar; only double, int, and bool "
+                "world bindings are readable here", ctx_word, id);
+        }
+        return;
+    }
+    case KFLE_CALL:
+        for (int i = 0; i < e->u.call.n_args; i++) {
+            rl_check_objective_names_(m, form, e->u.call.args[i],
+                                      ctx_word, line, diag);
+        }
+        return;
+    case KFLE_UNARY:
+        rl_check_objective_names_(m, form, e->u.un.operand, ctx_word,
+                                  line, diag);
+        return;
+    case KFLE_BINARY:
+        rl_check_objective_names_(m, form, e->u.bin.lhs, ctx_word,
+                                  line, diag);
+        rl_check_objective_names_(m, form, e->u.bin.rhs, ctx_word,
+                                  line, diag);
+        return;
+    case KFLE_VEC_LIT:
+        for (int i = 0; i < e->u.vec.n_elems; i++) {
+            rl_check_objective_names_(m, form, e->u.vec.elems[i],
+                                      ctx_word, line, diag);
+        }
+        return;
+    case KFLE_INDEX:
+        rl_check_objective_names_(m, form, e->u.index.base, ctx_word,
+                                  line, diag);
+        rl_check_objective_names_(m, form, e->u.index.idx, ctx_word,
+                                  line, diag);
+        return;
+    default:
+        return;
+    }
+}
+
 /* Reward, terminal adjustment, and termination predicate. Absent
  * blocks give the documented defaults: an all-zero reward stream, no
  * terminal adjustment, no predicate termination. */
@@ -1340,19 +1536,29 @@ static int rl_emit_objective_(FILE *out, const RlModel *m,
         const char *ret;
         const KflcAttr *attr;
         const char *absent;
+        const char *word;
     } fns[3] = {
-        { "kflrl_reward_",     "double", m->reward,          "0.0" },
-        { "kflrl_terminal_",   "double", m->terminal,        "0.0" },
-        { "kflrl_terminated_", "int",    m->terminated_when, "0"   },
+        { "kflrl_reward_",     "double", m->reward,          "0.0",
+          "reward" },
+        { "kflrl_terminal_",   "double", m->terminal,        "0.0",
+          "terminal" },
+        { "kflrl_terminated_", "int",    m->terminated_when, "0",
+          "terminated when" },
     };
     for (int i = 0; i < 3; i++) {
         fprintf(out,
             "static %s %s(const double *_kfl_obs_v,\n"
-            "        const double *_kfl_act_v, uint32_t _kfl_nsteps)\n"
+            "        const double *_kfl_act_v, uint32_t _kfl_nsteps,\n"
+            "        const double *_kfl_world_v)\n"
             "{\n"
-            "    (void)_kfl_obs_v; (void)_kfl_act_v; (void)_kfl_nsteps;\n",
+            "    (void)_kfl_obs_v; (void)_kfl_act_v; (void)_kfl_nsteps; "
+            "(void)_kfl_world_v;\n",
             fns[i].ret, fns[i].name);
         if (fns[i].attr && fns[i].attr->expr) {
+            rl_check_objective_names_(m, form, fns[i].attr->expr,
+                                      fns[i].word, fns[i].attr->line,
+                                      diag);
+            if (diag->errors) return 1;
             rl_emit_scope_prelude_(out, m, 4);
             rl_rewrite_steps_(fns[i].attr->expr, arena);
             if (strcmp(fns[i].ret, "int") == 0) {
@@ -1403,6 +1609,8 @@ static void rl_emit_env_core_(FILE *out)
 "    uint32_t *flags;\n"
 "    uint16_t *fault;\n"
 "    double   *dr_vals;           /* n_envs * KFLRL_N_REC */\n"
+"    double   *wscal;             /* n_envs * KFLRL_N_WSCAL, world\n"
+"                                  * scalars captured at create */\n"
 "    double   *scratch;           /* KFLRL_OBS_TOTAL */\n"
 "    double    control_dt;\n"
 "    uint32_t  horizon;\n"
@@ -1600,6 +1808,7 @@ static void rl_emit_env_core_(FILE *out)
 "    free(h->flags);\n"
 "    free(h->fault);\n"
 "    free(h->dr_vals);\n"
+"    free(h->wscal);\n"
 "    free(h->scratch);\n"
 "    free(h->spec);\n"
 "    free(h->seen_seeds);\n"
@@ -1648,11 +1857,15 @@ static void rl_emit_env_core_(FILE *out)
 "    h->dr_vals = (double *)calloc(\n"
 "        (size_t)n_envs * (KFLRL_N_REC ? KFLRL_N_REC : 1),\n"
 "        sizeof(double));\n"
+"    h->wscal = (double *)calloc(\n"
+"        (size_t)n_envs * (KFLRL_N_WSCAL ? KFLRL_N_WSCAL : 1),\n"
+"        sizeof(double));\n"
 "    h->scratch = (double *)calloc(\n"
 "        KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1, sizeof(double));\n"
 "    if (!h->seen_seeds || !h->worlds || !h->baseline || !h->baseline_t ||\n"
 "        !h->episode || !h->steps || !h->ended || !h->obs || !h->rew ||\n"
-"        !h->flags || !h->fault || !h->dr_vals || !h->scratch) {\n"
+"        !h->flags || !h->fault || !h->dr_vals || !h->wscal ||\n"
+"        !h->scratch) {\n"
 "        kflrl_free_handle_(h);\n"
 "        return K26RL_E_INTERNAL;\n"
 "    }\n"
@@ -1667,7 +1880,8 @@ static void rl_emit_env_core_(FILE *out)
 "            return K26RL_E_INTERNAL;\n"
 "        }\n"
 "        (void)k26astro_world_set_seed(h->worlds[e], seed);\n"
-"        if (kflrl_build_world_(h->worlds[e], h->key, e) != 0) {\n"
+"        if (kflrl_build_world_(h->worlds[e], h->key, e,\n"
+"                h->wscal + (size_t)e * KFLRL_N_WSCAL) != 0) {\n"
 "            kflrl_free_handle_(h);\n"
 "            return K26RL_E_INTERNAL;\n"
 "        }\n"
@@ -1798,6 +2012,8 @@ static void rl_emit_env_core_(FILE *out)
 "    for (uint32_t e = 0; e < h->n_envs; e++) {\n"
 "        const double *aslice = actions\n"
 "            ? actions + (size_t)e * KFLRL_ACT_TOTAL : NULL;\n"
+"        const double *wslice = h->wscal + (size_t)e * KFLRL_N_WSCAL;\n"
+"        (void)wslice;\n"
 "\n"
 "        if (h->ended[e]) {\n"
 "            /* Boundary reset: no transition, no time advance, the\n"
@@ -1850,7 +2066,7 @@ static void rl_emit_env_core_(FILE *out)
 "        }\n"
 "\n"
 "        uint32_t ns = h->steps[e] + 1u;\n"
-"        double r = kflrl_reward_(h->scratch, aslice, ns);\n"
+"        double r = kflrl_reward_(h->scratch, aslice, ns, wslice);\n"
 "        if (!std::isfinite(r)) {\n"
 "            K26RlStatus fst = kflrl_fault_(\n"
 "                h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);\n"
@@ -1865,7 +2081,7 @@ static void rl_emit_env_core_(FILE *out)
 "        memcpy(h->obs + (size_t)e * KFLRL_OBS_TOTAL, h->scratch,\n"
 "               sizeof(double) * KFLRL_OBS_TOTAL);\n"
 "        uint32_t f = 0;\n"
-"        int term = kflrl_terminated_(h->scratch, aslice, ns);\n"
+"        int term = kflrl_terminated_(h->scratch, aslice, ns, wslice);\n"
 "        if (term) f |= K26RL_FLAG_TERMINATED;\n"
 "        if (h->horizon != 0 && ns >= h->horizon) {\n"
 "            f |= K26RL_FLAG_TRUNCATED;\n"
@@ -1874,7 +2090,7 @@ static void rl_emit_env_core_(FILE *out)
 "        if (term) {\n"
 "            /* Terminal adjustment on termination only; truncation\n"
 "             * carries none. */\n"
-"            tadj = kflrl_terminal_(h->scratch, aslice, ns);\n"
+"            tadj = kflrl_terminal_(h->scratch, aslice, ns, wslice);\n"
 "            r += tadj;\n"
 "        }\n"
 "        h->rew[e] = r;\n"

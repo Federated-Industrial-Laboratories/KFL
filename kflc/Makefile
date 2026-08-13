@@ -87,7 +87,53 @@ $(RL_EMIT_TEST): tests/test_rl_emit.c ../libk26rl/include/k26rl_env.h \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
-test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) $(BIN)
+# Determinism and equivalence gates for the dual-mode artifact:
+# two-process batch determinism, two-session serve determinism,
+# vector independence (batch and serve), spec round trip with
+# unknown-tag injection, and batch/serve whole-file equivalence.
+# Skips (77) when the sibling stack archives are not built.
+RL_DET_TEST = tests/test_rl_determinism
+$(RL_DET_TEST): tests/test_rl_determinism.c tests/rl_gate_util.h \
+                ../libk26rl/include/k26rl_env.h \
+                ../libk26rl/include/k26rl_episode.h
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
+# Fault and auto-reset gates: a deterministically induced fault in
+# one environment of a stepping set, the recorded fault record's
+# fixed column families, boundary-reset semantics for all three
+# episode endings, and episode index monotonicity. Skips (77) when
+# the sibling stack archives are not built.
+RL_FAULT_TEST = tests/test_rl_fault
+$(RL_FAULT_TEST): tests/test_rl_fault.c tests/rl_gate_util.h \
+                  ../libk26rl/include/k26rl_env.h \
+                  ../libk26rl/include/k26rl_episode.h
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
+# Re-simulation gate: an episode rebuilt from the file alone by its
+# identity triple (rekey ordinal, env index, episode index) with the
+# recorded seed and action stream reproduces the recorded streams
+# bitwise, terminated, truncated, faulted, and post-rekey episodes
+# included. Skips (77) when the sibling stack archives are not built.
+RL_RESIM_TEST = tests/test_rl_resim
+$(RL_RESIM_TEST): tests/test_rl_resim.c tests/rl_gate_util.h \
+                  ../libk26rl/include/k26rl_env.h \
+                  ../libk26rl/include/k26rl_episode.h
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
+# Grammar 3.1 pins: the 3.1 `step` statement still lowers to the
+# clamped stepping entry (the exact-dt entry belongs to the episode
+# machinery alone), a reinforcement learning program stripped of its
+# constructs emits as a plain 3.1 program, and 3.1 emission is
+# byte-identical against the pre-RL base commit when the repository
+# history is available. Needs only the built kflc.
+RL_31_PIN_TEST = tests/test_rl_31_pin
+$(RL_31_PIN_TEST): tests/test_rl_31_pin.c
+	$(CC) $(CFLAGS) -o $@ $<
+
+test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_31_PIN_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
@@ -103,6 +149,25 @@ test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMOR
 	 elif [ $$rc -ne 0 ]; then \
 	     exit $$rc; \
 	 fi
+	@./$(RL_DET_TEST); rc=$$?; \
+	 if [ $$rc -eq 77 ]; then \
+	     echo 'test_rl_determinism: SKIP (stack libraries not built)'; \
+	 elif [ $$rc -ne 0 ]; then \
+	     exit $$rc; \
+	 fi
+	@./$(RL_FAULT_TEST); rc=$$?; \
+	 if [ $$rc -eq 77 ]; then \
+	     echo 'test_rl_fault: SKIP (stack libraries not built)'; \
+	 elif [ $$rc -ne 0 ]; then \
+	     exit $$rc; \
+	 fi
+	@./$(RL_RESIM_TEST); rc=$$?; \
+	 if [ $$rc -eq 77 ]; then \
+	     echo 'test_rl_resim: SKIP (stack libraries not built)'; \
+	 elif [ $$rc -ne 0 ]; then \
+	     exit $$rc; \
+	 fi
+	./$(RL_31_PIN_TEST)
 	@printf 'form PROBE\n    fn double f()\n        return 1.0\n    end\nend\n' \
 	     > /tmp/kflc_flags_probe.kfl; \
 	 env -u KFLC_CFLAGS ./$(BIN) /tmp/kflc_flags_probe.kfl \
@@ -152,5 +217,6 @@ clean:
 	rm -f src/*.o $(BIN) $(LIB) $(TEST_BIN) $(MANIFEST_TEST) \
 	      $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) \
 	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) \
-	      tests/bench_parse
+	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
+	      $(RL_31_PIN_TEST) tests/bench_parse
 	rm -rf bin

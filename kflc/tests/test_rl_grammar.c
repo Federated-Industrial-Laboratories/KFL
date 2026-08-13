@@ -12,8 +12,13 @@
  * when`, and a statement the on_step body rejects. The never-ending
  * episode warns but still checks clean.
  *
+ * Emit-level gates: a top-level world `let`/`const` scalar is
+ * readable in `terminated when` / `reward` / `terminal` (the emitter
+ * captures it at create), and the nested-block and non-scalar
+ * refusals carry precise diagnostics.
+ *
  * Pattern: write a small .kfl fixture to a tmpfile, run
- *   ./bin/kflc --check <tmpfile>
+ *   ./bin/kflc --check <tmpfile>   (or --emit for the emit gates)
  * capture stderr + exit code, assert on the captured state.
  *
  * Wire: see kflc/Makefile RL_GRAMMAR_TEST + test target.
@@ -38,13 +43,14 @@ static void write_fixture_(const char *path, const char *content)
     fclose(f);
 }
 
-/* Runs `kflc --check <fixture>`. Returns exit code; writes stderr
+/* Runs `kflc <mode> <fixture>`. Returns exit code; writes stderr
  * text to *err_out (caller frees). */
-static int run_check_(const char *fixture, char **err_out)
+static int run_mode_(const char *mode, const char *fixture, char **err_out)
 {
     char cmd[512];
     snprintf(cmd, sizeof cmd,
-             "./bin/kflc --check %s 2>/tmp/kflc_rl_err.log", fixture);
+             "./bin/kflc %s %s >/dev/null 2>/tmp/kflc_rl_err.log",
+             mode, fixture);
     int rc = system(cmd);
     FILE *f = fopen("/tmp/kflc_rl_err.log", "rb");
     if (!f) { *err_out = strdup(""); return WEXITSTATUS(rc); }
@@ -61,17 +67,18 @@ static int run_check_(const char *fixture, char **err_out)
 
 static int n_pass = 0;
 
-/* One fixture, one expectation: `expect_rc` on exit, `expect_msg`
- * present on stderr (NULL skips the message check), `absent_msg`
- * absent from stderr (NULL skips). */
-static void expect_(const char *tag, const char *src, int expect_rc,
-                    const char *expect_msg, const char *absent_msg)
+/* One fixture, one expectation under the given kflc mode:
+ * `expect_rc` on exit, `expect_msg` present on stderr (NULL skips the
+ * message check), `absent_msg` absent from stderr (NULL skips). */
+static void expect_mode_(const char *mode, const char *tag,
+                         const char *src, int expect_rc,
+                         const char *expect_msg, const char *absent_msg)
 {
     char path[128];
     snprintf(path, sizeof path, "/tmp/kflc_rl_%s.kfl", tag);
     write_fixture_(path, src);
     char *err = NULL;
-    int rc = run_check_(path, &err);
+    int rc = run_mode_(mode, path, &err);
     if (rc != expect_rc ||
         (expect_msg && strstr(err, expect_msg) == NULL) ||
         (absent_msg && strstr(err, absent_msg) != NULL))
@@ -85,6 +92,12 @@ static void expect_(const char *tag, const char *src, int expect_rc,
     free(err);
     unlink(path);
     n_pass++;
+}
+
+static void expect_(const char *tag, const char *src, int expect_rc,
+                    const char *expect_msg, const char *absent_msg)
+{
+    expect_mode_("--check", tag, src, expect_rc, expect_msg, absent_msg);
 }
 
 int main(void)
@@ -262,6 +275,78 @@ int main(void)
         "    end\n"
         "end\n",
         0, NULL, "error");
+
+    /* World scalar bindings in the objective and termination scope:
+     * a top-level world `let`/`const` is readable in `terminated
+     * when`, `reward`, and `terminal`, checked here through the
+     * emitter (the environment emitter captures the values at
+     * create). */
+    expect_mode_("--emit", "wscalpos",
+        "form WSCAL_POS\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    let target_range: double = 7.2e6\n"
+        "    const bonus: double = 2.5\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "        terminated when track_range > target_range\n"
+        "    end\n"
+        "    action push box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward bonus - track_range / target_range\n"
+        "        terminal bonus * 2.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    /* A binding declared inside a nested block is not in that scope;
+     * the emitter says so precisely instead of failing on an unknown
+     * identifier. */
+    expect_mode_("--emit", "wscalnested",
+        "form WSCAL_NEG1\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    if 1.0 > 0.0\n"
+        "        let hidden: double = 1.0\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward hidden - track_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "`hidden` is declared inside a nested block", NULL);
+
+    /* A non-scalar world binding is not readable there either. */
+    expect_mode_("--emit", "wscalvec",
+        "form WSCAL_NEG2\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7350.0\n"
+        "    let gains: vector = [1.0, 2.0, 3.0]\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        horizon 20\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as track\n"
+        "    objective\n"
+        "        reward gains - track_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "`gains` is not a scalar", NULL);
 
     printf("test_rl_grammar: %d case(s) passed\n", n_pass);
     return 0;
