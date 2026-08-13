@@ -15,8 +15,8 @@ LIB_OBJS = src/util.o src/lexer.o src/parser.o src/dump.o src/serialize.o \
            src/expr.o src/stmt.o src/check.o src/opaque.o \
            src/builtin_register_astro.o \
            src/builtin_loader.o src/runtime.o
-# Driver objects: emitter + CLI driver. Only the kflc binary needs these.
-DRV_OBJS = src/emit.o src/main.o
+# Driver objects: emitters + CLI driver. Only the kflc binary needs these.
+DRV_OBJS = src/emit.o src/emit_rl.o src/main.o
 
 .PHONY: all install clean test
 all: $(BIN) $(LIB)
@@ -74,7 +74,20 @@ RL_GRAMMAR_TEST = tests/test_rl_grammar
 $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
-test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(BIN)
+# Gate for the Grammar 3.2 dual-mode artifact: kflc -o on an RL
+# program produces the batch executable plus the companion shared
+# object with exactly the k26rl_env.h export set; a small batch run
+# writes an episode file the libk26rl reader verifies; the shared
+# object serves create/step/reset through dlopen with spec round trip,
+# a fault path, and a batch/serve bit-identity check. Skips (77) when
+# the sibling stack libraries are not built.
+RL_EMIT_TEST = tests/test_rl_emit
+$(RL_EMIT_TEST): tests/test_rl_emit.c ../libk26rl/include/k26rl_env.h \
+                 ../libk26rl/include/k26rl_episode.h
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
+test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
@@ -84,6 +97,12 @@ test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMOR
 	./$(MEMORY_QUAL_TEST)
 	./$(RESERVED_KW_TEST)
 	./$(RL_GRAMMAR_TEST)
+	@./$(RL_EMIT_TEST); rc=$$?; \
+	 if [ $$rc -eq 77 ]; then \
+	     echo 'test_rl_emit: SKIP (stack libraries not built)'; \
+	 elif [ $$rc -ne 0 ]; then \
+	     exit $$rc; \
+	 fi
 	@printf 'form PROBE\n    fn double f()\n        return 1.0\n    end\nend\n' \
 	     > /tmp/kflc_flags_probe.kfl; \
 	 env -u KFLC_CFLAGS ./$(BIN) /tmp/kflc_flags_probe.kfl \
@@ -132,6 +151,6 @@ install: $(BIN) $(LIB)
 clean:
 	rm -f src/*.o $(BIN) $(LIB) $(TEST_BIN) $(MANIFEST_TEST) \
 	      $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) \
-	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) \
+	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) \
 	      tests/bench_parse
 	rm -rf bin

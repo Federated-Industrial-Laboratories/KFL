@@ -89,6 +89,14 @@ int       kfl_emit_stmt(FILE *out, const KflcNode *s,
  * enforced. Used by the `arg` parser and the `let`/`const` parser. */
 int       kfl_is_reserved_future(const char *name);
 
+/* Reinforcement learning environment emitter (emit_rl.c). Emits the
+ * dual-mode core translation unit for a form that uses the Grammar
+ * 3.2 constructs: the k26rl_ stepping surface plus, under
+ * KFLC_RL_BATCH_MAIN, the batch entry. kflc_emit_cxx dispatches here
+ * when kflc_form_has_rl reports the form. Returns 0 on success. */
+int       kfl_emit_rl_cxx(FILE *out, const KflcNode *form,
+                          KflcDiag *diag);
+
 /* Statement-parse context flag. parser.c sets this to 1 around the
  * `fn world` body parse (and back to 0 after) so the reinforcement
  * learning statement keywords (episode / action / on_step /

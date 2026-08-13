@@ -438,6 +438,13 @@ int kflc_emit_cxx(FILE *out, const KflcNode *form, KflcDiag *diag)
         kflc_diag_errorf(diag, 0, "emit: not a form node");
         return 1;
     }
+    /* A form using the Grammar 3.2 reinforcement learning constructs
+     * emits the dual-mode environment core instead of the batch
+     * script program; the driver compiles that core twice (batch
+     * executable and shared object). */
+    if (kflc_form_has_rl(form)) {
+        return kfl_emit_rl_cxx(out, form, diag);
+    }
     /* A form needs no window header (title / size / cfg) — artifact
      * programs have no window. Any such attrs are ignored if present. */
     const char *form_name = form->name ? form->name : "FORM";

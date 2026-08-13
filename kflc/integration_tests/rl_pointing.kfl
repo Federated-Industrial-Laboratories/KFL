@@ -8,9 +8,10 @@
 # name, an objective block, and the scalar state keys (pos_* / vel_*)
 # as astro_body attributes with distribution values.
 #
-# This is a front-end fixture: code emission for RL programs arrives
-# in a later compiler pass, so the file is exercised by the
-# round-trip harness and `kflc --check`, not by `kflc -o`.
+# Exercised three ways: by the round-trip harness, by `kflc --check`,
+# and by the dual-mode artifact gate (tests/test_rl_emit), which
+# compiles it with `kflc -o` into the batch executable plus the
+# companion shared object and drives both.
 
 form RL_POINTING
 title "RL grammar 3.2 round-trip fixture"

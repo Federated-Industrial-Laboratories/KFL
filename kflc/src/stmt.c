@@ -2458,6 +2458,25 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
                             "k26astro_world_find_body(world, \"%s\");\n",
                             val);
                 }
+            } else if ((strncmp(a->name, "pos_", 4) == 0 ||
+                        strncmp(a->name, "vel_", 4) == 0) &&
+                       (a->name[4] == 'x' || a->name[4] == 'y' ||
+                        a->name[4] == 'z') && a->name[5] == '\0') {
+                /* The six scalar state keys map onto the compound
+                 * position and velocity fields: metres and metres per
+                 * second in the world frame. A position component
+                 * lands in the local offset with its sector index
+                 * zeroed, then re-normalises, which is exactly the
+                 * pos_from_m construction applied per component. */
+                char axis = a->name[4];
+                emit_indent(out, indent + 4);
+                if (a->name[0] == 'p') {
+                    fprintf(out, "_kfl_b.pos.s%c = 0; _kfl_b.pos.l%c = "
+                            "(%s); k26astro_pos_normalise(&_kfl_b.pos);\n",
+                            axis, axis, val);
+                } else {
+                    fprintf(out, "_kfl_b.vel.%c = (%s);\n", axis, val);
+                }
             } else {
                 emit_indent(out, indent + 4);
                 fprintf(out, "_kfl_b.%s = (%s);\n", a->name, val);
@@ -2693,12 +2712,13 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
     case KFLN_STMT_ACTION:
     case KFLN_STMT_ON_STEP:
     case KFLN_STMT_OBJECTIVE:
-        /* Grammar 3.2 front-end pass: these constructs parse,
-         * serialize, and check; their code emission arrives in a
-         * later compiler pass. */
+        /* The reinforcement learning constructs are emitted by the
+         * environment emitter (emit_rl.c), which a form using them is
+         * routed to before this dispatch can see them. Reaching this
+         * arm means the routing failed. */
         kflc_diag_errorf(diag, s->line,
-            "reinforcement learning constructs are not yet emittable; "
-            "this compiler version parses and checks them only");
+            "internal error: reinforcement learning construct outside "
+            "the environment emitter");
         return 1;
 
     default:

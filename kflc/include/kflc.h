@@ -164,9 +164,9 @@ typedef enum {
      * bodies; outside that context the introducing words stay
      * ordinary identifiers (with the reserved-future warning when
      * used as binding names). Parsed by stmt.c, serialised by
-     * serialize.c, validated by kflc_check (check.c). Code emission
-     * for them arrives in a later pass; kfl_emit_stmt reports them
-     * as not yet emittable. */
+     * serialize.c, validated by kflc_check (check.c), emitted by the
+     * environment emitter (emit_rl.c), which kflc_emit_cxx routes a
+     * form using them to. */
     /* `episode ... end`. Attrs carry `control_dt` (required),
      * `horizon`, and `terminated_when`, each with the parsed
      * expression on KflcAttr.expr; children are the
@@ -589,10 +589,11 @@ int kflc_check(const KflcNode *form, KflcDiag *diag);
 /* Returns nonzero when any `fn world` in the form uses a Grammar 3.2
  * reinforcement learning construct (episode / action / on_step /
  * objective / observe ... as, or a distribution expression in an
- * astro_body attribute value). Such programs parse, serialize, and
- * check, but code emission for them arrives in a later pass; callers
- * that drive kflc_emit_cxx can consult this to report "not yet
- * emittable" up front. */
+ * astro_body attribute value). kflc_emit_cxx routes such a form to
+ * the environment emitter, whose output compiles to the batch
+ * executable and the companion shared object; callers that drive the
+ * downstream compiler themselves consult this to know two artifacts
+ * are expected. */
 int kflc_form_has_rl(const KflcNode *form);
 
 /* ---- Emit (codegen) ----------------------------------------------- */
@@ -603,7 +604,14 @@ int kflc_form_has_rl(const KflcNode *form);
  * Emits a standalone console/batch program: no widget or window
  * scaffolding, and a plain `int main()` that runs the program's compute
  * and `fn world` logic, routing results to stdout / files. The emitted
- * source compiles against KFL_Stack alone. */
+ * source compiles against KFL_Stack alone.
+ *
+ * A form using the Grammar 3.2 reinforcement learning constructs emits
+ * the dual-mode environment core instead: one translation unit that
+ * compiles, with KFLC_RL_BATCH_MAIN defined, to the batch executable,
+ * and without it to the companion shared object exporting the k26rl_
+ * stepping surface (linked with a version script restricting exports
+ * to exactly that set). */
 int kflc_emit_cxx(FILE *out, const KflcNode *form, KflcDiag *diag);
 
 /* ---- Expression parse + emit ------------------------------------ */
