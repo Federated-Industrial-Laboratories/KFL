@@ -85,10 +85,9 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     if (!world) return;
     if (!(dt_s > 0.0)) return;
 
-    /* A latched substep failure stops the channel: nothing steps
-     * past a failure until a public advance entry clears the latch.
-     * Completed substeps stand; this layer rolls nothing back. */
-    if (world->substep_status != K26ASTRO_E_OK) return;
+    /* No latch check here: the public advance entries guarantee the
+     * latch is clear before any dispatch (protocol at the latch's
+     * declaration, world_internal.h). This layer only writes it. */
 
     /* Encounter detection — populates world->encounters with K
      * weights baked in. */
@@ -141,13 +140,24 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     /* Step 2: IAS15 sub-step on NEAR. Switch the integrator for
      * the inner pass, then restore. The restore and clear run on
      * the failure path too, so a latched failure never leaves the
-     * split's temporary integrator or context behind. */
+     * split's temporary integrator or context behind.
+     *
+     * Epoch accounting: the two passes are halves of ONE substep
+     * over the same dt_s, but each integrator bills its own dt
+     * against state->t. The FAR pass above already billed the
+     * substep's dt, so the NEAR pass's epoch advance is cancelled
+     * by restoring t around it (on failure too: a failed NEAR pass
+     * with partial internal progress must not add its partial bill
+     * on top of the FAR pass's full one). One substep advances
+     * simulated time once. */
+    K26AstroEpoch t_billed = world->grav.t;
     world->grav.mercurius = &near_ctx;
     (void)k26astro_grav_set_integrator(&world->grav,
                                          K26ASTRO_INTEGRATOR_IAS15);
     rc = k26astro_grav_step(&world->grav, dt_s);
     (void)k26astro_grav_set_integrator(&world->grav, base);
     world->grav.mercurius = NULL;
+    world->grav.t = t_billed;
     if (rc != K26ASTRO_E_OK) {
         /* The FAR pass's uncommitted dot_m stays in the vehicle
          * accumulators: the substep did not complete, so its mass

@@ -99,12 +99,23 @@ struct K26AstroWorld {
      * failing k26astro_grav_step inside the orbit channel cannot
      * return its status through the dispatch; it writes the first
      * failure here instead (a K26ASTRO_E_* grav-space code, OK when
-     * clear). While latched, the orbit callback refuses to step, so
-     * nothing steps past a failure within one advance. The public
-     * step entries clear the latch on entry; k26astro_world_step_exact
-     * additionally reads it after the advance and returns the
-     * translated status to its caller. */
+     * clear). The public step entries own the whole protocol,
+     * keyed on advance_depth below: the outermost entry clears the
+     * latch before its advance; a nested advance (a public step
+     * call from inside a tick callback) neither clears nor
+     * consumes it, and declines to dispatch at all while a failure
+     * is latched; k26astro_world_step_exact reads and clears the
+     * latch at the outermost exit and returns the translated
+     * status. The tick dispatch fires the orbit channel once per
+     * advance, so under this protocol the orbit callback never
+     * runs with a failure latched, nothing steps past a failure
+     * until the outermost entry clears it, and the first failure
+     * is the one reported. */
     int                 substep_status;
+
+    /* Public-advance nesting depth. 0 outside any step entry; the
+     * latch protocol above keys on it. */
+    int                 advance_depth;
 
     /* FPU state saved at create. */
     K26AstroFPUState    fpu;

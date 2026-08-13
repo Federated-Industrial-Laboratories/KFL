@@ -75,10 +75,12 @@ typedef struct K26AstroEphem K26AstroEphem;
  * allocation failure or invalid args.
  *
  * Multi-world processes: each `create` saves the caller's FPU
- * state and pins to the world's mode. Destroying restores. If two
- * worlds with different modes coexist live, step calls return
- * K26ASTRO_RT_E_FPU_RACE. Single-world is the primary supported
- * shape; multi-world with the same mode is safe. */
+ * state and pins the FPU. The pin is mode-independent (every mode
+ * pins the same rounding and denormal state), so coexisting worlds
+ * cannot conflict on FPU state and no current path returns
+ * K26ASTRO_RT_E_FPU_RACE; that status is reserved for FPU-state
+ * conflicts and may become live if mode-dependent pinning is ever
+ * introduced. Single-world is the primary supported shape. */
 K26AstroWorld *k26astro_world_create(K26AstroWorldMode  mode,
                                       K26AstroCoordsMode coord_mode);
 
@@ -158,7 +160,13 @@ int  k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s);
  * substeps stand, nothing is rolled back, and the world's epoch
  * reflects exactly the completed work. Partial writes within the
  * failing substep are governed by the failing integrator's own
- * contract. A subsequent step call starts fresh from that state. */
+ * contract. A subsequent step call starts fresh from that state.
+ *
+ * Re-entrant advances (a step call issued from inside a tick
+ * callback of an outer advance) do not report substep status: the
+ * first failure anywhere in the nest is returned by the outermost
+ * call, and a nested call issued after that failure does not
+ * advance the world. */
 int  k26astro_world_step_exact(K26AstroWorld *world, double sim_dt_s);
 
 /* Single-body Kepler advance. Propagates `body_idx`'s state forward

@@ -41,11 +41,15 @@ double k26astro_mercurius_hill_radius(const K26AstroBody *i,
                                        double m_central)
 {
     if (!i || !j) return 0.0;
-    /* Semi-major axis approximated by current separation (good
-     * within an order of magnitude near the transition region — the
+    /* Semi-major axis approximated by the current separation (the
      * exact value would require fitting an osculating conic, which
-     * is too expensive per-pair per-step). Document this as a
-     * heuristic in the encounter primitive. */
+     * is too expensive per-pair per-step). Known recorded defect:
+     * with a_ij equal to the separation, the detector's ratio
+     * y = d / r_hill is separation-independent (the distance
+     * cancels), so this heuristic classifies pairs by mass ratio
+     * alone and never measures closeness; a pair massive enough to
+     * cross the threshold splits at every separation. The redesign
+     * is scoped as its own follow-up item. */
     K26V3 r = k26astro_pos_sub(&i->pos, &j->pos);
     double a_ij = sqrt(r.x * r.x + r.y * r.y + r.z * r.z);
     if (!(a_ij > 0.0))      return 0.0;
@@ -142,18 +146,34 @@ int k26astro_mercurius_detect(K26AstroWorld *world)
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
             /* Pairs involving the central body are never encounter
-             * pairs. MERCURIUS K-weights the interaction terms only
-             * (Rein-Tamayo 2019 section 3); the central body's
-             * Newtonian pull is not an interaction term, it is the
-             * Kepler part the Wisdom-Holman drift integrates
-             * exactly, so splitting such a pair would hand the
-             * drift's exact force to the adaptive side. The mutual-
-             * Hill heuristic below also degenerates on these pairs:
-             * with m_sum close to m_central the pair's Hill radius
-             * is about 0.69 times its separation, so y stays near
-             * 1.4 at every separation and a central pair would
-             * register as fully near forever, putting every
-             * satellite world on the split path on every step. */
+             * pairs. What the exclusion means depends on the base
+             * integrator:
+             *
+             * - Wisdom-Holman base: MERCURIUS K-weights the planet-
+             *   planet interaction terms only (Rein et al. 2019,
+             *   section 2, eqs 4-5). The central pull is the Kepler
+             *   part the drift integrates exactly ONLY when the
+             *   largest mass is body 0, the drift's hard-wired
+             *   primary (wisdom_holman.c, mu0 = b[0].gm). When the
+             *   largest mass sits elsewhere the drift still orbits
+             *   body 0, the exclusion is an approximation, and the
+             *   split's correctness there is an open question
+             *   recorded with the detector follow-up item.
+             *
+             * - Verlet base: there is no Kepler part; every force
+             *   lives in the pair sum. The exclusion is right for
+             *   the opposite reason: it keeps the central force in
+             *   the FAR pass at full weight. Including central
+             *   pairs zero-weighted the central force there (K = 1
+             *   near the primary), so the FAR pass integrated a
+             *   straight-line drift with no central gravity at all.
+             *   Excluding them corrected that, changing Verlet-base
+             *   split trajectories; only WH-base configurations are
+             *   byte-identical across the change.
+             *
+             * The mutual-Hill heuristic's degeneracy is structural
+             * for ALL pairs, not specific to central ones: see the
+             * recorded defect at k26astro_mercurius_hill_radius. */
             if (i == idx_central || j == idx_central) continue;
             const K26AstroBody *bi = &world->grav.bodies[i];
             const K26AstroBody *bj = &world->grav.bodies[j];

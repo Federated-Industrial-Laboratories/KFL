@@ -99,6 +99,7 @@ K26AstroWorld *k26astro_world_create(K26AstroWorldMode  mode,
     world->user           = NULL;
     world->ref_ctx        = NULL;
     world->substep_status = K26ASTRO_E_OK;
+    world->advance_depth  = 0;
 
     if (k26astro_rt_scheduler_init(world) != 0) {
         k26astro_grav_state_destroy(&world->grav);
@@ -258,19 +259,26 @@ int k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s)
 {
     if (!world) return -K26ASTRO_RT_E_NULL;
     if (!(wallclock_dt_s >= 0.0)) return -K26ASTRO_RT_E_BAD_ARG;
-    /* The callback shared with the exact entry stops on a latched
-     * failure, so each advance must start with a clear latch. This
-     * entry's observable contract is unchanged (it returns OK
+    /* Latch protocol (world_internal.h): only the outermost advance
+     * clears the latch; a nested advance leaves the outer advance's
+     * status alone and declines to step atop a latched failure.
+     * This entry's observable contract is unchanged (it returns OK
      * regardless of substep outcome, as 3.1 programs expect); the
      * only internal change is that a failing substep ends the orbit
      * work of this one advance instead of being silently ignored. */
-    world->substep_status = K26ASTRO_E_OK;
+    world->advance_depth++;
+    if (world->advance_depth == 1) world->substep_status = K26ASTRO_E_OK;
+    if (world->substep_status != K26ASTRO_E_OK) {
+        world->advance_depth--;
+        return K26ASTRO_RT_OK;
+    }
     k26astro_rt_ref_emit_step_begin(world, wallclock_dt_s);
     (void)k26tick_advance(world->tick, wallclock_dt_s);
     /* World time after the step — seconds-past-J2000 (TDB). */
     double t_s = (double)world->grav.t.days_since_J2000 * 86400.0
                + world->grav.t.seconds_of_day;
     k26astro_rt_ref_emit_step_end(world, t_s);
+    world->advance_depth--;
     return K26ASTRO_RT_OK;
 }
 
@@ -278,7 +286,19 @@ int k26astro_world_step_exact(K26AstroWorld *world, double sim_dt_s)
 {
     if (!world) return -K26ASTRO_RT_E_NULL;
     if (!(sim_dt_s >= 0.0)) return -K26ASTRO_RT_E_BAD_ARG;
-    world->substep_status = K26ASTRO_E_OK;
+    /* Latch protocol (world_internal.h): the outermost advance
+     * clears on entry and is the only reader; a nested advance
+     * neither clears nor consumes, so an outer advance's failure
+     * survives any advance issued from inside a tick callback, and
+     * a nested advance's own failure latches for the outermost
+     * reader. A nested advance atop a latched failure declines to
+     * step (stepping would step past the failure). */
+    world->advance_depth++;
+    if (world->advance_depth == 1) world->substep_status = K26ASTRO_E_OK;
+    if (world->substep_status != K26ASTRO_E_OK) {
+        world->advance_depth--;
+        return K26ASTRO_RT_OK;
+    }
     /* The op-log ops are the same as k26astro_world_step's; on this
      * path the requested dt is also the applied dt, because the
      * unclamped advance drops nothing. */
@@ -288,13 +308,19 @@ int k26astro_world_step_exact(K26AstroWorld *world, double sim_dt_s)
                + world->grav.t.seconds_of_day;
     k26astro_rt_ref_emit_step_end(world, t_s);
     /* First failing substep's status, translated across the grav/rt
-     * code boundary. Read-and-clear: the next advance starts fresh
-     * and re-attempts from wherever the completed substeps left the
-     * world. */
-    int sub = world->substep_status;
-    world->substep_status = K26ASTRO_E_OK;
-    if (sub != K26ASTRO_E_OK) return -rt_status_from_grav_(sub);
-    return K26ASTRO_RT_OK;
+     * code boundary. Read-and-clear at the outermost exit only: the
+     * next outermost advance starts fresh and re-attempts from
+     * wherever the completed substeps left the world. A nested
+     * advance reports nothing; the status belongs to the outermost
+     * reader. */
+    int ret = K26ASTRO_RT_OK;
+    if (world->advance_depth == 1) {
+        int sub = world->substep_status;
+        world->substep_status = K26ASTRO_E_OK;
+        if (sub != K26ASTRO_E_OK) ret = -rt_status_from_grav_(sub);
+    }
+    world->advance_depth--;
+    return ret;
 }
 
 /* World-seeded RNG (world_rng.h) --------------------------------- */
