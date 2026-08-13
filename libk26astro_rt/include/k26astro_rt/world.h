@@ -127,10 +127,15 @@ const char *k26astro_body_name(const K26AstroBody *b);
  * libk26tick scheduler which dispatches the orbit, spin, and render
  * channels at their registered rates. Returns 0 on success.
  *
- * Orbit substeps go through the MERCURIUS Rein-Tamayo close-encounter
- * handoff: pairs within `mercurius_outer` Hill-radius units have their
- * pairwise force smoothly partitioned between Wisdom-Holman (far)
- * and IAS15 (near) via the quintic switching function K(y).
+ * Orbit substeps go through the MERCURIUS close-encounter handoff
+ * (Rein, Hernandez, Tamayo et al. 2019, MNRAS 485(4):5490-5497): on
+ * a Verlet base integrator, pairs within `mercurius_outer`
+ * Hill-radius units have their pairwise force smoothly partitioned
+ * between the Verlet far pass and an IAS15 near pass via the
+ * quintic switching function K(y). Every other base integrator
+ * takes a single full-force step; in particular a Wisdom-Holman
+ * base never splits, because the WH interaction kick applies
+ * unweighted pair forces (rationale at orbit_step.c).
  *
  * Substep failures are not reported through this entry (interactive
  * 3.1 callers discard its return; a failing orbit substep ends that
@@ -161,6 +166,15 @@ int  k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s);
  * reflects exactly the completed work. Partial writes within the
  * failing substep are governed by the failing integrator's own
  * contract. A subsequent step call starts fresh from that state.
+ *
+ * One caveat on the split path (a Verlet base with active
+ * close-encounter pairs): the outer far pass bills the substep's
+ * full dt before the inner near pass runs, so a near-pass failure
+ * leaves the epoch advanced by that dt with the near-pass force
+ * contribution absent (or partial, per the inner integrator's
+ * contract). Without rollback the epoch cannot reflect partial
+ * physics exactly; on this path the epoch is exact at substep
+ * granularity only.
  *
  * Re-entrant advances (a step call issued from inside a tick
  * callback of an outer advance) do not report substep status: the
@@ -215,7 +229,10 @@ int  k26astro_world_set_atmos(K26AstroWorld *world,
                                struct K26AstroAtmos *atmos);
 
 /* MERCURIUS K(y) transition factors. Default y_inner=3.0,
- * y_outer=5.0 (Rein-Tamayo 2019 §3.1). Both in Hill-radius units. */
+ * y_outer=5.0, both in Hill-radius units. The window values are
+ * this tree's own defaults; the Hill-radius switching criterion is
+ * Rein, Hernandez, Tamayo et al. 2019, MNRAS 485(4):5490-5497,
+ * section 2. */
 int  k26astro_world_set_mercurius_factors(K26AstroWorld *world,
                                            double y_inner, double y_outer);
 

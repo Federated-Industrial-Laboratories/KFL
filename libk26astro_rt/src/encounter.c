@@ -1,14 +1,15 @@
 /* encounter.c — MERCURIUS close-encounter primitives.
  *
- * Implements the Rein-Tamayo 2019 quintic smoothstep K(y) over the
+ * Implements the MERCURIUS quintic smoothstep K(y) over the
  * transition window [y_inner, y_outer] in Hill-radius units, plus
  * the per-pair Hill radius and the per-pair encounter session
  * tracker. The orchestration that uses these primitives to actually
- * split the force between WH and IAS15 lives in orbit_step.c.
+ * split the force between the Verlet base and IAS15 lives in
+ * orbit_step.c.
  *
- * Reference: Rein & Tamayo (2019), MNRAS 489:4632-4640,
- * "MERCURIUS: a hybrid integrator for long-term planetary
- * simulations including close encounters." */
+ * Reference: Rein, Hernandez, Tamayo et al. (2019), MNRAS
+ * 485(4):5490-5497, "Hybrid Symplectic Integrators for Planetary
+ * Dynamics." */
 #include "encounter_internal.h"
 
 #include "k26astro_core/pos.h"
@@ -149,16 +150,18 @@ int k26astro_mercurius_detect(K26AstroWorld *world)
              * pairs. What the exclusion means depends on the base
              * integrator:
              *
-             * - Wisdom-Holman base: MERCURIUS K-weights the planet-
-             *   planet interaction terms only (Rein et al. 2019,
-             *   section 2, eqs 4-5). The central pull is the Kepler
-             *   part the drift integrates exactly ONLY when the
-             *   largest mass is body 0, the drift's hard-wired
-             *   primary (wisdom_holman.c, mu0 = b[0].gm). When the
-             *   largest mass sits elsewhere the drift still orbits
-             *   body 0, the exclusion is an approximation, and the
-             *   split's correctness there is an open question
-             *   recorded with the detector follow-up item.
+             * - Wisdom-Holman base (currently never admitted to
+             *   the split; see the admission note in orbit_step.c):
+             *   MERCURIUS K-weights the planet-planet interaction
+             *   terms only (Rein et al. 2019, section 2, eqs 4-5).
+             *   The central pull is the Kepler part the drift
+             *   integrates exactly ONLY when the largest mass is
+             *   body 0, the drift's hard-wired primary
+             *   (wisdom_holman.c, mu0 = b[0].gm). When the largest
+             *   mass sits elsewhere the drift still orbits body 0,
+             *   the exclusion is an approximation, and the split's
+             *   correctness there is an open question recorded with
+             *   the detector follow-up item.
              *
              * - Verlet base: there is no Kepler part; every force
              *   lives in the pair sum. The exclusion is right for

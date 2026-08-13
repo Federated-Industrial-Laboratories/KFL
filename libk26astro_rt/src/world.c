@@ -82,6 +82,28 @@ K26AstroWorld *k26astro_world_create(K26AstroWorldMode  mode,
     world->grav.ias15_carry = NULL;
     world->grav.wh_carry    = NULL;
 
+    /* Grav tolerance defaults, mirroring k26astro_grav_state_init
+     * (the open-coded init here must not leave them behind). A zero
+     * ias15_tol makes the IAS15 step controller reject every
+     * attempt, so any IAS15 use through a world that did not set
+     * the tolerance itself (an IAS15 base integrator, or the
+     * close-encounter split's NEAR pass) failed structurally with
+     * NO_CONVERGE instead of integrating. Hex-literal IEEE-754
+     * doubles, byte-identical to grav_state_init's values, for
+     * cross-platform determinism: ias15_tol = 1e-9 (Rein-Spiegel
+     * 2015 section 4), event_tol_s = 1e-6. The event tolerance's
+     * only consumer (advance_with_events.c) already substituted the
+     * same 1e-6 when the field was zero, so event-time bisection is
+     * bit-unchanged by initialising it. */
+    {
+        union { double d; uint64_t u; } eps = { .u = 0x3E112E0BE826D695ULL };
+        world->grav.ias15_tol = eps.d;
+    }
+    {
+        union { double d; uint64_t u; } tol = { .u = 0x3EB0C6F7A0B5ED8DULL };
+        world->grav.event_tol_s = tol.d;
+    }
+
     /* Frame registry: leave next_user_id at the user-base; per-world
      * user frames live in `world->frames` (the libk26astro_core
      * registry is process-global, so we also push registrations
@@ -89,7 +111,10 @@ K26AstroWorld *k26astro_world_create(K26AstroWorldMode  mode,
     world->n_frames     = 0;
     world->next_user_id = K26A_FRAME_USER_BASE;
 
-    /* MERCURIUS Rein-Tamayo 2019 §3.1 defaults. */
+    /* MERCURIUS transition-window defaults. The 3.0/5.0 window is
+     * this tree's own choice; the Hill-radius switching criterion
+     * is Rein, Hernandez, Tamayo et al. 2019, MNRAS
+     * 485(4):5490-5497, section 2. */
     world->mercurius_hill_factor  = 3.0;
     world->mercurius_outer_factor = 5.0;
 

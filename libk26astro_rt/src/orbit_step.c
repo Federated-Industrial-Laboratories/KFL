@@ -3,18 +3,20 @@
  * Runs every wallclock advance with the actual elapsed dt. Drives
  * the world's integrator (WH, IAS15, Verlet, RK4, RK45, or MERCURIUS).
  *
- * Paper-faithful MERCURIUS, Rein-Tamayo 2019 eq. 12-14:
+ * Paper-faithful MERCURIUS split, after Rein, Hernandez, Tamayo
+ * et al. 2019 (MNRAS 485(4):5490-5497) eq. 12-14:
  *   1. Detect close-encounter pairs (k26astro_mercurius_detect).
  *      Each pair carries a K(y) weight computed at detect time.
- *   2. If no encounters or active integrator is not WH/Verlet:
+ *   2. If no encounters or the active integrator is not Verlet:
  *      single full-force step (the integrator handles dynamics
- *      uniformly).
+ *      uniformly). A WH base never splits; the admission note at
+ *      do_split below says why.
  *   3. Otherwise (paper-faithful split):
  *        a. Set state->mercurius = { FAR, weights, n }.
- *        b. Run the chosen outer integrator (WH or Verlet) over
- *           dt; it sees only the (1-K)-weighted portion of each
- *           encounter pair plus full-force on non-encounter pairs.
- *           This handles the smooth bulk dynamics.
+ *        b. Run the Verlet outer integrator over dt; it sees only
+ *           the (1-K)-weighted portion of each encounter pair plus
+ *           full-force on non-encounter pairs. This handles the
+ *           smooth bulk dynamics.
  *        c. Set state->mercurius = { NEAR, weights, n }.
  *        d. Run IAS15 over the same dt — it sees only the
  *           K-weighted portion of each encounter pair (zero for
@@ -94,9 +96,25 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     int n_enc = k26astro_mercurius_detect(world);
 
     K26AstroIntegrator base = world->grav.integrator;
+    /* Split admission: Verlet base only. Verlet evaluates forces
+     * through k26astro_grav_accel_total, which applies the MERCURIUS
+     * context's K weights (force_direct.c), so its FAR pass
+     * genuinely integrates the (1-K) portion. A WH base is excluded
+     * because the WH interaction kick computes its own pair sum
+     * (interaction_accel_, wisdom_holman.c) and never consults
+     * state->mercurius, which breaks the split in both directions:
+     * the FAR pass applies the full pair force, so a converging
+     * NEAR pass would add the K-weighted portion again on top
+     * (double-counting), and a failing NEAR pass fails the substep
+     * while having contributed nothing, surfacing an integrator
+     * failure on a healthy world. Combined with the detection
+     * heuristic's separation-independence (the recorded defect at
+     * k26astro_mercurius_hill_radius), any pair above the mass
+     * threshold split on every WH step, so both directions were
+     * live. Restoring a WH split means teaching the kick the pair
+     * weights; that is scoped with the detector follow-up item. */
     int do_split = (n_enc > 0)
-        && (base == K26ASTRO_INTEGRATOR_WH ||
-            base == K26ASTRO_INTEGRATOR_VERLET);
+        && (base == K26ASTRO_INTEGRATOR_VERLET);
 
     if (!do_split) {
         /* Standard single-integrator step. On failure the substep
@@ -124,7 +142,7 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     K26AstroMercuriusContext near_ctx = {
         .mode = K26ASTRO_MERCURIUS_NEAR, .pair_weights = w, .n_pair_weights = n_w };
 
-    /* Step 1: outer (WH or Verlet) on FAR. On failure, stop before
+    /* Step 1: outer (Verlet) on FAR. On failure, stop before
      * the NEAR pass: the split's two integrations are halves of one
      * substep, and running the second half over the first's failed
      * state would step past the failure. The mercurius pointer is

@@ -189,11 +189,11 @@ int main(void)
         assert(k26astro_grav_set_integrator(g, K26ASTRO_INTEGRATOR_IAS15)
                == K26ASTRO_E_OK);
         /* The advanced-API caller configures IAS15 itself. The
-         * controller tolerance must be set explicitly here: a
-         * world's composed grav state carries no IAS15 tolerance
-         * (k26astro_world_create leaves it zero, where the grav
-         * library's own init defaults it to 1e-9), and a zero
-         * tolerance rejects every substep. */
+         * tolerance is set explicitly so this gate pins the budget
+         * failure against a stated controller configuration rather
+         * than the world's create-time default (numerically the
+         * same 1e-9; k26astro_world_create mirrors the grav
+         * library's init defaults). */
         k26astro_grav_ias15_set_tol(g, 1.0e-9);
         k26astro_grav_ias15_set_wall_budget(g, 0.01);
 

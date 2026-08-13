@@ -32,6 +32,16 @@
  *      word carries the fault bit, the fault code is DIVERGED, the
  *      pre-step observations hold, and the episode ends faulted in
  *      the file with the same code.
+ *   9. No phantom divergence on a healthy heavy-satellite world: a
+ *      Pluto/Charon/probe system (JPL GM and mass values) whose
+ *      satellite pair crosses the close-encounter detector's mass
+ *      threshold at every separation runs its full horizon on the
+ *      default Wisdom-Holman base with no fault and a truncated
+ *      ending. Pins the regression where the WH base was admitted
+ *      to the MERCURIUS split (whose NEAR pass the WH kick ignores)
+ *      and the world's unset IAS15 tolerance made that pass fail
+ *      structurally, faulting a healthy environment DIVERGED at
+ *      step 1.
  *
  * Requires the sibling stack archives (skips with 77 otherwise).
  */
@@ -487,7 +497,83 @@ int main(void)
     printf("gate 8: integrator divergence surfaces as a DIVERGED"
            " fault, end to end: OK\n");
 
+    /* Gate 9: the healthy counterpart of gate 8. Pluto, Charon, and
+     * a small probe with JPL GM and mass values: the Charon+probe
+     * pair's combined mass is 12 percent of Pluto's, above the
+     * close-encounter detector's mass threshold (3/125 of the
+     * central mass), so the detector reports the pair at every
+     * separation. On the default Wisdom-Holman base the pair must
+     * NOT push the step into the MERCURIUS split: the WH kick
+     * applies unweighted pair forces, so the split contributes
+     * nothing and its NEAR pass can only manufacture failure
+     * statuses. The episode must run its declared horizon with no
+     * fault and end truncated. This gate sits at the compiled-
+     * environment level because that is where the defect surfaced:
+     * it covers detection, split admission, the exact stepping
+     * status, and the fault mapping in one path. */
+    {
+        static const char *const pluto_kfl =
+            "form RL_PLUTO\n"
+            "fn world w\n"
+            "    astro_body pluto gm=8.696e11 mass=1.303e22\n"
+            "    astro_body charon gm=1.058e11 mass=1.586e21"
+            " parent=pluto pos_x=1.9595e7 vel_y=222.0\n"
+            "    astro_body probe gm=1.0 mass=1.0e3 parent=pluto"
+            " pos_x=3.0e7 vel_y=170.2\n"
+            "    episode\n"
+            "        control_dt 1.0\n"
+            "        horizon 8\n"
+            "    end\n"
+            "    action push box -1.0 1.0 default 0.0\n"
+            "    observe probe from pluto mode=geometric as trk\n"
+            "    objective\n"
+            "        reward 1.0\n"
+            "    end\n"
+            "end\n"
+            "end\n";
+        rl_write_file_(WORK_DIR "/pluto.kfl", pluto_kfl);
+        rl_compile_(WORK_DIR "/pluto.kfl", WORK_DIR "/pluto", WORK_DIR);
+        void *so6 = rl_dlopen_(WORK_DIR "/pluto.rlenv.so");
+        RlSurface p;
+        rl_resolve_surface_(so6, &p);
+        K26RlEnv *pe = NULL;
+        ASSERT(p.create(17, 1, &pe) == K26RL_OK);
+        ASSERT(p.output(pe, WORK_DIR "/pluto.k26epi") == K26RL_OK);
+
+        double a1[1] = { 0.0 };
+        double r1;
+        uint32_t f1;
+        uint16_t c1;
+        for (int t = 0; t < 8; t++) {
+            ASSERT(p.step(pe, a1) == K26RL_OK);
+            ASSERT(p.flags(pe, &f1) == K26RL_OK);
+            ASSERT(f1 == (t < 7 ? 0u : K26RL_FLAG_TRUNCATED));
+            ASSERT(p.fault_codes(pe, &c1) == K26RL_OK);
+            ASSERT(c1 == 0);
+            ASSERT(p.reward(pe, &r1) == K26RL_OK);
+            ASSERT(r1 == 1.0);
+        }
+        p.destroy(pe);
+        dlclose(so6);
+
+        K26RlEpisodeReader *rd = NULL;
+        ASSERT(k26rl_episode_reader_open(WORK_DIR "/pluto.k26epi", &rd)
+               == K26RL_OK);
+        K26RlEpisodeData ep;
+        ASSERT(k26rl_episode_read(rd, 0, 0, 0, &ep) == K26RL_OK);
+        ASSERT(ep.end_reason == K26RL_END_TRUNCATED);
+        ASSERT(ep.fault_code == 0);
+        ASSERT(ep.step_count == 8);
+        for (uint32_t t = 0; t < 8; t++) {
+            ASSERT(ep.applied_dt[t] == 1.0);
+        }
+        k26rl_episode_free(&ep);
+        k26rl_episode_reader_close(rd);
+    }
+    printf("gate 9: healthy heavy-satellite world runs its full"
+           " horizon unfaulted: OK\n");
+
     dlclose(so);
-    printf("test_rl_fault: 8 gates passed\n");
+    printf("test_rl_fault: 9 gates passed\n");
     return 0;
 }
