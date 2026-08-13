@@ -158,7 +158,39 @@ typedef enum {
      * links this to the form-level KFLN_ARENA so the emit knows the
      * arena's C symbol name. */
     KFLN_ARENA,
-    KFLN_ALLOCATOR_BIND
+    KFLN_ALLOCATOR_BIND,
+    /* Grammar 3.2 reinforcement learning statements. All of them are
+     * statement-level constructs that bind only inside `fn world`
+     * bodies; outside that context the introducing words stay
+     * ordinary identifiers (with the reserved-future warning when
+     * used as binding names). Parsed by stmt.c, serialised by
+     * serialize.c, validated by kflc_check (check.c). Code emission
+     * for them arrives in a later pass; kfl_emit_stmt reports them
+     * as not yet emittable. */
+    /* `episode ... end`. Attrs carry `control_dt` (required),
+     * `horizon`, and `terminated_when`, each with the parsed
+     * expression on KflcAttr.expr; children are the
+     * KFLN_STMT_EPISODE_RESET lines. */
+    KFLN_STMT_EPISODE,
+    /* `reset <body>.<key> <dist-expr>` inside an episode block.
+     * `name` is the body identifier, `position` (KFLV_IDENT) the
+     * state key (pos_x/pos_y/pos_z/vel_x/vel_y/vel_z), `expr` the
+     * distribution call (uniform/normal, two arguments). */
+    KFLN_STMT_EPISODE_RESET,
+    /* `action <name> box <low> <high> [default <expr>]` or
+     * `action <name> discrete <count> [default <expr>]`. `position`
+     * (KFLV_IDENT) is "box" or "discrete"; `expr` is the first
+     * bound (or the count), `expr2` the second bound (box only);
+     * an optional `default` attr carries its expression on
+     * KflcAttr.expr. */
+    KFLN_STMT_ACTION,
+    /* `on_step ... end`. Children are the per-step body statements
+     * (ordinary fn-world statements; astro_body / step / propagate /
+     * observe and nested RL constructs are rejected at parse). */
+    KFLN_STMT_ON_STEP,
+    /* `objective ... end`. Attrs carry `reward` (required) and
+     * `terminal`, each with the parsed expression on KflcAttr.expr. */
+    KFLN_STMT_OBJECTIVE
 } KflcNodeKind;
 
 /* Type system. The base scalar kinds are joined by KFLT_VECTOR /
@@ -537,6 +569,31 @@ KflcNode *kflc_parse_file(const char *path,
 /* ---- Dump (debug) ------------------------------------------------- */
 
 void kflc_dump_node(FILE *out, const KflcNode *n, int indent);
+
+/* ---- Check (semantic validation) ---------------------------------- */
+
+/* Validate a parsed form beyond what the parser enforces. Today this
+ * covers the Grammar 3.2 reinforcement learning rules: worlds that use
+ * an RL construct must declare an episode block, step / propagate are
+ * rejected in such worlds, duplicate blocks / action names / observe
+ * channel names are errors, an episode with no horizon and no
+ * termination condition warns, distribution expressions are confined
+ * to their two valid positions, and identifiers in `terminated when` /
+ * `reward` / `terminal` expressions must resolve. Diagnostics go
+ * through `diag` (errors and warnings counted as usual). Returns 0
+ * when the walk raised no errors, nonzero otherwise. Safe to call on
+ * any parsed form; programs without RL constructs pass through
+ * unchanged. */
+int kflc_check(const KflcNode *form, KflcDiag *diag);
+
+/* Returns nonzero when any `fn world` in the form uses a Grammar 3.2
+ * reinforcement learning construct (episode / action / on_step /
+ * objective / observe ... as, or a distribution expression in an
+ * astro_body attribute value). Such programs parse, serialize, and
+ * check, but code emission for them arrives in a later pass; callers
+ * that drive kflc_emit_cxx can consult this to report "not yet
+ * emittable" up front. */
+int kflc_form_has_rl(const KflcNode *form);
 
 /* ---- Emit (codegen) ----------------------------------------------- */
 

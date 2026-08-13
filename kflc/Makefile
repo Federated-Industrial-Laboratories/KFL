@@ -12,7 +12,8 @@ LIB      = libkflc.a
 # both the kflc binary and any embedding tool (k26form) that needs to
 # load .kfl files.
 LIB_OBJS = src/util.o src/lexer.o src/parser.o src/dump.o src/serialize.o \
-           src/expr.o src/stmt.o src/opaque.o src/builtin_register_astro.o \
+           src/expr.o src/stmt.o src/check.o src/opaque.o \
+           src/builtin_register_astro.o \
            src/builtin_loader.o src/runtime.o
 # Driver objects: emitter + CLI driver. Only the kflc binary needs these.
 DRV_OBJS = src/emit.o src/main.o
@@ -65,14 +66,24 @@ RESERVED_KW_TEST = tests/test_reserved_keywords
 $(RESERVED_KW_TEST): tests/test_reserved_keywords.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
 
-test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(BIN)
+# Gate for the Grammar 3.2 reinforcement learning front end: episode /
+# action / on_step / objective / observe-as parse + check, with the
+# negative diagnostics pinned. Runs the built kflc binary over /tmp
+# fixtures (test_reserved_keywords pattern).
+RL_GRAMMAR_TEST = tests/test_rl_grammar
+$(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+
+test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
+	./$(TEST_BIN) integration_tests/rl_pointing.kfl
 	./$(MANIFEST_TEST)
 	./$(BODY_BINDING_TEST)
 	./$(W8_ARENA_TEST)
 	./$(MEMORY_QUAL_TEST)
 	./$(RESERVED_KW_TEST)
+	./$(RL_GRAMMAR_TEST)
 	@printf 'form PROBE\n    fn double f()\n        return 1.0\n    end\nend\n' \
 	     > /tmp/kflc_flags_probe.kfl; \
 	 env -u KFLC_CFLAGS ./$(BIN) /tmp/kflc_flags_probe.kfl \
@@ -121,5 +132,6 @@ install: $(BIN) $(LIB)
 clean:
 	rm -f src/*.o $(BIN) $(LIB) $(TEST_BIN) $(MANIFEST_TEST) \
 	      $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) \
+	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) \
 	      tests/bench_parse
 	rm -rf bin

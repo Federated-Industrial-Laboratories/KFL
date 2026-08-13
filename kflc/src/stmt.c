@@ -443,6 +443,489 @@ static void append_child(KflcNode *parent, KflcNode *child)
     p->next = child;
 }
 
+/* ---- Grammar 3.2 reinforcement learning statements ---------------- */
+
+/* Statement-parse context. `g_rl_world_ctx` is raised by parser.c
+ * around `fn world` body parses (kfl_stmt_set_world_ctx); the RL
+ * statement keywords (episode / action / on_step / objective) bind as
+ * constructs only while it is set, so those words keep their
+ * ordinary-identifier reading (and the reserved-future warning) in
+ * every other fn body. `g_rl_on_step_depth` tracks nesting inside
+ * `on_step` bodies so the statements the per-step body rejects can be
+ * diagnosed at parse time. */
+static int g_rl_world_ctx     = 0;
+static int g_rl_on_step_depth = 0;
+
+void kfl_stmt_set_world_ctx(int in_world)
+{
+    g_rl_world_ctx = in_world;
+    if (!in_world) g_rl_on_step_depth = 0;
+}
+
+static int is_rl_keyword_(const char *s)
+{
+    return strcmp(s, "episode")   == 0 || strcmp(s, "action") == 0 ||
+           strcmp(s, "on_step")   == 0 || strcmp(s, "objective") == 0;
+}
+
+/* Statements the `on_step` body rejects: world construction and
+ * stepping (the episode machinery owns stepping in these programs),
+ * observation, and any nested RL construct. */
+static int is_on_step_forbidden_(const char *s)
+{
+    return strcmp(s, "astro_body") == 0 || strcmp(s, "step") == 0 ||
+           strcmp(s, "propagate")  == 0 || strcmp(s, "observe") == 0 ||
+           is_rl_keyword_(s);
+}
+
+static const KflcAttr *stmt_find_attr_(const KflcNode *n, const char *key)
+{
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, key) == 0) return a;
+    }
+    return NULL;
+}
+
+/* Scalar state keys accepted on an episode reset line. The same six
+ * keys are accepted as astro_body attributes (parsed generically
+ * there; the emission pass maps them). */
+static int is_reset_state_key_(const char *s)
+{
+    return strcmp(s, "pos_x") == 0 || strcmp(s, "pos_y") == 0 ||
+           strcmp(s, "pos_z") == 0 || strcmp(s, "vel_x") == 0 ||
+           strcmp(s, "vel_y") == 0 || strcmp(s, "vel_z") == 0;
+}
+
+/* Returns 1 when `e` is a well-formed distribution call:
+ * `uniform(<low>, <high>)` or `normal(<mean>, <stddev>)`. */
+static int is_dist_call_(const KflcExpr *e)
+{
+    return e && e->kind == KFLE_CALL && e->u.call.name &&
+           (strcmp(e->u.call.name, "uniform") == 0 ||
+            strcmp(e->u.call.name, "normal")  == 0) &&
+           e->u.call.n_args == 2;
+}
+
+/* Error recovery: discard the rest of the current source line as raw
+ * bytes, then step past the newline. Raw discard (rather than
+ * token-by-token draining) because the rest of the line may hold
+ * expression characters the main lexer does not tokenise. Call only
+ * when `cur` has not yet reached the line's newline. */
+static void rl_drain_line_(Lexer *L, Token *cur,
+                           KflcArena *arena, int *had_error)
+{
+    (void)take_line_remainder(L, arena);
+    advance(L, cur, had_error);
+    if (at_nl(cur)) advance(L, cur, had_error);
+}
+
+/* `episode ... end`. Body lines, each at most once except `reset`:
+ *   control_dt <expr>           (required)
+ *   horizon <expr>
+ *   terminated when <expr>
+ *   reset <body>.<key> <distribution>
+ * `cur` is the `episode` keyword on entry. */
+static KflcNode *parse_episode_(Lexer *L, Token *cur,
+                                KflcArena *arena, KflcDiag *diag,
+                                int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (!at_nl(cur) && !at_eof2(cur)) {
+        kflc_diag_errorf(diag, line0,
+            "episode: expected end of line after `episode`");
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+    } else if (at_nl(cur)) {
+        advance(L, cur, had_error);
+    }
+
+    KflcNode *n = new_node(arena, KFLN_STMT_EPISODE, line0);
+    for (;;) {
+        skip_newlines(L, cur, had_error);
+        if (at_eof2(cur)) {
+            kflc_diag_errorf(diag, cur->line,
+                "episode: unexpected EOF (missing `end`)");
+            *had_error = 1;
+            break;
+        }
+        if (is_ident_named(cur, "end")) {
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            break;
+        }
+        if (cur->kind != T_IDENT || !cur->str) {
+            kflc_diag_errorf(diag, cur->line,
+                "episode: expected a keyword line (control_dt, horizon, "
+                "`terminated when`, reset, or end)");
+            *had_error = 1;
+            rl_drain_line_(L, cur, arena, had_error);
+            continue;
+        }
+
+        if (is_ident_named(cur, "control_dt") ||
+            is_ident_named(cur, "horizon"))
+        {
+            const char *key = cur->str;
+            int lineK = cur->line;
+            char *src = take_line_remainder(L, arena);
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            if (stmt_find_attr_(n, key)) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: duplicate `%s` (allowed at most once)", key);
+                *had_error = 1;
+                continue;
+            }
+            char *t = trim(src);
+            if (t[0] == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: `%s` requires an expression", key);
+                *had_error = 1;
+                continue;
+            }
+            KflcValue none;
+            memset(&none, 0, sizeof none);
+            KflcAttr *a = stmt_append_attr(arena, n, key, none, lineK);
+            a->expr = kflc_parse_expr(t, arena, diag, lineK);
+            if (!a->expr) *had_error = 1;
+            continue;
+        }
+
+        if (is_ident_named(cur, "terminated")) {
+            int lineK = cur->line;
+            advance(L, cur, had_error);
+            if (!is_ident_named(cur, "when")) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: expected `when` after `terminated`");
+                *had_error = 1;
+                if (!at_nl(cur) && !at_eof2(cur)) {
+                    rl_drain_line_(L, cur, arena, had_error);
+                } else if (at_nl(cur)) {
+                    advance(L, cur, had_error);
+                }
+                continue;
+            }
+            char *src = take_line_remainder(L, arena);
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            if (stmt_find_attr_(n, "terminated_when")) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: duplicate `terminated when` "
+                    "(allowed at most once)");
+                *had_error = 1;
+                continue;
+            }
+            char *t = trim(src);
+            if (t[0] == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: `terminated when` requires an expression");
+                *had_error = 1;
+                continue;
+            }
+            KflcValue none;
+            memset(&none, 0, sizeof none);
+            KflcAttr *a = stmt_append_attr(arena, n, "terminated_when",
+                                           none, lineK);
+            a->expr = kflc_parse_expr(t, arena, diag, lineK);
+            if (!a->expr) *had_error = 1;
+            continue;
+        }
+
+        if (is_ident_named(cur, "reset")) {
+            int lineK = cur->line;
+            char *raw = take_line_remainder(L, arena);
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            char *p = trim(raw);
+            char *q = p;
+            while (*q && *q != '.' && *q != ' ' && *q != '\t') q++;
+            if (*q != '.' || q == p) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode reset: expected `<body>.<key> <distribution>`");
+                *had_error = 1;
+                continue;
+            }
+            *q = '\0';
+            char *body_name = kflc_arena_strdup(arena, p);
+            char *k = q + 1;
+            q = k;
+            while (*q && *q != ' ' && *q != '\t') q++;
+            int have_more = (*q != '\0');
+            *q = '\0';
+            char *key = kflc_arena_strdup(arena, k);
+            char *expr_src = have_more ? q + 1 : q;
+            if (!is_reset_state_key_(key)) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode reset: unknown state key `%s` (expected pos_x, "
+                    "pos_y, pos_z, vel_x, vel_y, or vel_z)", key);
+                *had_error = 1;
+                continue;
+            }
+            expr_src = trim(expr_src);
+            if (expr_src[0] == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "episode reset: expected a distribution expression "
+                    "after `%s.%s`", body_name, key);
+                *had_error = 1;
+                continue;
+            }
+            KflcExpr *dist = kflc_parse_expr(expr_src, arena, diag, lineK);
+            if (!dist) {
+                *had_error = 1;
+                continue;
+            }
+            if (!is_dist_call_(dist)) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode reset: expected a distribution expression "
+                    "`uniform(<low>, <high>)` or `normal(<mean>, <stddev>)`");
+                *had_error = 1;
+                continue;
+            }
+            KflcNode *r = new_node(arena, KFLN_STMT_EPISODE_RESET, lineK);
+            r->name          = body_name;
+            r->position.kind = KFLV_IDENT;
+            r->position.u.s  = key;
+            r->expr          = dist;
+            append_child(n, r);
+            continue;
+        }
+
+        kflc_diag_errorf(diag, cur->line,
+            "episode: unknown keyword `%s` (expected control_dt, horizon, "
+            "`terminated when`, reset, or end)", cur->str);
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+    }
+
+    if (!stmt_find_attr_(n, "control_dt")) {
+        kflc_diag_errorf(diag, line0,
+            "episode: missing required `control_dt <expr>`");
+        *had_error = 1;
+    }
+    return n;
+}
+
+/* `action <name> box <low> <high> [default <expr>]`
+ * `action <name> discrete <count> [default <expr>]`
+ * The bounds / count / default are whitespace-separated expressions
+ * (balanced `()` / `[]` keep a spaced expression together, matching
+ * the astro_body value convention). `cur` is the `action` keyword. */
+static KflcNode *parse_action_(Lexer *L, Token *cur,
+                               KflcArena *arena, KflcDiag *diag,
+                               int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (cur->kind != T_IDENT) {
+        kflc_diag_errorf(diag, line0, "action: expected action name");
+        *had_error = 1;
+        if (!at_nl(cur) && !at_eof2(cur)) {
+            rl_drain_line_(L, cur, arena, had_error);
+        } else if (at_nl(cur)) {
+            advance(L, cur, had_error);
+        }
+        return NULL;
+    }
+    char *name = cur->str;
+    advance(L, cur, had_error);
+    int is_box = is_ident_named(cur, "box");
+    if (!is_box && !is_ident_named(cur, "discrete")) {
+        kflc_diag_errorf(diag, line0,
+            "action %s: expected `box <low> <high>` or `discrete <count>`",
+            name);
+        *had_error = 1;
+        if (!at_nl(cur) && !at_eof2(cur)) {
+            rl_drain_line_(L, cur, arena, had_error);
+        } else if (at_nl(cur)) {
+            advance(L, cur, had_error);
+        }
+        return NULL;
+    }
+    char *raw = take_line_remainder(L, arena);
+    advance(L, cur, had_error);
+    if (at_nl(cur)) advance(L, cur, had_error);
+
+    /* Split into whitespace-separated, paren/bracket-balanced chunks:
+     * the expressions plus the optional `default` marker word. */
+    enum { ACTION_MAX_CHUNKS = 5 };
+    char *chunks[ACTION_MAX_CHUNKS];
+    int   n_chunks = 0;
+    int   overflow = 0;
+    char *p = trim(raw);
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        char *beg = p;
+        int paren = 0, brack = 0;
+        while (*p) {
+            if      (*p == '(') paren++;
+            else if (*p == ')') paren--;
+            else if (*p == '[') brack++;
+            else if (*p == ']') brack--;
+            else if ((*p == ' ' || *p == '\t') && paren == 0 && brack == 0)
+                break;
+            p++;
+        }
+        int more = (*p != '\0');
+        *p = '\0';
+        if (n_chunks < ACTION_MAX_CHUNKS) chunks[n_chunks++] = beg;
+        else overflow = 1;
+        if (more) p++;
+    }
+
+    int expect = is_box ? 2 : 1;
+    if (n_chunks < expect) {
+        kflc_diag_errorf(diag, line0,
+            is_box ? "action %s: box requires `<low> <high>`"
+                   : "action %s: discrete requires `<count>`",
+            name);
+        *had_error = 1;
+        return NULL;
+    }
+    int have_default = 0;
+    if (overflow || n_chunks > expect) {
+        if (overflow || n_chunks != expect + 2 ||
+            strcmp(chunks[expect], "default") != 0)
+        {
+            kflc_diag_errorf(diag, line0,
+                "action %s: expected optional `default <expr>` after the %s",
+                name, is_box ? "bounds" : "count");
+            *had_error = 1;
+            return NULL;
+        }
+        have_default = 1;
+    }
+
+    KflcNode *n = new_node(arena, KFLN_STMT_ACTION, line0);
+    n->name          = name;
+    n->position.kind = KFLV_IDENT;
+    n->position.u.s  = kflc_arena_strdup(arena, is_box ? "box" : "discrete");
+    n->expr = kflc_parse_expr(chunks[0], arena, diag, line0);
+    if (!n->expr) *had_error = 1;
+    if (is_box) {
+        n->expr2 = kflc_parse_expr(chunks[1], arena, diag, line0);
+        if (!n->expr2) *had_error = 1;
+    }
+    if (have_default) {
+        KflcValue none;
+        memset(&none, 0, sizeof none);
+        KflcAttr *a = stmt_append_attr(arena, n, "default", none, line0);
+        a->expr = kflc_parse_expr(chunks[expect + 1], arena, diag, line0);
+        if (!a->expr) *had_error = 1;
+    }
+    return n;
+}
+
+/* `on_step ... end`. The body is a plain statement block; the
+ * forbidden-statement check at the top of parse_stmt fires while
+ * `g_rl_on_step_depth` is raised. `cur` is the `on_step` keyword. */
+static KflcNode *parse_on_step_(Lexer *L, Token *cur,
+                                KflcArena *arena, KflcDiag *diag,
+                                int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (!at_nl(cur) && !at_eof2(cur)) {
+        kflc_diag_errorf(diag, line0,
+            "on_step: expected end of line after `on_step`");
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+    } else if (at_nl(cur)) {
+        advance(L, cur, had_error);
+    }
+
+    KflcNode *n = new_node(arena, KFLN_STMT_ON_STEP, line0);
+    const char *brk[] = { "end", NULL };
+    g_rl_on_step_depth++;
+    KflcNode *blk = kfl_parse_stmt_block(L, cur, arena, diag, had_error,
+                                         "end", brk);
+    g_rl_on_step_depth--;
+    n->children = blk ? blk->children : NULL;
+    if (is_ident_named(cur, "end")) {
+        advance(L, cur, had_error);
+        if (at_nl(cur)) advance(L, cur, had_error);
+    }
+    return n;
+}
+
+/* `objective ... end` with `reward <expr>` (required) and
+ * `terminal <expr>` (optional), each at most once. `cur` is the
+ * `objective` keyword. */
+static KflcNode *parse_objective_(Lexer *L, Token *cur,
+                                  KflcArena *arena, KflcDiag *diag,
+                                  int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (!at_nl(cur) && !at_eof2(cur)) {
+        kflc_diag_errorf(diag, line0,
+            "objective: expected end of line after `objective`");
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+    } else if (at_nl(cur)) {
+        advance(L, cur, had_error);
+    }
+
+    KflcNode *n = new_node(arena, KFLN_STMT_OBJECTIVE, line0);
+    for (;;) {
+        skip_newlines(L, cur, had_error);
+        if (at_eof2(cur)) {
+            kflc_diag_errorf(diag, cur->line,
+                "objective: unexpected EOF (missing `end`)");
+            *had_error = 1;
+            break;
+        }
+        if (is_ident_named(cur, "end")) {
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            break;
+        }
+        if (cur->kind == T_IDENT && cur->str &&
+            (strcmp(cur->str, "reward") == 0 ||
+             strcmp(cur->str, "terminal") == 0))
+        {
+            const char *key = cur->str;
+            int lineK = cur->line;
+            char *src = take_line_remainder(L, arena);
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            if (stmt_find_attr_(n, key)) {
+                kflc_diag_errorf(diag, lineK,
+                    "objective: duplicate `%s` (allowed at most once)", key);
+                *had_error = 1;
+                continue;
+            }
+            char *t = trim(src);
+            if (t[0] == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "objective: `%s` requires an expression", key);
+                *had_error = 1;
+                continue;
+            }
+            KflcValue none;
+            memset(&none, 0, sizeof none);
+            KflcAttr *a = stmt_append_attr(arena, n, key, none, lineK);
+            a->expr = kflc_parse_expr(t, arena, diag, lineK);
+            if (!a->expr) *had_error = 1;
+            continue;
+        }
+        kflc_diag_errorf(diag, cur->line,
+            "objective: unknown keyword `%s` (expected reward, terminal, "
+            "or end)",
+            (cur->kind == T_IDENT && cur->str) ? cur->str : "(non-ident)");
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+    }
+
+    if (!stmt_find_attr_(n, "reward")) {
+        kflc_diag_errorf(diag, line0,
+            "objective: missing required `reward <expr>`");
+        *had_error = 1;
+    }
+    return n;
+}
+
 /* Parse a single statement on the current line. Consumes the trailing
  * newline. Returns NULL on parse error.
  *
@@ -457,6 +940,33 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                              int *had_error)
 {
     int line = cur->line;
+
+    /* Grammar 3.2 RL statements. The keywords bind as constructs only
+     * at statement position inside `fn world` bodies; everywhere else
+     * they keep the ordinary-identifier reading (and reserved-future
+     * warning behaviour) of Grammar 3.1. Inside an `on_step` body the
+     * world-construction / stepping statements and nested RL
+     * constructs are rejected here so the diagnostic names the
+     * offending keyword. */
+    if (g_rl_world_ctx && cur->kind == T_IDENT && cur->str) {
+        if (g_rl_on_step_depth > 0 && is_on_step_forbidden_(cur->str)) {
+            kflc_diag_errorf(diag, line,
+                "on_step: `%s` is not allowed inside an on_step block; "
+                "the per-step body admits only ordinary statements",
+                cur->str);
+            *had_error = 1;
+            rl_drain_line_(L, cur, arena, had_error);
+            return NULL;
+        }
+        if (strcmp(cur->str, "episode") == 0)
+            return parse_episode_(L, cur, arena, diag, had_error);
+        if (strcmp(cur->str, "action") == 0)
+            return parse_action_(L, cur, arena, diag, had_error);
+        if (strcmp(cur->str, "on_step") == 0)
+            return parse_on_step_(L, cur, arena, diag, had_error);
+        if (strcmp(cur->str, "objective") == 0)
+            return parse_objective_(L, cur, arena, diag, had_error);
+    }
 
     /* `return [<expr>]` */
     if (is_ident_named(cur, "return")) {
@@ -984,7 +1494,10 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         stmt_append_attr(arena, n, "observer", ov, line0);
 
         /* Parse trailing `key=value` pairs (whitespace-separated).
-         * Each value lexes as an identifier (KFLV_IDENT). */
+         * Each value lexes as an identifier (KFLV_IDENT). A trailing
+         * `as <name>` clause (Grammar 3.2) names the observation
+         * channel; it must be the last clause on the line and lands
+         * as the `as` attr. */
         char *p = trim(raw);
         while (*p) {
             while (*p == ' ' || *p == '\t') p++;
@@ -992,6 +1505,37 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             char *kbeg = p;
             while (*p && *p != '=' && *p != ' ' && *p != '\t') p++;
             if (*p != '=') {
+                if ((size_t)(p - kbeg) == 2 && strncmp(kbeg, "as", 2) == 0) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    char *nbeg = p;
+                    while (*p && *p != ' ' && *p != '\t') p++;
+                    int more = (*p != '\0');
+                    *p = '\0';
+                    if (nbeg[0] == '\0') {
+                        kflc_diag_errorf(diag, line0,
+                            "observe %s: `as` requires a channel name",
+                            target_ident);
+                        *had_error = 1;
+                        return n;
+                    }
+                    if (more) {
+                        p++;
+                        while (*p == ' ' || *p == '\t') p++;
+                        if (*p) {
+                            kflc_diag_errorf(diag, line0,
+                                "observe %s: `as %s` must be the last "
+                                "clause on the line", target_ident, nbeg);
+                            *had_error = 1;
+                            return n;
+                        }
+                    }
+                    KflcValue av;
+                    memset(&av, 0, sizeof av);
+                    av.kind = KFLV_IDENT;
+                    av.u.s  = kflc_arena_strdup(arena, nbeg);
+                    stmt_append_attr(arena, n, "as", av, line0);
+                    return n;
+                }
                 kflc_diag_errorf(diag, line0,
                     "observe %s: expected `name=value` after observer",
                     target_ident);
@@ -2143,6 +2687,19 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
         fputs("(void)_kfl_active_arena;\n", out);
         return 0;
     }
+
+    case KFLN_STMT_EPISODE:
+    case KFLN_STMT_EPISODE_RESET:
+    case KFLN_STMT_ACTION:
+    case KFLN_STMT_ON_STEP:
+    case KFLN_STMT_OBJECTIVE:
+        /* Grammar 3.2 front-end pass: these constructs parse,
+         * serialize, and check; their code emission arrives in a
+         * later compiler pass. */
+        kflc_diag_errorf(diag, s->line,
+            "reinforcement learning constructs are not yet emittable; "
+            "this compiler version parses and checks them only");
+        return 1;
 
     default:
         kflc_diag_errorf(diag, s->line,

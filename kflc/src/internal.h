@@ -89,6 +89,14 @@ int       kfl_emit_stmt(FILE *out, const KflcNode *s,
  * enforced. Used by the `arg` parser and the `let`/`const` parser. */
 int       kfl_is_reserved_future(const char *name);
 
+/* Statement-parse context flag. parser.c sets this to 1 around the
+ * `fn world` body parse (and back to 0 after) so the reinforcement
+ * learning statement keywords (episode / action / on_step /
+ * objective) bind as constructs only there. Everywhere else those
+ * words keep their ordinary-identifier reading and the
+ * reserved-future warning behaviour. */
+void      kfl_stmt_set_world_ctx(int in_world);
+
 /* Block-scope tracker for heap-typed `let`s. The fn-body root level
  * (depth 0) is folded in too, so this tracker is the single source of
  * truth for "what heap-typed locals are live and how do we free them

@@ -724,9 +724,14 @@ static KflcNode *parse_form(Parser *P)
 
                 const char *brk[] = { "end", NULL };
                 int had_inner = 0;
+                /* RL statement keywords (episode / action / on_step /
+                 * objective) bind as constructs only inside `fn world`
+                 * bodies; flag the context for the statement parser. */
+                kfl_stmt_set_world_ctx(1);
                 KflcNode *body = kfl_parse_stmt_block(&P->L, &P->cur,
                                                        P->arena, P->diag, &had_inner,
                                                        "end", brk);
+                kfl_stmt_set_world_ctx(0);
                 if (had_inner) P->had_error = 1;
                 if (body && body->children) {
                     fnode->children = body->children;

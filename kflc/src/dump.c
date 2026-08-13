@@ -36,6 +36,11 @@ static const char *kind_name(KflcNodeKind k)
     case KFLN_STMT_LVALUE_ASSIGN: return "STMT_LVALUE_ASSIGN";
     case KFLN_ARENA:          return "ARENA";
     case KFLN_ALLOCATOR_BIND: return "ALLOCATOR_BIND";
+    case KFLN_STMT_EPISODE:       return "STMT_EPISODE";
+    case KFLN_STMT_EPISODE_RESET: return "STMT_EPISODE_RESET";
+    case KFLN_STMT_ACTION:        return "STMT_ACTION";
+    case KFLN_STMT_ON_STEP:       return "STMT_ON_STEP";
+    case KFLN_STMT_OBJECTIVE:     return "STMT_OBJECTIVE";
     }
     return "?";
 }

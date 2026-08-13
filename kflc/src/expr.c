@@ -242,6 +242,19 @@ static EToken el_next(EL *L)
     if (el_is_ident_start(c)) {
         size_t start = L->pos;
         while (L->pos < L->len && el_is_ident_cont((unsigned char)L->src[L->pos])) L->pos++;
+        /* Dotted name (e.g. `episode.steps`): a `.` continues the
+         * identifier only when an identifier start follows, so float
+         * literals (`1.5`) and the `.5` shorthand stay numbers. The
+         * whole dotted path lands as one KFLE_IDENT; resolution
+         * happens downstream (kflc_check for the RL expression
+         * positions, the emitter elsewhere). */
+        while (L->pos + 1 < L->len && L->src[L->pos] == '.' &&
+               el_is_ident_start((unsigned char)L->src[L->pos + 1]))
+        {
+            L->pos += 2;
+            while (L->pos < L->len &&
+                   el_is_ident_cont((unsigned char)L->src[L->pos])) L->pos++;
+        }
         size_t n = L->pos - start;
         t.kind = ET_IDENT;
         t.str  = kflc_arena_strndup(L->arena, L->src + start, n);

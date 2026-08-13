@@ -576,11 +576,105 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
                 observer ? observer : "?");
         for (const KflcAttr *a = n->attrs; a; a = a->next) {
             if (strcmp(a->name, "observer") == 0) continue;
+            /* `as` is a bare trailing clause, not a key=value pair;
+             * the parser guarantees it is the last attr. */
+            if (strcmp(a->name, "as") == 0) continue;
             const char *v = (a->value.kind == KFLV_IDENT && a->value.u.s)
                             ? a->value.u.s : "?";
             fprintf(out, " %s=%s", a->name, v);
         }
+        const KflcAttr *as_a = find_attr_(n->attrs, "as");
+        if (as_a && as_a->value.kind == KFLV_IDENT && as_a->value.u.s) {
+            fprintf(out, " as %s", as_a->value.u.s);
+        }
         fputc('\n', out);
+        break;
+    }
+
+    /* ---- Grammar 3.2 reinforcement learning statements ---------- */
+
+    case KFLN_STMT_EPISODE: {
+        indent(out, level);
+        fputs("episode\n", out);
+        /* Attrs in list order (source order): control_dt / horizon /
+         * terminated_when, each with its expression on attr->expr. */
+        for (const KflcAttr *a = n->attrs; a; a = a->next) {
+            indent(out, level + 1);
+            if (strcmp(a->name, "terminated_when") == 0) {
+                fputs("terminated when ", out);
+            } else {
+                fputs(a->name, out);
+                fputc(' ', out);
+            }
+            if (a->expr) kflc_expr_to_text(out, a->expr);
+            else         fputs("?", out);
+            fputc('\n', out);
+        }
+        for (const KflcNode *c = n->children; c; c = c->next) {
+            emit_node(out, c, level + 1);
+        }
+        indent(out, level);
+        fputs("end\n", out);
+        break;
+    }
+
+    case KFLN_STMT_EPISODE_RESET: {
+        indent(out, level);
+        fprintf(out, "reset %s.%s ",
+                n->name ? n->name : "?",
+                (n->position.kind == KFLV_IDENT && n->position.u.s)
+                    ? n->position.u.s : "?");
+        if (n->expr) kflc_expr_to_text(out, n->expr);
+        else         fputs("?", out);
+        fputc('\n', out);
+        break;
+    }
+
+    case KFLN_STMT_ACTION: {
+        indent(out, level);
+        fprintf(out, "action %s %s ",
+                n->name ? n->name : "?",
+                (n->position.kind == KFLV_IDENT && n->position.u.s)
+                    ? n->position.u.s : "box");
+        if (n->expr) kflc_expr_to_text(out, n->expr);
+        else         fputs("?", out);
+        if (n->expr2) {
+            fputc(' ', out);
+            kflc_expr_to_text(out, n->expr2);
+        }
+        const KflcAttr *dflt = find_attr_(n->attrs, "default");
+        if (dflt && dflt->expr) {
+            fputs(" default ", out);
+            kflc_expr_to_text(out, dflt->expr);
+        }
+        fputc('\n', out);
+        break;
+    }
+
+    case KFLN_STMT_ON_STEP: {
+        indent(out, level);
+        fputs("on_step\n", out);
+        for (const KflcNode *c = n->children; c; c = c->next) {
+            emit_node(out, c, level + 1);
+        }
+        indent(out, level);
+        fputs("end\n", out);
+        break;
+    }
+
+    case KFLN_STMT_OBJECTIVE: {
+        indent(out, level);
+        fputs("objective\n", out);
+        for (const KflcAttr *a = n->attrs; a; a = a->next) {
+            indent(out, level + 1);
+            fputs(a->name, out);
+            fputc(' ', out);
+            if (a->expr) kflc_expr_to_text(out, a->expr);
+            else         fputs("?", out);
+            fputc('\n', out);
+        }
+        indent(out, level);
+        fputs("end\n", out);
         break;
     }
 

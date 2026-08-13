@@ -100,22 +100,28 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* --check: silently run emit through /dev/null so we surface
-     * emit-phase diagnostics (unknown builtin, arity mismatch,
-     * type errors in `compute expression`) that --dump skips. Exits
-     * with the parse+emit error count as a 0/1 status. Nothing else
-     * runs. */
+    /* --check: run the semantic checker, then silently run emit
+     * through /dev/null so we surface emit-phase diagnostics (unknown
+     * builtin, arity mismatch, type errors in `compute expression`)
+     * that --dump skips. Programs using the Grammar 3.2 reinforcement
+     * learning constructs skip the emit pass: code emission for them
+     * arrives in a later compiler pass, and kflc_check is their
+     * check-time gate. Exits with the accumulated error count as a
+     * 0/1 status. Nothing else runs. */
     if (check) {
-        FILE *devnull = fopen("/dev/null", "w");
-        if (devnull) {
-            (void)kflc_emit_cxx(devnull, form, &diag);
-            fclose(devnull);
-        } else {
-            /* /dev/null missing is so weird we should report it
-             * rather than silently skip the emit pass. */
-            fprintf(stderr, "kflc: --check: cannot open /dev/null\n");
-            kflc_arena_release(arena);
-            return 1;
+        (void)kflc_check(form, &diag);
+        if (diag.errors == 0 && !kflc_form_has_rl(form)) {
+            FILE *devnull = fopen("/dev/null", "w");
+            if (devnull) {
+                (void)kflc_emit_cxx(devnull, form, &diag);
+                fclose(devnull);
+            } else {
+                /* /dev/null missing is so weird we should report it
+                 * rather than silently skip the emit pass. */
+                fprintf(stderr, "kflc: --check: cannot open /dev/null\n");
+                kflc_arena_release(arena);
+                return 1;
+            }
         }
         int errs = diag.errors;
         kflc_arena_release(arena);

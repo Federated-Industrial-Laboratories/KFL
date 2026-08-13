@@ -1,0 +1,40 @@
+# rl_pointing.kfl: Grammar 3.2 reinforcement learning surface,
+# round-trip fixture.
+#
+# Exercises every RL construct through parse -> serialize -> parse:
+# an episode block (control_dt / horizon / terminated when / reset
+# lines with both distributions), box and discrete actions with
+# defaults, an on_step body, an observe statement with a channel
+# name, an objective block, and the scalar state keys (pos_* / vel_*)
+# as astro_body attributes with distribution values.
+#
+# This is a front-end fixture: code emission for RL programs arrives
+# in a later compiler pass, so the file is exercised by the
+# round-trip harness and `kflc --check`, not by `kflc -o`.
+
+form RL_POINTING
+title "RL grammar 3.2 round-trip fixture"
+size 320x200
+
+fn world pointing_world
+    astro_body earth gm=3.986004418e14 mass=5.972e24
+    astro_body craft gm=1.0 parent=earth pos_x=uniform(-7.0e6,7.0e6) pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=normal(0.0,10.0) vel_z=0.0
+    episode
+        control_dt 0.1
+        horizon 1000
+        terminated when episode.steps > 900
+        reset craft.pos_x uniform(-7.0e6, 7.0e6)
+        reset craft.vel_y normal(0.0, 10.0)
+    end
+    action thrust box -1.0 1.0 default 0.0
+    action gear discrete 3 default 0
+    on_step
+        let damping: double = 0.99
+    end
+    observe craft from earth mode=astrometric as track
+    objective
+        reward 0.0 - track_range + thrust
+        terminal track_range < 0.5
+    end
+end
+end
