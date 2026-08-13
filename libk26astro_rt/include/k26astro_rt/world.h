@@ -128,7 +128,13 @@ const char *k26astro_body_name(const K26AstroBody *b);
  * Orbit substeps go through the MERCURIUS Rein-Tamayo close-encounter
  * handoff: pairs within `mercurius_outer` Hill-radius units have their
  * pairwise force smoothly partitioned between Wisdom-Holman (far)
- * and IAS15 (near) via the quintic switching function K(y). */
+ * and IAS15 (near) via the quintic switching function K(y).
+ *
+ * Substep failures are not reported through this entry (interactive
+ * 3.1 callers discard its return; a failing orbit substep ends that
+ * one advance's orbit work and the next advance re-attempts).
+ * Callers that need the failure status use
+ * k26astro_world_step_exact. */
 int  k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s);
 
 /* Advance the world by exactly sim_dt_s of simulated time. Same
@@ -137,8 +143,22 @@ int  k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s);
  * on render hitches, and dropping simulated time would silently
  * shorten a propagation (a 3600 s request through the clamped path
  * advances only 0.5 s). Callers whose dt is simulated time (batch
- * propagation, external stepping) use this entry. Returns 0 on
- * success. */
+ * propagation, external stepping) use this entry.
+ *
+ * Returns 0 on success, or a negative K26ASTRO_RT_E_* code carrying
+ * the first failing orbit substep's status:
+ *   E_INTEGRATOR      - the integrator failed to advance (Kepler or
+ *                       predictor-corrector non-convergence, or an
+ *                       exceeded IAS15 wall budget)
+ *   E_OOM             - allocation failure inside the step
+ *   E_BAD_ARG         - the integrator rejected its inputs
+ *   E_NOT_IMPLEMENTED - the selected integrator is not wired
+ *
+ * On failure the advance stops at the failing substep: completed
+ * substeps stand, nothing is rolled back, and the world's epoch
+ * reflects exactly the completed work. Partial writes within the
+ * failing substep are governed by the failing integrator's own
+ * contract. A subsequent step call starts fresh from that state. */
 int  k26astro_world_step_exact(K26AstroWorld *world, double sim_dt_s);
 
 /* Single-body Kepler advance. Propagates `body_idx`'s state forward

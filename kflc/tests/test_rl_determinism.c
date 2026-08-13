@@ -31,6 +31,12 @@
  *      share the stepping machinery by construction, so this gate
  *      exercises the entry code: argument handling, the stopping
  *      rule, and output enabling.
+ *   7. Two-process serve determinism: the same serve drive run as
+ *      two separate processes (this binary re-executed in driver
+ *      mode), each writing its observation, reward, and flag
+ *      streams to a file, produces bitwise-identical files; a third
+ *      in-process drive matches the same bytes. Gate 2 only ever
+ *      compared serve sessions inside one process.
  *
  * The fixture's reward reads a world scalar binding and an action
  * channel, so the reward stream witnesses both the world-binding
@@ -157,6 +163,43 @@ static void drive_(const char *so_path, uint64_t seed, uint32_t n_envs,
     dlclose(so);
 }
 
+/* Serve-driver subprocess entry (gate 7): drive one session with the
+ * deterministic base action stream and write the raw observation,
+ * reward, and flag streams to out_path. The parent launches two of
+ * these as separate processes and compares the files bitwise. The
+ * observation width is the fixture's (4, pinned by gate 5's spec
+ * walk). */
+static int serve_driver_main_(const char *so_path, const char *seed_s,
+                              const char *T_s, const char *n_s,
+                              const char *out_path)
+{
+    uint64_t seed = strtoull(seed_s, NULL, 10);
+    uint32_t T    = (uint32_t)strtoul(T_s, NULL, 10);
+    uint32_t N    = (uint32_t)strtoul(n_s, NULL, 10);
+    const uint32_t OBS = 4;
+    ASSERT(T > 0 && N > 0);
+
+    double   *o = malloc(sizeof(double)   * (size_t)T * N * OBS);
+    double   *r = malloc(sizeof(double)   * (size_t)T * N);
+    uint32_t *f = malloc(sizeof(uint32_t) * (size_t)T * N);
+    ASSERT(o != NULL && r != NULL && f != NULL);
+    drive_(so_path, seed, N, T, 0, o, r, f);
+
+    FILE *out = fopen(out_path, "wb");
+    ASSERT(out != NULL);
+    ASSERT(fwrite(o, sizeof(double), (size_t)T * N * OBS, out)
+           == (size_t)T * N * OBS);
+    ASSERT(fwrite(r, sizeof(double), (size_t)T * N, out)
+           == (size_t)T * N);
+    ASSERT(fwrite(f, sizeof(uint32_t), (size_t)T * N, out)
+           == (size_t)T * N);
+    ASSERT(fclose(out) == 0);
+    free(o);
+    free(r);
+    free(f);
+    return 0;
+}
+
 /* Bitwise comparison of two decoded episodes across every recorded
  * stream. */
 static void episodes_equal_(const K26RlEpisodeData *a,
@@ -185,8 +228,15 @@ static void episodes_equal_(const K26RlEpisodeData *a,
                   sizeof(double) * agent_count) == 0);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    /* Subprocess driver mode for gate 7. Launched by this same
+     * binary; the fixture's shared object already exists then. */
+    if (argc == 7 && strcmp(argv[1], "--serve-driver") == 0) {
+        return serve_driver_main_(argv[2], argv[3], argv[4], argv[5],
+                                  argv[6]);
+    }
+
     if (!rl_libs_present_("test_rl_determinism")) return 77;
     rl_run_or_die_("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
 
@@ -397,6 +447,50 @@ int main(void)
     }
     printf("gate 6: batch/serve equivalence, whole-file memcmp: OK\n");
 
-    printf("test_rl_determinism: 6 gates passed\n");
+    /* Gate 7: two-process serve determinism. Two separate processes
+     * (fresh address spaces, fresh loader state) run the same serve
+     * drive and write their streams to files; the files must match
+     * bitwise, and an in-process drive of the same script must
+     * match the same bytes. This closes the note that serve
+     * determinism was only ever checked within one process. */
+    {
+        enum { T = 60, N = 4, OBS = 4 };
+        char cmd[1024];
+        int n = snprintf(cmd, sizeof cmd,
+                         "%s --serve-driver " WORK_DIR "/det.rlenv.so"
+                         " 42 %d %d " WORK_DIR "/serve_p1.bin",
+                         argv[0], T, N);
+        ASSERT(n > 0 && (size_t)n < sizeof cmd);
+        rl_run_or_die_(cmd);
+        n = snprintf(cmd, sizeof cmd,
+                     "%s --serve-driver " WORK_DIR "/det.rlenv.so"
+                     " 42 %d %d " WORK_DIR "/serve_p2.bin",
+                     argv[0], T, N);
+        ASSERT(n > 0 && (size_t)n < sizeof cmd);
+        rl_run_or_die_(cmd);
+        ASSERT(rl_files_equal_(WORK_DIR "/serve_p1.bin",
+                               WORK_DIR "/serve_p2.bin"));
+
+        /* Third leg: in-process drive against the subprocess bytes. */
+        static double   o[T * N * OBS], of[T * N * OBS];
+        static double   r[T * N], rf[T * N];
+        static uint32_t f[T * N], ff[T * N];
+        drive_(WORK_DIR "/det.rlenv.so", 42, N, T, 0, o, r, f);
+        FILE *fp = fopen(WORK_DIR "/serve_p1.bin", "rb");
+        ASSERT(fp != NULL);
+        ASSERT(fread(of, sizeof(double), T * N * OBS, fp)
+               == (size_t)T * N * OBS);
+        ASSERT(fread(rf, sizeof(double), T * N, fp) == (size_t)T * N);
+        ASSERT(fread(ff, sizeof(uint32_t), T * N, fp) == (size_t)T * N);
+        ASSERT(fgetc(fp) == EOF);   /* stream file has no tail */
+        fclose(fp);
+        ASSERT(memcmp(o, of, sizeof o) == 0);
+        ASSERT(memcmp(r, rf, sizeof r) == 0);
+        ASSERT(memcmp(f, ff, sizeof f) == 0);
+    }
+    printf("gate 7: two-process serve determinism, stream files"
+           " bitwise: OK\n");
+
+    printf("test_rl_determinism: 7 gates passed\n");
     return 0;
 }

@@ -24,6 +24,14 @@
  *   5. Episode index monotonicity: a batch run's file indexes each
  *      environment's episodes at ordinal 0 with indices 0, 1, 2 in
  *      file order.
+ *   8. Integrator-divergence arm: a world whose declared dynamics
+ *      drive the runtime's integrator to a genuine failure status
+ *      (a zero-GM primary makes the Wisdom-Holman Kepler drift
+ *      reject its solve, a NO_CONVERGE-class failure) maps to the
+ *      K26RL_E_DIVERGED fault: the step call returns OK, the flag
+ *      word carries the fault bit, the fault code is DIVERGED, the
+ *      pre-step observations hold, and the episode ends faulted in
+ *      the file with the same code.
  *
  * Requires the sibling stack archives (skips with 77 otherwise).
  */
@@ -397,7 +405,89 @@ int main(void)
     printf("gate 7: fractionless literals stay double arithmetic;"
            " a non-finite terminal faults: OK\n");
 
+    /* Gate 8: the integrator-divergence arm. The primary's zero GM
+     * is the declared dynamics; the Wisdom-Holman drift's universal-
+     * variable Kepler solve genuinely rejects it inside the runtime
+     * on the first substep, the runtime returns the integrator
+     * status through the exact stepping entry, and the environment
+     * maps it to a per-environment K26RL_E_DIVERGED fault. Nothing
+     * here injects a status: the failure travels the full stack. */
+    {
+        static const char *const diverge_kfl =
+            "form RL_DIVERGE\n"
+            "fn world w\n"
+            "    astro_body core gm=0.0 mass=5.972e24\n"
+            "    astro_body craft gm=1.0 parent=core"
+            " pos_x=7.0e6 vel_y=7350.0\n"
+            "    episode\n"
+            "        control_dt 0.1\n"
+            "        horizon 6\n"
+            "    end\n"
+            "    action push box -1.0 1.0 default 0.0\n"
+            "    observe craft from core mode=geometric as trk\n"
+            "    objective\n"
+            "        reward 1.0\n"
+            "    end\n"
+            "end\n"
+            "end\n";
+        rl_write_file_(WORK_DIR "/diverge.kfl", diverge_kfl);
+        rl_compile_(WORK_DIR "/diverge.kfl", WORK_DIR "/diverge", WORK_DIR);
+        void *so5 = rl_dlopen_(WORK_DIR "/diverge.rlenv.so");
+        RlSurface d;
+        rl_resolve_surface_(so5, &d);
+        K26RlEnv *de = NULL;
+        ASSERT(d.create(13, 1, &de) == K26RL_OK);
+        ASSERT(d.output(de, WORK_DIR "/diverge.k26epi") == K26RL_OK);
+
+        double pre[4], post[4];
+        double a1[1] = { 0.0 };
+        double r1 = -1.0;
+        uint32_t f1 = 0;
+        uint16_t c1 = 0;
+        ASSERT(d.obs(de, pre) == K26RL_OK);
+
+        /* The faulting step: the call itself succeeds; the fault is
+         * carried per environment. */
+        ASSERT(d.step(de, a1) == K26RL_OK);
+        ASSERT(d.flags(de, &f1) == K26RL_OK);
+        ASSERT(f1 == K26RL_FLAG_FAULT);
+        ASSERT(d.fault_codes(de, &c1) == K26RL_OK);
+        ASSERT(c1 == (uint16_t)K26RL_E_DIVERGED);
+        ASSERT(d.obs(de, post) == K26RL_OK);
+        ASSERT(memcmp(post, pre, sizeof post) == 0);   /* held */
+        ASSERT(d.reward(de, &r1) == K26RL_OK);
+        ASSERT(r1 == 0.0);
+
+        /* Boundary after the fault clears the code. */
+        ASSERT(d.step(de, a1) == K26RL_OK);
+        ASSERT(d.flags(de, &f1) == K26RL_OK);
+        ASSERT(f1 == K26RL_FLAG_RESET_BOUNDARY);
+        ASSERT(d.fault_codes(de, &c1) == K26RL_OK);
+        ASSERT(c1 == 0);
+        d.destroy(de);
+        dlclose(so5);
+
+        /* The recorded ending. */
+        K26RlEpisodeReader *rd = NULL;
+        ASSERT(k26rl_episode_reader_open(WORK_DIR "/diverge.k26epi", &rd)
+               == K26RL_OK);
+        K26RlEpisodeData ep;
+        ASSERT(k26rl_episode_read(rd, 0, 0, 0, &ep) == K26RL_OK);
+        ASSERT(ep.end_reason == K26RL_END_FAULT);
+        ASSERT(ep.fault_code == (uint16_t)K26RL_E_DIVERGED);
+        ASSERT(ep.step_count == 1);
+        ASSERT(ep.flags[0] == K26RL_FLAG_FAULT);
+        ASSERT(ep.rewards[0] == 0.0);
+        ASSERT(ep.applied_dt[0] == 0.0);
+        ASSERT(memcmp(ep.obs, ep.initial_obs, 4 * sizeof(double)) == 0);
+        ASSERT(memcmp(ep.obs, pre, sizeof pre) == 0);
+        k26rl_episode_free(&ep);
+        k26rl_episode_reader_close(rd);
+    }
+    printf("gate 8: integrator divergence surfaces as a DIVERGED"
+           " fault, end to end: OK\n");
+
     dlclose(so);
-    printf("test_rl_fault: 7 gates passed\n");
+    printf("test_rl_fault: 8 gates passed\n");
     return 0;
 }

@@ -127,19 +127,34 @@ int k26astro_mercurius_detect(K26AstroWorld *world)
     int n = world->grav.n_bodies;
     if (n < 2) { world->n_encounters = 0; return 0; }
 
-    /* Central body = the largest GM. In the solar system this is the
-     * Sun; for moon-around-planet sub-systems the caller should set
-     * up a hierarchical world (out of scope in v0.1). */
-    double m_central = 0.0;
+    /* Central body = the largest mass. In the solar system this is
+     * the Sun; for moon-around-planet sub-systems the caller should
+     * set up a hierarchical world (out of scope in v0.1). */
+    double m_central   = 0.0;
+    int    idx_central = -1;
     for (int k = 0; k < n; k++) {
         double m = world->grav.bodies[k].mass;
-        if (m > m_central) m_central = m;
+        if (m > m_central) { m_central = m; idx_central = k; }
     }
     if (!(m_central > 0.0)) { world->n_encounters = 0; return 0; }
 
     world->n_encounters = 0;
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
+            /* Pairs involving the central body are never encounter
+             * pairs. MERCURIUS K-weights the interaction terms only
+             * (Rein-Tamayo 2019 section 3); the central body's
+             * Newtonian pull is not an interaction term, it is the
+             * Kepler part the Wisdom-Holman drift integrates
+             * exactly, so splitting such a pair would hand the
+             * drift's exact force to the adaptive side. The mutual-
+             * Hill heuristic below also degenerates on these pairs:
+             * with m_sum close to m_central the pair's Hill radius
+             * is about 0.69 times its separation, so y stays near
+             * 1.4 at every separation and a central pair would
+             * register as fully near forever, putting every
+             * satellite world on the split path on every step. */
+            if (i == idx_central || j == idx_central) continue;
             const K26AstroBody *bi = &world->grav.bodies[i];
             const K26AstroBody *bj = &world->grav.bodies[j];
             double rh = k26astro_mercurius_hill_radius(bi, bj, m_central);

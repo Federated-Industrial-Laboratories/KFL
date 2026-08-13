@@ -85,6 +85,11 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     if (!world) return;
     if (!(dt_s > 0.0)) return;
 
+    /* A latched substep failure stops the channel: nothing steps
+     * past a failure until a public advance entry clears the latch.
+     * Completed substeps stand; this layer rolls nothing back. */
+    if (world->substep_status != K26ASTRO_E_OK) return;
+
     /* Encounter detection — populates world->encounters with K
      * weights baked in. */
     int n_enc = k26astro_mercurius_detect(world);
@@ -95,8 +100,15 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
             base == K26ASTRO_INTEGRATOR_VERLET);
 
     if (!do_split) {
-        /* Standard single-integrator step. */
-        (void)k26astro_grav_step(&world->grav, dt_s);
+        /* Standard single-integrator step. On failure the substep
+         * did not complete: latch the status and skip the mass
+         * commit (its accumulator would step mass past the
+         * failure). */
+        int rc = k26astro_grav_step(&world->grav, dt_s);
+        if (rc != K26ASTRO_E_OK) {
+            world->substep_status = rc;
+            return;
+        }
         commit_vehicle_mass_(world, dt_s);
         return;
     }
@@ -113,19 +125,36 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     K26AstroMercuriusContext near_ctx = {
         .mode = K26ASTRO_MERCURIUS_NEAR, .pair_weights = w, .n_pair_weights = n_w };
 
-    /* Step 1: outer (WH or Verlet) on FAR. */
+    /* Step 1: outer (WH or Verlet) on FAR. On failure, stop before
+     * the NEAR pass: the split's two integrations are halves of one
+     * substep, and running the second half over the first's failed
+     * state would step past the failure. The mercurius pointer is
+     * always cleared before returning (it aims at stack locals). */
     world->grav.mercurius = &far_ctx;
-    (void)k26astro_grav_step(&world->grav, dt_s);
+    int rc = k26astro_grav_step(&world->grav, dt_s);
+    if (rc != K26ASTRO_E_OK) {
+        world->grav.mercurius = NULL;
+        world->substep_status = rc;
+        return;
+    }
 
     /* Step 2: IAS15 sub-step on NEAR. Switch the integrator for
-     * the inner pass, then restore. */
+     * the inner pass, then restore. The restore and clear run on
+     * the failure path too, so a latched failure never leaves the
+     * split's temporary integrator or context behind. */
     world->grav.mercurius = &near_ctx;
     (void)k26astro_grav_set_integrator(&world->grav,
                                          K26ASTRO_INTEGRATOR_IAS15);
-    (void)k26astro_grav_step(&world->grav, dt_s);
+    rc = k26astro_grav_step(&world->grav, dt_s);
     (void)k26astro_grav_set_integrator(&world->grav, base);
-
     world->grav.mercurius = NULL;
+    if (rc != K26ASTRO_E_OK) {
+        /* The FAR pass's uncommitted dot_m stays in the vehicle
+         * accumulators: the substep did not complete, so its mass
+         * step is not taken. */
+        world->substep_status = rc;
+        return;
+    }
 
     /* MERCURIUS split: commit mass once per outer substep (FAR pass).
      * The NEAR sub-step is internal to IAS15 and shouldn't double-count

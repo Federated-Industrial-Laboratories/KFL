@@ -95,6 +95,17 @@ struct K26AstroWorld {
     K26AstroWorldMode   mode;
     K26AstroCoordsMode  coord_mode;
 
+    /* Substep-failure latch. The tick callbacks are void, so a
+     * failing k26astro_grav_step inside the orbit channel cannot
+     * return its status through the dispatch; it writes the first
+     * failure here instead (a K26ASTRO_E_* grav-space code, OK when
+     * clear). While latched, the orbit callback refuses to step, so
+     * nothing steps past a failure within one advance. The public
+     * step entries clear the latch on entry; k26astro_world_step_exact
+     * additionally reads it after the advance and returns the
+     * translated status to its caller. */
+    int                 substep_status;
+
     /* FPU state saved at create. */
     K26AstroFPUState    fpu;
 

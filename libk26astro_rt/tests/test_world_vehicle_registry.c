@@ -15,6 +15,7 @@
 #include "k26astro_rt/world.h"
 #include "k26astro_vehicle/vehicle.h"
 #include "k26astro_body/body.h"
+#include "k26astro_core/pos.h"
 #include "k26astro_grav/grav.h"
 #include "k26astro_grav/perturb.h"
 
@@ -59,11 +60,21 @@ int main(void)
     assert(idx_primary == 0);
 
     /* Body 1: spacecraft body. Mass set via vehicle later; bound to
-     * vehicle for mass-step propagation. */
+     * vehicle for mass-step propagation. On a circular 1 AU orbit:
+     * the registry commit runs at substep close, and a substep only
+     * closes when its integration succeeds (a failing substep
+     * latches its status and commits nothing), so the craft must
+     * fly a real orbit rather than sit coincident with the
+     * primary. */
     K26AstroBody craft;
     k26astro_body_init(&craft);
     strncpy(craft.name, "spacecraft", sizeof craft.name - 1);
     craft.mass = 1000.0;
+    craft.pos  = k26astro_pos_from_m(1.495978707e11, 0.0, 0.0);
+    /* Circular speed sqrt(mu / r) for the primary's GM. */
+    craft.vel  = (K26V3){ 0.0, sqrt(1.32712440018e20 / 1.495978707e11),
+                          0.0 };
+    craft.parent_body_idx = 0;
     int idx_craft = k26astro_world_add_body(w, craft);
     assert(idx_craft == 1);
 

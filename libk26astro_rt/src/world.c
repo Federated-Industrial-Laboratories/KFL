@@ -93,11 +93,12 @@ K26AstroWorld *k26astro_world_create(K26AstroWorldMode  mode,
     world->mercurius_hill_factor  = 3.0;
     world->mercurius_outer_factor = 5.0;
 
-    world->observer_mode = K26ASTRO_OBS_ASTROMETRIC;
-    world->atmos         = NULL;
-    world->snapshot_id   = 0;
-    world->user          = NULL;
-    world->ref_ctx       = NULL;
+    world->observer_mode  = K26ASTRO_OBS_ASTROMETRIC;
+    world->atmos          = NULL;
+    world->snapshot_id    = 0;
+    world->user           = NULL;
+    world->ref_ctx        = NULL;
+    world->substep_status = K26ASTRO_E_OK;
 
     if (k26astro_rt_scheduler_init(world) != 0) {
         k26astro_grav_state_destroy(&world->grav);
@@ -232,10 +233,38 @@ const char *k26astro_body_name(const K26AstroBody *b)
 
 /* Stepping --------------------------------------------------------- */
 
+/* Translate a libk26astro_grav step status into this lib's code
+ * space. The two spaces collide numerically (K26ASTRO_E_TIME_BUDGET
+ * and K26ASTRO_RT_E_FPU_RACE are both 6), so a latched substep
+ * status must never be forwarded raw. The latch only ever carries
+ * k26astro_grav_step statuses, so an unrecognised (future) code
+ * still reports as an integrator failure rather than leaking a
+ * colliding number. */
+static int rt_status_from_grav_(int grav_status)
+{
+    switch (grav_status) {
+    case K26ASTRO_E_OK:          return K26ASTRO_RT_OK;
+    case K26ASTRO_E_NULL:        /* fall through */
+    case K26ASTRO_E_BAD_INPUT:   return K26ASTRO_RT_E_BAD_ARG;
+    case K26ASTRO_E_NOT_WIRED:   return K26ASTRO_RT_E_NOT_IMPLEMENTED;
+    case K26ASTRO_E_ALLOC:       return K26ASTRO_RT_E_OOM;
+    case K26ASTRO_E_NO_CONVERGE: /* fall through */
+    case K26ASTRO_E_TIME_BUDGET: /* fall through */
+    default:                     return K26ASTRO_RT_E_INTEGRATOR;
+    }
+}
+
 int k26astro_world_step(K26AstroWorld *world, double wallclock_dt_s)
 {
     if (!world) return -K26ASTRO_RT_E_NULL;
     if (!(wallclock_dt_s >= 0.0)) return -K26ASTRO_RT_E_BAD_ARG;
+    /* The callback shared with the exact entry stops on a latched
+     * failure, so each advance must start with a clear latch. This
+     * entry's observable contract is unchanged (it returns OK
+     * regardless of substep outcome, as 3.1 programs expect); the
+     * only internal change is that a failing substep ends the orbit
+     * work of this one advance instead of being silently ignored. */
+    world->substep_status = K26ASTRO_E_OK;
     k26astro_rt_ref_emit_step_begin(world, wallclock_dt_s);
     (void)k26tick_advance(world->tick, wallclock_dt_s);
     /* World time after the step — seconds-past-J2000 (TDB). */
@@ -249,6 +278,7 @@ int k26astro_world_step_exact(K26AstroWorld *world, double sim_dt_s)
 {
     if (!world) return -K26ASTRO_RT_E_NULL;
     if (!(sim_dt_s >= 0.0)) return -K26ASTRO_RT_E_BAD_ARG;
+    world->substep_status = K26ASTRO_E_OK;
     /* The op-log ops are the same as k26astro_world_step's; on this
      * path the requested dt is also the applied dt, because the
      * unclamped advance drops nothing. */
@@ -257,6 +287,13 @@ int k26astro_world_step_exact(K26AstroWorld *world, double sim_dt_s)
     double t_s = (double)world->grav.t.days_since_J2000 * 86400.0
                + world->grav.t.seconds_of_day;
     k26astro_rt_ref_emit_step_end(world, t_s);
+    /* First failing substep's status, translated across the grav/rt
+     * code boundary. Read-and-clear: the next advance starts fresh
+     * and re-attempts from wherever the completed substeps left the
+     * world. */
+    int sub = world->substep_status;
+    world->substep_status = K26ASTRO_E_OK;
+    if (sub != K26ASTRO_E_OK) return -rt_status_from_grav_(sub);
     return K26ASTRO_RT_OK;
 }
 
