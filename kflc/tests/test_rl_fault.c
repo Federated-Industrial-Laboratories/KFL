@@ -500,7 +500,7 @@ int main(void)
     /* Gate 9: the healthy counterpart of gate 8. Pluto, Charon, and
      * a small probe with JPL GM and mass values. The Charon+probe
      * pair is a genuine close pair by the semi-major-axis Hill
-     * criterion (y near 1.16, inside the transition window's inner
+     * criterion (y near 1.22, below the transition window's inner
      * edge), so on the default Wisdom-Holman base with Pluto at
      * body 0 the MERCURIUS split runs on every step, carrying the
      * pair force in the IAS15 drift at full weight. The episode

@@ -7,7 +7,7 @@
  *       char     magic[8];      "K26ASNP\0"
  *       uint32_t version;       K26ASTRO_SNAPSHOT_VERSION_CURRENT
  *       uint32_t endian_probe;  0x01020304
- *       uint32_t flags;         bit 0 = Q64_64; bit 1 = FAST mode
+ *       uint32_t flags;         bit 0 = Q64_64; bit 1 = FAST mode; bit 2 = window trailer
  *       uint32_t body_count;
  *       K26AstroEpoch epoch;    24 bytes
  *       char     integrator[16];
