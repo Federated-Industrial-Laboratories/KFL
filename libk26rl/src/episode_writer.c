@@ -3,11 +3,14 @@
  * Layouts follow k26rl_episode.h: every integer is assembled
  * little-endian field by field, doubles travel as their binary64 bit
  * patterns, and every frame carries the 24-byte CRC-framed header.
- * The per-step path only copies into the environment's chunk buffer,
- * preallocated at open; a full chunk or an episode end emits the
- * buffered frame with a single fwrite. All output is a pure function
- * of the call sequence, so identical sequences yield byte-identical
- * files. */
+ * Every buffer touched between open and close is allocated at open,
+ * once: the per-step path copies into the environment's chunk buffer,
+ * episode starts and ends build in the environment's boundary
+ * scratch, and each finished frame leaves in a single fwrite. The
+ * index is assembled at close by one sequential pass over the file
+ * this writer wrote, so no bookkeeping grows while running. All
+ * output is a pure function of the call sequence, so identical
+ * sequences yield byte-identical files. */
 #include "k26rl_episode.h"
 #include "k26rl_internal.h"
 
@@ -19,27 +22,14 @@
 #include <unistd.h>
 
 typedef struct {
-    uint32_t ordinal;
-    uint32_t env;
-    uint32_t episode;
-    uint32_t chunk_count;
-    uint64_t start_off;
-    uint64_t end_off;
-    uint64_t *chunk_offs;
-} IndexEntry_;
-
-typedef struct {
     int open;
     uint32_t ordinal;       /* rekey ordinal captured at episode start */
     uint32_t episode;
     uint32_t steps_total;
     uint32_t chunk_first;   /* first step index of the buffered chunk */
     uint32_t chunk_fill;
-    uint64_t start_off;
-    uint8_t *buf;           /* full frame image: header plus payload */
-    uint64_t *chunk_offs;
-    uint32_t chunk_count;
-    uint32_t chunk_cap;
+    uint8_t *buf;           /* chunk frame image: header plus payload */
+    uint8_t *boundary;      /* start and end frame image scratch */
 } EnvState_;
 
 struct K26RlEpisodeWriter {
@@ -49,41 +39,8 @@ struct K26RlEpisodeWriter {
     uint64_t sequence;      /* next frame sequence number */
     uint32_t rekey_ordinal;
     uint64_t ncols8;        /* 8-byte columns per chunk: obs+act+agents */
-    uint64_t chunk_buf_size;
     EnvState_ *envs;
-    IndexEntry_ *index;
-    uint32_t index_count;
-    uint32_t index_cap;
 };
-
-static int u64_append_(uint64_t **arr, uint32_t *count, uint32_t *cap,
-                       uint64_t v)
-{
-    if (*count == *cap) {
-        uint32_t ncap = *cap ? *cap * 2 : 8;
-        uint64_t *n = realloc(*arr, (size_t)ncap * sizeof **arr);
-        if (!n)
-            return -1;
-        *arr = n;
-        *cap = ncap;
-    }
-    (*arr)[(*count)++] = v;
-    return 0;
-}
-
-static int index_append_(K26RlEpisodeWriter *w, const IndexEntry_ *e)
-{
-    if (w->index_count == w->index_cap) {
-        uint32_t ncap = w->index_cap ? w->index_cap * 2 : 8;
-        IndexEntry_ *n = realloc(w->index, (size_t)ncap * sizeof *n);
-        if (!n)
-            return -1;
-        w->index = n;
-        w->index_cap = ncap;
-    }
-    w->index[w->index_count++] = *e;
-    return 0;
-}
 
 /* Emit one frame whose payload already sits at buf + 24. The header
  * is written here with the crc field zero, the CRC is computed over
@@ -139,9 +96,6 @@ static K26RlStatus flush_chunk_(K26RlEpisodeWriter *w, uint32_t env)
     k26rl_put_u32_(pay + 8, e->chunk_first);
     k26rl_put_u32_(pay + 12, (uint32_t)K);
     plen = (uint32_t)(16 + K * (w->ncols8 * 8 + 12));
-    if (u64_append_(&e->chunk_offs, &e->chunk_count, &e->chunk_cap,
-                    w->offset) != 0)
-        return K26RL_E_INTERNAL;
     e->chunk_first += (uint32_t)K;
     e->chunk_fill = 0;
     return emit_buf_(w, K26RL_FRAME_STEP_CHUNK, e->buf, plen, NULL);
@@ -160,7 +114,8 @@ K26RlStatus k26rl_episode_writer_open(const char *path,
     FILE *f;
     int fd;
     size_t glen, rlen;
-    uint64_t chunk_payload, plen64;
+    uint64_t chunk_payload, start_payload, end_payload, boundary_size;
+    uint64_t plen64;
     uint32_t i;
     K26RlStatus st = K26RL_E_INTERNAL;
 
@@ -178,15 +133,27 @@ K26RlStatus k26rl_episode_writer_open(const char *path,
     chunk_payload = 16 + (uint64_t)geom->steps_per_chunk *
         (((uint64_t)geom->obs_total + geom->act_total +
           geom->agent_count) * 8 + 12);
-    if (chunk_payload > UINT32_MAX)
+    /* The boundary scratch holds one frame image, sized for the
+     * larger of an episode-start carrying dr_max pairs and an
+     * episode-end, so starts and ends build in place and allocate
+     * nothing. */
+    start_payload = 16 + (uint64_t)geom->obs_total * 8 +
+        (uint64_t)geom->dr_max * 12;
+    end_payload = 20 + (uint64_t)geom->agent_count * 8;
+    if (chunk_payload > UINT32_MAX || start_payload > UINT32_MAX ||
+        end_payload > UINT32_MAX)
         return K26RL_E_GEOMETRY;
+    boundary_size = K26RL_EPISODE_FRAME_HEADER_SIZE +
+        (start_payload > end_payload ? start_payload : end_payload);
 
     /* O_EXCL makes creation the existence check: nothing truncates a
-     * completed run and no race window separates test from create. */
-    fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+     * completed run and no race window separates test from create.
+     * Read-write because close re-reads the file to assemble the
+     * index. */
+    fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0644);
     if (fd < 0)
         return errno == EEXIST ? K26RL_E_OUTPUT_EXISTS : K26RL_E_INTERNAL;
-    f = fdopen(fd, "wb");
+    f = fdopen(fd, "w+b");
     if (!f) {
         close(fd);
         remove(path);
@@ -201,13 +168,14 @@ K26RlStatus k26rl_episode_writer_open(const char *path,
     w->rekey_ordinal = rekey_ordinal;
     w->ncols8 = (uint64_t)geom->obs_total + geom->act_total +
                 geom->agent_count;
-    w->chunk_buf_size = K26RL_EPISODE_FRAME_HEADER_SIZE + chunk_payload;
     w->envs = calloc(geom->n_envs, sizeof *w->envs);
     if (!w->envs)
         goto fail;
     for (i = 0; i < geom->n_envs; i++) {
-        w->envs[i].buf = malloc((size_t)w->chunk_buf_size);
-        if (!w->envs[i].buf)
+        w->envs[i].buf = malloc((size_t)K26RL_EPISODE_FRAME_HEADER_SIZE +
+                                (size_t)chunk_payload);
+        w->envs[i].boundary = malloc((size_t)boundary_size);
+        if (!w->envs[i].buf || !w->envs[i].boundary)
             goto fail;
     }
 
@@ -259,8 +227,10 @@ fail:
      * path this failed call itself created. */
     if (w) {
         if (w->envs) {
-            for (i = 0; i < geom->n_envs; i++)
+            for (i = 0; i < geom->n_envs; i++) {
                 free(w->envs[i].buf);
+                free(w->envs[i].boundary);
+            }
             free(w->envs);
         }
         free(w);
@@ -278,8 +248,7 @@ K26RlStatus k26rl_episode_writer_start(K26RlEpisodeWriter *w,
                                        uint32_t dr_count)
 {
     EnvState_ *e;
-    uint8_t *frame, *p;
-    uint64_t plen64, off = 0;
+    uint8_t *p;
     uint32_t plen, j;
     K26RlStatus st;
 
@@ -291,18 +260,20 @@ K26RlStatus k26rl_episode_writer_start(K26RlEpisodeWriter *w,
         return K26RL_E_NULL;
     if (env >= w->geom.n_envs)
         return K26RL_E_GEOMETRY;
+    /* The boundary scratch was sized for dr_max pairs at open; a
+     * larger record cannot be built without allocating, so it is
+     * refused as a geometry disagreement. */
+    if (dr_count > w->geom.dr_max)
+        return K26RL_E_GEOMETRY;
     e = &w->envs[env];
     if (e->open)
         return K26RL_E_OUTPUT_TIMING;
 
-    plen64 = 12 + (uint64_t)w->geom.obs_total * 8 + 4 + (uint64_t)dr_count * 12;
-    if (plen64 > UINT32_MAX)
-        return K26RL_E_GEOMETRY;
-    plen = (uint32_t)plen64;
-    frame = malloc((size_t)K26RL_EPISODE_FRAME_HEADER_SIZE + plen);
-    if (!frame)
-        return K26RL_E_INTERNAL;
-    p = frame + K26RL_EPISODE_FRAME_HEADER_SIZE;
+    /* Open bounded the dr_max payload to a uint32 and dr_count is
+     * within dr_max, so this cannot overflow. */
+    plen = (uint32_t)(16 + (uint64_t)w->geom.obs_total * 8 +
+                      (uint64_t)dr_count * 12);
+    p = e->boundary + K26RL_EPISODE_FRAME_HEADER_SIZE;
     k26rl_put_u32_(p, w->rekey_ordinal);
     k26rl_put_u32_(p + 4, env);
     k26rl_put_u32_(p + 8, episode);
@@ -315,8 +286,7 @@ K26RlStatus k26rl_episode_writer_start(K26RlEpisodeWriter *w,
         k26rl_put_u32_(p, dr_tags[j]);
         k26rl_put_f64_(p + 4, dr_values[j]);
     }
-    st = emit_buf_(w, K26RL_FRAME_EPISODE_START, frame, plen, &off);
-    free(frame);
+    st = emit_buf_(w, K26RL_FRAME_EPISODE_START, e->boundary, plen, NULL);
     if (st != K26RL_OK)
         return st;
 
@@ -326,8 +296,6 @@ K26RlStatus k26rl_episode_writer_start(K26RlEpisodeWriter *w,
     e->steps_total = 0;
     e->chunk_first = 0;
     e->chunk_fill = 0;
-    e->chunk_count = 0;
-    e->start_off = off;
     return K26RL_OK;
 }
 
@@ -377,9 +345,7 @@ K26RlStatus k26rl_episode_writer_end(K26RlEpisodeWriter *w, uint32_t env,
                                      const double *terminal_adjustments)
 {
     EnvState_ *e;
-    IndexEntry_ entry;
-    uint8_t *frame, *p;
-    uint64_t off = 0;
+    uint8_t *p;
     uint32_t plen, j;
     K26RlStatus st;
 
@@ -398,10 +364,7 @@ K26RlStatus k26rl_episode_writer_end(K26RlEpisodeWriter *w, uint32_t env,
         return st;
 
     plen = (uint32_t)(20 + (uint64_t)w->geom.agent_count * 8);
-    frame = malloc((size_t)K26RL_EPISODE_FRAME_HEADER_SIZE + plen);
-    if (!frame)
-        return K26RL_E_INTERNAL;
-    p = frame + K26RL_EPISODE_FRAME_HEADER_SIZE;
+    p = e->boundary + K26RL_EPISODE_FRAME_HEADER_SIZE;
     k26rl_put_u32_(p, e->ordinal);
     k26rl_put_u32_(p + 4, env);
     k26rl_put_u32_(p + 8, e->episode);
@@ -411,24 +374,10 @@ K26RlStatus k26rl_episode_writer_end(K26RlEpisodeWriter *w, uint32_t env,
     p += 20;
     for (j = 0; j < w->geom.agent_count; j++, p += 8)
         k26rl_put_f64_(p, terminal_adjustments[j]);
-    st = emit_buf_(w, K26RL_FRAME_EPISODE_END, frame, plen, &off);
-    free(frame);
+    st = emit_buf_(w, K26RL_FRAME_EPISODE_END, e->boundary, plen, NULL);
     if (st != K26RL_OK)
         return st;
 
-    entry.ordinal = e->ordinal;
-    entry.env = env;
-    entry.episode = e->episode;
-    entry.chunk_count = e->chunk_count;
-    entry.start_off = e->start_off;
-    entry.end_off = off;
-    entry.chunk_offs = e->chunk_offs;
-    if (index_append_(w, &entry) != 0)
-        return K26RL_E_INTERNAL;
-    /* The entry owns the chunk offset list now. */
-    e->chunk_offs = NULL;
-    e->chunk_cap = 0;
-    e->chunk_count = 0;
     e->open = 0;
     return K26RL_OK;
 }
@@ -464,9 +413,187 @@ K26RlStatus k26rl_episode_writer_rekey(K26RlEpisodeWriter *w,
     return K26RL_OK;
 }
 
+/* Close-time index assembly. Close is not the hot path: the entry
+ * and offset arrays here grow freely. */
+typedef struct {
+    uint32_t ordinal;
+    uint32_t env;
+    uint32_t episode;
+    uint32_t chunk_count;
+    uint64_t start_off;
+    uint64_t end_off;
+    uint64_t *chunk_offs;
+} IndexEntry_;
+
+typedef struct {
+    int open;
+    uint32_t ordinal;
+    uint32_t episode;
+    uint64_t start_off;
+    uint64_t *chunk_offs;
+    uint32_t chunk_count;
+    uint32_t chunk_cap;
+} Pending_;
+
+static int u64_append_(uint64_t **arr, uint32_t *count, uint32_t *cap,
+                       uint64_t v)
+{
+    if (*count == *cap) {
+        uint32_t ncap = *cap ? *cap * 2 : 8;
+        uint64_t *n = realloc(*arr, (size_t)ncap * sizeof **arr);
+        if (!n)
+            return -1;
+        *arr = n;
+        *cap = ncap;
+    }
+    (*arr)[(*count)++] = v;
+    return 0;
+}
+
+static int index_append_(IndexEntry_ **arr, uint32_t *count, uint32_t *cap,
+                         const IndexEntry_ *e)
+{
+    if (*count == *cap) {
+        uint32_t ncap = *cap ? *cap * 2 : 8;
+        IndexEntry_ *n = realloc(*arr, (size_t)ncap * sizeof *n);
+        if (!n)
+            return -1;
+        *arr = n;
+        *cap = ncap;
+    }
+    (*arr)[(*count)++] = *e;
+    return 0;
+}
+
+static void index_free_(IndexEntry_ *idx, uint32_t count)
+{
+    uint32_t i;
+
+    if (!idx)
+        return;
+    for (i = 0; i < count; i++)
+        free(idx[i].chunk_offs);
+    free(idx);
+}
+
+/* One sequential pass over the frames this writer wrote, collecting
+ * per-episode start, chunk, and end offsets for episodes whose start
+ * and end are both present. The caller flushed the stream and every
+ * byte below w->offset was written by this process moments ago, so
+ * the walk trusts header arithmetic, skips payloads by length, and
+ * reads only the identity prefix of the three episode frame kinds;
+ * any disagreement with what this writer emits is an internal
+ * failure, not a parse decision. */
+static K26RlStatus build_index_(K26RlEpisodeWriter *w, IndexEntry_ **out_idx,
+                                uint32_t *out_count)
+{
+    uint8_t hdr[K26RL_EPISODE_FRAME_HEADER_SIZE];
+    uint8_t pfx[12];
+    Pending_ *pend;
+    IndexEntry_ *idx = NULL;
+    uint32_t idx_count = 0, idx_cap = 0;
+    uint64_t off = 8;
+    uint32_t i;
+    K26RlStatus st = K26RL_OK;
+
+    *out_idx = NULL;
+    *out_count = 0;
+    pend = calloc(w->geom.n_envs, sizeof *pend);
+    if (!pend)
+        return K26RL_E_INTERNAL;
+
+    while (st == K26RL_OK &&
+           off + K26RL_EPISODE_FRAME_HEADER_SIZE <= w->offset) {
+        uint16_t kind;
+        uint32_t plen;
+
+        if (fseeko(w->f, (off_t)off, SEEK_SET) != 0 ||
+            fread(hdr, 1, sizeof hdr, w->f) != sizeof hdr) {
+            st = K26RL_E_INTERNAL;
+            break;
+        }
+        kind = k26rl_get_u16_(hdr + K26RL_FH_OFF_KIND);
+        plen = k26rl_get_u32_(hdr + K26RL_FH_OFF_LENGTH);
+        if (plen > w->offset - off - K26RL_EPISODE_FRAME_HEADER_SIZE) {
+            st = K26RL_E_INTERNAL;
+            break;
+        }
+        if (kind == K26RL_FRAME_EPISODE_START ||
+            kind == K26RL_FRAME_STEP_CHUNK ||
+            kind == K26RL_FRAME_EPISODE_END) {
+            uint32_t env;
+            Pending_ *pe;
+
+            if (plen < sizeof pfx ||
+                fread(pfx, 1, sizeof pfx, w->f) != sizeof pfx) {
+                st = K26RL_E_INTERNAL;
+                break;
+            }
+            env = k26rl_get_u32_(pfx + 4);
+            if (env >= w->geom.n_envs) {
+                st = K26RL_E_INTERNAL;
+                break;
+            }
+            pe = &pend[env];
+            if (kind == K26RL_FRAME_EPISODE_START) {
+                pe->open = 1;
+                pe->ordinal = k26rl_get_u32_(pfx);
+                pe->episode = k26rl_get_u32_(pfx + 8);
+                pe->start_off = off;
+                pe->chunk_count = 0;
+            } else if (kind == K26RL_FRAME_STEP_CHUNK) {
+                if (!pe->open ||
+                    u64_append_(&pe->chunk_offs, &pe->chunk_count,
+                                &pe->chunk_cap, off) != 0) {
+                    st = K26RL_E_INTERNAL;
+                    break;
+                }
+            } else {
+                IndexEntry_ entry;
+
+                if (!pe->open) {
+                    st = K26RL_E_INTERNAL;
+                    break;
+                }
+                entry.ordinal = pe->ordinal;
+                entry.env = env;
+                entry.episode = pe->episode;
+                entry.chunk_count = pe->chunk_count;
+                entry.start_off = pe->start_off;
+                entry.end_off = off;
+                entry.chunk_offs = pe->chunk_offs;
+                if (index_append_(&idx, &idx_count, &idx_cap,
+                                  &entry) != 0) {
+                    st = K26RL_E_INTERNAL;
+                    break;
+                }
+                /* The entry owns the offset list now. */
+                pe->chunk_offs = NULL;
+                pe->chunk_cap = 0;
+                pe->chunk_count = 0;
+                pe->open = 0;
+            }
+        }
+        off += K26RL_EPISODE_FRAME_HEADER_SIZE + (uint64_t)plen;
+    }
+
+    for (i = 0; i < w->geom.n_envs; i++)
+        free(pend[i].chunk_offs);
+    free(pend);
+    if (st != K26RL_OK) {
+        index_free_(idx, idx_count);
+        return st;
+    }
+    *out_idx = idx;
+    *out_count = idx_count;
+    return K26RL_OK;
+}
+
 K26RlStatus k26rl_episode_writer_close(K26RlEpisodeWriter *w)
 {
     K26RlStatus st = K26RL_OK, s2;
+    IndexEntry_ *idx = NULL;
+    uint32_t idx_count = 0;
     uint64_t plen64, idx_off = 0;
     uint32_t i, j;
 
@@ -487,60 +614,71 @@ K26RlStatus k26rl_episode_writer_close(K26RlEpisodeWriter *w)
         }
     }
 
-    plen64 = 4;
-    for (i = 0; i < w->index_count; i++)
-        plen64 += 32 + (uint64_t)w->index[i].chunk_count * 8;
-    if (plen64 > UINT32_MAX) {
-        if (st == K26RL_OK)
+    /* The index pass reads the file back, so buffered output must
+     * reach the file first; after a write failure above w->offset no
+     * longer matches the file, so no index is attempted over it. */
+    if (st == K26RL_OK && fflush(w->f) != 0)
+        st = K26RL_E_INTERNAL;
+    if (st == K26RL_OK)
+        st = build_index_(w, &idx, &idx_count);
+    /* Reposition at the logical end: the pass moved the stream, and
+     * an update stream requires a seek between the reads and the
+     * writes that follow. */
+    if (st == K26RL_OK && fseeko(w->f, (off_t)w->offset, SEEK_SET) != 0)
+        st = K26RL_E_INTERNAL;
+
+    if (st == K26RL_OK) {
+        plen64 = 4;
+        for (i = 0; i < idx_count; i++)
+            plen64 += 32 + (uint64_t)idx[i].chunk_count * 8;
+        if (plen64 > UINT32_MAX) {
             st = K26RL_E_INTERNAL;
-    } else {
-        uint32_t plen = (uint32_t)plen64;
-        uint8_t *frame =
-            malloc((size_t)K26RL_EPISODE_FRAME_HEADER_SIZE + plen);
-        if (!frame) {
-            if (st == K26RL_OK)
-                st = K26RL_E_INTERNAL;
         } else {
-            uint8_t *p = frame + K26RL_EPISODE_FRAME_HEADER_SIZE;
-            k26rl_put_u32_(p, w->index_count);
-            p += 4;
-            for (i = 0; i < w->index_count; i++) {
-                const IndexEntry_ *e = &w->index[i];
-                k26rl_put_u32_(p, e->ordinal);
-                k26rl_put_u32_(p + 4, e->env);
-                k26rl_put_u32_(p + 8, e->episode);
-                k26rl_put_u32_(p + 12, e->chunk_count);
-                k26rl_put_u64_(p + 16, e->start_off);
-                p += 24;
-                for (j = 0; j < e->chunk_count; j++, p += 8)
-                    k26rl_put_u64_(p, e->chunk_offs[j]);
-                k26rl_put_u64_(p, e->end_off);
-                p += 8;
+            uint32_t plen = (uint32_t)plen64;
+            uint8_t *frame =
+                malloc((size_t)K26RL_EPISODE_FRAME_HEADER_SIZE + plen);
+            if (!frame) {
+                st = K26RL_E_INTERNAL;
+            } else {
+                uint8_t *p = frame + K26RL_EPISODE_FRAME_HEADER_SIZE;
+                k26rl_put_u32_(p, idx_count);
+                p += 4;
+                for (i = 0; i < idx_count; i++) {
+                    const IndexEntry_ *e = &idx[i];
+                    k26rl_put_u32_(p, e->ordinal);
+                    k26rl_put_u32_(p + 4, e->env);
+                    k26rl_put_u32_(p + 8, e->episode);
+                    k26rl_put_u32_(p + 12, e->chunk_count);
+                    k26rl_put_u64_(p + 16, e->start_off);
+                    p += 24;
+                    for (j = 0; j < e->chunk_count; j++, p += 8)
+                        k26rl_put_u64_(p, e->chunk_offs[j]);
+                    k26rl_put_u64_(p, e->end_off);
+                    p += 8;
+                }
+                s2 = emit_buf_(w, K26RL_FRAME_INDEX, frame, plen, &idx_off);
+                free(frame);
+                if (s2 == K26RL_OK) {
+                    uint8_t tr[16];
+                    memcpy(tr, K26RL_EPISODE_TRAILER, 8);
+                    k26rl_put_u64_(tr + 8, idx_off);
+                    if (fwrite(tr, 1, sizeof tr, w->f) != sizeof tr)
+                        s2 = K26RL_E_INTERNAL;
+                }
+                if (s2 != K26RL_OK)
+                    st = s2;
             }
-            s2 = emit_buf_(w, K26RL_FRAME_INDEX, frame, plen, &idx_off);
-            free(frame);
-            if (s2 == K26RL_OK) {
-                uint8_t tr[16];
-                memcpy(tr, K26RL_EPISODE_TRAILER, 8);
-                k26rl_put_u64_(tr + 8, idx_off);
-                if (fwrite(tr, 1, sizeof tr, w->f) != sizeof tr)
-                    s2 = K26RL_E_INTERNAL;
-            }
-            if (s2 != K26RL_OK && st == K26RL_OK)
-                st = s2;
         }
     }
 
     if (fclose(w->f) != 0 && st == K26RL_OK)
         st = K26RL_E_INTERNAL;
+    index_free_(idx, idx_count);
     for (i = 0; i < w->geom.n_envs; i++) {
         free(w->envs[i].buf);
-        free(w->envs[i].chunk_offs);
+        free(w->envs[i].boundary);
     }
     free(w->envs);
-    for (i = 0; i < w->index_count; i++)
-        free(w->index[i].chunk_offs);
-    free(w->index);
     free(w);
     return st;
 }

@@ -79,13 +79,19 @@ uint32_t k26rl_crc32c(uint32_t crc_in, const void *data, uint64_t len);
 /* Fixed per-file geometry, stated by the producer at open. The spec
  * blob is embedded verbatim in the file header so a reader needs no
  * side channel, but the writer takes the numbers it sizes buffers by
- * explicitly. */
+ * explicitly. Chunk and boundary buffers are per environment and
+ * sized from these numbers at open, so resident memory scales as
+ * n_envs times the chunk frame; the producer chooses steps_per_chunk
+ * with that in mind. */
 typedef struct {
     uint32_t n_envs;
     uint32_t agent_count;
     uint32_t obs_total;        /* doubles per environment */
     uint32_t act_total;        /* doubles per environment */
     uint32_t steps_per_chunk;  /* any positive value; 1024 is the default */
+    uint32_t dr_max;           /* most domain-randomisation pairs any
+                                * episode-start carries; starts refuse
+                                * above it */
 } K26RlEpisodeGeom;
 
 /* Writer ----------------------------------------------------------- */
@@ -96,8 +102,13 @@ typedef struct K26RlEpisodeWriter K26RlEpisodeWriter;
  * K26RL_E_OUTPUT_EXISTS: nothing truncates a completed run and no
  * file carries two file-headers. Writes the file-header frame
  * recording the governing seed and rekey ordinal in force at enable,
- * the geometry, both version strings, and the spec blob verbatim. All
- * per-environment chunk buffers are allocated here, once. */
+ * the geometry, both version strings, and the spec blob verbatim.
+ * Every buffer the writer will ever touch between open and close is
+ * allocated here, once: the per-environment chunk buffers and the
+ * per-environment boundary scratch, so steps, episode starts, and
+ * episode ends allocate nothing. The index is assembled at close by
+ * one pass over the file the writer wrote, so no per-chunk or
+ * per-episode bookkeeping grows while running. */
 K26RlStatus k26rl_episode_writer_open(const char *path,
                                       const K26RlEpisodeGeom *geom,
                                       uint64_t governing_seed,
@@ -123,7 +134,9 @@ K26RlStatus k26rl_episode_writer_start(K26RlEpisodeWriter *w,
  * hot path: copies into the preallocated chunk buffer only; a full
  * chunk flushes as one buffered write. Observations are the
  * post-step values; a faulted episode's final record carries what the
- * format fixes for it and is appended through this same call. */
+ * format fixes for it and is appended through this same call. Flag
+ * words are recorded as given: bit 3 and every higher bit are the
+ * producer's to keep zero, per the format. */
 K26RlStatus k26rl_episode_writer_step(K26RlEpisodeWriter *w, uint32_t env,
                                       const double *obs, const double *act,
                                       const double *rewards, uint32_t flags,
@@ -168,6 +181,10 @@ typedef struct {
     uint32_t act_total;
     uint64_t readable_bytes;
     uint32_t episode_count;     /* complete episodes in the index */
+    uint32_t unindexed_episode_starts; /* episode-start frames in the
+                                * readable prefix with no indexed
+                                * episode: a producer closed with an
+                                * episode open, or the tail was cut */
     uint8_t  clean_close;
 } K26RlEpisodeInfo;
 

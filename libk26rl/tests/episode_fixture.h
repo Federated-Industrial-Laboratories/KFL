@@ -229,6 +229,7 @@ static inline void fix_write_(const Fixture *fx, const char *path)
     g.obs_total = FIX_OBS;
     g.act_total = FIX_ACT;
     g.steps_per_chunk = FIX_CHUNK;
+    g.dr_max = FIX_MAX_DR;
     ASSERT(k26rl_episode_writer_open(path, &g, FIX_SEED, 0, "3.2",
                                      "kfl-rl-0.1", fx->spec, fx->spec_len,
                                      &w) == K26RL_OK);

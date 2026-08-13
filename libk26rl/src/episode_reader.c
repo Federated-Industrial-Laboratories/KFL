@@ -348,8 +348,9 @@ static int pending_chunk_append_(Pending_ *pe, uint64_t off)
 }
 
 /* The sequential pass: validate every frame, note where the readable
- * prefix ends, collect the rekey seed table, and reconstruct an index
- * from the episode frames actually seen. Only episodes with both a
+ * prefix ends, collect the rekey seed table, reconstruct an index
+ * from the episode frames actually seen, and count the episode-start
+ * frames left without an indexed episode. Only episodes with both a
  * start and a matching end whose chunk arithmetic adds up are
  * indexed, so every indexed episode is fully decodable. */
 static K26RlStatus scan_(K26RlEpisodeReader *r, Scratch_ *s,
@@ -358,6 +359,7 @@ static K26RlStatus scan_(K26RlEpisodeReader *r, Scratch_ *s,
     uint64_t off = 8;
     Pending_ *pend = NULL;
     uint32_t n_pend = 0;
+    uint32_t starts_seen = 0;
     uint32_t i;
     K26RlStatus st = K26RL_OK;
 
@@ -384,6 +386,7 @@ static K26RlStatus scan_(K26RlEpisodeReader *r, Scratch_ *s,
             }
         } else if (kind == K26RL_FRAME_EPISODE_START) {
             StartView_ v;
+            starts_seen++;
             if (r->have_header && parse_start_(r, s->p, plen, &v) == 0 &&
                 v.env < n_pend) {
                 Pending_ *pe = &pend[v.env];
@@ -455,6 +458,11 @@ static K26RlStatus scan_(K26RlEpisodeReader *r, Scratch_ *s,
         off += K26RL_EPISODE_FRAME_HEADER_SIZE + (uint64_t)plen;
     }
     *out_end = off;
+    /* Every reconstructed episode consumed exactly one of the starts
+     * counted above, so the difference is the starts with no indexed
+     * episode: a producer closed with the episode open, or the tail
+     * was cut. */
+    r->info.unindexed_episode_starts = starts_seen - r->ep_count;
 out:
     if (pend) {
         for (i = 0; i < n_pend; i++)

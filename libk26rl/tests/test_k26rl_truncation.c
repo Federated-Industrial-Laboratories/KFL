@@ -3,9 +3,12 @@
  * Acceptance: a file cut at any frame boundary, mid-header, or
  * mid-payload still opens, reports clean_close 0 with readable_bytes
  * at the last complete frame, and yields exactly the episodes whose
- * frames are complete; a corrupted payload byte ends the readable
- * prefix before its frame; an unknown frame kind with a valid
- * checksum is skipped by length on the sequential pass. */
+ * frames are complete; every episode-start in the readable prefix
+ * without a complete episode is reported as unindexed, so a cut that
+ * removes an episode-end surfaces a nonzero count; a corrupted
+ * payload byte ends the readable prefix before its frame; an unknown
+ * frame kind with a valid checksum is skipped by length on the
+ * sequential pass. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -102,6 +105,19 @@ static uint32_t complete_at_(const TFrame_ *fr, uint32_t nf, uint64_t c)
     return n;
 }
 
+/* Episode-start frames wholly inside the prefix at cut c; the starts
+ * beyond the complete episodes are what the reopen must report as
+ * unindexed. */
+static uint32_t starts_at_(const TFrame_ *fr, uint32_t nf, uint64_t c)
+{
+    uint32_t i, n = 0;
+
+    for (i = 0; i < nf; i++)
+        if (fr[i].kind == K26RL_FRAME_EPISODE_START && fr[i].end <= c)
+            n++;
+    return n;
+}
+
 static uint64_t boundary_at_(const TFrame_ *fr, uint32_t nf, uint64_t c)
 {
     uint64_t b = 8;
@@ -116,7 +132,8 @@ static uint64_t boundary_at_(const TFrame_ *fr, uint32_t nf, uint64_t c)
 /* Open a cut or modified file and check the reported prefix and the
  * decodable episode set against expectation. */
 static void check_prefix_(const Fixture *fx, const char *path,
-                          uint64_t want_readable, uint32_t want_eps)
+                          uint64_t want_readable, uint32_t want_eps,
+                          uint32_t want_unindexed)
 {
     K26RlEpisodeReader *r = NULL;
     K26RlEpisodeInfo info;
@@ -128,6 +145,7 @@ static void check_prefix_(const Fixture *fx, const char *path,
     ASSERT(info.clean_close == 0);
     ASSERT(info.readable_bytes == want_readable);
     ASSERT(info.episode_count == want_eps);
+    ASSERT(info.unindexed_episode_starts == want_unindexed);
     for (i = 0; i < want_eps; i++) {
         ASSERT(k26rl_episode_reader_at(r, i, &o, &e, &p) == K26RL_OK);
         ASSERT(o == fix_order_[i][0]);
@@ -185,21 +203,44 @@ int main(void)
     for (i = 0; i <= nf; i++) {
         c = (i == 0) ? 8 : fr[i - 1].end;
         write_file_(cut, buf, c);
-        check_prefix_(&fx, cut, c, complete_at_(fr, nf, c));
+        check_prefix_(&fx, cut, c, complete_at_(fr, nf, c),
+                      starts_at_(fr, nf, c) - complete_at_(fr, nf, c));
+    }
+
+    /* A cut that removes the episode-ends leaves both live starts
+     * without an indexed episode; the reopen must surface a nonzero
+     * unindexed count. */
+    {
+        K26RlEpisodeReader *r = NULL;
+        K26RlEpisodeInfo info;
+
+        c = fr[6].start;
+        write_file_(cut, buf, c);
+        ASSERT(k26rl_episode_reader_open(cut, &r) == K26RL_OK);
+        ASSERT(k26rl_episode_reader_info(r, &info) == K26RL_OK);
+        ASSERT(info.episode_count == 0);
+        ASSERT(info.unindexed_episode_starts == 2);
+        k26rl_episode_reader_close(r);
     }
 
     /* A mid-header cut: the readable prefix ends at the previous
      * frame boundary. */
     c = fr[4].start + 10;
     write_file_(cut, buf, c);
-    check_prefix_(&fx, cut, boundary_at_(fr, nf, c),
-                  complete_at_(fr, nf, boundary_at_(fr, nf, c)));
+    {
+        uint64_t b = boundary_at_(fr, nf, c);
+        check_prefix_(&fx, cut, b, complete_at_(fr, nf, b),
+                      starts_at_(fr, nf, b) - complete_at_(fr, nf, b));
+    }
 
     /* A mid-payload cut. */
     c = fr[3].start + 24 + fr[3].plen / 2;
     write_file_(cut, buf, c);
-    check_prefix_(&fx, cut, boundary_at_(fr, nf, c),
-                  complete_at_(fr, nf, boundary_at_(fr, nf, c)));
+    {
+        uint64_t b = boundary_at_(fr, nf, c);
+        check_prefix_(&fx, cut, b, complete_at_(fr, nf, b),
+                      starts_at_(fr, nf, b) - complete_at_(fr, nf, b));
+    }
 
     /* One corrupted payload byte in a middle frame of a full copy:
      * the readable prefix ends before that frame even though the
@@ -216,6 +257,8 @@ int main(void)
         b2[fr[8].start + 24] ^= 0x01;
         write_file_(mod, b2, size);
         check_prefix_(&fx, mod, fr[8].start,
+                      complete_at_(fr, nf, fr[8].start),
+                      starts_at_(fr, nf, fr[8].start) -
                       complete_at_(fr, nf, fr[8].start));
         ASSERT(k26rl_episode_reader_open(mod, &r) == K26RL_OK);
         ASSERT(k26rl_episode_reader_seed(r, 0, &seed) == K26RL_OK);
@@ -260,7 +303,7 @@ int main(void)
         memcpy(b3 + fr[8].start + sizeof syn, buf + fr[8].start,
                (size_t)(size - fr[8].start));
         write_file_(mod, b3, nsize);
-        check_prefix_(&fx, mod, nsize - 16, FIX_EP_COUNT);
+        check_prefix_(&fx, mod, nsize - 16, FIX_EP_COUNT, 0);
         ASSERT(k26rl_episode_reader_open(mod, &r) == K26RL_OK);
         ASSERT(k26rl_episode_reader_seed(r, 0, &seed) == K26RL_OK);
         ASSERT(seed == FIX_SEED);

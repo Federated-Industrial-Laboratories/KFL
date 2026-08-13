@@ -2,10 +2,13 @@
  *
  * Acceptance: the writer is byte-deterministic (identical call
  * sequences yield byte-identical files); an existing path is refused;
- * a clean reopen reports the recorded geometry, clean close, and
- * episode count; every decoded value is bitwise identical to what was
- * fed; both rekey ordinals resolve to their seeds; enumeration covers
- * the index and a missing identity refuses. */
+ * a clean reopen reports the recorded geometry, clean close, episode
+ * count, and no unindexed episode starts; every decoded value is
+ * bitwise identical to what was fed; both rekey ordinals resolve to
+ * their seeds; enumeration covers the index and a missing identity
+ * refuses; a writer closed with an episode still open yields a clean
+ * file that leaves that episode out of the index and reports its
+ * start as unindexed. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +22,7 @@
 int main(void)
 {
     Fixture fx;
-    char pa[512], pb[512];
+    char pa[512], pb[512], pc[512];
     uint8_t *ba, *bb;
     uint64_t sa, sb, seed;
     K26RlEpisodeReader *r = NULL;
@@ -53,6 +56,7 @@ int main(void)
         g.obs_total = FIX_OBS;
         g.act_total = FIX_ACT;
         g.steps_per_chunk = FIX_CHUNK;
+        g.dr_max = FIX_MAX_DR;
         ASSERT(k26rl_episode_writer_open(pa, &g, FIX_SEED, 0, "3.2",
                                          "kfl-rl-0.1", fx.spec, fx.spec_len,
                                          &w2) == K26RL_E_OUTPUT_EXISTS);
@@ -72,6 +76,7 @@ int main(void)
     ASSERT(info.act_total == FIX_ACT);
     ASSERT(info.clean_close == 1);
     ASSERT(info.episode_count == FIX_EP_COUNT);
+    ASSERT(info.unindexed_episode_starts == 0);
 
     /* The embedded spec blob is verbatim. */
     ASSERT(k26rl_episode_reader_spec(r, &spec, &spec_len) == K26RL_OK);
@@ -109,6 +114,63 @@ int main(void)
     ASSERT(k26rl_episode_read(r, 2, 0, 0, &d) != K26RL_OK);
 
     k26rl_episode_reader_close(r);
+
+    /* (g) a writer closed with an episode still open: the close is
+     * clean, the unfinished episode stays out of the index, and the
+     * reopen reports its start as unindexed. */
+    {
+        K26RlEpisodeWriter *w = NULL;
+        K26RlEpisodeGeom g;
+        const FixEpisode *e0 = &fx.eps[0];
+
+        fix_path_(pc, sizeof pc, "roundtrip_c.k26epi");
+        remove(pc);
+        g.n_envs = FIX_N_ENVS;
+        g.agent_count = FIX_AGENTS;
+        g.obs_total = FIX_OBS;
+        g.act_total = FIX_ACT;
+        g.steps_per_chunk = FIX_CHUNK;
+        g.dr_max = FIX_MAX_DR;
+        ASSERT(k26rl_episode_writer_open(pc, &g, FIX_SEED, 0, "3.2",
+                                         "kfl-rl-0.1", fx.spec, fx.spec_len,
+                                         &w) == K26RL_OK);
+        /* Env 0 completes two steps and ends; env 1 is left open. */
+        ASSERT(k26rl_episode_writer_start(w, 0, 0, e0->initial_obs,
+                                          e0->dr_tags, e0->dr_values,
+                                          e0->dr_count) == K26RL_OK);
+        ASSERT(k26rl_episode_writer_start(w, 1, 0, e0->initial_obs, NULL,
+                                          NULL, 0) == K26RL_OK);
+        for (i = 0; i < 2; i++) {
+            ASSERT(k26rl_episode_writer_step(w, 0, &e0->obs[i * FIX_OBS],
+                                             &e0->act[i * FIX_ACT],
+                                             &e0->rewards[i * FIX_AGENTS],
+                                             e0->flags[i],
+                                             e0->applied_dt[i]) == K26RL_OK);
+            ASSERT(k26rl_episode_writer_step(w, 1, &e0->obs[i * FIX_OBS],
+                                             &e0->act[i * FIX_ACT],
+                                             &e0->rewards[i * FIX_AGENTS],
+                                             e0->flags[i],
+                                             e0->applied_dt[i]) == K26RL_OK);
+        }
+        ASSERT(k26rl_episode_writer_end(w, 0, K26RL_END_TERMINATED, 0,
+                                        e0->terminal_adjustments)
+               == K26RL_OK);
+        ASSERT(k26rl_episode_writer_close(w) == K26RL_OK);
+
+        r = NULL;
+        ASSERT(k26rl_episode_reader_open(pc, &r) == K26RL_OK);
+        ASSERT(k26rl_episode_reader_info(r, &info) == K26RL_OK);
+        ASSERT(info.clean_close == 1);
+        ASSERT(info.episode_count == 1);
+        ASSERT(info.unindexed_episode_starts == 1);
+        ASSERT(k26rl_episode_reader_at(r, 0, &o, &e, &p) == K26RL_OK);
+        ASSERT(o == 0 && e == 0 && p == 0);
+        ASSERT(k26rl_episode_reader_at(r, 1, &o, &e, &p) != K26RL_OK);
+        ASSERT(k26rl_episode_read(r, 0, 1, 0, &d) != K26RL_OK);
+        k26rl_episode_reader_close(r);
+        remove(pc);
+    }
+
     remove(pa);
     remove(pb);
     printf("test_k26rl_roundtrip: ok\n");

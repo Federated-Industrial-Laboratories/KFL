@@ -146,6 +146,24 @@ typedef enum {
  * condition stops another environment's stream, and it changes no
  * value in any stream.
  *
+ * The step that ends an episode by termination or truncation
+ * delivers the final observation, the final reward including any
+ * terminal adjustment, and the terminated or truncated bit; the next
+ * episode's initial observation arrives only with the boundary reset
+ * that follows, and that boundary step does not count against the new
+ * episode's horizon.
+ *
+ * n_envs is fixed at create: there is no grow or shrink. Agents are
+ * slices, not handles: the spec declares each agent's observation and
+ * action slices and its reward index, the step call takes one
+ * concatenated action vector for the whole environment, slicing is
+ * the consumer's to do from the spec, and rewards are per-agent
+ * streams. Single-agent is agent count 1 with nothing else different.
+ *
+ * Within one handle's life every (seed, draw coordinate) pair is used
+ * at most once; that is the uniqueness this surface claims.
+ * Cross-handle and cross-process seed hygiene is the caller's.
+ *
  * k26rl_env_reset increments every environment's episode index and
  * resets them all; it re-reads nothing from the outside world.
  * k26rl_env_reset_seeded replaces the key and zeroes all episode
@@ -160,7 +178,12 @@ typedef enum {
  * an episode boundary: after create, immediately after a reset call,
  * and before the first step that follows; any other timing is refused
  * with K26RL_E_OUTPUT_TIMING. A path that already exists is refused
- * with K26RL_E_OUTPUT_EXISTS. Emission is off until enabled.
+ * with K26RL_E_OUTPUT_EXISTS. Emission is off until enabled. Enabling
+ * emits the file-header, which records the key in force and its rekey
+ * ordinal at enable so every ordinal in the file resolves from the
+ * file alone, and one episode-start frame per environment carrying
+ * exactly the current initial observations and randomisation values,
+ * so the file's first episodes are complete, not truncated.
  *
  * Buffer geometry is spec-driven and env-major: actions is
  * n_envs * act_total doubles, out for observations
