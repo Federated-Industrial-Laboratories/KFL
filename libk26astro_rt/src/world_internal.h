@@ -27,14 +27,16 @@ typedef struct {
 /* Per-pair close-encounter session. Allocated on demand in
  * encounter.c as pairs cross into the MERCURIUS transition region.
  *
- * `k_weight` is the Rein-Tamayo 2019 K(y) value computed at detect
- * time:
- *   K = 1 inside y_inner  → force entirely on the IAS15 "near" side
- *   K = 0 outside y_outer → force entirely on the WH "far" side
- *   0 < K < 1 in the transition window (C² smoothstep)
- * The MERCURIUS orchestrator (orbit_step.c) reads this weight in
- * both directions: the WH kick uses (1-K)·F, the IAS15 sub-step
- * uses K·F. */
+ * `k_weight` is the MERCURIUS K(y) value computed at detect time
+ * (encounter.c; the switching design follows Rein, Hernandez,
+ * Tamayo et al. 2019):
+ *   K = 1 inside y_inner: force entirely on the near (drift) side
+ *   K = 0 outside y_outer: force entirely on the far (kick) side
+ *   0 < K < 1 in the transition window (C2 smoothstep)
+ * The orchestrator (orbit_step.c) reads the weight in both
+ * directions through k26astro_grav_accel_total: the far half-kicks
+ * apply (1-K) times the pair force, the IAS15 drift applies K times
+ * it plus the central pairs at full weight. */
 typedef struct K26AstroEncounter {
     int       i, j;            /* body indices, i < j */
     double    y_last;          /* last r_ij / hill_radius value */

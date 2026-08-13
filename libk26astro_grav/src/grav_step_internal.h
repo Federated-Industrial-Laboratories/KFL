@@ -41,9 +41,10 @@ int k26astro_grav_wh_carry_ensure(K26AstroGravState *state);
 
 /* MERCURIUS pair-weight lookup (force_direct.c). Returns the K
  * weight recorded for pair (i, j) in either index order, or 0.0 when
- * the pair is not in the list. Shared between the direct-force pair
- * loop and the Wisdom-Holman interaction kick so both consult the
- * split context with identical arithmetic. */
+ * the pair is not in the list. Both weighted pair loops in
+ * force_direct.c resolve weights through it; it stays visible here
+ * so in-tree diagnostics consult the split context with identical
+ * arithmetic. */
 double k26_grav_mercurius_pair_weight(const K26AstroPairWeight *weights,
                                        int n_weights, int i, int j);
 

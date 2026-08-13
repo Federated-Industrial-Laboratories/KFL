@@ -59,10 +59,11 @@ void k26astro_grav_force_direct_softened(const K26AstroGravView *view,
  * future perturbation registration shows up automatically.
  *
  * If state->mercurius is non-NULL, the direct-N² pair loop applies
- * the per-pair K weight specified in the context (see
- * mercurius.h). Perturbations are NOT weighted (J2/SRP/GR are
- * additive corrections that don't participate in the MERCURIUS
- * splitting). */
+ * the per-pair K weight specified in the context
+ * (K26AstroMercuriusContext below). Perturbations are never
+ * K-weighted: under an active split context they contribute to the
+ * FAR field only, and the NEAR field runs none (the rule stated at
+ * the split in accel_total, force_direct.c). */
 void k26astro_grav_accel_total(const K26AstroGravState *state,
                                 K26V3 *accel_out);
 
@@ -91,16 +92,21 @@ typedef enum {
  * mutate it.
  *
  * `central_plus1`: index + 1 of the body whose pair forces belong to
- * the base integrator's central drift rather than to the kick's pair
- * sum (the Wisdom-Holman Kepler primary). Pairs containing that body
- * contribute zero in FAR mode (the drift already carries them) and
- * full weight in NEAR mode (the near integrator replaces the drift,
- * so it must carry the central attraction itself). 0 means no such
- * body: every pair is weighted by its K entry alone, with central
- * pairs staying in FAR at full weight (the Verlet-style bases, where
- * all forces live in the pair sum). Encoded plus-one so a designated
+ * the split's inner (drift) integrator rather than to the far kick's
+ * pair sum. Pairs containing that body contribute zero in FAR mode
+ * (the drift carries the central attraction) and full weight in NEAR
+ * mode (the near integrator owns it outright). The orchestrator
+ * (libk26astro_rt orbit_step.c) sets this to the detector's central
+ * body on every admitted base. 0 means no such body: every pair is
+ * weighted by its K entry alone (the caller-side decomposition
+ * primitive below, and tests). Encoded plus-one so a designated
  * initializer that omits the field keeps the no-drift-central
- * behaviour. */
+ * behaviour.
+ *
+ * Layout note: `central_plus1` was appended to this struct in
+ * libk26astro_grav 0.4.2 (the struct grew by one int). Contexts are
+ * caller-built for the duration of one step and never stored, so
+ * the change is a rebuild concern, not a data-migration one. */
 struct K26AstroMercuriusContext {
     K26AstroMercuriusMode      mode;
     const K26AstroPairWeight  *pair_weights;

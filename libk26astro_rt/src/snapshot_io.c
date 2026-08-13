@@ -24,6 +24,10 @@
  *   i32 ephem_naif_id;
  *   u8 on_rails;
  *   i32 parent_body_idx;
+ *
+ * After the last body record, when header flag bit 2 is set: the
+ * MERCURIUS transition-window trailer, two doubles (y_inner,
+ * y_outer). Compatibility statement in k26astro_rt/snapshot.h.
  */
 #include "k26astro_rt/snapshot.h"
 #include "world_internal.h"
@@ -265,6 +269,9 @@ int k26astro_world_snapshot_save(const K26AstroWorld *world, const char *path)
     uint32_t flags = 0;
     if (world->coord_mode == K26ASTRO_COORDS_Q64_64) flags |= K26ASTRO_SNAPSHOT_FLAG_Q64_64;
     if (world->mode       == K26ASTRO_MODE_FAST)     flags |= K26ASTRO_SNAPSHOT_FLAG_FAST_MODE;
+    /* The MERCURIUS window trailer is always written; the flag bit
+     * is what tells a reader it is there (snapshot.h layout note). */
+    flags |= K26ASTRO_SNAPSHOT_FLAG_MERCURIUS_WINDOW;
     if (k26astro_snap_write_u32(f, flags)) { fclose(f); return -K26ASTRO_RT_E_BAD_ARG; }
     if (k26astro_snap_write_u32(f, (uint32_t)world->grav.n_bodies)) { fclose(f); return -K26ASTRO_RT_E_BAD_ARG; }
 
@@ -302,6 +309,15 @@ int k26astro_world_snapshot_save(const K26AstroWorld *world, const char *path)
             fclose(f);
             return -K26ASTRO_RT_E_BAD_ARG;
         }
+    }
+
+    /* MERCURIUS window trailer (flag bit 2 in the header). Without
+     * it a round trip silently reset a custom transition window to
+     * the construction defaults. */
+    if (k26astro_snap_write_dbl(f, world->mercurius_hill_factor) ||
+        k26astro_snap_write_dbl(f, world->mercurius_outer_factor)) {
+        fclose(f);
+        return -K26ASTRO_RT_E_BAD_ARG;
     }
 
     if (fclose(f) != 0) return -K26ASTRO_RT_E_BAD_ARG;
@@ -372,6 +388,23 @@ K26AstroWorld *k26astro_world_snapshot_load(const char *path)
             return NULL;
         }
         if (k26astro_world_add_body(world, b) < 0) {
+            k26astro_world_destroy(world);
+            fclose(f);
+            return NULL;
+        }
+    }
+
+    /* MERCURIUS window trailer, present only when the header flag
+     * says so; files written before the flag existed load with the
+     * construction defaults, as they always did. A file that
+     * declares the trailer and then lacks it, or carries a window
+     * the setter would reject, is corrupt. */
+    if (flags & K26ASTRO_SNAPSHOT_FLAG_MERCURIUS_WINDOW) {
+        double y_inner, y_outer;
+        if (k26astro_snap_read_dbl(f, &y_inner, swap) ||
+            k26astro_snap_read_dbl(f, &y_outer, swap) ||
+            k26astro_world_set_mercurius_factors(world, y_inner,
+                                                 y_outer) != K26ASTRO_RT_OK) {
             k26astro_world_destroy(world);
             fclose(f);
             return NULL;

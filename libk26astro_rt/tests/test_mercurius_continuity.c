@@ -15,7 +15,10 @@
  *     discontinuity in (x_after_step - x_before_step) as K(y)
  *     transitions smoothly through the window.
  *
- * Reference: Rein & Tamayo 2019 §3 eq. 12-14. */
+ * Reference: Rein, Hernandez, Tamayo et al. (2019), MNRAS
+ * 485(4):5490-5497, for the hybrid switching design (section 2);
+ * the decomposition identity and the K endpoints are this tree's
+ * own force-split contract (k26astro_grav/forces.h). */
 #include "k26astro_rt/world.h"
 #include "k26astro_body/body.h"
 #include "k26astro_grav/grav.h"

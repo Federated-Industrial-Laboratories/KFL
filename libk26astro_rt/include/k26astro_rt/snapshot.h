@@ -19,6 +19,15 @@
  *   uint16_t flags;       reserved
  *   <K26AstroBody fields serialised one at a time>
  *
+ * Optional trailer, keyed by header flag bit 2
+ * (K26ASTRO_SNAPSHOT_FLAG_MERCURIUS_WINDOW): two doubles after the
+ * last body record, the MERCURIUS transition window y_inner then
+ * y_outer. The addition is backward and forward compatible within
+ * version 1: a reader that predates the flag reads exactly the
+ * records it knows and ignores both the bit and the trailing
+ * bytes (the window silently defaults, as it always did), and the
+ * current reader takes the defaults when the bit is absent.
+ *
  * Version 1 is the only version v0.1 reads/writes. A v2 reader would
  * dispatch by `version` to a migration routine. */
 #ifndef K26ASTRO_RT_SNAPSHOT_H
@@ -36,8 +45,12 @@ extern "C" {
 #define K26ASTRO_SNAPSHOT_HEADER_BYTES   80
 
 /* Snapshot flags. */
-#define K26ASTRO_SNAPSHOT_FLAG_Q64_64    (1u << 0)
-#define K26ASTRO_SNAPSHOT_FLAG_FAST_MODE (1u << 1)
+#define K26ASTRO_SNAPSHOT_FLAG_Q64_64           (1u << 0)
+#define K26ASTRO_SNAPSHOT_FLAG_FAST_MODE        (1u << 1)
+/* A MERCURIUS transition-window trailer (two doubles: y_inner,
+ * y_outer) follows the last body record. See the layout note
+ * above. */
+#define K26ASTRO_SNAPSHOT_FLAG_MERCURIUS_WINDOW (1u << 2)
 
 /* Write the world's state to `path`. Returns 0 on success or a
  * negative K26ASTRO_RT_E_* code. In PORTABLE mode the output is

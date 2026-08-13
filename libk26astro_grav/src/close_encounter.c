@@ -1,16 +1,21 @@
-/* close_encounter.c — Hill-radius proximity detector.
+/* close_encounter.c - parent-relative Hill-ratio proximity scan.
  *
  * Scans the body array and returns the index of any body whose
- * distance from its parent body's center is within hill_factor × R_Hill.
- * If multiple bodies are simultaneously in close encounter, returns
- * the most-deeply-penetrating one (smallest r / r_Hill ratio).
+ * distance from its parent body's centre is within hill_factor
+ * times r_hill, where r_hill scales the body's CURRENT parent
+ * distance: r_hill = r * cbrt(gm / (3 * gm_parent)). Because the
+ * same r appears in the ratio r / r_hill, the ratio is independent
+ * of the separation: this query classifies by mass ratio alone and
+ * cannot measure approach. It is NOT consumed by the MERCURIUS
+ * handoff orchestration; libk26astro_rt runs its own pairwise
+ * detector (encounter.c there) built on central-relative length
+ * scales. Kept for its API compatibility; new callers wanting a
+ * closeness measure should not use it (the same statement in
+ * k26astro_grav/close_encounter.h).
  *
- * Hill radius approximation: r_Hill ≈ a · ∛(m_secondary / (3 · m_primary)).
- * Here we use the body's CURRENT distance from the parent (not the
- * orbital semi-major axis) — this is the "Hill sphere at this instant"
- * approximation that the MERCURIUS handoff detector wants.
- *
- * Returns -1 if no close encounter, otherwise the body index. */
+ * If multiple bodies register simultaneously, returns the
+ * most-deeply-penetrating one (smallest r / r_hill ratio).
+ * Returns -1 if no body registers, otherwise the body index. */
 #include "k26astro_grav/close_encounter.h"
 #include "k26astro_body/body.h"
 #include "k26astro_core/pos.h"

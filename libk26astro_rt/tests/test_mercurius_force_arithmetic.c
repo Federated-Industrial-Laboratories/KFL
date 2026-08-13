@@ -8,37 +8,60 @@
  *   Gate 1 (field identity): with a genuinely detected encounter
  *     pair, the FAR-context and NEAR-context accelerations sum to
  *     the unsplit acceleration, body by body, for both context
- *     shapes (Verlet: central pairs stay in FAR; WH: central pairs
- *     handed to the drift via central_plus1).
+ *     shapes (central_plus1 = 0, the pure pair-weight shape of the
+ *     caller-side primitive; central_plus1 set, the production
+ *     shape in which the drift owns the central pairs on every
+ *     admitted base).
  *
  *   Gate 2 (detector honesty): the same pair of masses is detected
  *     or not detected by closeness, not by mass ratio alone: a
  *     distant pair does not split, a close pair does, a deep pair
- *     carries K = 1, and the unbound fallback follows its stated
- *     rule (current central-relative distance).
+ *     carries K = 1, the unbound fallback follows its stated rule
+ *     (current central-relative distance), and the mutual Hill
+ *     radius is continuous at the parabolic boundary (the bound
+ *     side's distance cap and the unbound branch agree at escape
+ *     speed).
  *
- *   Gate 3 (WH kick weight consultation): the Wisdom-Holman
- *     interaction kick honours an active split context: a K = 0
- *     entry leaves the step bit-identical to an uncontexted step,
- *     and a K = 1 entry removes exactly the pair's kick.
+ *   Gate 3 (perturbation split): with a user perturbation
+ *     registered, the FAR and NEAR context fields still sum to the
+ *     unsplit total, the perturbation contributes to FAR exactly
+ *     once, and the NEAR field is bit-identical with or without the
+ *     perturbation registered. This is the gate that goes red on a
+ *     perturbation double-count across the passes.
  *
  *   Gate 4 (split-step near-identity): for each admitted base
  *     (Verlet; WH with the largest mass at body 0), a genuinely
  *     splitting trajectory lands on the unsplit high-accuracy IAS15
- *     trajectory of the same configuration within stated bounds,
- *     and bills the same epoch. This is the gate that goes red on
- *     force double-counting (a pass applying full pair force under
- *     an active context), on zero-weighting (a pass dropping its
- *     portion), and on kinetic double-drift (two passes each
- *     advancing positions).
+ *     trajectory of the same configuration within stated per-base
+ *     bounds, and bills the same epoch. This is the gate that goes
+ *     red on force double-counting (a pass applying full pair force
+ *     under an active context), on zero-weighting (a pass dropping
+ *     its portion), on kinetic double-drift (two passes each
+ *     advancing positions), on central-pair ownership swaps (the
+ *     drift must own the central attraction on both bases), and on
+ *     kick asymmetry (both half-kicks at dt/2).
  *
- * Bounds: the near-identity bound (1e-4) sits far above the honest
- * tree's measured metrics (1e-15 to 1e-11 at this configuration)
- * and well below the metrics measured under deliberate mutations of
- * this tree: force double-counting and zero-weighting land between
- * 1e-3 and 1, and the two-full-integrator composition this gate
- * retired shows a position metric near 1 (each pass drifted every
- * position by its velocity, doubling the kinetic advance).
+ *   Gate 5 (mass commit): the committed vehicle mass of a splitting
+ *     substep equals the same base's unsplit commit, on both bases,
+ *     within round-off (the per-base rule stated in orbit_step.c).
+ *
+ *   Gate 6 (split readmission): on a WH base with the largest mass
+ *     not at body 0, the split declines even though an encounter is
+ *     detected, and the trajectory is bit-identical to the unsplit
+ *     WH steps of the same configuration.
+ *
+ * Gate 4 bounds: measured on the honest tree, both bases sit at a
+ * position metric of 8.13e-15 and a velocity metric of 3.09e-12 at
+ * this configuration, and the two bases measure identically (the
+ * split composition is base-independent once the drift owns the
+ * central pairs, so equally tight per-base bounds are themselves
+ * part of the pin: an ownership change degrades both). The bounds
+ * are set roughly 40x above the measurement (position 3e-13,
+ * velocity 1.2e-10), far below the metrics measured under the
+ * mutations this gate must catch: a central-pair ownership swap
+ * lands at a position metric of 2.4e-11, an asymmetric first-order
+ * kick at 4.8e-9, and the retired two-full-integrator composition
+ * at a position metric near 1.
  *
  * Reference: Rein, Hernandez, Tamayo et al. (2019), MNRAS
  * 485(4):5490-5497, "Hybrid Symplectic Integrators for Planetary
@@ -47,8 +70,10 @@
 #include "k26astro_grav/grav.h"
 #include "k26astro_grav/forces.h"
 #include "k26astro_grav/ias15.h"
+#include "k26astro_grav/perturb.h"
 #include "k26astro_body/body.h"
 #include "k26astro_core/pos.h"
+#include "k26astro_vehicle/vehicle.h"
 
 #include "encounter_internal.h"
 
@@ -128,7 +153,10 @@ static void gate1_field_identity_(void)
     k26astro_grav_accel_total(&w->grav, a_full);
 
     for (int shape = 0; shape < 2; shape++) {
-        int central_plus1 = shape;   /* 0 = Verlet shape, 1 = WH shape */
+        /* 0 = pure pair-weight shape (caller-side primitive);
+         * 1 = production shape, drift-owned central pairs
+         *     (central at body 0 in this fixture). */
+        int central_plus1 = shape;
         K26AstroMercuriusContext far_ctx = {
             .mode = K26ASTRO_MERCURIUS_FAR, .pair_weights = &pw,
             .n_pair_weights = 1, .central_plus1 = central_plus1 };
@@ -224,77 +252,141 @@ static void gate2_detector_honesty_(void)
               "fallback deviates from its stated rule");
         k26astro_world_destroy(w);
     }
+    /* Parabolic-boundary continuity: the bound side's length scale
+     * is capped at the current central-relative distance, the same
+     * quantity the unbound branch returns, so the mutual Hill
+     * radius is IDENTICAL just below escape speed and at escape
+     * speed (the rule at hill_length_scale_, encounter.c). Without
+     * the cap the just-below-escape orbit's semi-major axis grows
+     * without bound and a distant near-parabolic pair classifies as
+     * a deep encounter. */
+    {
+        double rh[2] = { 0.0, 0.0 };
+        for (int k = 0; k < 2; k++) {
+            K26AstroWorld *w = pair_world_(1.0e-3, 1.0e13 / AU);
+            K26AstroBody *p2 = k26astro_world_body_at(w, 2);
+            double r2 = AU + 1.0e13;
+            double f  = (k == 0) ? (1.0 - 1.0e-12) : 1.0;
+            p2->vel.y = f * sqrt(2.0 * GM_SUN / r2);
+            rh[k] = k26astro_mercurius_hill_radius(
+                    &w->grav.bodies[1], &w->grav.bodies[2],
+                    &w->grav.bodies[0]);
+            int n_enc = k26astro_mercurius_detect(w);
+            CHECK(n_enc == 0, "distant near-parabolic pair split "
+                  "(f=%.12f, %d encounter(s))", f, n_enc);
+            k26astro_world_destroy(w);
+        }
+        fprintf(stderr, "gate2 parabolic continuity: r_hill just "
+                "below escape %.17g m, at escape %.17g m\n",
+                rh[0], rh[1]);
+        CHECK(rh[0] == rh[1], "r_hill discontinuous at the "
+              "parabolic boundary: %.17g vs %.17g", rh[0], rh[1]);
+    }
 }
 
-/* ---- Gate 3: the WH kick honours the split context -------------- */
-static void gate3_wh_kick_weights_(void)
+/* ---- Gate 3: perturbations split FAR-only, once ----------------- */
+
+static int  pert_calls_;
+
+/* Constant, recognisable non-gravitational push on body 1. Large
+ * against the gate tolerances (the push is about 2e-3 of body 1's
+ * gravitational acceleration; a double-count breaks the field
+ * identity at that scale, ten orders above the 1e-14 bound). */
+static void pert_push_(const K26AstroGravState *s,
+                       const K26AstroGravView *v, K26V3 *accel, void *ctx)
 {
-    K26AstroBody set_a[3], set_b[3], set_c[3];
-    for (int k = 0; k < 3; k++) {
-        set_a[0] = body_("sun", M_SUN, GM_SUN, 0.0, 0.0, -1);
-        set_a[1] = body_("p1", 1.0e-3 * M_SUN, 1.0e-3 * GM_SUN,
-                         AU, sqrt(GM_SUN / AU), 0);
-        set_a[2] = body_("p2", 1.0e-3 * M_SUN, 1.0e-3 * GM_SUN,
-                         1.361 * AU, sqrt(GM_SUN / (1.361 * AU)), 0);
-        if (k == 0) memcpy(set_b, set_a, sizeof set_a);
-        if (k == 1) memcpy(set_c, set_a, sizeof set_a);
+    (void)s; (void)ctx;
+    if (v->n > 1) {
+        accel[1].x += 1.0e-5;
+        accel[1].y += 2.0e-5;
     }
+    pert_calls_++;
+}
 
-    K26AstroGravState sz, sy, sx;
-    k26astro_grav_state_init(&sz, set_a, 3);
-    k26astro_grav_state_init(&sy, set_b, 3);
-    k26astro_grav_state_init(&sx, set_c, 3);
-    k26astro_grav_set_integrator(&sz, K26ASTRO_INTEGRATOR_WH);
-    k26astro_grav_set_integrator(&sy, K26ASTRO_INTEGRATOR_WH);
-    k26astro_grav_set_integrator(&sx, K26ASTRO_INTEGRATOR_WH);
+static void gate3_perturbation_split_(void)
+{
+    K26AstroWorld *w = pair_world_(1.0e-3, 0.361);
+    int n_enc = k26astro_mercurius_detect(w);
+    CHECK(n_enc == 1, "expected 1 encounter, got %d", n_enc);
+    double K = (n_enc == 1) ? w->encounters[0].k_weight : -1.0;
+    CHECK(K > 0.0 && K < 1.0, "K = %.17g not in (0,1)", K);
 
-    double dt = 60.0;
-    K26AstroPairWeight pw0 = { 1, 2, 0.0 };
-    K26AstroPairWeight pw1 = { 1, 2, 1.0 };
-    K26AstroMercuriusContext ctx0 = {
-        .mode = K26ASTRO_MERCURIUS_FAR, .pair_weights = &pw0,
-        .n_pair_weights = 1, .central_plus1 = 1 };
-    K26AstroMercuriusContext ctx1 = {
-        .mode = K26ASTRO_MERCURIUS_FAR, .pair_weights = &pw1,
-        .n_pair_weights = 1, .central_plus1 = 1 };
+    K26AstroPairWeight pw = { w->encounters[0].i, w->encounters[0].j, K };
+    /* The production context shape: the drift owns the central
+     * pairs (orbit_step.c sets central_plus1 on every admitted
+     * base). */
+    int central_plus1 = w->mercurius_central_idx + 1;
+    K26AstroMercuriusContext far_ctx = {
+        .mode = K26ASTRO_MERCURIUS_FAR, .pair_weights = &pw,
+        .n_pair_weights = 1, .central_plus1 = central_plus1 };
+    K26AstroMercuriusContext near_ctx = {
+        .mode = K26ASTRO_MERCURIUS_NEAR, .pair_weights = &pw,
+        .n_pair_weights = 1, .central_plus1 = central_plus1 };
 
-    int rcz = k26astro_grav_step(&sz, dt);
-    sy.mercurius = &ctx0;
-    int rcy = k26astro_grav_step(&sy, dt);
-    sy.mercurius = NULL;
-    sx.mercurius = &ctx1;
-    int rcx = k26astro_grav_step(&sx, dt);
-    sx.mercurius = NULL;
-    CHECK(rcz == 0 && rcy == 0 && rcx == 0,
-          "WH steps rc=%d/%d/%d", rcz, rcy, rcx);
+    /* Context fields before the perturbation exists. */
+    K26V3 a_far0[3], a_near0[3];
+    w->grav.mercurius = &far_ctx;
+    k26astro_grav_accel_total(&w->grav, a_far0);
+    w->grav.mercurius = &near_ctx;
+    k26astro_grav_accel_total(&w->grav, a_near0);
+    w->grav.mercurius = NULL;
 
-    /* K = 0 in FAR mode is weight 1: bit-identical to no context. */
-    int same = 1;
+    int rc = k26astro_grav_register_perturb(&w->grav, pert_push_, NULL);
+    CHECK(rc == 0, "register_perturb rc=%d", rc);
+
+    /* Unsplit total: the perturbation contributes exactly once. */
+    K26V3 a_full[3], a_far1[3], a_near1[3];
+    pert_calls_ = 0;
+    k26astro_grav_accel_total(&w->grav, a_full);
+    CHECK(pert_calls_ == 1, "unsplit total ran the perturbation %d "
+          "times, want 1", pert_calls_);
+
+    /* FAR carries it once; NEAR must not run it at all. */
+    pert_calls_ = 0;
+    w->grav.mercurius = &far_ctx;
+    k26astro_grav_accel_total(&w->grav, a_far1);
+    CHECK(pert_calls_ == 1, "FAR pass ran the perturbation %d times, "
+          "want 1", pert_calls_);
+    pert_calls_ = 0;
+    w->grav.mercurius = &near_ctx;
+    k26astro_grav_accel_total(&w->grav, a_near1);
+    w->grav.mercurius = NULL;
+    CHECK(pert_calls_ == 0, "NEAR pass ran the perturbation %d times, "
+          "want 0", pert_calls_);
+
+    /* Field identity with the perturbation registered. A
+     * double-count across the passes (the perturbation entering
+     * both FAR and NEAR) breaks this at the push's scale. */
+    double worst = 0.0;
     for (int i = 0; i < 3; i++) {
-        if (memcmp(&set_a[i].vel, &set_b[i].vel, sizeof(K26V3)) != 0) same = 0;
-        K26V3 pa = k26astro_pos_to_m_approx(&set_a[i].pos);
-        K26V3 pb = k26astro_pos_to_m_approx(&set_b[i].pos);
-        if (memcmp(&pa, &pb, sizeof(K26V3)) != 0) same = 0;
+        K26V3 sum = { a_far1[i].x + a_near1[i].x,
+                      a_far1[i].y + a_near1[i].y,
+                      a_far1[i].z + a_near1[i].z };
+        double mag = sqrt(a_full[i].x * a_full[i].x
+                        + a_full[i].y * a_full[i].y
+                        + a_full[i].z * a_full[i].z);
+        double resid = v3_dist_(sum, a_full[i]);
+        double rel = (mag > 0.0) ? resid / mag : resid;
+        if (rel > worst) worst = rel;
     }
-    fprintf(stderr, "gate3 K=0 context vs no context: %s\n",
-            same ? "bit-identical" : "DIFFER");
-    CHECK(same, "K=0 far context changed a WH step");
+    fprintf(stderr, "gate3 perturbed field identity: "
+            "max |a_far+a_near-a_full|/|a_full| = %.3e\n", worst);
+    CHECK(worst <= 1.0e-14, "perturbed field identity residual %.3e",
+          worst);
 
-    /* K = 1 in FAR mode removes exactly the pair's kick: p1's
-     * velocity difference across the two steps is the pair kick
-     * dt * G m2 / d^2 to leading order. */
-    double dv = v3_dist_(set_a[1].vel, set_c[1].vel);
-    double d12 = 0.361 * AU;
-    double kick = dt * (1.0e-3 * GM_SUN) / (d12 * d12);
-    fprintf(stderr, "gate3 K=1 pair kick removed: |dv|=%.6e m/s, "
-            "analytic pair kick %.6e m/s\n", dv, kick);
-    CHECK(dv > 0.0, "K=1 far context did not change the step");
-    CHECK(fabs(dv - kick) <= 0.1 * kick,
-          "removed kick %.3e not within 10%% of analytic %.3e", dv, kick);
+    /* The NEAR field is bit-identical with or without the
+     * perturbation registered; FAR gained exactly the push. */
+    CHECK(memcmp(a_near1, a_near0, sizeof a_near0) == 0,
+          "NEAR field changed when a perturbation was registered");
+    double dx = a_far1[1].x - a_far0[1].x;
+    double dy = a_far1[1].y - a_far0[1].y;
+    fprintf(stderr, "gate3 FAR delta on body 1: (%.17g, %.17g), "
+            "push (1e-05, 2e-05)\n", dx, dy);
+    CHECK(fabs(dx - 1.0e-5) <= 1.0e-11 && fabs(dy - 2.0e-5) <= 1.0e-11,
+          "FAR pass does not carry the push once: delta (%.3e, %.3e)",
+          dx, dy);
 
-    k26astro_grav_state_destroy(&sz);
-    k26astro_grav_state_destroy(&sy);
-    k26astro_grav_state_destroy(&sx);
+    k26astro_world_destroy(w);
 }
 
 /* ---- Gate 4: split lands on the unsplit trajectory -------------- */
@@ -305,7 +397,8 @@ static double epoch_s_(K26AstroWorld *w)
     return (double)e.days_since_J2000 * 86400.0 + e.seconds_of_day;
 }
 
-static void gate4_near_identity_(K26AstroIntegrator base, const char *name)
+static void gate4_near_identity_(K26AstroIntegrator base, const char *name,
+                                 double pos_bound, double vel_bound)
 {
     const double dt = 60.0;
     const int    steps = 10;
@@ -384,20 +477,169 @@ static void gate4_near_identity_(K26AstroIntegrator base, const char *name)
     fprintf(stderr, "gate4 %s: pos metric %.3e (err %.3e m over "
             "scale %.3e m), vel metric %.3e (err %.3e over %.3e m/s)\n",
             name, m_pos, err_pos, scale_pos, m_vel, err_vel, scale_vel);
-    CHECK(m_pos <= 1.0e-4, "%s position metric %.3e", name, m_pos);
-    CHECK(m_vel <= 1.0e-4, "%s velocity metric %.3e", name, m_vel);
+    CHECK(m_pos <= pos_bound, "%s position metric %.3e over bound %.1e",
+          name, m_pos, pos_bound);
+    CHECK(m_vel <= vel_bound, "%s velocity metric %.3e over bound %.1e",
+          name, m_vel, vel_bound);
 
     k26astro_world_destroy(a);
     k26astro_world_destroy(b);
+}
+
+/* ---- Gate 5: split and unsplit commit the same vehicle mass ----- */
+
+/* Constant mass flow, added once per perturbation evaluation, the
+ * same channel a propulsion callback uses. */
+static void dotm_pert_(const K26AstroGravState *s,
+                       const K26AstroGravView *v, K26V3 *accel, void *ctx)
+{
+    (void)s; (void)v; (void)accel;
+    k26astro_vehicle_mass_accum_add((K26AstroVehicle *)ctx, -2.5);
+}
+
+/* One 60 s substep on `base` with a 1000 kg craft losing mass at a
+ * constant 2.5 kg/s per evaluation; returns the committed mass
+ * delta. split_on = 0 narrows the transition window so the same
+ * bodies take the base's unsplit step. */
+static double committed_mass_delta_(K26AstroIntegrator base, int split_on,
+                                    const char *name)
+{
+    K26AstroWorld *w = pair_world_(1.0e-3, 0.361);
+    /* A dynamically negligible craft carries the vehicle; its pairs
+     * sit far outside the transition window (y > 10), so the p1-p2
+     * encounter alone drives the split. */
+    k26astro_world_add_body(w, body_("craft", 1.0e3, 6.674e-8,
+                                     3.0 * AU, sqrt(GM_SUN / (3.0 * AU)),
+                                     0));
+    if (!split_on) k26astro_world_set_mercurius_factors(w, 0.05, 0.1);
+    k26astro_grav_set_integrator(k26astro_world_grav(w), base);
+    k26astro_grav_ias15_set_tol(k26astro_world_grav(w), 1.0e-11);
+
+    K26AstroVehicle *v = k26astro_vehicle_new();
+    k26astro_vehicle_bind_body(v, k26astro_world_body_at(w, 3));
+    k26astro_vehicle_set_dry_mass(v, 1000.0);
+    int rc_reg = k26astro_world_register_vehicle(w, v);
+    int rc_pert = k26astro_grav_register_perturb(k26astro_world_grav(w),
+                                                 dotm_pert_, v);
+    CHECK(rc_reg == 0 && rc_pert == 0,
+          "%s: vehicle/perturb registration rc=%d/%d",
+          name, rc_reg, rc_pert);
+
+    int rc = k26astro_world_step_exact(w, 60.0);
+    CHECK(rc == 0, "%s: step rc=%d", name, rc);
+    CHECK(w->n_encounters == (split_on ? 1 : 0),
+          "%s: %d encounters, want %d", name, w->n_encounters,
+          split_on ? 1 : 0);
+
+    double dm = k26astro_vehicle_mass_now(v) - 1000.0;
+    k26astro_world_destroy(w);
+    k26astro_vehicle_destroy(v);
+    return dm;
+}
+
+static void gate5_mass_commit_(void)
+{
+    struct { K26AstroIntegrator base; const char *name; } cases[2] = {
+        { K26ASTRO_INTEGRATOR_VERLET, "verlet-base" },
+        { K26ASTRO_INTEGRATOR_WH,     "wh-base" },
+    };
+    for (int c = 0; c < 2; c++) {
+        double dm_split   = committed_mass_delta_(cases[c].base, 1,
+                                                  cases[c].name);
+        double dm_unsplit = committed_mass_delta_(cases[c].base, 0,
+                                                  cases[c].name);
+        fprintf(stderr, "gate5 %s: committed mass split %.17g kg, "
+                "unsplit %.17g kg\n", cases[c].name, dm_split, dm_unsplit);
+        CHECK(dm_split < 0.0 && dm_unsplit < 0.0,
+              "%s: no mass was committed", cases[c].name);
+        CHECK(fabs(dm_split - dm_unsplit) <= 1.0e-12 * fabs(dm_unsplit),
+              "%s: split commits %.17g kg, unsplit %.17g kg",
+              cases[c].name, dm_split, dm_unsplit);
+    }
+}
+
+/* ---- Gate 6: WH split readmission declines off-primary centrals - */
+static void gate6_readmission_(void)
+{
+    /* Largest mass at body 1. The craft-big pair (bodies 0 and 2)
+     * is a genuine deep encounter (y near 0.7), so the detector
+     * reports it; the WH admission must still decline (the WH
+     * drift's Kepler primary is hard-wired to body 0), and every
+     * step must be bit-identical to the unsplit WH step of the same
+     * configuration (world B, whose narrowed window detects
+     * nothing). */
+    K26AstroWorld *wa = k26astro_world_create(K26ASTRO_MODE_PORTABLE,
+                                              K26ASTRO_COORDS_SECTOR_GRID);
+    K26AstroWorld *wb = k26astro_world_create(K26ASTRO_MODE_PORTABLE,
+                                              K26ASTRO_COORDS_SECTOR_GRID);
+    K26AstroWorld *ws[2] = { wa, wb };
+    for (int k = 0; k < 2; k++) {
+        k26astro_world_add_body(ws[k], body_("craft", 1.0e3, 1.0e-6,
+                                             1.05 * AU,
+                                             sqrt(GM_SUN / (1.05 * AU)), 1));
+        k26astro_world_add_body(ws[k], body_("sun", M_SUN, GM_SUN,
+                                             0.0, 0.0, -1));
+        k26astro_world_add_body(ws[k], body_("big", 1.0e-3 * M_SUN,
+                                             1.0e-3 * GM_SUN,
+                                             AU, sqrt(GM_SUN / AU), 1));
+        k26astro_grav_set_integrator(k26astro_world_grav(ws[k]),
+                                     K26ASTRO_INTEGRATOR_WH);
+    }
+    k26astro_world_set_mercurius_factors(wb, 0.05, 0.1);
+
+    int rc_a = 0, rc_b = 0;
+    for (int s = 0; s < 5; s++) {
+        int r = k26astro_world_step_exact(wa, 60.0);
+        if (r != 0 && rc_a == 0) rc_a = r;
+        r = k26astro_world_step_exact(wb, 60.0);
+        if (r != 0 && rc_b == 0) rc_b = r;
+    }
+    CHECK(rc_a == 0 && rc_b == 0, "gate6 rc=%d/%d", rc_a, rc_b);
+    CHECK(wa->n_encounters == 1,
+          "gate6: %d encounters, want 1 (the pin needs a detected "
+          "encounter)", wa->n_encounters);
+    CHECK(wa->mercurius_central_idx == 1,
+          "gate6: central idx %d, want 1", wa->mercurius_central_idx);
+    CHECK(wb->n_encounters == 0,
+          "gate6 reference: %d encounters, want 0", wb->n_encounters);
+
+    int same = 1;
+    for (int i = 0; i < 3; i++) {
+        K26AstroBody *ba = k26astro_world_body_at(wa, i);
+        K26AstroBody *bb = k26astro_world_body_at(wb, i);
+        if (memcmp(&ba->vel, &bb->vel, sizeof(K26V3)) != 0) same = 0;
+        K26V3 pa = k26astro_pos_to_m_approx(&ba->pos);
+        K26V3 pb = k26astro_pos_to_m_approx(&bb->pos);
+        if (memcmp(&pa, &pb, sizeof(K26V3)) != 0) same = 0;
+    }
+    fprintf(stderr, "gate6 off-primary WH vs unsplit WH: %s "
+            "(encounters %d, central idx %d)\n",
+            same ? "bit-identical" : "DIFFER",
+            wa->n_encounters, wa->mercurius_central_idx);
+    CHECK(same, "off-primary WH world took a split step");
+
+    double ea = epoch_s_(wa), eb = epoch_s_(wb);
+    CHECK(ea == eb, "gate6 epochs differ: %.9f vs %.9f s", ea, eb);
+
+    k26astro_world_destroy(wa);
+    k26astro_world_destroy(wb);
 }
 
 int main(void)
 {
     gate1_field_identity_();
     gate2_detector_honesty_();
-    gate3_wh_kick_weights_();
-    gate4_near_identity_(K26ASTRO_INTEGRATOR_VERLET, "verlet-base");
-    gate4_near_identity_(K26ASTRO_INTEGRATOR_WH, "wh-base");
+    gate3_perturbation_split_();
+    /* Per-base bounds per the file header: both bases measure
+     * pos 8.13e-15 / vel 3.09e-12 here and MUST measure alike (the
+     * composition is base-independent); roughly 40x headroom over
+     * the measurement. */
+    gate4_near_identity_(K26ASTRO_INTEGRATOR_VERLET, "verlet-base",
+                         3.0e-13, 1.2e-10);
+    gate4_near_identity_(K26ASTRO_INTEGRATOR_WH, "wh-base",
+                         3.0e-13, 1.2e-10);
+    gate5_mass_commit_();
+    gate6_readmission_();
     if (failures_ != 0) {
         fprintf(stderr, "test_mercurius_force_arithmetic: %d failure(s)\n",
                 failures_);

@@ -13,10 +13,11 @@
  *   3. Otherwise, one kick-drift-kick composition of the substep's
  *      dt, splitting the acceleration field into
  *        a_far  = (1-K)-weighted encounter pairs + full weight on
- *                 every other kicked pair + perturbations,
- *        a_near = K-weighted encounter pairs (+ the central pairs
- *                 at full weight on a WH base, which owns them in
- *                 the drift; central_plus1 in forces.h),
+ *                 every other non-central pair + perturbations,
+ *        a_near = K-weighted encounter pairs + the central pairs
+ *                 at full weight (the drift owns the central
+ *                 attraction on every admitted base, per the
+ *                 paper's Kepler part; central_plus1 in forces.h),
  *      with a_far + a_near summing to the unsplit total by
  *      construction:
  *        a. Half-kick: v += (dt/2) * a_far at the current
@@ -29,17 +30,24 @@
  *        c. Half-kick: v += (dt/2) * a_far at the drifted
  *           positions. Clear state->mercurius.
  *
- *      This is the paper's operator structure with the encounter
- *      terms integrated inside the drift. The previous revision ran
- *      the base integrator over dt (FAR field) and then IAS15 over
- *      the same dt (NEAR field) as two FULL steps in sequence; the
- *      force weights summed to the identity, but each pass advanced
- *      positions by its own kinetic drift, so every position moved
- *      at twice its velocity on split substeps (measured ratio
- *      2.0000 over one substep). The kick-drift-kick composition
- *      integrates the kinetic term exactly once. The force
- *      arithmetic (split accelerations summing to the unsplit
- *      total, and the split step landing on the single-step
+ *      This is the paper's operator structure: the drift owns the
+ *      central attraction and the encounter terms, the kick carries
+ *      only the (1-K)-weighted pair terms. Two earlier revisions
+ *      departed from it. One ran the base integrator over dt (FAR
+ *      field) and then IAS15 over the same dt (NEAR field) as two
+ *      FULL steps in sequence; the force weights summed to the
+ *      identity, but each pass advanced positions by its own
+ *      kinetic drift, so every position moved at twice its velocity
+ *      on split substeps (measured ratio 2.0000 over one substep).
+ *      The other kept the central pairs in the half-kicks on a
+ *      Verlet base, inverting the paper's operator assignment
+ *      (central attraction impulsive, only the pair term in the
+ *      adaptive drift); that shape measured roughly twice as far
+ *      from a tight reference as not splitting at all. The
+ *      composition here integrates the kinetic term exactly once
+ *      and drifts the central attraction on every admitted base.
+ *      The force arithmetic (split accelerations summing to the
+ *      unsplit total, and the split step landing on the single-step
  *      trajectory) is gated by test_mercurius_force_arithmetic. */
 #include "encounter_internal.h"
 
@@ -105,20 +113,20 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     int n_enc = k26astro_mercurius_detect(world);
 
     K26AstroIntegrator base = world->grav.integrator;
-    /* Split admission. Verlet: always (all its forces live in the
-     * pair sum, so the FAR/NEAR field split covers everything).
-     * Wisdom-Holman: only when the detector's central body is body
-     * 0, the Kepler primary hard-wired into the WH drift
-     * (wisdom_holman.c, mu0 = b[0].gm). The split's field
-     * partition hands the central pairs to the drift side
-     * (central_plus1 below); when the largest mass is not body 0
-     * the detector's exclusion set and the drift's primary disagree
-     * about which pairs those are, so the partition would drop the
-     * largest body's pair forces from one side without the other
-     * picking them up. In that configuration WH takes single
-     * full-force steps, where its primary choice is its own
-     * pre-existing approximation and no split arithmetic depends on
-     * it. IAS15 resolves encounters itself; RK4/RK45 stay whole. */
+    /* Split admission. Verlet: always (it has no hard-wired
+     * primary; the composition below never runs the base
+     * integrator, and the near drift takes the central pairs at
+     * whichever index the detector found). Wisdom-Holman: only when
+     * the detector's central body is body 0, the Kepler primary
+     * hard-wired into the WH drift (wisdom_holman.c,
+     * mu0 = b[0].gm). With the largest mass elsewhere, the base's
+     * own unsplit steps and the split's central-pair partition
+     * would disagree about which body is primary, so WH takes
+     * single full-force steps there, where its primary choice is
+     * its own pre-existing approximation and no split arithmetic
+     * depends on it (pinned bitwise by gate 6 of
+     * test_mercurius_force_arithmetic). IAS15 resolves encounters
+     * itself; RK4/RK45 stay whole. */
     int wh_split_ok = (base == K26ASTRO_INTEGRATOR_WH)
         && (world->mercurius_central_idx == 0);
     int do_split = (n_enc > 0)
@@ -145,7 +153,13 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
     int n_w = 0;
     K26AstroPairWeight *w = build_pair_weights_(world, &n_w);
 
-    int central_plus1 = (base == K26ASTRO_INTEGRATOR_WH) ? 1 : 0;
+    /* The near drift owns the central pairs on every admitted base:
+     * the inner integrator carries the central attraction (the
+     * paper's Kepler part) while the far kick carries only the
+     * (1-K)-weighted pair terms. The detector guarantees
+     * mercurius_central_idx >= 0 whenever n_enc > 0, and the WH
+     * admission above additionally pins it to 0 on that base. */
+    int central_plus1 = world->mercurius_central_idx + 1;
     K26AstroMercuriusContext far_ctx  = {
         .mode = K26ASTRO_MERCURIUS_FAR, .pair_weights = w,
         .n_pair_weights = n_w, .central_plus1 = central_plus1 };
@@ -211,11 +225,20 @@ void k26astro_rt_orbit_step_cb(double dt_s, void *user)
         b[i].vel.z += 0.5 * dt_s * a_far[i].z;
     }
 
-    /* Commit mass once per substep. The far field was evaluated
-     * twice (once per half-kick), so any propulsion dot_m callback
-     * ran twice; committing half the substep's dt keeps the mass
-     * step at one substep's worth of accumulated flow, matching a
-     * single-evaluation unsplit step. The NEAR drift is internal to
-     * IAS15 and runs no user perturbations (accel_total's rule). */
-    commit_vehicle_mass_(world, 0.5 * dt_s);
+    /* Commit mass once per substep, matching what the same base's
+     * unsplit step commits. The split evaluates the far field twice
+     * (once per half-kick), so any propulsion dot_m callback ran
+     * twice; the NEAR drift is internal to IAS15 and runs no user
+     * perturbations (accel_total's rule). Rule, per base: an
+     * unsplit Verlet step evaluates the field once and commits dt,
+     * so the split on a Verlet base commits dt/2 to keep the
+     * committed flow at one evaluation's worth; an unsplit WH step
+     * evaluates the interaction field twice (both half-kicks) and
+     * commits dt, so the split on a WH base commits dt as well.
+     * Gate 5 of test_mercurius_force_arithmetic pins split ==
+     * unsplit committed mass on both bases. */
+    if (base == K26ASTRO_INTEGRATOR_WH)
+        commit_vehicle_mass_(world, dt_s);
+    else
+        commit_vehicle_mass_(world, 0.5 * dt_s);
 }

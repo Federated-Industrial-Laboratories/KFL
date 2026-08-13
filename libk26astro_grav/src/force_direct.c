@@ -143,9 +143,11 @@ void k26astro_grav_force_direct_softened(const K26AstroGravView *view,
 
 /* Look up the K weight for pair (i, j) in the weight list. Linear
  * scan; encounters typically number 0-20 even in dense systems.
- * Returns 0.0 if the pair is not in the encounter list. Shared with
- * the Wisdom-Holman interaction kick (grav_step_internal.h) so every
- * consumer of the split context resolves weights identically. */
+ * Returns 0.0 if the pair is not in the encounter list. Both
+ * weighted pair loops in this file resolve weights through this one
+ * function, and it stays visible in grav_step_internal.h so in-tree
+ * diagnostics consult the split context with identical
+ * arithmetic. */
 double k26_grav_mercurius_pair_weight(const K26AstroPairWeight *weights,
                                        int n_weights, int i, int j)
 {

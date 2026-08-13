@@ -72,7 +72,9 @@ install: $(LIB) $(SHLIB_FULL)
 	install -m644 kfl/k26astro_rt.kflbi \
 	    $(DESTDIR)$(PREFIX)/share/kflc/builtins/k26astro_rt.kflbi
 
-TEST_LINK = $(LIB) \
+# Every archive a test binary links must also be a prerequisite of the
+# link rule, or a rebuilt sibling leaves stale test binaries behind.
+TEST_ARCHIVES = $(LIB) \
             ../libk26astro_vehicle/libk26astro_vehicle.a \
             ../libk26astro_grav/libk26astro_grav.a \
             ../libk26astro_conics/libk26astro_conics.a \
@@ -82,7 +84,9 @@ TEST_LINK = $(LIB) \
             ../libk26astro_core/libk26astro_core.a \
             ../libk26compute/libk26compute.a \
             ../libk26tick/libk26tick.a \
-            ../libk26m3d/libk26m3d.a -lgfortran -lm
+            ../libk26m3d/libk26m3d.a
+
+TEST_LINK = $(TEST_ARCHIVES) -lgfortran -lm
 
 TEST_SRC = $(wildcard tests/test_*.c)
 TEST_BIN = $(TEST_SRC:.c=)
@@ -90,7 +94,7 @@ TEST_BIN = $(TEST_SRC:.c=)
 test: $(LIB) $(TEST_BIN)
 	@for t in $(TEST_BIN); do ./$$t || exit 1; done
 
-tests/test_%: tests/test_%.c $(LIB)
+tests/test_%: tests/test_%.c $(TEST_ARCHIVES)
 	$(CC) $(CFLAGS) -o $@ $< $(TEST_LINK)
 
 clean:

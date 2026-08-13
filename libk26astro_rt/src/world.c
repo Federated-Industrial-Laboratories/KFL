@@ -112,9 +112,11 @@ K26AstroWorld *k26astro_world_create(K26AstroWorldMode  mode,
     world->next_user_id = K26A_FRAME_USER_BASE;
 
     /* MERCURIUS transition-window defaults. The 3.0/5.0 window is
-     * this tree's own choice; the Hill-radius switching criterion
-     * is Rein, Hernandez, Tamayo et al. 2019, MNRAS
-     * 485(4):5490-5497, section 2. */
+     * this tree's own choice; Rein, Hernandez, Tamayo et al. 2019,
+     * MNRAS 485(4):5490-5497, section 3, names "a small multiple of
+     * the mutual Hill radius" as the typical switching distance,
+     * and the smoothstep switching function follows the hybrid
+     * design of the paper's section 2. */
     world->mercurius_hill_factor  = 3.0;
     world->mercurius_outer_factor = 5.0;
     world->mercurius_central_idx  = -1;

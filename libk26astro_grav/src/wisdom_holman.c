@@ -102,21 +102,18 @@ extern void k26astro_perturb_gr_ppn1(const K26AstroGravState *,
  * so e.g. outer-planet kicks contribute to the Sun's barycentric
  * wobble correctly.
  *
- * MERCURIUS split context: when state->mercurius is set, each pair's
- * force is weighted exactly as the direct-force pair loop weights it
- * (force_direct.c): the shared lookup resolves the pair's K, and the
- * kick applies (1-K) in FAR mode or K in NEAR mode. Perturbations
- * participate in FAR only, mirroring accel_total's rule (they are
- * smooth additive corrections that belong with the far dynamics).
- * Without this the split double-counted every encounter pair on a
- * Wisdom-Holman base: the kick applied the full pair force and the
- * near pass added the K-weighted portion on top. */
+ * This kick reads no MERCURIUS split context. The split composition
+ * (libk26astro_rt orbit_step.c) never runs the base integrator on a
+ * splitting substep: it evaluates the far field through
+ * k26astro_grav_accel_total and drifts with IAS15, so the
+ * context-weighted pair arithmetic lives in force_direct.c alone.
+ * An earlier revision weighted this kick by the context as well;
+ * that branch was unreachable from the split path and is removed
+ * rather than kept behind a false causal claim. */
 static void interaction_accel_(const K26AstroGravState *state, K26V3 *accel)
 {
     int n = state->n_bodies;
     const K26AstroBody *b = state->bodies;
-    const K26AstroMercuriusContext *ctx = state->mercurius;
-    int near_mode = (ctx && ctx->mode == K26ASTRO_MERCURIUS_NEAR);
     memset(accel, 0, sizeof(K26V3) * (size_t)n);
 
     /* Inter-body Newtonian (central body excluded; Kepler drift). */
@@ -128,14 +125,6 @@ static void interaction_accel_(const K26AstroGravState *state, K26V3 *accel)
             double inv_r3 = 1.0 / (r2 * r_mag);
             double s_i =  b[j].gm * inv_r3;
             double s_j = -b[i].gm * inv_r3;
-            if (ctx) {
-                double K_ij = k26_grav_mercurius_pair_weight(
-                        ctx->pair_weights, ctx->n_pair_weights, i, j);
-                double w = near_mode ? K_ij : (1.0 - K_ij);
-                if (w == 0.0) continue;
-                s_i *= w;
-                s_j *= w;
-            }
             accel[i].x += s_i * r_ij.x;
             accel[i].y += s_i * r_ij.y;
             accel[i].z += s_i * r_ij.z;
@@ -145,9 +134,7 @@ static void interaction_accel_(const K26AstroGravState *state, K26V3 *accel)
         }
     }
 
-    /* Perturbations (built-in flag-gated + user registry). FAR side
-     * only when a split context is active, as in accel_total. */
-    if (near_mode) return;
+    /* Perturbations (built-in flag-gated + user registry). */
     K26AstroGravView view = k26astro_grav_view(b, n);
     if (state->use_j2)      k26astro_perturb_j2     (state, &view, accel, NULL);
     if (state->use_srp)     k26astro_perturb_srp    (state, &view, accel, NULL);

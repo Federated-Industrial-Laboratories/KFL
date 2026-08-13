@@ -37,19 +37,26 @@ double k26astro_mercurius_K(double y, double y_inner, double y_outer)
     return 1.0 - s;
 }
 
-/* Osculating length scale of `b` about `central` for the Hill-radius
- * build: the semi-major axis from vis-viva,
+/* Length scale of `b` about `central` for the Hill-radius build.
+ * Rule, stated: the smaller of the osculating semi-major axis from
+ * vis-viva,
  *   a = 1 / (2/r - v^2/mu),   mu = central->gm,
- * with r and v the body's position and velocity relative to the
- * central body. Fallback rule, stated: when the relative state is
- * unbound or degenerate (2/r - v^2/mu <= 0, i.e. parabolic or
- * hyperbolic, or mu or r non-positive, or a non-finite result), the
- * scale is the body's CURRENT distance from the central body. An
- * unbound body has no finite semi-major axis, and the Hill argument
- * is local: r * cbrt(m / 3M) is the tidal sphere at the distance the
- * body actually occupies. The fallback is the central-relative
- * distance, never the pair separation, so the closeness ratio
- * y = d / r_hill stays separation-dependent in every branch. */
+ * and the body's CURRENT distance r from the central body; when the
+ * relative state is unbound or degenerate (2/r - v^2/mu <= 0, i.e.
+ * parabolic or hyperbolic, or mu or r non-positive, or a non-finite
+ * result), the scale is r alone. The cap makes the scale continuous
+ * at the parabolic boundary: as the orbit approaches escape from
+ * below, a grows without bound, so the bound branch already returns
+ * r wherever a >= r, and the unbound branch returns the same r;
+ * just-below-escape and at-escape agree. Without the cap a
+ * near-parabolic bound orbit inflates a arbitrarily (a to infinity
+ * as e approaches 1) and the classification jumps discontinuously
+ * at escape speed. The Hill argument is local either way:
+ * r * cbrt(m / 3M) is the tidal sphere at the distance the body
+ * actually occupies. Both the cap and the fallback use the
+ * central-relative distance, never the pair separation, so the
+ * closeness ratio y = d / r_hill stays separation-dependent in
+ * every branch (limitation noted at the mutual-Hill build below). */
 static double hill_length_scale_(const K26AstroBody *b,
                                  const K26AstroBody *central)
 {
@@ -66,7 +73,7 @@ static double hill_length_scale_(const K26AstroBody *b,
     if (!(inv_a > 0.0)) return r;
     double a = 1.0 / inv_a;
     if (!isfinite(a)) return r;
-    return a;
+    return (a < r) ? a : r;
 }
 
 double k26astro_mercurius_hill_radius(const K26AstroBody *i,
@@ -74,18 +81,30 @@ double k26astro_mercurius_hill_radius(const K26AstroBody *i,
                                        const K26AstroBody *central)
 {
     if (!i || !j || !central) return 0.0;
-    /* Mutual Hill radius per Rein, Hernandez, Tamayo et al. (2019),
-     * MNRAS 485(4):5490-5497, section 2: the switching function's
-     * length unit is built from the bodies' SEMI-MAJOR AXES about
-     * the central body, not from their current separation,
+    /* Mutual Hill radius in the standard form,
      *   R_hill_ij = ((a_i + a_j) / 2) * cbrt((m_i + m_j) / (3 M)),
-     * with a_i, a_j from vis-viva and the unbound fallback stated at
-     * hill_length_scale_ above. The previous revision approximated
-     * a_ij by the pair separation, which cancelled the distance out
-     * of y = d / r_hill entirely: pairs were classified by mass
-     * ratio alone, at any separation. With the semi-major axes in
-     * the unit, y is a genuine closeness measure: distant pairs do
-     * not split, near passes do. */
+     * with a_i, a_j the per-body length scales stated at
+     * hill_length_scale_ above. The formula is this tree's own
+     * construction of that standard form: Rein, Hernandez, Tamayo
+     * et al. (2019), MNRAS 485(4):5490-5497, section 3, names "a
+     * small multiple of the mutual Hill radius" as the typical
+     * switching distance but prints no formula, and Chambers
+     * (1999), MNRAS 304:793-799, sets its changeover distance in
+     * mutual Hill radii, likewise without printing one.
+     *
+     * The previous revision approximated the length scale by the
+     * pair separation, which cancelled the distance out of
+     * y = d / r_hill entirely: pairs were classified by mass ratio
+     * alone, at any separation. With the central-relative scales in
+     * the unit, y measures closeness for planetary-style
+     * architectures: near passes split, co-orbital distant pairs do
+     * not. Stated limitation, inherent to Hill-type criteria: for a
+     * radially separated pair (one body near the central mass, one
+     * far out), the far body's scale tracks the pair distance
+     * itself, so y collapses to a mass-ratio-only number again and
+     * a sufficiently massive pair splits at any such separation.
+     * Architectures that are not roughly planetary must not rely on
+     * this detector to keep distant pairs unsplit. */
     double m_central = central->mass;
     if (!(m_central > 0.0)) return 0.0;
     double m_sum = i->mass + j->mass;
@@ -188,30 +207,26 @@ int k26astro_mercurius_detect(K26AstroWorld *world)
     for (int i = 0; i < n; i++) {
         for (int j = i + 1; j < n; j++) {
             /* Pairs involving the central body are never encounter
-             * pairs. What the exclusion means depends on the base
-             * integrator:
+             * pairs: MERCURIUS K-weights the planet-planet
+             * interaction terms only (Rein et al. 2019, section 2,
+             * eqs 4-5), and the split composition (orbit_step.c)
+             * hands every central pair to the near integrator at
+             * full weight on both admitted bases (central_plus1 in
+             * forces.h), so the drift owns the central attraction
+             * and the far kick carries only the weighted pair
+             * terms.
              *
-             * - Wisdom-Holman base: MERCURIUS K-weights the
-             *   planet-planet interaction terms only (Rein et al.
-             *   2019, section 2, eqs 4-5); the central pull is the
-             *   Kepler part owned by the drift. That statement is
-             *   true ONLY when the largest mass is body 0, the
-             *   drift's hard-wired primary (wisdom_holman.c,
-             *   mu0 = b[0].gm), so the split admission in
-             *   orbit_step.c requires mercurius_central_idx == 0
-             *   for a WH base; otherwise WH takes single full-force
-             *   steps, where the drift's primary choice is WH's own
-             *   pre-existing approximation and no split arithmetic
-             *   depends on it.
-             *
-             * - Verlet base: there is no Kepler part; every force
-             *   lives in the pair sum. The exclusion is right for
-             *   the opposite reason: it keeps the central force in
-             *   the FAR pass at full weight. Including central
-             *   pairs zero-weighted the central force there (K = 1
-             *   near the primary), so the FAR pass integrated a
-             *   straight-line drift with no central gravity at
-             *   all. */
+             * Wisdom-Holman admission: the WH drift's Kepler
+             * primary is hard-wired to body 0 (wisdom_holman.c,
+             * mu0 = b[0].gm). When the detector's central body is
+             * not body 0, the base's own unsplit steps and the
+             * split's central-pair partition would disagree about
+             * which body is primary, so orbit_step.c admits a WH
+             * base to the split only when mercurius_central_idx is
+             * 0; otherwise WH takes single full-force steps, where
+             * the primary choice is WH's own pre-existing
+             * approximation and no split arithmetic depends on
+             * it. */
             if (i == idx_central || j == idx_central) continue;
             const K26AstroBody *bi = &world->grav.bodies[i];
             const K26AstroBody *bj = &world->grav.bodies[j];
