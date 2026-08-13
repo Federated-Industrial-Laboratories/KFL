@@ -41,8 +41,7 @@ uint64_t k26rng_bounded(K26RngKey key, K26RngCoords c, uint64_t n)
  * x = m * 2^e with m in [0.5, 1) by bit manipulation (exact), m
  * shifted into [sqrt(1/2), sqrt(2)) so the series argument
  * s = (m-1)/(m+1) satisfies |s| <= 0.1716. Then
- * ln m = 2 atanh(s) = 2s (1 + s^2/3 + s^4/5 + ...), truncated at the
- * s^16 term, whose next term is below 2^-80 of the sum; and
+ * ln m = 2 atanh(s) = 2s (1 + s^2/3 + s^4/5 + ...), and
  * ln x = ln m + e ln 2 with ln 2 as a compile-time constant. The
  * path is fixed, so the result is bit-stable even where the final
  * rounding is not correctly rounded as a whole. */
@@ -63,6 +62,10 @@ double k26rng_internal_ln(double x)
         e = e - 1;
     }
 
+    /* Truncated after the s^16 term: the next term, s^18/19, is below
+     * 2^-50 of the sum at the worst-case |s|, an absolute
+     * contribution to ln m under 3e-16, inside the demonstrated
+     * bound. */
     s = (m - 1.0) / (m + 1.0);
     s2 = s * s;
     series = 1.0 / 17.0;
@@ -81,37 +84,37 @@ double k26rng_internal_ln(double x)
 /* AS 241 PPND16 coefficients, transcribed from the published source.
  * The paper ships hash sums of the coefficient mantissas to check
  * transcription; test_k26rng_quantile.c recomputes them. */
-static const double A[8] = {
+const double k26rng_internal_qA[8] = {
     3.3871328727963666080e0,  1.3314166789178437745e2,
     1.9715909503065514427e3,  1.3731693765509461125e4,
     4.5921953931549871457e4,  6.7265770927008700853e4,
     3.3430575583588128105e4,  2.5090809287301226727e3
 };
-static const double B[8] = {
+const double k26rng_internal_qB[8] = {
     1.0,                      4.2313330701600911252e1,
     6.8718700749205790830e2,  5.3941960214247511077e3,
     2.1213794301586595867e4,  3.9307895800092710610e4,
     2.8729085735721942674e4,  5.2264952788528545610e3
 };
-static const double C[8] = {
+const double k26rng_internal_qC[8] = {
     1.42343711074968357734e0, 4.63033784615654529590e0,
     5.76949722146069140550e0, 3.64784832476320460504e0,
     1.27045825245236838258e0, 2.41780725177450611770e-1,
     2.27238449892691845833e-2, 7.74545014278341407640e-4
 };
-static const double D[8] = {
+const double k26rng_internal_qD[8] = {
     1.0,                      2.05319162663775882187e0,
     1.67638483018380384940e0, 6.89767334985100004550e-1,
     1.48103976427480074590e-1, 1.51986665636164571966e-2,
     5.47593808499534494600e-4, 1.05075007164441684324e-9
 };
-static const double E[8] = {
+const double k26rng_internal_qE[8] = {
     6.65790464350110377720e0, 5.46378491116411436990e0,
     1.78482653991729133580e0, 2.96560571828504891230e-1,
     2.65321895265761230930e-2, 1.24266094738807843860e-3,
     2.71155556874348757815e-5, 2.01033439929228813265e-7
 };
-static const double F[8] = {
+const double k26rng_internal_qF[8] = {
     1.0,                      5.99832206555887937690e-1,
     1.36929880922735805310e-1, 1.48753612908506148525e-2,
     7.86869131145613259100e-4, 1.84631831751005468180e-5,
@@ -134,16 +137,16 @@ double k26rng_internal_quantile(double p)
 
     if (q < 0.0 ? -q <= 0.425 : q <= 0.425) {
         r = 0.180625 - q * q;
-        return q * ratio_(A, B, r);
+        return q * ratio_(k26rng_internal_qA, k26rng_internal_qB, r);
     }
     r = q < 0.0 ? p : 1.0 - p;
     r = sqrt(-k26rng_internal_ln(r));
     if (r <= 5.0) {
         r = r - 1.6;
-        r = ratio_(C, D, r);
+        r = ratio_(k26rng_internal_qC, k26rng_internal_qD, r);
     } else {
         r = r - 5.0;
-        r = ratio_(E, F, r);
+        r = ratio_(k26rng_internal_qE, k26rng_internal_qF, r);
     }
     return q < 0.0 ? -r : r;
 }

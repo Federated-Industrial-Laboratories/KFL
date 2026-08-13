@@ -99,3 +99,26 @@ Hipparcos-2 bright-star subset
              the Raw Data"; epoch J1991.25 TT.
              Catalogue distributed by the ESA / Hipparcos archive
              without restrictive licensing.
+
+== Deterministic sampling reference material ==
+
+The following values are transcribed from open publications and ship
+inline within libk26rng. They are reference data and algorithm
+constants, not third-party source code; the upstream libraries are
+not vendored.
+
+Philox4x32-10 constants and known-answer vectors
+  Path:      libk26rng/src/philox.c (four round and Weyl constants)
+             libk26rng/tests/test_k26rng_core.c (three test vectors)
+  Source:    Salmon J. K., Moraes M. A., Dror R. O., Shaw D. E.
+             (2011), "Parallel Random Numbers: As Easy as 1, 2, 3",
+             SC'11; constants and vectors from the authors' Random123
+             library (D. E. Shaw Research, BSD-3-Clause), which
+             permits use with attribution.
+
+AS 241 normal quantile coefficients (PPND16)
+  Path:      libk26rng/src/dist.c
+  Source:    Wichura M. J. (1988), "Algorithm AS 241: The Percentage
+             Points of the Normal Distribution", Applied Statistics
+             37 no. 3; coefficients transcribed from the published
+             algorithm and checked against its shipped hash sums.

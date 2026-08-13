@@ -17,4 +17,15 @@ double k26rng_internal_ln(double x);
  * Defined for p in (0, 1). */
 double k26rng_internal_quantile(double p);
 
+/* The quantile's coefficient arrays, exposed so the transcription
+ * check sums the bytes the library computes with, not a copy: the
+ * paper ships hash sums of the coefficient mantissas for exactly
+ * that check. */
+extern const double k26rng_internal_qA[8];
+extern const double k26rng_internal_qB[8];
+extern const double k26rng_internal_qC[8];
+extern const double k26rng_internal_qD[8];
+extern const double k26rng_internal_qE[8];
+extern const double k26rng_internal_qF[8];
+
 #endif /* K26RNG_INTERNAL_H */

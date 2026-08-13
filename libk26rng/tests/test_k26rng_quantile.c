@@ -24,41 +24,17 @@
     fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
     exit(1); } } while (0)
 
-/* The coefficients again, with each one's power-of-ten exponent, so
- * the hash sums check the test's own copy against the paper and the
- * library's copy against the test through the accuracy sweep. */
-typedef struct { double v; int exp10; } CoefRow;
-
-static const CoefRow AB[] = {
-    { 3.3871328727963666080e0, 0 },  { 1.3314166789178437745e2, 2 },
-    { 1.9715909503065514427e3, 3 },  { 1.3731693765509461125e4, 4 },
-    { 4.5921953931549871457e4, 4 },  { 6.7265770927008700853e4, 4 },
-    { 3.3430575583588128105e4, 4 },  { 2.5090809287301226727e3, 3 },
-    { 4.2313330701600911252e1, 1 },  { 6.8718700749205790830e2, 2 },
-    { 5.3941960214247511077e3, 3 },  { 2.1213794301586595867e4, 4 },
-    { 3.9307895800092710610e4, 4 },  { 2.8729085735721942674e4, 4 },
-    { 5.2264952788528545610e3, 3 },
-};
-static const CoefRow CD[] = {
-    { 1.42343711074968357734e0, 0 },  { 4.63033784615654529590e0, 0 },
-    { 5.76949722146069140550e0, 0 },  { 3.64784832476320460504e0, 0 },
-    { 1.27045825245236838258e0, 0 },  { 2.41780725177450611770e-1, -1 },
-    { 2.27238449892691845833e-2, -2 }, { 7.74545014278341407640e-4, -4 },
-    { 2.05319162663775882187e0, 0 },  { 1.67638483018380384940e0, 0 },
-    { 6.89767334985100004550e-1, -1 }, { 1.48103976427480074590e-1, -1 },
-    { 1.51986665636164571966e-2, -2 }, { 5.47593808499534494600e-4, -4 },
-    { 1.05075007164441684324e-9, -9 },
-};
-static const CoefRow EF[] = {
-    { 6.65790464350110377720e0, 0 },  { 5.46378491116411436990e0, 0 },
-    { 1.78482653991729133580e0, 0 },  { 2.96560571828504891230e-1, -1 },
-    { 2.65321895265761230930e-2, -2 }, { 1.24266094738807843860e-3, -3 },
-    { 2.71155556874348757815e-5, -5 }, { 2.01033439929228813265e-7, -7 },
-    { 5.99832206555887937690e-1, -1 }, { 1.36929880922735805310e-1, -1 },
-    { 1.48753612908506148525e-2, -2 }, { 7.86869131145613259100e-4, -4 },
-    { 1.84631831751005468180e-5, -5 }, { 1.42151175831644588870e-7, -7 },
-    { 2.04426310338993978564e-15, -15 },
-};
+/* The hash sums check the arrays the library computes with, reached
+ * through the internal seam; only each coefficient's power-of-ten
+ * exponent lives here, read from the published source. B[0], D[0],
+ * F[0] are the rational forms' fixed 1.0 and are not summed, matching
+ * the paper's fifteen-coefficient sums. */
+static const int EXP_A[8] = { 0, 2, 3, 4, 4, 4, 4, 3 };
+static const int EXP_B[8] = { 0, 1, 2, 3, 4, 4, 4, 3 };
+static const int EXP_C[8] = { 0, 0, 0, 0, 0, -1, -2, -4 };
+static const int EXP_D[8] = { 0, 0, 0, -1, -1, -2, -4, -9 };
+static const int EXP_E[8] = { 0, 0, 0, -1, -2, -3, -5, -7 };
+static const int EXP_F[8] = { 0, -1, -1, -2, -4, -5, -7, -15 };
 
 static double pow10i_(int e)
 {
@@ -68,10 +44,14 @@ static double pow10i_(int e)
     return e < 0 ? 1.0 / r : r;
 }
 
-static double mantissa_sum_(const CoefRow *t, int n)
+/* Sum the mantissas of a numerator array (all eight) and a
+ * denominator array (skipping its fixed leading 1.0). */
+static double mantissa_sum_(const double *num, const int *num_exp,
+                            const double *den, const int *den_exp)
 {
     double s = 0.0;
-    for (int i = 0; i < n; i++) s += t[i].v / pow10i_(t[i].exp10);
+    for (int i = 0; i < 8; i++) s += num[i] / pow10i_(num_exp[i]);
+    for (int i = 1; i < 8; i++) s += den[i] / pow10i_(den_exp[i]);
     return s;
 }
 
@@ -129,11 +109,15 @@ static const struct { double x; double ref; } LN_REFS[] = {
 
 int main(void)
 {
-    /* ---- Transcription: the paper's mantissa hash sums. ------------ */
+    /* ---- Transcription: the paper's mantissa hash sums, computed
+     * over the library's own arrays. ------------------------------- */
     {
-        double ab = mantissa_sum_(AB, 15);
-        double cd = mantissa_sum_(CD, 15);
-        double ef = mantissa_sum_(EF, 15);
+        double ab = mantissa_sum_(k26rng_internal_qA, EXP_A,
+                                  k26rng_internal_qB, EXP_B);
+        double cd = mantissa_sum_(k26rng_internal_qC, EXP_C,
+                                  k26rng_internal_qD, EXP_D);
+        double ef = mantissa_sum_(k26rng_internal_qE, EXP_E,
+                                  k26rng_internal_qF, EXP_F);
         printf("hash sums: AB %.17g CD %.17g EF %.17g\n", ab, cd, ef);
         ASSERT(fabs(ab - 55.8831928806149014439) < 1e-12);
         ASSERT(fabs(cd - 49.3320650330161028904) < 1e-12);
@@ -165,7 +149,13 @@ int main(void)
         }
         printf("quantile worst absolute error: %.3g over %zu points\n",
                worst, sizeof REFS / sizeof REFS[0]);
+        /* The conformance bound. */
         ASSERT(worst <= 1e-9);
+        /* Regression tripwire, distinct from conformance: the measured
+         * worst is 1.78e-15, and a change that degrades accuracy by
+         * orders of magnitude while staying conformant should be loud,
+         * not silent. Loosening this line is a deliberate act. */
+        ASSERT(worst <= 5e-15);
     }
 
     /* ---- The draw path lands on the quantile of its own grid
