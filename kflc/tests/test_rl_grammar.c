@@ -17,9 +17,21 @@
  * captures it at create), and the nested-block and non-scalar
  * refusals carry precise diagnostics.
  *
+ * Purity gates: an expression that has to reproduce on replay is
+ * refused when it reaches a builtin that is not marked pure, in a
+ * body state assignment and in all three objective-side positions
+ * (`reward`, `terminal`, `terminated when`), directly or through a
+ * user fn, while pure builtins stay admitted in every one of them.
+ *
+ * Mode gates: the two refusals that guard published bytes, an
+ * over-long channel name and a body named `episode`, are asserted on
+ * the artifact-producing paths as well as under `--check`, since a
+ * refusal that only `--check` performs does not stop a compile.
+ *
  * Pattern: write a small .kfl fixture to a tmpfile, run
- *   ./bin/kflc --check <tmpfile>   (or --emit for the emit gates)
- * capture stderr + exit code, assert on the captured state.
+ *   ./bin/kflc --check <tmpfile>   (or --emit / -o for the gates that
+ * pin a mode) capture stderr + exit code, assert on the captured
+ * state.
  *
  * Wire: see kflc/Makefile RL_GRAMMAR_TEST + test target.
  */
@@ -665,6 +677,82 @@ int main(void)
         STATE_WORLD("", "        craft.vel_x = sqrt(a * a) + 1.0\n", "0.0"),
         0, NULL, "error");
 
+    /* The same rule on the three objective-side expressions. Each is
+     * evaluated once per transition and has to reproduce on replay,
+     * so an impure call is refused there for the reason it is refused
+     * in a state assignment. One macro, three positions. */
+#define OBJ_WORLD(WHERE_EPISODE, WHERE_OBJECTIVE) \
+        "form RL_OBJ\n" \
+        "fn world w\n" \
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+        "    astro_body craft gm=1.0 parent=earth" \
+        " pos_x=7.0e6 vel_y=7546.0\n" \
+        "    episode\n" \
+        "        control_dt 1.0\n" \
+        "        horizon 4\n" \
+        WHERE_EPISODE \
+        "    end\n" \
+        "    observe craft from earth mode=geometric as trk\n" \
+        "    objective\n" \
+        WHERE_OBJECTIVE \
+        "    end\n" \
+        "end\n" \
+        "end\n"
+
+    expect_("reward_impure_builtin",
+        OBJ_WORLD("",
+            "        reward 0.0 - astro_world_body_count(trk_range)\n"),
+        1, "the `reward` expression must be side-effect free", NULL);
+
+    expect_("terminal_impure_builtin",
+        OBJ_WORLD("",
+            "        reward 0.0\n"
+            "        terminal astro_world_body_count(trk_range)\n"),
+        1, "the `terminal` expression must be side-effect free", NULL);
+
+    expect_("terminated_when_impure_builtin",
+        OBJ_WORLD(
+            "        terminated when"
+            " astro_world_body_count(trk_range) > 0.0\n",
+            "        reward 0.0\n"),
+        1, "the `terminated when` expression must be side-effect free",
+        NULL);
+
+    /* One indirection does not launder it: the sweep follows calls
+     * into user fn bodies, and the diagnostic names the fn. */
+    expect_("reward_impure_through_fn",
+        "form RL_OBJ_P\n"
+        "    fn double reach(double x)\n"
+        "        return astro_world_body_count(x)\n"
+        "    end\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0 - reach(trk_range)\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "`fn reach` called here reaches", NULL);
+
+    /* Pure builtins stay admitted in all three positions, which is
+     * what keeps the refusals above about purity: the shipped
+     * environments compute their reward with `abs` and `sqrt`. */
+    expect_("objective_pure_builtins",
+        OBJ_WORLD(
+            "        terminated when sqrt(trk_range * trk_range) > 1.0\n",
+            "        reward 0.0 - abs(trk_range)\n"
+            "        terminal max(trk_range, 1.0)\n"),
+        0, NULL, "error");
+
+#undef OBJ_WORLD
+
     /* The stepping path performs no I/O, and a print one call away is
      * still I/O on the stepping path. */
     expect_("state_print_through_fn",
@@ -751,6 +839,116 @@ int main(void)
         "end\n"
         "end\n",
         1, "longer than 53 bytes", NULL);
+
+    /* Both refusals above reach a plain compile, not only `--check`.
+     * They guard published bytes: an over-long channel name is
+     * truncated by the emitted spec writer rather than reported, and
+     * a body named `episode` collides with `episode.steps` in the
+     * expression scope, so a compile that accepted either would ship
+     * the defect into an artifact.
+     *
+     * Two modes per case. `--emit` produces the C++ and nothing else,
+     * so its exit code is the compiler front end's own answer. `-o`
+     * additionally runs the host C++ compiler, which in a bare
+     * environment fails for its own reasons, so that arm asserts on
+     * the message: the refusal text present and `compile failed`
+     * absent proves kflc refused before it ever reached the host
+     * compiler. */
+    expect_mode_("--emit", "chan_name_54_emit",
+        "form RL_CHAN54E\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as"
+        " chan_abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvw\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "longer than 53 bytes", NULL);
+
+    expect_mode_("-o /tmp/kflc_rl_compile.out", "chan_name_54_compile",
+        "form RL_CHAN54O\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as"
+        " chan_abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvw\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "longer than 53 bytes", "compile failed");
+
+    expect_mode_("--emit", "body_episode_emit",
+        "form RL_BODYEPE\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body episode gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe episode from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "the name is taken by `episode.steps`", NULL);
+
+    expect_mode_("-o /tmp/kflc_rl_compile.out", "body_episode_compile",
+        "form RL_BODYEPO\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body episode gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe episode from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "the name is taken by `episode.steps`", "compile failed");
+
+    /* A program the checker accepts still compiles: the gate above
+     * must not have made every compile run a refusal. `--emit` on the
+     * positive fixture is the same front end that refused the two
+     * cases above. */
+    expect_mode_("--emit", "compile_path_positive",
+        "form RL_OKC\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0 - abs(trk_range)\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
 
     /* The range-rate component is a readable channel like the four
      * beside it. */

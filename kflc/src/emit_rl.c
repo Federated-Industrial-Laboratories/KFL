@@ -1577,6 +1577,31 @@ static int rl_reject_print_(const KflcNode *form, const KflcNode *stmts,
     return 1;
 }
 
+/* An expression the runtime has to be able to re-evaluate is refused
+ * when it reaches a builtin that is not marked pure, calls into user
+ * fns followed. `what` names the position and completes the sentence
+ * "<what> must be side-effect free". Every position that replays,
+ * whether by re-simulation or by being evaluated once per step, uses
+ * this: an impure call there would make a recorded episode
+ * irreproducible from its recorded inputs. */
+static int rl_reject_impure_(const KflcNode *form, const KflcExpr *e,
+                             const char *what, int line, KflcDiag *diag)
+{
+    RlSweep sw;
+    rl_sweep_init_(&sw, form, RL_SWEEP_IMPURE);
+    if (!rl_sweep_expr_(&sw, e, NULL)) return 0;
+    if (sw.via) {
+        kflc_diag_errorf(diag, line,
+            "%s must be side-effect free, and `fn %s` called here "
+            "reaches `%s`, which is not pure", what, sw.via, sw.found);
+    } else {
+        kflc_diag_errorf(diag, line,
+            "%s must be side-effect free, and `%s` is not a pure "
+            "builtin", what, sw.found);
+    }
+    return 1;
+}
+
 /* ---- Body state inside on_step -------------------------------------- */
 
 /* Split a name at its single dot. Returns 1 when exactly one dot sits
@@ -1716,28 +1741,6 @@ static int rl_bs_rewrite_expr_(RlModel *m, KflcExpr *e, int line,
     }
 }
 
-/* The assigned expression must stay re-evaluable, so a call to a
- * builtin that is not marked pure is refused, calls into user fns
- * followed. */
-static int rl_bs_check_pure_(const KflcNode *form, const KflcExpr *e,
-                             int line, KflcDiag *diag)
-{
-    RlSweep sw;
-    rl_sweep_init_(&sw, form, RL_SWEEP_IMPURE);
-    if (!rl_sweep_expr_(&sw, e, NULL)) return 0;
-    if (sw.via) {
-        kflc_diag_errorf(diag, line,
-            "on_step: a body state assignment must be side-effect free, "
-            "and `fn %s` called here reaches `%s`, which is not pure",
-            sw.via, sw.found);
-    } else {
-        kflc_diag_errorf(diag, line,
-            "on_step: a body state assignment must be side-effect free, "
-            "and `%s` is not a pure builtin", sw.found);
-    }
-    return 1;
-}
-
 /* Rewrite one statement list: dotted reads become accessor calls, and
  * an assignment to a dotted name becomes an expression statement
  * calling the state setter. Nested blocks are rewritten too, so the
@@ -1754,7 +1757,9 @@ static int rl_bs_rewrite_stmts_(RlModel *m, KflcNode *stmts,
             if (rl_bs_rewrite_expr_(m, s->expr, s->line, arena, diag)) {
                 return 1;
             }
-            if (rl_bs_check_pure_(form, s->expr, s->line, diag)) return 1;
+            if (rl_reject_impure_(form, s->expr,
+                                  "on_step: a body state assignment",
+                                  s->line, diag)) return 1;
 
             char fn[192];
             rl_bs_fn_name_(m, slot, 1, fn, sizeof fn);
@@ -2070,6 +2075,13 @@ static int rl_emit_objective_(FILE *out, const RlModel *m,
                                       fns[i].word, fns[i].attr->line,
                                       diag);
             if (diag->errors) return 1;
+            char what[80];
+            snprintf(what, sizeof what, "the `%s` expression",
+                     fns[i].word);
+            if (rl_reject_impure_(form, fns[i].attr->expr, what,
+                                  fns[i].attr->line, diag)) {
+                return 1;
+            }
             rl_emit_scope_prelude_(out, m, 4);
             rl_rewrite_steps_(fns[i].attr->expr, arena);
             if (strcmp(fns[i].ret, "int") == 0) {

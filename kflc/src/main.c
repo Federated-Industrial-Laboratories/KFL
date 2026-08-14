@@ -30,6 +30,7 @@ static int usage(void)
         "\n"
         "  --dump          parse and dump the AST to stdout\n"
         "  --emit          emit C++ source to stdout (no compile)\n"
+        "                  Runs the checker first, as -o does.\n"
         "  --check         parse + check + run emit silently; exit 0 on\n"
         "                  clean, 1 on parse, check, or emit errors.\n"
         "                  Nothing written to stdout. Intended for editor\n"
@@ -39,7 +40,8 @@ static int usage(void)
         "                  using the reinforcement learning constructs also\n"
         "                  produces <output>.rlenv.so, a shared object\n"
         "                  exporting the k26rl_ stepping surface, from the\n"
-        "                  same emitted source.\n"
+        "                  same emitted source. The checker runs first, so a\n"
+        "                  program --check rejects does not compile.\n"
         "  -c              also keep the emitted C++ source alongside <output>\n",
         stderr);
     return 2;
@@ -164,6 +166,26 @@ int main(int argc, char **argv)
         int errs = diag.errors;
         kflc_arena_release(arena);
         return errs ? 1 : 0;
+    }
+
+    /* A mode that produces an artifact runs the semantic checker
+     * first. Without this the checker's refusals reach only `--check`,
+     * so a program that `--check` rejects still compiles, and two of
+     * those refusals guard published bytes: a channel name too long
+     * for the spec's 64-byte name entries is otherwise truncated in
+     * the emitted spec writer rather than refused, and a body named
+     * `episode` otherwise collides with `episode.steps` in the
+     * expression scope. `--dump` deliberately stays out: it produces
+     * no artifact, and refusing to print a parse tree is the wrong
+     * answer to a question asked while diagnosing one. */
+    if (emit || output) {
+        (void)kflc_check(form, &diag);
+        if (diag.errors) {
+            fprintf(stderr, "kflc: check failed (%d error%s)\n",
+                    diag.errors, diag.errors == 1 ? "" : "s");
+            kflc_arena_release(arena);
+            return 1;
+        }
     }
 
     if (dump) {
