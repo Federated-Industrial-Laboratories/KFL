@@ -308,6 +308,17 @@ static void resolve_expr_names_(const KflcExpr *e, const NameList *allowed,
     switch (e->kind) {
     case KFLE_IDENT:
         if (e->u.ident && !namelist_has_(allowed, e->u.ident)) {
+            /* A dotted name here is body state, which is addressed
+             * inside on_step and nowhere else; say so rather than
+             * listing the scope. */
+            if (strchr(e->u.ident, '.')) {
+                kflc_diag_errorf(diag, line,
+                    "%s: `%s`: body state is readable and assignable "
+                    "only inside an on_step block; an objective reads "
+                    "state through `observe ... as` channels",
+                    ctx_word, e->u.ident);
+                return;
+            }
             kflc_diag_errorf(diag, line,
                 "%s: unknown name `%s`; readable names here are declared "
                 "actions, observe-as channel components, `episode.steps`, "

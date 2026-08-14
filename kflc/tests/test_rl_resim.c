@@ -22,7 +22,8 @@
  * ordinal 1 episodes are rebuilt from the rekey frame's seed);
  * faulted episodes whose final fault record replays the faulting
  * call's actions and reproduces the fault (fixture 2, recorded by
- * the batch executable).
+ * the batch executable). Both fixtures write body state in on_step,
+ * so what replays includes the writes the actions drove.
  *
  * Requires the sibling stack archives (skips with 77 otherwise).
  */
@@ -53,6 +54,9 @@ static const char *const RESIM_KFL =
     "        reset craft.vel_y normal(7350.0, 5.0)\n"
     "    end\n"
     "    action push box -1.0 1.0 default 0.1\n"
+    "    on_step\n"
+    "        craft.vel_x = craft.vel_x + push\n"
+    "    end\n"
     "    observe craft from earth mode=geometric as trk\n"
     "    objective\n"
     "        reward trk_range * 1.0e-6 + push\n"
@@ -61,7 +65,11 @@ static const char *const RESIM_KFL =
     "end\n";
 
 /* reward 1.0 / (3.0 - episode.steps): every episode faults at
- * transition 3, so the batch file records fault records to rebuild. */
+ * transition 3, so the batch file records fault records to rebuild.
+ * The block writes body state every step, so the episodes recorded
+ * after a fault also pin the discard rule: a write made on the
+ * faulting step must reach neither the next episode's opening state
+ * nor its streams, or the rebuild from resets alone would differ. */
 static const char *const RESIM_FAULT_KFL =
     "form RL_RESIM_FAULT\n"
     "fn world resim_fault_world\n"
@@ -73,6 +81,9 @@ static const char *const RESIM_FAULT_KFL =
     "        reset craft.vel_y normal(7350.0, 5.0)\n"
     "    end\n"
     "    action push box -1.0 1.0 default 0.0\n"
+    "    on_step\n"
+    "        craft.vel_x = craft.vel_x + push + 5.0\n"
+    "    end\n"
     "    observe craft from earth mode=geometric as trk\n"
     "    objective\n"
     "        reward 1.0 / (3.0 - episode.steps)\n"

@@ -518,6 +518,248 @@ int main(void)
         "end\n",
         0, NULL, "collides");
 
+    /* ---- Body state inside on_step ------------------------------- */
+
+    /* The shape of every case below: one world, one action, one
+     * observation channel, with STATE substituted into the on_step
+     * body or elsewhere. */
+#define STATE_WORLD(WHERE_PREFIX, WHERE_ON_STEP, WHERE_OBJECTIVE) \
+        "form RL_STATE\n" \
+        "fn world w\n" \
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+        "    astro_body craft gm=1.0 parent=earth" \
+        " pos_x=7.0e6 vel_y=7546.0\n" \
+        WHERE_PREFIX \
+        "    episode\n" \
+        "        control_dt 1.0\n" \
+        "        horizon 4\n" \
+        "    end\n" \
+        "    action a box -1.0 1.0 default 0.0\n" \
+        "    on_step\n" \
+        WHERE_ON_STEP \
+        "    end\n" \
+        "    observe craft from earth mode=geometric as trk\n" \
+        "    objective\n" \
+        "        reward " WHERE_OBJECTIVE "\n" \
+        "    end\n" \
+        "end\n" \
+        "end\n"
+
+    /* Every state key is readable and assignable in the block. */
+    expect_("state_all_keys",
+        STATE_WORLD("",
+            "        craft.pos_x = craft.pos_x + a\n"
+            "        craft.pos_y = craft.pos_y + a\n"
+            "        craft.pos_z = craft.pos_z + a\n"
+            "        craft.vel_x = craft.vel_x + a\n"
+            "        craft.vel_y = craft.vel_y + a\n"
+            "        craft.vel_z = craft.vel_z + a\n", "0.0"),
+        0, NULL, "error");
+
+    /* Outside the block the dot is not a name: in the world prefix it
+     * stays the lexical error it was before the block existed. */
+    expect_("state_in_prefix",
+        STATE_WORLD("    craft.vel_x = 1.0\n", "        let z: double = a\n",
+                    "0.0"),
+        1, "unexpected character", NULL);
+
+    /* An objective is told where body state lives instead. */
+    expect_("state_in_objective",
+        STATE_WORLD("", "        let z: double = a\n", "craft.vel_x"),
+        1, "only inside an on_step block", NULL);
+
+    /* A termination predicate is refused the same way. */
+    expect_("state_in_terminated",
+        "form RL_STATE_T\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "        terminated when craft.vel_x > 1.0\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "only inside an on_step block", NULL);
+
+    /* An ordinary fn body is not a stepping block either. */
+    expect_("state_in_fn",
+        "form RL_STATE_F\n"
+        "fn double helper()\n"
+        "    craft.vel_x = 1.0\n"
+        "    return 1.0\n"
+        "end\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "unexpected character", NULL);
+
+    /* An unknown body, an unknown key, and `episode.steps` each name
+     * what they found. */
+    expect_("state_unknown_body",
+        STATE_WORLD("", "        rocket.vel_x = a\n", "0.0"),
+        1, "no astro_body named `rocket`", NULL);
+
+    expect_("state_unknown_key",
+        STATE_WORLD("", "        craft.spin_x = a\n", "0.0"),
+        1, "is not a body state key", NULL);
+
+    expect_("state_episode_steps",
+        STATE_WORLD("", "        let z: double = episode.steps\n", "0.0"),
+        1, "not in on_step", NULL);
+
+    /* The assigned expression must stay re-evaluable, so a call to a
+     * builtin that is not marked pure is refused, whether it is made
+     * directly or through a fn. */
+    expect_("state_impure_builtin",
+        STATE_WORLD("",
+            "        craft.vel_x = a + astro_world_body_count(world)\n",
+            "0.0"),
+        1, "is not a pure builtin", NULL);
+
+    expect_("state_impure_through_fn",
+        "form RL_STATE_P\n"
+        "fn double reach(world w)\n"
+        "    return astro_world_body_count(w)\n"
+        "end\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    on_step\n"
+        "        craft.vel_x = a + reach(world)\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "reaches", NULL);
+
+    /* A pure builtin is admitted, which is what makes the refusals
+     * above about purity rather than about calls. */
+    expect_("state_pure_builtin",
+        STATE_WORLD("", "        craft.vel_x = sqrt(a * a) + 1.0\n", "0.0"),
+        0, NULL, "error");
+
+    /* The stepping path performs no I/O, and a print one call away is
+     * still I/O on the stepping path. */
+    expect_("state_print_through_fn",
+        "form RL_STATE_IO\n"
+        "fn double chatty(double x)\n"
+        "    print \"step\"\n"
+        "    return x\n"
+        "end\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    on_step\n"
+        "        let z: double = chatty(a)\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "performs no I/O", NULL);
+
+    /* A body named `episode` would make `episode.steps` ambiguous. */
+    expect_("state_body_named_episode",
+        "form RL_STATE_E\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body episode gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe episode from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "the name is taken by `episode.steps`", NULL);
+
+    /* The channel-name bound is the spec's 64-byte name entry less
+     * the longest derived suffix, so 53 accepted and 54 refused. */
+    expect_("chan_name_53",
+        "form RL_CHAN53\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as"
+        " chan_abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuv\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "longer than");
+
+    expect_("chan_name_54",
+        "form RL_CHAN54\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as"
+        " chan_abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvw\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "longer than 53 bytes", NULL);
+
+    /* The range-rate component is a readable channel like the four
+     * beside it. */
+    expect_("chan_range_rate",
+        STATE_WORLD("", "        let z: double = a\n", "trk_range_rate"),
+        0, NULL, "error");
+
+#undef STATE_WORLD
+
     printf("test_rl_grammar: %d case(s) passed\n", n_pass);
     return 0;
 }

@@ -53,7 +53,9 @@
  * step runs the paper-faithful split (WH far pass plus IAS15 near
  * pass), the deepest stepping path. Horizon 24 with no termination
  * predicate: episodes truncate on a fixed cadence inside the armed
- * window. */
+ * window. The block writes body state, one velocity key and one
+ * position key, so the state accessors and the position fold are
+ * measured too. */
 static const char *const HP_KFL =
     "form RL_HOTPATH\n"
     "fn world hp_world\n"
@@ -71,6 +73,11 @@ static const char *const HP_KFL =
     "    action gear discrete 3 default 1\n"
     "    on_step\n"
     "        let scale: double = 1.0 + push * 0.001\n"
+    /* One velocity key and one position key, so the position
+     * write's sector-fold renormalisation sits inside the measured
+     * window rather than beside it. */
+    "        craft.vel_x = craft.vel_x + push * 0.01\n"
+    "        craft.pos_z = craft.pos_z + push\n"
     "    end\n"
     "    observe craft from earth mode=geometric as trk\n"
     "    objective\n"
