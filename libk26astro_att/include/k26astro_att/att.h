@@ -262,6 +262,47 @@ K26AstroAttStatus k26astro_att_thrusters_wrench(
     const K26AstroAttActuators *act, K26V3 *force, K26V3 *out);
 
 /**
+ * @brief Geodetic latitude, longitude and height from an Earth-fixed
+ *        Cartesian position.
+ * @param ecef Position in the Earth-fixed frame, metres.
+ * @param lat  Receives geodetic latitude, radians.
+ * @param lon  Receives longitude, radians.
+ * @param alt  Receives height above the ellipsoid, metres.
+ * @return K26ASTRO_ATT_OK, or K26ASTRO_ATT_E_NULL.
+ * @note  This exists because the magnetic field model is evaluated at
+ *        a geodetic position and nothing in this tree converted to
+ *        one. Bowring's method, iterated to convergence, on the WGS84
+ *        ellipsoid.
+ *
+ *        The two defining constants are corroborated inside this tree
+ *        rather than asserted: the equatorial radius 6378137 m is what
+ *        libk26geo states as the WGS84 equatorial radius, and the
+ *        flattening 1/298.257223563 is what libk26astro_core's
+ *        constants carry marked WGS84. The rounded equatorial radius
+ *        in that same header is not used here, since pairing it with
+ *        the exact flattening would misplace a point by of order a
+ *        hundred metres. The standard itself is the authority for
+ *        both and is verified at intake.
+ */
+K26AstroAttStatus k26astro_att_geodetic(K26V3 ecef, double *lat,
+                                        double *lon, double *alt);
+
+/**
+ * @brief Rotate a local east-north-up vector into the Earth-fixed
+ *        frame.
+ * @param enu Vector in the local frame, east then north then up.
+ * @param lat Geodetic latitude, radians.
+ * @param lon Longitude, radians.
+ * @return The same vector in the Earth-fixed frame.
+ * @note  The field model reports north, east and down, so a caller
+ *        converts to east, north and up before calling this. The
+ *        sign of the down component is the trap that convention sets,
+ *        and it is the caller's to get right; the gate that exercises
+ *        this pair does so through a field whose direction is known.
+ */
+K26V3 k26astro_att_enu_to_ecef(K26V3 enu, double lat, double lon);
+
+/**
  * @brief Advance a vehicle's attitude with stored momentum.
  * @param v     The vehicle.
  * @param act   Its actuators, or NULL for a body with none.

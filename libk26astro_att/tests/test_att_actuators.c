@@ -459,6 +459,89 @@ int main(void)
         n_pass++;
     }
 
+    printf("geodetic conversion:\n");
+    {
+        /* Known points first. A point on the equator at zero
+         * longitude sits at the equatorial radius; one on the polar
+         * axis sits at the polar radius, which the flattening fixes
+         * and which is where a wrong flattening shows up. */
+        double lat, lon, alt;
+        ASSERT(k26astro_att_geodetic(k26m3d_v3(6378137.0, 0.0, 0.0),
+                                     &lat, &lon, &alt) == K26ASTRO_ATT_OK);
+        printf("  equator, zero longitude: lat %.9f lon %.9f alt %.6f\n",
+               lat, lon, alt);
+        ASSERT(fabs(lat) < 1e-12 && fabs(lon) < 1e-12);
+        ASSERT(fabs(alt) < 1e-6);
+
+        double b = 6378137.0 * (1.0 - 1.0 / 298.257223563);
+        ASSERT(k26astro_att_geodetic(k26m3d_v3(0.0, 0.0, b),
+                                     &lat, &lon, &alt) == K26ASTRO_ATT_OK);
+        printf("  north pole: lat %.9f alt %.6f (polar radius %.3f)\n",
+               lat, alt, b);
+        ASSERT(fabs(lat - M_PI / 2.0) < 1e-12);
+        ASSERT(fabs(alt) < 1e-6);
+
+        /* The round trip, at a place where latitude and longitude are
+         * both away from an axis and the height is a real orbit's.
+         * Geodetic latitude differs from the geocentric one by up to
+         * about a fifth of a degree, so a conversion that confused
+         * them would fail this by kilometres. */
+        const double la = 0.9, lo = -1.3, al = 4.2e5;
+        double sp = sin(la), cp = cos(la);
+        double e2 = (1.0 / 298.257223563) * (2.0 - 1.0 / 298.257223563);
+        double N  = 6378137.0 / sqrt(1.0 - e2 * sp * sp);
+        K26V3 ecef = {
+            (N + al) * cp * cos(lo),
+            (N + al) * cp * sin(lo),
+            (N * (1.0 - e2) + al) * sp
+        };
+        ASSERT(k26astro_att_geodetic(ecef, &lat, &lon, &alt) ==
+               K26ASTRO_ATT_OK);
+        printf("  round trip at 420 km: lat error %.3e rad, lon %.3e, "
+               "alt %.6f m\n", fabs(lat - la), fabs(lon - lo),
+               fabs(alt - al));
+        ASSERT(fabs(lat - la) < 1e-12);
+        ASSERT(fabs(lon - lo) < 1e-12);
+        ASSERT(fabs(alt - al) < 1e-6);
+        /* The geocentric latitude at this point differs from the
+         * geodetic one by more than a milliradian, so the round trip
+         * above is not passing by treating them as the same. */
+        double geoc = atan2(ecef.z, sqrt(ecef.x * ecef.x +
+                                         ecef.y * ecef.y));
+        printf("  geodetic minus geocentric latitude here: %.6f rad\n",
+               la - geoc);
+        ASSERT(fabs(la - geoc) > 1e-3);
+        printf("  the conversion reproduces known points and round "
+               "trips to under a micrometre: OK\n");
+        n_pass++;
+    }
+    {
+        /* The local-frame rotation, at a point where every component
+         * is distinguishable: up must point away from the centre,
+         * east must be perpendicular to the axis, and north must
+         * complete the set. */
+        const double la = 0.9, lo = -1.3;
+        K26V3 up    = k26astro_att_enu_to_ecef(k26m3d_v3(0, 0, 1), la, lo);
+        K26V3 east  = k26astro_att_enu_to_ecef(k26m3d_v3(1, 0, 0), la, lo);
+        K26V3 north = k26astro_att_enu_to_ecef(k26m3d_v3(0, 1, 0), la, lo);
+        printf("  up (%.6f, %.6f, %.6f), east (%.6f, %.6f, %.6f)\n",
+               up.x, up.y, up.z, east.x, east.y, east.z);
+        /* Up has the sign of the latitude in z and points outward. */
+        ASSERT(up.z > 0.0);
+        ASSERT(relerr_(up.z, sin(la)) < 1e-15);
+        /* East has no z component anywhere. */
+        ASSERT(fabs(east.z) < 1e-15);
+        /* The three are orthonormal. */
+        ASSERT(fabs(k26m3d_v3_dot(up, east)) < 1e-15);
+        ASSERT(fabs(k26m3d_v3_dot(up, north)) < 1e-15);
+        ASSERT(fabs(k26m3d_v3_dot(east, north)) < 1e-15);
+        ASSERT(relerr_(v3len_(up), 1.0) < 1e-15);
+        ASSERT(relerr_(v3len_(north), 1.0) < 1e-15);
+        printf("  the local frame is orthonormal and up points "
+               "outward: OK\n");
+        n_pass++;
+    }
+
     printf("the actuated step against the unactuated one:\n");
     {
         /* With no actuators commanded the two paths must agree

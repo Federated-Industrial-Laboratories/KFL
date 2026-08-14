@@ -270,3 +270,65 @@ K26AstroAttStatus k26astro_att_step_actuated(K26AstroVehicle *v,
     }
     return K26ASTRO_ATT_OK;
 }
+
+/* ---- Geodetic conversion ------------------------------------------ *
+ *
+ * Bowring's method: an auxiliary parametric latitude gives a first
+ * estimate that is already accurate to well under a millimetre for
+ * heights of interest, and the loop below refines it until it stops
+ * moving. The alternative, a closed-form quartic solution, is exact
+ * but longer and needs care near the poles; this converges in two or
+ * three passes everywhere and its terminating condition is that the
+ * latitude has stopped changing at all.
+ */
+#define ATT_WGS84_A  6378137.0
+#define ATT_WGS84_F  (1.0 / 298.257223563)
+
+K26AstroAttStatus k26astro_att_geodetic(K26V3 ecef, double *lat,
+                                        double *lon, double *alt)
+{
+    if (!lat || !lon || !alt) return K26ASTRO_ATT_E_NULL;
+    const double a  = ATT_WGS84_A;
+    const double f  = ATT_WGS84_F;
+    const double b  = a * (1.0 - f);
+    const double e2 = f * (2.0 - f);
+    const double ep2 = e2 / (1.0 - e2);
+
+    double p = sqrt(ecef.x * ecef.x + ecef.y * ecef.y);
+    *lon = atan2(ecef.y, ecef.x);
+    if (p == 0.0) {
+        /* On the axis: the latitude is a pole and the height is the
+         * distance from the polar radius. */
+        *lat = (ecef.z >= 0.0) ? (M_PI / 2.0) : -(M_PI / 2.0);
+        *alt = fabs(ecef.z) - b;
+        return K26ASTRO_ATT_OK;
+    }
+    double theta = atan2(ecef.z * a, p * b);
+    double st = sin(theta), ct = cos(theta);
+    double phi = atan2(ecef.z + ep2 * b * st * st * st,
+                       p - e2 * a * ct * ct * ct);
+    for (int i = 0; i < 8; i++) {
+        double sp = sin(phi);
+        double N  = a / sqrt(1.0 - e2 * sp * sp);
+        double h  = p / cos(phi) - N;
+        double next = atan2(ecef.z, p * (1.0 - e2 * N / (N + h)));
+        if (next == phi) break;
+        phi = next;
+    }
+    double sp = sin(phi);
+    double N  = a / sqrt(1.0 - e2 * sp * sp);
+    *lat = phi;
+    *alt = p / cos(phi) - N;
+    return K26ASTRO_ATT_OK;
+}
+
+K26V3 k26astro_att_enu_to_ecef(K26V3 enu, double lat, double lon)
+{
+    double sl = sin(lat), cl = cos(lat);
+    double so = sin(lon), co = cos(lon);
+    K26V3 out;
+    out.x = -so * enu.x - sl * co * enu.y + cl * co * enu.z;
+    out.y =  co * enu.x - sl * so * enu.y + cl * so * enu.z;
+    out.z =              cl      * enu.y + sl      * enu.z;
+    return out;
+}
