@@ -445,15 +445,30 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
         }
     }
 
+    /* `episode.steps` occupies that name in the same read space an
+     * on_step body addresses bodies through, so a body called
+     * `episode` would make `episode.steps` ambiguous. */
+    for (const KflcNode *s = world->children; s; s = s->next) {
+        if (s->kind == KFLN_STMT_ASTRO_BODY && s->name &&
+            strcmp(s->name, "episode") == 0)
+        {
+            kflc_diag_errorf(diag, s->line,
+                "astro_body `episode`: the name is taken by "
+                "`episode.steps` in this program's expression scope; "
+                "rename the body");
+        }
+    }
+
     /* Channel names are published in the artifact's spec, whose name
      * entries carry at most 64 bytes; the longest derived component
-     * suffix is 6 bytes, so the base name is bounded at 58. Refusing
-     * here keeps every published component name exact. */
+     * suffix is `_range_rate` at 11 bytes, so the base name is
+     * bounded at 53. Refusing here keeps every published component
+     * name exact. */
     for (int i = 0; i < st.observes_as.n; i++) {
         const char *ni = observe_as_name_(st.observes_as.items[i]);
-        if (ni && strlen(ni) > 58) {
+        if (ni && strlen(ni) > 53) {
             kflc_diag_errorf(diag, st.observes_as.items[i]->line,
-                "observe ... as `%s`: channel name is longer than 58 "
+                "observe ... as `%s`: channel name is longer than 53 "
                 "bytes, so its derived component names would not fit "
                 "the published spec's 64-byte name entries", ni);
         }
@@ -466,14 +481,14 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
      * pre-existing sets may reuse one of those names: an action or a
      * component silently shadowing a user's `let` or `arg` would read
      * back the wrong value with no diagnostic at all. */
-    static const char *const comp_sfx_[4] =
-        { "_dir_x", "_dir_y", "_dir_z", "_range" };
+    static const char *const comp_sfx_[5] =
+        { "_dir_x", "_dir_y", "_dir_z", "_range", "_range_rate" };
     NameList comps;
     memset(&comps, 0, sizeof comps);
     for (int j = 0; j < st.observes_as.n; j++) {
         const char *base = observe_as_name_(st.observes_as.items[j]);
         if (!base) continue;
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < 5; k++) {
             namelist_push_(&comps, suffixed_(arena, base, comp_sfx_[k]),
                            arena);
         }
@@ -579,6 +594,8 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
         namelist_push_(&allowed, suffixed_(arena, base, "_dir_y"), arena);
         namelist_push_(&allowed, suffixed_(arena, base, "_dir_z"), arena);
         namelist_push_(&allowed, suffixed_(arena, base, "_range"), arena);
+        namelist_push_(&allowed, suffixed_(arena, base, "_range_rate"),
+                       arena);
     }
 
     for (int i = 0; i < st.episodes.n; i++) {

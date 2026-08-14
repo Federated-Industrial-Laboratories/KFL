@@ -77,8 +77,12 @@ def main():
     spec = _spec.parse(blob)
     _spec.validate(spec, art.abi_version, n_envs)
     g.check(spec.endian_probe == 0x01020304, "endian probe value")
-    g.check(spec.obs_total == 4, "fixture obs_total is %s"
+    # One observe-as statement, five components each.
+    g.check(spec.obs_total == 5, "fixture obs_total is %s"
             % spec.obs_total)
+    g.check(spec.obs_channel_names.get(4) == "track_range_rate",
+            "fifth component name is %s"
+            % spec.obs_channel_names.get(4))
     g.check(spec.act_total == 2, "fixture act_total is %s"
             % spec.act_total)
     g.check(spec.agent_count == 1, "fixture agent count")

@@ -138,7 +138,7 @@ static void drive_(const char *so_path, uint64_t seed, uint32_t n_envs,
     ASSERT(v.n_envs == n_envs);
     const uint32_t obs_total = v.obs_total;
     const uint32_t act_total = v.act_total;
-    ASSERT(obs_total > 0 && act_total == 2);
+    ASSERT(obs_total == 5 && act_total == 2);
 
     double *act = malloc(sizeof(double) * (size_t)n_envs * act_total);
     ASSERT(act != NULL);
@@ -167,7 +167,7 @@ static void drive_(const char *so_path, uint64_t seed, uint32_t n_envs,
  * deterministic base action stream and write the raw observation,
  * reward, and flag streams to out_path. The parent launches two of
  * these as separate processes and compares the files bitwise. The
- * observation width is the fixture's (4, pinned by gate 5's spec
+ * observation width is the fixture's (5, pinned by gate 5's spec
  * walk). */
 static int serve_driver_main_(const char *so_path, const char *seed_s,
                               const char *T_s, const char *n_s,
@@ -176,7 +176,7 @@ static int serve_driver_main_(const char *so_path, const char *seed_s,
     uint64_t seed = strtoull(seed_s, NULL, 10);
     uint32_t T    = (uint32_t)strtoul(T_s, NULL, 10);
     uint32_t N    = (uint32_t)strtoul(n_s, NULL, 10);
-    const uint32_t OBS = 4;
+    const uint32_t OBS = 5;
     ASSERT(T > 0 && N > 0);
 
     double   *o = malloc(sizeof(double)   * (size_t)T * N * OBS);
@@ -259,7 +259,7 @@ int main(int argc, char **argv)
      * streams. T=60 crosses two truncation boundaries, so the
      * comparison covers boundary resets too. */
     {
-        enum { T = 60, N = 4, OBS = 4 };
+        enum { T = 60, N = 4, OBS = 5 };
         rl_run_or_die_("cp " WORK_DIR "/det.rlenv.so "
                        WORK_DIR "/det_s1.so && cp " WORK_DIR
                        "/det.rlenv.so " WORK_DIR "/det_s2.so");
@@ -327,7 +327,7 @@ int main(int argc, char **argv)
     /* Gate 4: vector independence, serve, neighbours driven with
      * different actions. */
     {
-        enum { T = 60, N = 64, OBS = 4 };
+        enum { T = 60, N = 64, OBS = 5 };
         static double o1[T * 1 * OBS], oN[T * N * OBS];
         static double r1[T * 1], rN[T * N];
         static uint32_t f1[T * 1], fN[T * N];
@@ -367,7 +367,7 @@ int main(int argc, char **argv)
         ASSERT(v.endian_probe == 0x01020304u);
         ASSERT(v.agent_count == 1);
         ASSERT(v.n_envs == 2);
-        ASSERT(v.obs_total == 4);
+        ASSERT(v.obs_total == 5);
         ASSERT(v.act_total == 2);
         ASSERT(v.horizon == 24);
         {
@@ -454,7 +454,7 @@ int main(int argc, char **argv)
      * match the same bytes. This closes the note that serve
      * determinism was only ever checked within one process. */
     {
-        enum { T = 60, N = 4, OBS = 4 };
+        enum { T = 60, N = 4, OBS = 5 };
         char cmd[1024];
         int n = snprintf(cmd, sizeof cmd,
                          "%s --serve-driver " WORK_DIR "/det.rlenv.so"

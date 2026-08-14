@@ -409,7 +409,8 @@ int main(void)
         1, "collides with the `track_range` component", NULL);
 
     /* A channel name too long for the spec's 64-byte name entries is
-     * refused at compile time, never silently truncated. */
+     * refused at compile time, never silently truncated. The bound is
+     * 64 less the longest derived suffix, `_range_rate`. */
     expect_("longchan",
         "form LONG_CHAN\n"
         "fn world w\n"
@@ -421,13 +422,13 @@ int main(void)
         "        horizon 20\n"
         "    end\n"
         "    observe craft from earth mode=geometric as"
-        " channel_name_padded_out_to_be_conspicuously_longer_than_58_bytes\n"
+        " channel_name_padded_out_to_be_conspicuously_longer_than_53_bytes\n"
         "    objective\n"
         "        reward 0.0\n"
         "    end\n"
         "end\n"
         "end\n",
-        1, "longer than 58 bytes", NULL);
+        1, "longer than 53 bytes", NULL);
 
     /* A world binding silently shadowed by an observation component
      * would read back the wrong value with no diagnostic; the

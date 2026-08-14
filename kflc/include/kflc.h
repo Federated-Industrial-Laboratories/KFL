@@ -300,6 +300,15 @@ int         kflc_register_builtin(const char *kfl_name,
  * are unaffected — they live in a separate const table. */
 void        kflc_clear_builtins(void);
 
+/* 1 when `name` resolves to a builtin at all, static or registered. */
+int         kflc_builtin_known(const char *name);
+/* 1 when that builtin is marked pure: its result depends on its
+ * arguments alone and it touches no world state, no I/O, and no
+ * allocation. Registered library surfaces are impure, since the
+ * registry has no way to declare otherwise. Expression positions that
+ * must stay re-evaluable consult this. */
+int         kflc_builtin_is_pure(const char *name);
+
 /* Astro bootstrap. Registers the `world` / `starfield` opaque types
  * and all libk26astro_rt + libk26astro_render builtins (mirrors the
  * .kflbi manifests as an in-process fallback for embedders that do

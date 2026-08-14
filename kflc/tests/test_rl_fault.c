@@ -115,7 +115,7 @@ int main(void)
     ASSERT(s.output(env, WORK_DIR "/faultv.k26epi") == K26RL_OK);
 
     double act[3] = { 0.0, 0.0, 0.0 };
-    double obs[3 * 4], obs_pre[3 * 4], fault_obs[4];
+    double obs[3 * 5], obs_pre[3 * 5], fault_obs[5];
     double rew[3];
     uint32_t fl[3];
     uint16_t fc[3];
@@ -141,12 +141,12 @@ int main(void)
     ASSERT(fc[0] == 0 && fc[1] == (uint16_t)K26RL_E_ENV_INTERNAL &&
            fc[2] == 0);
     ASSERT(s.obs(env, obs) == K26RL_OK);
-    ASSERT(memcmp(obs + 4, obs_pre + 4, 4 * sizeof(double)) == 0);
-    ASSERT(memcmp(obs + 0, obs_pre + 0, 4 * sizeof(double)) != 0);
-    ASSERT(memcmp(obs + 8, obs_pre + 8, 4 * sizeof(double)) != 0);
+    ASSERT(memcmp(obs + 5, obs_pre + 5, 5 * sizeof(double)) == 0);
+    ASSERT(memcmp(obs + 0, obs_pre + 0, 5 * sizeof(double)) != 0);
+    ASSERT(memcmp(obs + 10, obs_pre + 10, 5 * sizeof(double)) != 0);
     ASSERT(s.reward(env, rew) == K26RL_OK);
     ASSERT(rew[0] == 1.0 && rew[1] == 0.0 && rew[2] == 1.0);
-    memcpy(fault_obs, obs + 4, sizeof fault_obs);
+    memcpy(fault_obs, obs + 5, sizeof fault_obs);
     printf("gate 1: fault confined to one environment of three: OK\n");
 
     /* Boundary after the fault: only the reset-boundary bit, a
@@ -199,10 +199,10 @@ int main(void)
         ASSERT(ep.step_count == 3);
         /* The five fixed column families of the fault record. */
         ASSERT(ep.act[2] == 1.0);                     /* faulting call */
-        ASSERT(memcmp(ep.obs + 2 * 4, ep.obs + 1 * 4,
-                      4 * sizeof(double)) == 0);      /* pre-step obs */
-        ASSERT(memcmp(ep.obs + 2 * 4, fault_obs,
-                      4 * sizeof(double)) == 0);      /* getter equality */
+        ASSERT(memcmp(ep.obs + 2 * 5, ep.obs + 1 * 5,
+                      5 * sizeof(double)) == 0);      /* pre-step obs */
+        ASSERT(memcmp(ep.obs + 2 * 5, fault_obs,
+                      5 * sizeof(double)) == 0);      /* getter equality */
         ASSERT(ep.rewards[2] == 0.0);
         ASSERT(ep.applied_dt[2] == 0.0);
         ASSERT(ep.flags[2] == K26RL_FLAG_FAULT);
@@ -449,7 +449,7 @@ int main(void)
         ASSERT(d.create(13, 1, &de) == K26RL_OK);
         ASSERT(d.output(de, WORK_DIR "/diverge.k26epi") == K26RL_OK);
 
-        double pre[4], post[4];
+        double pre[5], post[5];
         double a1[1] = { 0.0 };
         double r1 = -1.0;
         uint32_t f1 = 0;

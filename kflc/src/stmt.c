@@ -1636,6 +1636,19 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         return NULL;
     }
     char *rest = take_line_remainder(L, arena);
+    /* The leading token is re-joined to the rest of the line with a
+     * separating space, which would split a dotted name the
+     * expression lexer folds into one identifier (`craft.vel_x`).
+     * Drop the separator inside an on_step body, where body state is
+     * addressed that way, so the name reaches the expression parser
+     * whole. Everywhere else the dot stays a lexical error, which is
+     * what it is today. Only the tight form joins: `craft . vel_x`
+     * keeps its spaces and stays an error there too. */
+    if (g_rl_on_step_depth > 0 && rest[0] == '.' &&
+        cur->kind == T_IDENT && cur->str) {
+        size_t plen = strlen(prefix);
+        if (plen > 0 && prefix[plen - 1] == ' ') prefix[plen - 1] = '\0';
+    }
     size_t pn = strlen(prefix), rn = strlen(rest);
     char *line_src = (char *)kflc_arena_alloc(arena, pn + rn + 1);
     memcpy(line_src, prefix, pn);

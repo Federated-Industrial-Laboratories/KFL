@@ -52,9 +52,11 @@
 #define RL_MAX_RESETS   256
 #define RL_MAX_DR       256
 #define RL_MAX_WSCAL    256
+#define RL_MAX_BS       128
 
-/* The six scalar state keys astro_body and reset lines share. Order
- * matters nowhere; membership does. */
+/* The six scalar state keys astro_body, reset lines, and on_step
+ * assignments share. Order is the key index used by the state
+ * accessors; membership is what the other callers ask about. */
 static const char *const RL_STATE_KEYS_[6] = {
     "pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z"
 };
@@ -67,6 +69,15 @@ static int rl_is_state_key_(const char *k)
     }
     return 0;
 }
+
+/* The components one `observe ... as` contributes, in observation
+ * vector order. One table, so the width and the names cannot drift
+ * apart between the spec, the scope prelude, and the emitted
+ * recompute. */
+#define RL_OBS_COMPS 5
+static const char *const RL_OBS_COMP_[RL_OBS_COMPS] = {
+    "_dir_x", "_dir_y", "_dir_z", "_range", "_range_rate"
+};
 
 /* ---- Program model -------------------------------------------------- */
 
@@ -81,6 +92,13 @@ typedef struct {
     KflcExpr       *dist;      /* parsed uniform/normal call */
     int             channel;   /* class 0x0002 channel */
 } RlDrParam;
+
+/* One (body, state key) pair an on_step body reads or assigns. */
+typedef struct {
+    int body;      /* index into the model's bodies[] */
+    int key;       /* index into RL_STATE_KEYS_ */
+    int written;   /* 1 when an assignment targets it */
+} RlStateRef;
 
 typedef struct {
     const KflcNode *world;
@@ -110,6 +128,11 @@ typedef struct {
      * without allocating on the step path. */
     const KflcNode *wscal[RL_MAX_WSCAL];
     int             n_wscal;
+
+    /* Body state the on_step body reaches, in first-mention order.
+     * One accessor pair is emitted per entry. */
+    RlStateRef      bs[RL_MAX_BS];
+    int             n_bs;
 
     const KflcAttr *control_dt;
     const KflcAttr *horizon;          /* or NULL */
@@ -231,16 +254,13 @@ static int rl_scope_name_taken_(const RlModel *m, const char *name)
         const char *an = m->actions[i]->name;
         if (an && strcmp(an, name) == 0) return 1;
     }
-    static const char *const comp[4] = {
-        "_dir_x", "_dir_y", "_dir_z", "_range"
-    };
     for (int i = 0; i < m->n_observes; i++) {
         const char *base = rl_observe_as_(m->observes[i]);
         if (!base) continue;
         size_t bl = strlen(base);
         if (strncmp(name, base, bl) != 0) continue;
-        for (int c = 0; c < 4; c++) {
-            if (strcmp(name + bl, comp[c]) == 0) return 1;
+        for (int c = 0; c < RL_OBS_COMPS; c++) {
+            if (strcmp(name + bl, RL_OBS_COMP_[c]) == 0) return 1;
         }
     }
     return 0;
@@ -661,16 +681,14 @@ static void rl_emit_scope_prelude_(FILE *out, const RlModel *m, int indent)
             "(void)%s;\n",
             m->actions[i]->name, i, m->actions[i]->name);
     }
-    static const char *const comp[4] = {
-        "_dir_x", "_dir_y", "_dir_z", "_range"
-    };
     for (int i = 0; i < m->n_observes; i++) {
         const char *base = rl_observe_as_(m->observes[i]);
-        for (int c = 0; c < 4; c++) {
+        for (int c = 0; c < RL_OBS_COMPS; c++) {
             rl_emit_indent_(out, indent);
             fprintf(out,
                 "const double %s%s = _kfl_obs_v[%d]; (void)%s%s;\n",
-                base, comp[c], i * 4 + c, base, comp[c]);
+                base, RL_OBS_COMP_[c], i * RL_OBS_COMPS + c,
+                base, RL_OBS_COMP_[c]);
         }
     }
     for (int i = 0; i < m->n_wscal; i++) {
@@ -694,17 +712,14 @@ static void rl_scope_bindings_(const RlModel *m, const KflcNode *form,
         rl_push_binding_(arena, live, live_n, live_cap,
                          m->actions[i]->name, KFLT_DOUBLE);
     }
-    static const char *const comp[4] = {
-        "_dir_x", "_dir_y", "_dir_z", "_range"
-    };
     for (int i = 0; i < m->n_observes; i++) {
         const char *base = rl_observe_as_(m->observes[i]);
         if (!base) continue;
-        for (int c = 0; c < 4; c++) {
-            size_t bl = strlen(base), sl = strlen(comp[c]);
+        for (int c = 0; c < RL_OBS_COMPS; c++) {
+            size_t bl = strlen(base), sl = strlen(RL_OBS_COMP_[c]);
             char *nm = (char *)kflc_arena_alloc(arena, bl + sl + 1);
             memcpy(nm, base, bl);
-            memcpy(nm + bl, comp[c], sl + 1);
+            memcpy(nm + bl, RL_OBS_COMP_[c], sl + 1);
             rl_push_binding_(arena, live, live_n, live_cap, nm,
                              KFLT_DOUBLE);
         }
@@ -818,7 +833,7 @@ static void rl_emit_prologue_(FILE *out, const RlModel *m,
         "#define KFLRL_HAS_TERMINATED %d\n"
         "#define KFLRL_MAGIC 0x4b524c45u\n"
         "\n",
-        m->n_bodies, m->n_observes * 4, m->n_actions,
+        m->n_bodies, m->n_observes * RL_OBS_COMPS, m->n_actions,
         m->n_resets, m->n_dr, m->n_resets + m->n_dr,
         m->n_wscal, m->terminated_when ? 1 : 0);
 
@@ -837,18 +852,15 @@ static void rl_emit_prologue_(FILE *out, const RlModel *m,
     }
     fputs(" };\n#endif\n\n", out);
 
-    /* Observation channel names, source order, four components per
-     * observe-as statement. */
+    /* Observation channel names, source order, one entry per
+     * component of each observe-as statement. */
     if (m->n_observes > 0) {
         fputs("static const char *const kflrl_obs_names_"
               "[KFLRL_OBS_TOTAL] = {\n", out);
-        static const char *const comp[4] = {
-            "_dir_x", "_dir_y", "_dir_z", "_range"
-        };
         for (int i = 0; i < m->n_observes; i++) {
             const char *base = rl_observe_as_(m->observes[i]);
-            for (int c = 0; c < 4; c++) {
-                fprintf(out, "    \"%s%s\",\n", base, comp[c]);
+            for (int c = 0; c < RL_OBS_COMPS; c++) {
+                fprintf(out, "    \"%s%s\",\n", base, RL_OBS_COMP_[c]);
             }
         }
         fputs("};\n\n", out);
@@ -1347,53 +1359,484 @@ static void rl_emit_observe_(FILE *out, const RlModel *m)
             "        K26V3 _kfl_d; _kfl_d.x = _kfl_d.y = _kfl_d.z = "
             "0.0;\n"
             "        double _kfl_range = 0.0;\n"
+            "        double _kfl_rrate = 0.0;\n"
             "        if (_kfl_t >= 0 && _kfl_o >= 0) {\n"
             "            (void)k26astro_world_observe(world, _kfl_t, "
             "_kfl_o, &_kfl_p, &_kfl_d);\n"
             "            K26AstroBody *_kfl_ob = "
             "k26astro_world_body_at(world, _kfl_o);\n"
+            "            K26AstroBody *_kfl_tb = "
+            "k26astro_world_body_at(world, _kfl_t);\n"
             "            if (_kfl_ob) {\n"
             "                K26V3 _kfl_r = k26astro_pos_sub(&_kfl_p, "
             "&_kfl_ob->pos);\n"
             "                _kfl_range = std::sqrt(_kfl_r.x * _kfl_r.x "
             "+ _kfl_r.y * _kfl_r.y + _kfl_r.z * _kfl_r.z);\n"
             "            }\n"
+            /* The range rate is the geometric one: the observation
+             * mode corrects a position, and there is no corrected
+             * velocity to differentiate, so the rate is taken from
+             * the two bodies' current state. Zero separation yields
+             * 0.0 rather than a quotient of zeroes. */
+            "            if (_kfl_ob && _kfl_tb) {\n"
+            "                K26V3 _kfl_gr = k26astro_pos_sub("
+            "&_kfl_tb->pos, &_kfl_ob->pos);\n"
+            "                K26V3 _kfl_gv;\n"
+            "                _kfl_gv.x = _kfl_tb->vel.x - _kfl_ob->vel.x;\n"
+            "                _kfl_gv.y = _kfl_tb->vel.y - _kfl_ob->vel.y;\n"
+            "                _kfl_gv.z = _kfl_tb->vel.z - _kfl_ob->vel.z;\n"
+            "                double _kfl_gm = std::sqrt("
+            "_kfl_gr.x * _kfl_gr.x + _kfl_gr.y * _kfl_gr.y"
+            " + _kfl_gr.z * _kfl_gr.z);\n"
+            "                if (_kfl_gm != 0.0) {\n"
+            "                    _kfl_rrate = (_kfl_gr.x * _kfl_gv.x"
+            " + _kfl_gr.y * _kfl_gv.y + _kfl_gr.z * _kfl_gv.z)"
+            " / _kfl_gm;\n"
+            "                }\n"
+            "            }\n"
             "        }\n"
             "        out_v[%d] = _kfl_d.x;\n"
             "        out_v[%d] = _kfl_d.y;\n"
             "        out_v[%d] = _kfl_d.z;\n"
             "        out_v[%d] = _kfl_range;\n"
+            "        out_v[%d] = _kfl_rrate;\n"
             "    }\n",
-            i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 3);
+            i * RL_OBS_COMPS, i * RL_OBS_COMPS + 1,
+            i * RL_OBS_COMPS + 2, i * RL_OBS_COMPS + 3,
+            i * RL_OBS_COMPS + 4);
     }
     fputs("}\n\n", out);
 }
 
-/* The stepping hot path performs no I/O; print anywhere in the
- * on_step body (nested blocks included) is rejected. */
-static int rl_reject_print_(const KflcNode *stmts, KflcDiag *diag)
+/* ---- Statements and calls the stepping path forbids ----------------- */
+
+/* A sweep follows calls into user fn bodies, so a forbidden statement
+ * cannot reach the stepping path one indirection away. Two sweeps
+ * share the walk: RL_SWEEP_PRINT for I/O, RL_SWEEP_IMPURE for a call
+ * to a builtin that is not marked pure. */
+#define RL_SWEEP_PRINT   0
+#define RL_SWEEP_IMPURE  1
+#define RL_SWEEP_MAX_FNS 64
+
+typedef struct {
+    const KflcNode *form;
+    int             kind;              /* RL_SWEEP_* */
+    const char     *found;             /* offending name, when found */
+    const char     *via;               /* user fn it was reached through */
+    int             line;              /* line of the offending statement */
+    const char     *seen[RL_SWEEP_MAX_FNS];
+    int             n_seen;
+} RlSweep;
+
+static int rl_sweep_stmts_(RlSweep *sw, const KflcNode *stmts,
+                           const char *via);
+
+static const KflcNode *rl_find_user_fn_(const KflcNode *form,
+                                        const char *name)
 {
-    for (const KflcNode *s = stmts; s; s = s->next) {
-        if (s->kind == KFLN_STMT_PRINT) {
-            kflc_diag_errorf(diag, s->line,
-                "print is not allowed in on_step: the stepping hot "
-                "path performs no I/O");
+    if (!form || !name) return NULL;
+    for (const KflcNode *c = form->children; c; c = c->next) {
+        if (c->kind == KFLN_FN && c->name && strcmp(c->name, name) == 0) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
+static int rl_sweep_expr_(RlSweep *sw, const KflcExpr *e, const char *via)
+{
+    if (!e) return 0;
+    switch (e->kind) {
+    case KFLE_UNARY:
+        return rl_sweep_expr_(sw, e->u.un.operand, via);
+    case KFLE_BINARY:
+        return rl_sweep_expr_(sw, e->u.bin.lhs, via) ||
+               rl_sweep_expr_(sw, e->u.bin.rhs, via);
+    case KFLE_INDEX:
+        return rl_sweep_expr_(sw, e->u.index.base, via) ||
+               rl_sweep_expr_(sw, e->u.index.idx, via);
+    case KFLE_VEC_LIT:
+        for (int i = 0; i < e->u.vec.n_elems; i++) {
+            if (rl_sweep_expr_(sw, e->u.vec.elems[i], via)) return 1;
+        }
+        return 0;
+    case KFLE_CALL: {
+        for (int i = 0; i < e->u.call.n_args; i++) {
+            if (rl_sweep_expr_(sw, e->u.call.args[i], via)) return 1;
+        }
+        const char *nm = e->u.call.name;
+        if (!nm) return 0;
+        if (sw->kind == RL_SWEEP_IMPURE && kflc_builtin_known(nm) &&
+            !kflc_builtin_is_pure(nm)) {
+            sw->found = nm;
+            sw->via   = via;
             return 1;
         }
-        if (rl_reject_print_(s->children, diag)) return 1;
-        if (rl_reject_print_(s->else_children, diag)) return 1;
+        const KflcNode *fn = rl_find_user_fn_(sw->form, nm);
+        if (!fn) return 0;
+        for (int i = 0; i < sw->n_seen; i++) {
+            if (strcmp(sw->seen[i], nm) == 0) return 0;   /* recursion */
+        }
+        if (sw->n_seen >= RL_SWEEP_MAX_FNS) return 0;
+        sw->seen[sw->n_seen++] = nm;
+        return rl_sweep_stmts_(sw, fn->children, via ? via : nm);
+    }
+    default:
+        return 0;
+    }
+}
+
+static int rl_sweep_stmts_(RlSweep *sw, const KflcNode *stmts,
+                           const char *via)
+{
+    for (const KflcNode *s = stmts; s; s = s->next) {
+        if (sw->kind == RL_SWEEP_PRINT && s->kind == KFLN_STMT_PRINT) {
+            sw->found = "print";
+            sw->via   = via;
+            sw->line  = s->line;
+            return 1;
+        }
+        sw->line = s->line;
+        if (rl_sweep_expr_(sw, s->expr, via)) return 1;
+        if (rl_sweep_expr_(sw, s->expr2, via)) return 1;
+        if (rl_sweep_stmts_(sw, s->children, via)) return 1;
+        if (rl_sweep_stmts_(sw, s->else_children, via)) return 1;
     }
     return 0;
 }
 
-/* The on_step body: action names in scope as read-only scalars, run
- * once per external step before the world advances, identically in
- * both modes. */
-static int rl_emit_on_step_(FILE *out, const RlModel *m,
+static void rl_sweep_init_(RlSweep *sw, const KflcNode *form, int kind)
+{
+    memset(sw, 0, sizeof *sw);
+    sw->form = form;
+    sw->kind = kind;
+}
+
+/* The stepping hot path performs no I/O; print anywhere the on_step
+ * body reaches, nested blocks and called fns included, is rejected. */
+static int rl_reject_print_(const KflcNode *form, const KflcNode *stmts,
+                            KflcDiag *diag)
+{
+    RlSweep sw;
+    rl_sweep_init_(&sw, form, RL_SWEEP_PRINT);
+    if (!rl_sweep_stmts_(&sw, stmts, NULL)) return 0;
+    if (sw.via) {
+        kflc_diag_errorf(diag, sw.line,
+            "print is not allowed in on_step: the stepping hot path "
+            "performs no I/O, and `fn %s` called from here prints",
+            sw.via);
+    } else {
+        kflc_diag_errorf(diag, sw.line,
+            "print is not allowed in on_step: the stepping hot "
+            "path performs no I/O");
+    }
+    return 1;
+}
+
+/* ---- Body state inside on_step -------------------------------------- */
+
+/* Split a name at its single dot. Returns 1 when exactly one dot sits
+ * between two non-empty parts. */
+static int rl_dotted_split_(const char *name, char *lhs, size_t lcap,
+                            char *rhs, size_t rcap)
+{
+    if (!name) return 0;
+    const char *dot = strchr(name, '.');
+    if (!dot || dot == name || dot[1] == '\0') return 0;
+    if (strchr(dot + 1, '.')) return 0;
+    size_t ln = (size_t)(dot - name);
+    if (ln + 1 > lcap || strlen(dot + 1) + 1 > rcap) return 0;
+    memcpy(lhs, name, ln);
+    lhs[ln] = '\0';
+    snprintf(rhs, rcap, "%s", dot + 1);
+    return 1;
+}
+
+static int rl_state_key_index_(const char *k)
+{
+    for (int i = 0; i < 6; i++) {
+        if (k && strcmp(k, RL_STATE_KEYS_[i]) == 0) return i;
+    }
+    return -1;
+}
+
+/* Record a (body, key) reference, one slot per pair, in first-mention
+ * order. Returns the slot or -2 when the model's table is full. */
+static int rl_bs_slot_(RlModel *m, int body, int key, int write, int line,
+                       KflcDiag *diag)
+{
+    for (int i = 0; i < m->n_bs; i++) {
+        if (m->bs[i].body == body && m->bs[i].key == key) {
+            if (write) m->bs[i].written = 1;
+            return i;
+        }
+    }
+    if (m->n_bs >= RL_MAX_BS) {
+        kflc_diag_errorf(diag, line,
+            "on_step: more than %d distinct body state references",
+            RL_MAX_BS);
+        return -2;
+    }
+    m->bs[m->n_bs].body    = body;
+    m->bs[m->n_bs].key     = key;
+    m->bs[m->n_bs].written = write;
+    return m->n_bs++;
+}
+
+static void rl_bs_fn_name_(const RlModel *m, int slot, int set,
+                           char *out, size_t cap)
+{
+    const RlStateRef *r = &m->bs[slot];
+    snprintf(out, cap, "kflrl_bs_%s_%s_%s", set ? "set" : "get",
+             m->bodies[r->body].body->name, RL_STATE_KEYS_[r->key]);
+}
+
+/* Resolve a dotted name used inside on_step. Returns the slot, -1 when
+ * the name carries no dot and is somebody else's to resolve, or -2 when
+ * it is dotted and refused with a diagnostic. */
+static int rl_bs_resolve_(RlModel *m, const char *name, int write,
+                          int line, KflcDiag *diag)
+{
+    if (!name || !strchr(name, '.')) return -1;
+    if (strcmp(name, "episode.steps") == 0) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `episode.steps` is readable in the objective and "
+            "termination expressions, not in on_step");
+        return -2;
+    }
+    char b[128], k[64];
+    if (!rl_dotted_split_(name, b, sizeof b, k, sizeof k)) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s` is not a body state reference (expected "
+            "`<body>.<key>`)", name);
+        return -2;
+    }
+    int bi = rl_body_index_of_(m, b);
+    if (bi < 0) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s`: no astro_body named `%s` is declared in this "
+            "world", name, b);
+        return -2;
+    }
+    int ki = rl_state_key_index_(k);
+    if (ki < 0) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s`: `%s` is not a body state key (expected "
+            "pos_x, pos_y, pos_z, vel_x, vel_y, or vel_z)", name, k);
+        return -2;
+    }
+    return rl_bs_slot_(m, bi, ki, write, line, diag);
+}
+
+/* Rewrite dotted reads in an expression into calls on the emitted
+ * state accessors. The identifier text becomes the call itself, which
+ * the expression emitter passes through for a double binding, so the
+ * read is live: it sees writes made earlier in the same body. */
+static int rl_bs_rewrite_expr_(RlModel *m, KflcExpr *e, int line,
+                               KflcArena *arena, KflcDiag *diag)
+{
+    if (!e) return 0;
+    switch (e->kind) {
+    case KFLE_IDENT: {
+        int slot = rl_bs_resolve_(m, e->u.ident, 0, line, diag);
+        if (slot == -1) return 0;
+        if (slot < 0) return 1;
+        char fn[192], call[256];
+        rl_bs_fn_name_(m, slot, 0, fn, sizeof fn);
+        snprintf(call, sizeof call, "%s(world)", fn);
+        e->u.ident = kflc_arena_strdup(arena, call);
+        return 0;
+    }
+    case KFLE_UNARY:
+        return rl_bs_rewrite_expr_(m, e->u.un.operand, line, arena, diag);
+    case KFLE_BINARY:
+        return rl_bs_rewrite_expr_(m, e->u.bin.lhs, line, arena, diag) ||
+               rl_bs_rewrite_expr_(m, e->u.bin.rhs, line, arena, diag);
+    case KFLE_INDEX:
+        return rl_bs_rewrite_expr_(m, e->u.index.base, line, arena, diag) ||
+               rl_bs_rewrite_expr_(m, e->u.index.idx, line, arena, diag);
+    case KFLE_VEC_LIT:
+        for (int i = 0; i < e->u.vec.n_elems; i++) {
+            if (rl_bs_rewrite_expr_(m, e->u.vec.elems[i], line, arena,
+                                    diag)) return 1;
+        }
+        return 0;
+    case KFLE_CALL:
+        for (int i = 0; i < e->u.call.n_args; i++) {
+            if (rl_bs_rewrite_expr_(m, e->u.call.args[i], line, arena,
+                                    diag)) return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/* The assigned expression must stay re-evaluable, so a call to a
+ * builtin that is not marked pure is refused, calls into user fns
+ * followed. */
+static int rl_bs_check_pure_(const KflcNode *form, const KflcExpr *e,
+                             int line, KflcDiag *diag)
+{
+    RlSweep sw;
+    rl_sweep_init_(&sw, form, RL_SWEEP_IMPURE);
+    if (!rl_sweep_expr_(&sw, e, NULL)) return 0;
+    if (sw.via) {
+        kflc_diag_errorf(diag, line,
+            "on_step: a body state assignment must be side-effect free, "
+            "and `fn %s` called here reaches `%s`, which is not pure",
+            sw.via, sw.found);
+    } else {
+        kflc_diag_errorf(diag, line,
+            "on_step: a body state assignment must be side-effect free, "
+            "and `%s` is not a pure builtin", sw.found);
+    }
+    return 1;
+}
+
+/* Rewrite one statement list: dotted reads become accessor calls, and
+ * an assignment to a dotted name becomes an expression statement
+ * calling the state setter. Nested blocks are rewritten too, so the
+ * form works wherever an ordinary assignment does. */
+static int rl_bs_rewrite_stmts_(RlModel *m, KflcNode *stmts,
+                                const KflcNode *form, KflcArena *arena,
+                                KflcDiag *diag)
+{
+    for (KflcNode *s = stmts; s; s = s->next) {
+        if (s->kind == KFLN_STMT_ASSIGN && s->name &&
+            strchr(s->name, '.')) {
+            int slot = rl_bs_resolve_(m, s->name, 1, s->line, diag);
+            if (slot < 0) return 1;
+            if (rl_bs_rewrite_expr_(m, s->expr, s->line, arena, diag)) {
+                return 1;
+            }
+            if (rl_bs_check_pure_(form, s->expr, s->line, diag)) return 1;
+
+            char fn[192];
+            rl_bs_fn_name_(m, slot, 1, fn, sizeof fn);
+            KflcExpr *world = (KflcExpr *)kflc_arena_alloc(arena,
+                                                           sizeof *world);
+            memset(world, 0, sizeof *world);
+            world->kind    = KFLE_IDENT;
+            world->line    = s->line;
+            world->u.ident = kflc_arena_strdup(arena, "world");
+            KflcExpr **args = (KflcExpr **)kflc_arena_alloc(
+                arena, 2 * sizeof *args);
+            args[0] = world;
+            args[1] = s->expr;
+            KflcExpr *call = (KflcExpr *)kflc_arena_alloc(arena,
+                                                          sizeof *call);
+            memset(call, 0, sizeof *call);
+            call->kind           = KFLE_CALL;
+            call->line           = s->line;
+            call->u.call.name    = kflc_arena_strdup(arena, fn);
+            call->u.call.args    = args;
+            call->u.call.n_args  = 2;
+
+            s->kind = KFLN_STMT_EXPR;
+            s->name = NULL;
+            s->expr = call;
+            continue;
+        }
+        if (rl_bs_rewrite_expr_(m, s->expr, s->line, arena, diag)) return 1;
+        if (rl_bs_rewrite_expr_(m, s->expr2, s->line, arena, diag)) return 1;
+        if (rl_bs_rewrite_stmts_(m, s->children, form, arena, diag)) {
+            return 1;
+        }
+        if (rl_bs_rewrite_stmts_(m, s->else_children, form, arena, diag)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The state accessors, one pair per referenced (body, key). A key
+ * means metres or metres per second from the world origin wherever it
+ * is written, so the setter emits the same write the reset path emits,
+ * sector fold included, and the getter is its exact inverse. */
+static void rl_emit_state_accessors_(FILE *out, const RlModel *m)
+{
+    for (int i = 0; i < m->n_bs; i++) {
+        const RlStateRef *r = &m->bs[i];
+        const char *key = RL_STATE_KEYS_[r->key];
+        char axis = key[4];
+        char fn[192];
+
+        rl_bs_fn_name_(m, i, 0, fn, sizeof fn);
+        fprintf(out,
+            "static double %s(K26AstroWorld *world)\n"
+            "{\n"
+            "    K26AstroBody *b = k26astro_world_body_at(world, "
+            "kflrl_body_idx_[%d]);\n"
+            "    if (!b) return 0.0;\n", fn, r->body);
+        if (strncmp(key, "pos_", 4) == 0) {
+            fprintf(out,
+                "    return (double)b->pos.s%c * K26ASTRO_SECTOR_EDGE_M"
+                " + b->pos.l%c;\n", axis, axis);
+        } else {
+            fprintf(out, "    return b->vel.%c;\n", axis);
+        }
+        fputs("}\n\n", out);
+
+        if (!r->written) continue;
+        rl_bs_fn_name_(m, i, 1, fn, sizeof fn);
+        fprintf(out,
+            "static void %s(K26AstroWorld *world, double v)\n"
+            "{\n"
+            "    K26AstroBody *b = k26astro_world_body_at(world, "
+            "kflrl_body_idx_[%d]);\n"
+            "    if (!b) return;\n", fn, r->body);
+        rl_emit_body_write_(out, 4, "b->", key, "v");
+        fputs("}\n\n", out);
+    }
+}
+
+/* The on_step body: action names in scope as read-only scalars, body
+ * state readable and assignable by dotted name, run once per external
+ * step before the world advances, identically in both modes. */
+static int rl_emit_on_step_(FILE *out, RlModel *m,
                             const KflcNode *form, KflcArena *arena,
                             KflcExprFn *user_fn_arr, int n_user_fns,
                             KflcDiag *diag)
 {
+    KflcExprFn *fns = user_fn_arr;
+    int n_fns = n_user_fns;
+
+    if (m->on_step) {
+        /* The stepping hot path performs no I/O, so a print here, or
+         * in anything this body calls, would falsify the artifact's
+         * contract. */
+        if (rl_reject_print_(form, m->on_step->children, diag)) return 1;
+        if (rl_bs_rewrite_stmts_(m, m->on_step->children, form, arena,
+                                 diag)) {
+            return 1;
+        }
+        rl_emit_state_accessors_(out, m);
+
+        /* The accessors resolve as ordinary calls in this body alone:
+         * they are emitted in this translation unit and named only
+         * here. */
+        if (m->n_bs > 0) {
+            n_fns = n_user_fns + 2 * m->n_bs;
+            fns = (KflcExprFn *)kflc_arena_alloc(
+                arena, (size_t)n_fns * sizeof *fns);
+            for (int i = 0; i < n_user_fns; i++) fns[i] = user_fn_arr[i];
+            int at = n_user_fns;
+            for (int i = 0; i < m->n_bs; i++) {
+                char nm[192];
+                rl_bs_fn_name_(m, i, 0, nm, sizeof nm);
+                fns[at].name  = kflc_arena_strdup(arena, nm);
+                fns[at].arity = 1;
+                at++;
+                rl_bs_fn_name_(m, i, 1, nm, sizeof nm);
+                fns[at].name  = kflc_arena_strdup(arena, nm);
+                fns[at].arity = 2;
+                at++;
+            }
+            n_fns = at;
+        }
+    }
+
     fputs("static void kflrl_on_step_(K26AstroWorld *world, "
           "const double *_kfl_act_v)\n"
           "{\n"
@@ -1406,10 +1849,6 @@ static int rl_emit_on_step_(FILE *out, const RlModel *m,
                 m->actions[i]->name, i, m->actions[i]->name);
         }
 
-        /* The stepping hot path performs no I/O, so a print here
-         * would falsify the artifact's contract. */
-        if (rl_reject_print_(m->on_step->children, diag)) return 1;
-
         KflcExprBinding *live = NULL;
         int live_n = 0, live_cap = 0;
         rl_collect_form_args_(form, arena, &live, &live_n, &live_cap);
@@ -1420,6 +1859,13 @@ static int rl_emit_on_step_(FILE *out, const RlModel *m,
         for (const KflcNode *s = m->on_step->children; s; s = s->next) {
             rl_collect_lets_(s, arena, &live, &live_n, &live_cap);
         }
+        for (int i = 0; i < m->n_bs; i++) {
+            char nm[192], call[256];
+            rl_bs_fn_name_(m, i, 0, nm, sizeof nm);
+            snprintf(call, sizeof call, "%s(world)", nm);
+            rl_push_binding_(arena, &live, &live_n, &live_cap,
+                             kflc_arena_strdup(arena, call), KFLT_DOUBLE);
+        }
         rl_push_binding_(arena, &live, &live_n, &live_cap, "world",
                          KFLT_OPAQUE);
         live[live_n - 1].type_subtype = "world";
@@ -1428,8 +1874,8 @@ static int rl_emit_on_step_(FILE *out, const RlModel *m,
         memset(&ctx, 0, sizeof ctx);
         ctx.bindings   = live;
         ctx.n_bindings = live_n;
-        ctx.fns        = user_fn_arr;
-        ctx.n_fns      = n_user_fns;
+        ctx.fns        = fns;
+        ctx.n_fns      = n_fns;
         ctx.form       = form;
         ctx.headless   = 1;
 
@@ -1462,6 +1908,16 @@ static void rl_check_objective_names_(const RlModel *m,
         if (!id) return;
         if (strcmp(id, "episode.steps") == 0 ||
             strcmp(id, "true") == 0 || strcmp(id, "false") == 0) {
+            return;
+        }
+        if (strchr(id, '.')) {
+            /* Body state is addressed by dotted name inside on_step
+             * and nowhere else; state reaches an objective through
+             * observation channels. */
+            kflc_diag_errorf(diag, line,
+                "%s: `%s`: body state is readable and assignable only "
+                "inside an on_step block; an objective reads state "
+                "through `observe ... as` channels", ctx_word, id);
             return;
         }
         if (rl_scope_name_taken_(m, id)) return;   /* action / channel */

@@ -365,7 +365,7 @@ int main(void)
     ASSERT(info.n_envs == 2);
     ASSERT(info.governing_seed == 42);
     ASSERT(info.rekey_ordinal == 0);
-    ASSERT(info.obs_total == 4);
+    ASSERT(info.obs_total == 5);   /* one observe-as, five components */
     ASSERT(info.act_total == 2);
     ASSERT(info.agent_count == 1);
     {
@@ -410,7 +410,7 @@ int main(void)
     ASSERT(v.endian_probe == 0x01020304u);
     ASSERT(v.agent_count == 1);
     ASSERT(v.n_envs == 2);
-    ASSERT(v.obs_total == 4);
+    ASSERT(v.obs_total == 5);
     ASSERT(v.act_total == 2);
     ASSERT(v.horizon == 1000);
     {
@@ -450,24 +450,24 @@ int main(void)
         ASSERT(ep1.step_count == 901);
 
         double actions[2 * 2] = { 0.0, 0.0, 0.0, 0.0 };
-        double obs[2 * 4];
+        double obs[2 * 5];
         double rew[2];
         uint32_t fl[2];
 
         /* Initial observations equal the episode-start frames'. */
         ASSERT(s.obs(env, obs) == K26RL_OK);
-        ASSERT(memcmp(obs, ep0.initial_obs, 4 * sizeof(double)) == 0);
-        ASSERT(memcmp(obs + 4, ep1.initial_obs, 4 * sizeof(double)) == 0);
+        ASSERT(memcmp(obs, ep0.initial_obs, 5 * sizeof(double)) == 0);
+        ASSERT(memcmp(obs + 5, ep1.initial_obs, 5 * sizeof(double)) == 0);
 
         for (uint32_t t = 0; t < 901; t++) {
             ASSERT(s.step(env, actions) == K26RL_OK);
             ASSERT(s.obs(env, obs) == K26RL_OK);
             ASSERT(s.reward(env, rew) == K26RL_OK);
             ASSERT(s.flags(env, fl) == K26RL_OK);
-            ASSERT(memcmp(obs, ep0.obs + (size_t)t * 4,
-                          4 * sizeof(double)) == 0);
-            ASSERT(memcmp(obs + 4, ep1.obs + (size_t)t * 4,
-                          4 * sizeof(double)) == 0);
+            ASSERT(memcmp(obs, ep0.obs + (size_t)t * 5,
+                          5 * sizeof(double)) == 0);
+            ASSERT(memcmp(obs + 5, ep1.obs + (size_t)t * 5,
+                          5 * sizeof(double)) == 0);
             ASSERT(memcmp(&rew[0], &ep0.rewards[t], sizeof(double)) == 0);
             ASSERT(memcmp(&rew[1], &ep1.rewards[t], sizeof(double)) == 0);
             ASSERT(fl[0] == ep0.flags[t]);
@@ -503,7 +503,7 @@ int main(void)
     ASSERT(f.create(7, 1, &fe) == K26RL_OK);
     {
         double act[1] = { 0.0 };
-        double obs_pre[4], obs_now[4];
+        double obs_pre[5], obs_now[5];
         double rew;
         uint32_t fl;
         uint16_t fc;

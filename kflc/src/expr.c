@@ -37,40 +37,47 @@
  * (e.g. KFL `abs` → C++ `fabs`) and gives a single point of truth for
  * the set of available calls. `arity` is checked at emit time; -1
  * means variadic and is currently unused. */
+/* `pure` marks a builtin whose result depends on its arguments alone
+ * and which touches nothing else: no world state, no I/O, no
+ * allocation. Callers that must be able to re-evaluate an expression
+ * and get the same program back consult it through
+ * kflc_builtin_is_pure. Only `concat` is impure in the static table,
+ * because it allocates its result. */
 typedef struct {
     const char *kfl_name;
     const char *cxx_name;
     int         arity;
+    int         pure;
 } BuiltinFn;
 
 static const BuiltinFn BUILTINS[] = {
     /* libm scalar — one argument unless noted */
-    { "sin",   "sin",     1 },
-    { "cos",   "cos",     1 },
-    { "tan",   "tan",     1 },
-    { "asin",  "asin",    1 },
-    { "acos",  "acos",    1 },
-    { "atan",  "atan",    1 },
-    { "atan2", "atan2",   2 },
-    { "exp",   "exp",     1 },
-    { "log",   "log",     1 },
-    { "log10", "log10",   1 },
-    { "sqrt",  "sqrt",    1 },
-    { "pow",   "pow",     2 },
-    { "abs",   "fabs",    1 },
-    { "floor", "floor",   1 },
-    { "ceil",  "ceil",    1 },
-    { "round", "round",   1 },
-    { "min",   "fmin",    2 },
-    { "max",   "fmax",    2 },
-    { "fmod",  "fmod",    2 },
+    { "sin",   "sin",     1, 1 },
+    { "cos",   "cos",     1, 1 },
+    { "tan",   "tan",     1, 1 },
+    { "asin",  "asin",    1, 1 },
+    { "acos",  "acos",    1, 1 },
+    { "atan",  "atan",    1, 1 },
+    { "atan2", "atan2",   2, 1 },
+    { "exp",   "exp",     1, 1 },
+    { "log",   "log",     1, 1 },
+    { "log10", "log10",   1, 1 },
+    { "sqrt",  "sqrt",    1, 1 },
+    { "pow",   "pow",     2, 1 },
+    { "abs",   "fabs",    1, 1 },
+    { "floor", "floor",   1, 1 },
+    { "ceil",  "ceil",    1, 1 },
+    { "round", "round",   1, 1 },
+    { "min",   "fmin",    2, 1 },
+    { "max",   "fmax",    2, 1 },
+    { "fmod",  "fmod",    2, 1 },
     /* String helpers from libk26util. */
-    { "strlen",          "k26_str_len",                    1 },
-    { "streq",           "k26_str_eq",                     2 },
-    { "starts_with",     "k26_str_starts_with",            2 },
-    { "ends_with",       "k26_str_ends_with",              2 },
-    { "concat",          "k26_str_concat",                 2 },
-    { NULL,    NULL,      0 }
+    { "strlen",          "k26_str_len",                    1, 1 },
+    { "streq",           "k26_str_eq",                     2, 1 },
+    { "starts_with",     "k26_str_starts_with",            2, 1 },
+    { "ends_with",       "k26_str_ends_with",              2, 1 },
+    { "concat",          "k26_str_concat",                 2, 0 },
+    { NULL,    NULL,      0, 0 }
 };
 
 /* Dynamic registry, populated by kflc_register_builtin. External
@@ -99,6 +106,10 @@ int kflc_register_builtin(const char *kfl_name, const char *cxx_name, int arity)
     g_dynamic_builtins[g_dynamic_builtin_count].kfl_name = kfl_name;
     g_dynamic_builtins[g_dynamic_builtin_count].cxx_name = cxx_name;
     g_dynamic_builtins[g_dynamic_builtin_count].arity    = arity;
+    /* A registered library surface is impure until a manifest can say
+     * otherwise: these entries reach world state, and the registry
+     * carries no purity field to declare with. */
+    g_dynamic_builtins[g_dynamic_builtin_count].pure     = 0;
     g_dynamic_builtin_count++;
     return 0;
 }
@@ -132,6 +143,17 @@ static const BuiltinFn *lookup_builtin(const char *name)
             return &g_dynamic_builtins[i];
     }
     return NULL;
+}
+
+int kflc_builtin_is_pure(const char *name)
+{
+    const BuiltinFn *b = lookup_builtin(name);
+    return b ? b->pure : 0;
+}
+
+int kflc_builtin_known(const char *name)
+{
+    return lookup_builtin(name) != NULL;
 }
 
 /* ---- Expression lexer -------------------------------------------- */
