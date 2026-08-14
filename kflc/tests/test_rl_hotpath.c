@@ -29,6 +29,16 @@
  *      per boundary per environment). 2 environments x 2 boundaries
  *      x 3 frames gives 12; the bound asserts (0, 12] and at least
  *      one write-family call.
+ *   4. Telemetry tap enabled, no consumer: the same drive again. The
+ *      acceptance is equality with gate 2's counts rather than a
+ *      bound of its own, because publication into a shared mapping is
+ *      a store and not a system call. Both counts must therefore be
+ *      exactly what the untapped drive read.
+ *   5. Tap enabled with a consumer attached, reading continuously in
+ *      its own process for the whole window: the same equality. This
+ *      is where an implementation that published over a pipe, or that
+ *      remapped or allocated per frame, or that waited on a consumer,
+ *      would show up.
  *
  * Batch path: the batch executable shares the stepping machinery
  * with the serve surface by construction, and test_rl_determinism
@@ -45,6 +55,7 @@
 #include <sys/wait.h>
 
 #include "rl_gate_util.h"
+#include "k26rl_tap.h"
 
 #define WORK_DIR "/tmp/kflc_rl_hotpath_test"
 
@@ -152,6 +163,8 @@ static unsigned long write_total_(void)
     return counts_[4] + counts_[5];
 }
 
+static unsigned long untapped_writes;
+
 static int child_main_(void)
 {
     counts_ = (volatile unsigned long *)dlsym(RTLD_DEFAULT, "k26hp_counts");
@@ -216,6 +229,8 @@ static int child_main_(void)
                counts_[2], counts_[3], w);
         ASSERT(a == 0);
         ASSERT(w == 0);
+        /* Kept as the reference the tap arms below must equal. */
+        untapped_writes = w;
         s.destroy(env);
     }
     printf("gate 2: zero allocations, zero writes: OK\n");
@@ -247,10 +262,102 @@ static int child_main_(void)
     }
     printf("gate 3: zero allocations, bounded writes: OK\n");
 
+    /* Gates 4 and 5: the telemetry tap costs the step path no
+     * allocation and no system call, whether or not anyone is
+     * listening. The acceptance is not a bound of its own: it is
+     * equality with the untapped drive gate 2 just measured in this
+     * same process, over the same fixture and the same window. An
+     * implementation that published over a pipe, or remapped per
+     * frame, would move the write-family count and fail here. */
+    char tap_name[64];
+    snprintf(tap_name, sizeof tap_name, "hotpath.%ld", (long)getpid());
+    {
+        K26RlEnv *env = NULL;
+        ASSERT(s.create(42, HP_ENVS, &env) == K26RL_OK);
+        ASSERT(s.tap(env, tap_name) == K26RL_OK);
+        ASSERT(s.reset(env) == K26RL_OK);
+
+        counters_clear_();
+        *armed_ = 1;
+        for (int t = 0; t < HP_STEPS; t++) {
+            ASSERT(s.step(env, act) == K26RL_OK);
+        }
+        *armed_ = 0;
+
+        unsigned long a = alloc_total_(), w = write_total_();
+        printf("gate 4: %d steps x %d envs, tap enabled, no consumer:"
+               " alloc-family %lu, write-family %lu"
+               " (untapped drive was %lu)\n",
+               HP_STEPS, HP_ENVS, a, w, untapped_writes);
+        ASSERT(a == 0);
+        ASSERT(w == untapped_writes);
+        s.destroy(env);
+    }
+    printf("gate 4: tap enabled costs no allocation and no syscall: OK\n");
+
+    {
+        K26RlEnv *env = NULL;
+        pid_t consumer;
+
+        ASSERT(s.create(42, HP_ENVS, &env) == K26RL_OK);
+        ASSERT(s.tap(env, tap_name) == K26RL_OK);
+        ASSERT(s.reset(env) == K26RL_OK);
+
+        /* A real consumer, in its own process, reading continuously
+         * for as long as the producer runs. Its own allocations are
+         * its own process's and cannot reach these counters, which is
+         * the point: a consumer is invisible to the producer. */
+        consumer = fork();
+        ASSERT(consumer >= 0);
+        if (consumer == 0) {
+            K26RlTapReader *r = NULL;
+            uint32_t slot = 0;
+            for (int tries = 0; tries < 10000; tries++) {
+                if (k26rl_tap_attach(tap_name, 1, &r) == K26RL_OK)
+                    break;
+            }
+            if (!r)
+                _exit(2);
+            ASSERT(k26rl_tap_reader_info(r, &slot, NULL) == K26RL_OK);
+            uint8_t *buf = (uint8_t *)malloc(slot);
+            if (!buf)
+                _exit(2);
+            for (;;) {
+                uint32_t len = 0;
+                if (k26rl_tap_read(r, buf, slot, &len, NULL) != K26RL_OK)
+                    _exit(2);
+                if (!len && k26rl_tap_reader_closed(r))
+                    break;
+            }
+            _exit(0);
+        }
+
+        counters_clear_();
+        *armed_ = 1;
+        for (int t = 0; t < HP_STEPS; t++) {
+            ASSERT(s.step(env, act) == K26RL_OK);
+        }
+        *armed_ = 0;
+
+        unsigned long a = alloc_total_(), w = write_total_();
+        printf("gate 5: %d steps x %d envs, tap enabled, consumer"
+               " attached: alloc-family %lu, write-family %lu"
+               " (untapped drive was %lu)\n",
+               HP_STEPS, HP_ENVS, a, w, untapped_writes);
+        ASSERT(a == 0);
+        ASSERT(w == untapped_writes);
+        s.destroy(env);
+
+        int cst = 0;
+        ASSERT(waitpid(consumer, &cst, 0) == consumer);
+        ASSERT(WIFEXITED(cst) && WEXITSTATUS(cst) == 0);
+    }
+    printf("gate 5: an attached consumer changes neither count: OK\n");
+
     dlclose(so);
     fclose(fnull);
     close(devnull);
-    printf("test_rl_hotpath: 3 gates passed\n");
+    printf("test_rl_hotpath: 5 gates passed\n");
     return 0;
 }
 

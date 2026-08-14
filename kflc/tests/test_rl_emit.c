@@ -100,6 +100,7 @@ static const char *const FROZEN_EXPORTS =
     "k26rl_env_reward\n"
     "k26rl_env_spec\n"
     "k26rl_env_step\n"
+    "k26rl_env_tap\n"
     "k26rl_status_str\n";
 
 /* Resolved frozen surface, filled by dlsym. */

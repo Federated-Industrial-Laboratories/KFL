@@ -136,6 +136,7 @@ typedef struct {
     uint32_t    (*abi_version)(void);
     K26RlStatus (*create)(uint64_t, uint32_t, K26RlEnv **);
     K26RlStatus (*output)(K26RlEnv *, const char *);
+    K26RlStatus (*tap)(K26RlEnv *, const char *);
     K26RlStatus (*reset)(K26RlEnv *);
     K26RlStatus (*reset_seeded)(K26RlEnv *, uint64_t);
     K26RlStatus (*step)(K26RlEnv *, const double *);
@@ -160,6 +161,7 @@ static inline void rl_resolve_surface_(void *so, RlSurface *s)
     RL_RESOLVE_(abi_version,  "k26rl_abi_version");
     RL_RESOLVE_(create,       "k26rl_env_create");
     RL_RESOLVE_(output,       "k26rl_env_output");
+    RL_RESOLVE_(tap,          "k26rl_env_tap");
     RL_RESOLVE_(reset,        "k26rl_env_reset");
     RL_RESOLVE_(reset_seeded, "k26rl_env_reset_seeded");
     RL_RESOLVE_(step,         "k26rl_env_step");
@@ -214,6 +216,14 @@ static inline uint16_t rl_get_u16_(const uint8_t *p)
 static inline uint64_t rl_get_u64_(const uint8_t *p)
 {
     return (uint64_t)rl_get_u32_(p) | ((uint64_t)rl_get_u32_(p + 4) << 32);
+}
+
+static inline double rl_get_f64_(const uint8_t *p)
+{
+    uint64_t bits = rl_get_u64_(p);
+    double v;
+    memcpy(&v, &bits, sizeof v);
+    return v;
 }
 
 static inline void rl_parse_spec_(const uint8_t *blob, uint32_t len,

@@ -159,6 +159,21 @@ $(RL_STATE_TEST): tests/test_rl_state.c tests/rl_gate_util.h \
 # across the stepping window only, and proves the counters live
 # with a positive control before asserting the zeros. Skips (77)
 # when the sibling stack archives are not built.
+# Telemetry tap gates on the serve surface: cross-transport equality
+# between the ring and the episode file, bit identity of a run with
+# the tap enabled and disabled and with consumers absent, attached,
+# stalled, flapping, and killed, the read-only mapping proven by the
+# fault a store raises, the enable surface with every refusal, and a
+# late attach recovering the spec from the ring's preamble. Skips
+# (77) when the sibling stack archives are not built.
+RL_TAP_TEST = tests/test_rl_tap
+$(RL_TAP_TEST): tests/test_rl_tap.c tests/rl_gate_util.h \
+                ../libk26rl/include/k26rl_env.h \
+                ../libk26rl/include/k26rl_episode.h \
+                ../libk26rl/include/k26rl_tap.h
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_HOTPATH_TEST = tests/test_rl_hotpath
 $(RL_HOTPATH_TEST): tests/test_rl_hotpath.c tests/rl_gate_util.h \
                     ../libk26rl/include/k26rl_env.h
@@ -187,7 +202,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -204,7 +219,7 @@ test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMOR
 	./$(RL_GRAMMAR_TEST)
 	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
-	          $(RL_STATE_TEST); do \
+	          $(RL_STATE_TEST) $(RL_TAP_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -274,5 +289,6 @@ clean:
 	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) \
 	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
 	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
-	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) tests/bench_parse
+	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \
+	      tests/bench_parse
 	rm -rf bin

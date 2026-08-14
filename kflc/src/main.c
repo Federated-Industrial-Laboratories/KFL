@@ -64,6 +64,7 @@ static int write_rl_exports_map(const char *path)
         "k26rl_env_spec",
         "k26rl_status_str",
         "k26rl_env_destroy",
+        "k26rl_env_tap",
         NULL
     };
     FILE *f = fopen(path, "w");
