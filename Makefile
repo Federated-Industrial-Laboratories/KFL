@@ -232,7 +232,10 @@ test-compiler: compiler
 # fixture through the built compiler and drive the produced shared
 # object, so the compiler and the astro stack build first; each gate
 # skips (77) when a piece it needs (the archives, gymnasium) is
-# absent, so this completes on hosts without the Python stack.
+# absent. A run in which every gate skipped fails, since a green
+# suite that checked nothing enforces nothing; a host without the
+# Python stack passes ALLOW_ALL_SKIP=1 to accept that, and command
+# line variables reach the sub-make on their own.
 test-python: compiler astro
 	@echo "==> python k26rl gates"
 	@$(MAKE) -C python test

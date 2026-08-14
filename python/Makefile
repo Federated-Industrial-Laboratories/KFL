@@ -4,10 +4,14 @@
 # absent, so `make test` completes everywhere and reports what it
 # could not check. Every gate runs; the summary line counts passes,
 # skips, and failures, the exit status is nonzero exactly when a
-# gate failed, and a run in which every gate skipped says so in one
-# line, because an all-skip exit 0 enforces nothing. PYTHON selects
-# the interpreter (for instance a virtual environment's); the
-# default is python3.
+# gate failed, and a run in which every gate skipped fails, because
+# an all-skip exit 0 enforces nothing and a green suite that checked
+# nothing is worse than a red one. A machine that cannot install the
+# shim's dependencies stays usable by passing ALLOW_ALL_SKIP=1, which
+# makes the same run pass and says on the line above it that nothing
+# was enforced; the point is that the exemption is typed by someone
+# rather than assumed. PYTHON selects the interpreter (for instance a
+# virtual environment's); the default is python3.
 #
 # Gate numbers 8 and 9 belong to the telemetry transport suite and
 # land with that component; the numbering here stays aligned with
@@ -44,5 +48,9 @@ test:
 	echo "gates: $$passed passed, $$skipped skipped, $$failed failed"; \
 	if [ $$passed -eq 0 ] && [ $$failed -eq 0 ]; then \
 	    echo "all gates skipped: no enforcement this run"; \
+	    if [ -z "$(ALLOW_ALL_SKIP)" ]; then \
+	        echo "failing on that: pass ALLOW_ALL_SKIP=1 to accept it"; \
+	        exit 1; \
+	    fi; \
 	fi; \
 	[ $$failed -eq 0 ]
