@@ -461,11 +461,13 @@ int main(void)
         exp[0] = '\0';
         append_(&exp, &len, &cap, "k26rl_view dump 1\npanel traj\n");
         append_(&exp, &len, &cap, "trajectory_count 1\n");
-        append_(&exp, &len, &cap, "trajectory_label observer-relative:"
-                " apparent direction at geometric range; exact position under"
-                " a geometric observe, an apparent direction taken at a"
-                " geometric range under an astrometric one\n");
+        append_(&exp, &len, &cap, "trajectory_label observer-relative: each"
+                " channel's own mode is published by the spec and stated per"
+                " trajectory below; the reconstruction is the target's"
+                " position exactly under a geometric observe, and an apparent"
+                " direction taken at a geometric range otherwise\n");
         append_(&exp, &len, &cap, "trajectory trk 0 1 2 3\n");
+        append_(&exp, &len, &cap, "trajectory_mode trk geometric\n");
         for (uint32_t k = 0; k < info.episode_count; k++) {
             uint32_t ord, env, epi;
             uint64_t seed = 0;
@@ -740,7 +742,112 @@ int main(void)
                " observation panel and nowhere in three dimensions: OK\n");
     }
 
+    /* ---- Gate 8: the world-frame panel ----------------------------- */
+    {
+        char *got;
+        char found[256];
+        void *so;
+        RlSurface vs;
+        K26RlEnv *env = NULL;
+        K26RlEpisodeReader *rd2 = NULL;
+        K26RlEpisodeInfo i2;
+        K26RlEpisodeData e0;
+        uint32_t ord, envi, epi;
+        uint64_t seed = 0;
+        int32_t bwant;
+        double *bodies, *act;
+        uint32_t nb, lines = 0;
+
+        /* Without an artifact the panel says so: the file alone
+         * records observation channels and cannot produce a world. */
+        run_viewer_("--dump world " WORK_DIR "/view.k26epi",
+                    WORK_DIR "/world_none.txt");
+        got = slurp_(WORK_DIR "/world_none.txt", NULL);
+        ASSERT(find_line_(got, "world unavailable ", found, sizeof found));
+        ASSERT(strstr(got, "\nworld 0 ") == NULL);
+        free(got);
+
+        /* The channel modes are now facts read from the spec, not
+         * conditions the reader must resolve. */
+        run_viewer_("--dump traj --episode 0 --steps 0:1 "
+                    WORK_DIR "/view.k26epi", WORK_DIR "/traj_mode.txt");
+        got = slurp_(WORK_DIR "/traj_mode.txt", NULL);
+        ASSERT(find_line_(got, "trajectory_mode trk ", found, sizeof found));
+        ASSERT(strcmp(found, "trajectory_mode trk geometric") == 0);
+        free(got);
+
+        /* With an artifact, the panel's values must equal the
+         * artifact's own getter, driven here independently along the
+         * same rebuild the viewer performs. */
+        run_viewer_("--dump world --episode 1 --artifact "
+                    WORK_DIR "/view.rlenv.so " WORK_DIR "/view.k26epi",
+                    WORK_DIR "/world.txt");
+        got = slurp_(WORK_DIR "/world.txt", NULL);
+        ASSERT(find_line_(got, "body 0 ", found, sizeof found));
+        ASSERT(strcmp(found, "body 0 earth") == 0);
+        ASSERT(find_line_(got, "body 1 ", found, sizeof found));
+        ASSERT(strcmp(found, "body 1 craft") == 0);
+
+        ASSERT(k26rl_episode_reader_open(WORK_DIR "/view.k26epi", &rd2) ==
+               K26RL_OK);
+        ASSERT(k26rl_episode_reader_info(rd2, &i2) == K26RL_OK);
+        ASSERT(k26rl_episode_reader_at(rd2, 1, &ord, &envi, &epi) == K26RL_OK);
+        ASSERT(k26rl_episode_reader_seed(rd2, ord, &seed) == K26RL_OK);
+        ASSERT(k26rl_episode_read(rd2, ord, envi, epi, &e0) == K26RL_OK);
+
+        so = rl_dlopen_(WORK_DIR "/view.rlenv.so");
+        rl_resolve_surface_(so, &vs);
+        ASSERT(vs.abi_version() == K26RL_ABI_VERSION);
+        ASSERT(vs.create(seed, i2.n_envs, &env) == K26RL_OK);
+        for (uint32_t k = 0; k < epi; k++)
+            ASSERT(vs.reset(env) == K26RL_OK);
+        bwant = vs.bodies(env, K26RL_BODY_REF_ORIGIN, NULL, 0);
+        ASSERT(bwant > 0);
+        nb = (uint32_t)bwant / (i2.n_envs * 6u);
+        bodies = malloc(sizeof(double) * (size_t)bwant);
+        act = malloc(sizeof(double) * (size_t)i2.n_envs * i2.act_total);
+        ASSERT(bodies && act);
+
+        for (uint32_t t = 0; t < e0.step_count; t++) {
+            for (uint32_t j = 0; j < i2.n_envs; j++) {
+                memcpy(act + (size_t)j * i2.act_total,
+                       e0.act + (size_t)t * i2.act_total,
+                       sizeof(double) * i2.act_total);
+            }
+            ASSERT(vs.step(env, act) == K26RL_OK);
+            ASSERT(vs.bodies(env, K26RL_BODY_REF_ORIGIN, bodies,
+                             (uint32_t)bwant) == bwant);
+            for (uint32_t b = 0; b < nb; b++) {
+                char key[64], line[512], want[512];
+                const double *src = bodies +
+                    ((size_t)envi * nb + b) * 6;
+                int off;
+                snprintf(key, sizeof key, "world 1 %u %u ", t, b);
+                ASSERT(find_line_(got, key, line, sizeof line));
+                off = snprintf(want, sizeof want, "world 1 %u %u", t, b);
+                for (int c = 0; c < 6; c++) {
+                    off += snprintf(want + off, sizeof want - (size_t)off,
+                                    " %016" PRIx64, bits_(src[c]));
+                }
+                ASSERT(strcmp(line, want) == 0);
+                lines++;
+            }
+        }
+        ASSERT(lines == e0.step_count * nb);
+
+        free(bodies);
+        free(act);
+        k26rl_episode_free(&e0);
+        vs.destroy(env);
+        dlclose(so);
+        k26rl_episode_reader_close(rd2);
+        free(got);
+        printf("gate 8: %u world-frame rows equal the artifact's own body"
+               " getter bitwise, and the channel modes are read from the"
+               " spec: OK\n", lines);
+    }
+
     free(exp);
-    printf("test_rl_view: 7 gates passed\n");
+    printf("test_rl_view: 8 gates passed\n");
     return 0;
 }

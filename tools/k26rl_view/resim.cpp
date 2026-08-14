@@ -38,6 +38,9 @@ struct Surface {
     K26RlStatus (*flags)(const K26RlEnv *, uint32_t *);
     const char *(*status_str)(K26RlStatus);
     void (*destroy)(K26RlEnv *);
+    /* Added at ABI 1.2 and probed rather than required, so an older
+     * artifact still re-simulates; only the world frame goes. */
+    int32_t (*bodies)(const K26RlEnv *, uint32_t, double *, uint32_t);
 };
 
 bool resolve_(void *so, const char *name, void *slot, std::string *err)
@@ -87,6 +90,12 @@ ResimResult resimulate(const Model &model, const Episode &ep,
         !resolve_(so, "k26rl_env_destroy", &s.destroy, &r.message)) {
         dlclose(so);
         return r;
+    }
+
+    {
+        void *p = dlsym(so, "k26rl_env_bodies");
+        if (p)
+            memcpy(&s.bodies, &p, sizeof p);
     }
 
     r.abi_version = s.abi_version();
@@ -146,6 +155,16 @@ ResimResult resimulate(const Model &model, const Episode &ep,
     r.initial_obs.assign(obs.begin() + (size_t)ep.env * obs_total,
                          obs.begin() + (size_t)(ep.env + 1) * obs_total);
 
+    std::vector<double> body_buf;
+    if (s.bodies) {
+        int32_t need = s.bodies(env, K26RL_BODY_REF_ORIGIN, 0, 0);
+        if (need > 0 && n && (uint32_t)need % (n * 6u) == 0) {
+            body_buf.resize((size_t)need);
+            r.body_count = (uint32_t)need / (n * 6u);
+            r.has_bodies = true;
+        }
+    }
+
     r.ran = true;
     r.equal = true;
     /* The episode-start frame's initial observation is reached with no
@@ -184,6 +203,15 @@ ResimResult resimulate(const Model &model, const Episode &ep,
                          rew.begin() + (size_t)ep.env * agents,
                          rew.begin() + (size_t)(ep.env + 1) * agents);
         r.flags.push_back(fl[ep.env]);
+        /* The world frame, taken at the same instant as the streams
+         * above so a viewer can draw them together. */
+        if (r.has_bodies &&
+            s.bodies(env, K26RL_BODY_REF_ORIGIN, &body_buf[0],
+                     (uint32_t)body_buf.size()) > 0) {
+            size_t base = (size_t)ep.env * r.body_count * 6;
+            r.bodies.insert(r.bodies.end(), body_buf.begin() + base,
+                            body_buf.begin() + base + r.body_count * 6);
+        }
         r.steps_compared++;
 
         if (r.equal) {

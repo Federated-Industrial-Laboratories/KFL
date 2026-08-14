@@ -32,6 +32,8 @@ namespace k26rl_view {
 struct Channel {
     uint32_t index;
     uint16_t kind;
+    uint16_t mode;      /* K26RL_TAG_OBS_CHANNEL_MODE, added at ABI 1.2 */
+    bool has_mode;      /* false for a file written before the tag existed */
     std::string name;
 };
 
@@ -67,6 +69,7 @@ struct Spec {
     std::vector<ActionDecl> actions;
     std::vector<Slice> obs_slices;
     std::vector<Slice> act_slices;
+    std::vector<std::string> body_names;   /* declaration order */
     std::vector<uint8_t> raw;
     /* Tags this build does not know, kept so the metadata panel can
      * say the file carried them rather than pretending it did not. */
@@ -188,6 +191,11 @@ private:
 /* The ending's name, for a panel that distinguishes the three the
  * format distinguishes. */
 const char *end_reason_name(uint16_t reason);
+
+/* The observer mode's name, as the spec publishes it. A file written
+ * before the mode tag existed carries none, and the viewer says so
+ * rather than guessing. */
+const char *observer_mode_name(uint16_t mode);
 
 }  /* namespace k26rl_view */
 

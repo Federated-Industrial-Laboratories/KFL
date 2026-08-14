@@ -290,6 +290,16 @@ void panel_traj_(Ui &ui, const Episode &ep)
 
     ImGui::Begin("Trajectory");
     ImGui::TextWrapped("%s", TRAJECTORY_LABEL);
+    if (!tr.empty() && ui.traj_pick < (int)tr.size()) {
+        const std::vector<Channel> &ch = ui.model->spec().channels;
+        for (size_t i = 0; i < ch.size(); i++) {
+            if (ch[i].index != tr[(size_t)ui.traj_pick].dir_x)
+                continue;
+            ImGui::Text("mode: %s", ch[i].has_mode
+                        ? observer_mode_name(ch[i].mode)
+                        : "not published by this file");
+        }
+    }
     if (tr.empty()) {
         ImGui::TextUnformatted(
             "no channel set matches the drawable naming convention; "
@@ -353,6 +363,56 @@ void panel_traj_(Ui &ui, const Episode &ep)
             ImGui::Text("step %u: (%.6g, %.6g, %.6g) m", ui.step, xyz[0],
                         xyz[1], xyz[2]);
         }
+    }
+    ImGui::End();
+}
+
+/* The world frame, which the file alone cannot give: bodies come from
+ * the artifact's body getter as the rebuild runs, so this panel
+ * appears only once a re-simulation has been performed. */
+void panel_world_(Ui &ui, const Episode &ep)
+{
+    (void)ep;
+    ImGui::Begin("World frame");
+    if (ui.artifact.empty()) {
+        ImGui::TextWrapped("the file records observation channels, not world "
+                           "states; supply an artifact to reconstruct the "
+                           "bodies");
+        ImGui::End();
+        return;
+    }
+    if (!ui.resim_done || !ui.resim.ran || !ui.resim.has_bodies) {
+        ImGui::TextWrapped("run the re-simulation panel's reconstruction to "
+                           "populate this view");
+        ImGui::End();
+        return;
+    }
+    {
+        const std::vector<std::string> &names = ui.model->spec().body_names;
+        std::vector<double> px(ui.resim.steps_compared);
+        std::vector<double> py(ui.resim.steps_compared);
+        if (ImPlot::BeginPlot("bodies, world frame", ImVec2(-1, 320),
+                              ImPlotFlags_Equal)) {
+            ImPlot::SetupAxes("x (m)", "y (m)");
+            for (uint32_t b = 0; b < ui.resim.body_count; b++) {
+                char label[64];
+                snprintf(label, sizeof label, "%s",
+                         b < names.size() ? names[b].c_str() : "body");
+                for (uint32_t i = 0; i < ui.resim.steps_compared; i++) {
+                    size_t base = ((size_t)i * ui.resim.body_count + b) * 6;
+                    px[i] = base + 6 <= ui.resim.bodies.size()
+                            ? ui.resim.bodies[base] : 0.0;
+                    py[i] = base + 6 <= ui.resim.bodies.size()
+                            ? ui.resim.bodies[base + 1] : 0.0;
+                }
+                if (ui.resim.steps_compared)
+                    ImPlot::PlotLine(label, &px[0], &py[0],
+                                     (int)ui.resim.steps_compared);
+            }
+            ImPlot::EndPlot();
+        }
+        ImGui::Text("%u bodies over %u reconstructed steps",
+                    ui.resim.body_count, ui.resim.steps_compared);
     }
     ImGui::End();
 }
@@ -524,6 +584,7 @@ int run_gui(Model &model, const std::string &artifact)
             panel_obs_(ui, *ep);
             panel_action_(ui, *ep);
             panel_traj_(ui, *ep);
+            panel_world_(ui, *ep);
             panel_meta_(ui, *ep);
             panel_resim_(ui, *ep);
         } else {

@@ -37,7 +37,7 @@ static int usage_(const char *prog)
         "       %s --dump PANEL [--episode K] [--steps A:B]\n"
         "               [--artifact PATH] FILE\n"
         "\n"
-        "panels: meta timeline reward obs action traj scrub resim all\n"
+        "panels: meta timeline reward obs action traj scrub world resim all\n"
         "\n"
         "  --episode K     restrict to the K-th indexed episode\n"
         "  --steps A:B     restrict to steps [A, B) of each episode\n"

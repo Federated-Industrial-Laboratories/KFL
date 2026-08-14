@@ -34,9 +34,25 @@ static void hx(FILE *f, double v)
  * one condition under which the reconstruction is exact, which is
  * what keeps the panel honest without inventing a fact. */
 const char *const TRAJECTORY_LABEL =
-    "observer-relative: apparent direction at geometric range; "
-    "exact position under a geometric observe, an apparent direction "
-    "taken at a geometric range under an astrometric one";
+    "observer-relative: each channel's own mode is published by the "
+    "spec and stated per trajectory below; the reconstruction is the "
+    "target's position exactly under a geometric observe, and an "
+    "apparent direction taken at a geometric range otherwise";
+
+/* A trajectory's mode is its channels' mode, which the five channels
+ * of one observe share. A file written before the tag existed carries
+ * none, and this says so rather than guessing. */
+static const char *trajectory_mode_name(Model &m, const Trajectory &t)
+{
+    const std::vector<Channel> &ch = m.spec().channels;
+
+    for (size_t i = 0; i < ch.size(); i++) {
+        if (ch[i].index == t.dir_x)
+            return ch[i].has_mode ? observer_mode_name(ch[i].mode)
+                                  : "unpublished";
+    }
+    return "unpublished";
+}
 
 static void range_for(const Episode &ep, const DumpOptions &o,
                       uint32_t *lo, uint32_t *hi)
@@ -112,7 +128,12 @@ static void dump_meta(FILE *f, Model &m)
         const Trajectory &t = m.trajectories()[k];
         fprintf(f, "trajectory %s %u %u %u %u\n", t.base.c_str(), t.dir_x,
                 t.dir_y, t.dir_z, t.range);
+        fprintf(f, "trajectory_mode %s %s\n", t.base.c_str(),
+                trajectory_mode_name(m, t));
     }
+    for (size_t k = 0; k < m.spec().body_names.size(); k++)
+        fprintf(f, "body %u %s\n", (unsigned)k,
+                m.spec().body_names[k].c_str());
     fprintf(f, "trajectory_label %s\n", TRAJECTORY_LABEL);
 }
 
@@ -268,6 +289,8 @@ static void dump_traj(FILE *f, Model &m, const DumpOptions &o)
         const Trajectory &tr = m.trajectories()[t];
         fprintf(f, "trajectory %s %u %u %u %u\n", tr.base.c_str(), tr.dir_x,
                 tr.dir_y, tr.dir_z, tr.range);
+        fprintf(f, "trajectory_mode %s %s\n", tr.base.c_str(),
+                trajectory_mode_name(m, tr));
     }
     for (uint32_t k = 0; k < m.info().episode_count; k++) {
         std::string err;
@@ -326,6 +349,52 @@ static void dump_scrub(FILE *f, Model &m, const DumpOptions &o)
     }
     fprintf(f, "scrub_index_lookups %" PRIu64 "\n", m.index_lookups());
     fprintf(f, "scrub_episode_reads %" PRIu64 "\n", m.episode_reads());
+}
+
+/* The world frame, which only re-simulation can produce: the file
+ * records observation channels, and the bodies come from the
+ * artifact's body getter as the rebuild runs. */
+static void dump_world(FILE *f, Model &m, const DumpOptions &o)
+{
+    if (o.artifact.empty()) {
+        fprintf(f, "world unavailable no artifact supplied\n");
+        return;
+    }
+    for (size_t k = 0; k < m.spec().body_names.size(); k++)
+        fprintf(f, "body %u %s\n", (unsigned)k,
+                m.spec().body_names[k].c_str());
+    for (uint32_t k = 0; k < m.info().episode_count; k++) {
+        std::string err;
+        const Episode *e;
+
+        if (o.episode != UINT32_MAX && k != o.episode)
+            continue;
+        e = m.load(k, &err);
+        if (!e)
+            continue;
+        dump_episode_header(f, k, *e);
+        ResimResult r = resimulate(m, *e, o.artifact);
+        if (!r.ran || !r.has_bodies) {
+            fprintf(f, "world_unavailable %u %s\n", k,
+                    r.ran ? "artifact publishes no body getter"
+                          : r.message.c_str());
+            continue;
+        }
+        fprintf(f, "world_bodies %u %u\n", k, r.body_count);
+        for (uint32_t i = 0; i < r.steps_compared; i++) {
+            for (uint32_t b = 0; b < r.body_count; b++) {
+                size_t base = ((size_t)i * r.body_count + b) * 6;
+                if (base + 6 > r.bodies.size())
+                    break;
+                fprintf(f, "world %u %u %u", k, i, b);
+                for (int c = 0; c < 6; c++) {
+                    fprintf(f, " ");
+                    hx(f, r.bodies[base + c]);
+                }
+                fprintf(f, "\n");
+            }
+        }
+    }
 }
 
 static void dump_resim(FILE *f, Model &m, const DumpOptions &o)
@@ -405,11 +474,13 @@ int dump(FILE *f, Model &m, const DumpOptions &o)
         dump_traj(f, m, o);
     if (p == "scrub" || p == "all")
         dump_scrub(f, m, o);
+    if (p == "world" || p == "all")
+        dump_world(f, m, o);
     if (p == "resim" || p == "all")
         dump_resim(f, m, o);
     if (p != "meta" && p != "timeline" && p != "reward" && p != "obs" &&
         p != "action" && p != "traj" && p != "scrub" && p != "resim" &&
-        p != "all") {
+        p != "world" && p != "all") {
         fprintf(stderr, "k26rl_view: unknown panel `%s`\n", p.c_str());
         return 2;
     }

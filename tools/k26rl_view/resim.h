@@ -43,6 +43,12 @@ struct ResimResult {
     std::vector<double> rewards;
     std::vector<uint32_t> flags;
     std::vector<double> initial_obs;
+    /* World-frame body states, steps_compared * body_count * 6, from
+     * the artifact's body getter. Empty when the artifact predates
+     * that symbol, which a viewer reports rather than hides. */
+    std::vector<double> bodies;
+    uint32_t body_count = 0;
+    bool has_bodies = false;
 };
 
 /* Load an artifact and rebuild one episode of a model's file.

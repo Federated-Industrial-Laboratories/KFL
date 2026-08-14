@@ -26,6 +26,17 @@ const char *end_reason_name(uint16_t reason)
     }
 }
 
+const char *observer_mode_name(uint16_t mode)
+{
+    switch (mode) {
+    case K26RL_OBS_MODE_GEOMETRIC:   return "geometric";
+    case K26RL_OBS_MODE_ASTROMETRIC: return "astrometric";
+    case K26RL_OBS_MODE_APPARENT:    return "apparent";
+    case K26RL_OBS_MODE_TOPOCENTRIC: return "topocentric";
+    default:                         return "unknown";
+    }
+}
+
 /* Little-endian field reads, matching the format's own discipline:
  * every integer is assembled byte by byte, never read as a struct. */
 static uint16_t get_u16_(const uint8_t *p)
@@ -159,8 +170,30 @@ void Model::parse_spec_(const uint8_t *blob, uint32_t len)
                 Channel c;
                 c.index = get_u32_(v);
                 c.kind = K26RL_OBS_KIND_VECTOR;
+                c.mode = 0;
+                c.has_mode = false;
                 c.name.assign((const char *)v + 4, l - 4);
                 spec_.channels.push_back(c);
+            }
+            break;
+        case K26RL_TAG_OBS_CHANNEL_MODE:
+            if (l >= 6) {
+                uint32_t idx = get_u32_(v);
+                uint16_t md = get_u16_(v + 4);
+                for (size_t i = 0; i < spec_.channels.size(); i++) {
+                    if (spec_.channels[i].index == idx) {
+                        spec_.channels[i].mode = md;
+                        spec_.channels[i].has_mode = true;
+                    }
+                }
+            }
+            break;
+        case K26RL_TAG_BODY_NAME:
+            if (l >= 4) {
+                uint32_t bi = get_u32_(v);
+                if (spec_.body_names.size() <= bi)
+                    spec_.body_names.resize(bi + 1);
+                spec_.body_names[bi].assign((const char *)v + 4, l - 4);
             }
             break;
         case K26RL_TAG_OBS_CHANNEL_KIND:
