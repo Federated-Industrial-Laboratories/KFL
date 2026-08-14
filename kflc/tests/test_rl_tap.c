@@ -18,7 +18,14 @@
  *       must cover a whole episode, its start and end frames
  *       included. The two transports' file-header payloads are
  *       compared byte for byte in the same gate, which is where "one
- *       schema, two transports" is actually checked.
+ *       schema, two transports" is actually checked. A second arm
+ *       drives a deliberately induced fault on a second artifact and
+ *       checks the awkward case rather than only the easy one: the
+ *       final step record of a faulted episode completes no
+ *       transition, and both transports must carry it identically,
+ *       zero reward, zero applied dt, the faulting call's actions,
+ *       the fault bit alone, and the same end reason and registry
+ *       code.
  *   9a. Bit identity, tap absent against tap enabled: two runs at one
  *       seed and one scripted action stream, output enabled in both,
  *       one never calling the tap and one enabling it at create.
@@ -98,7 +105,30 @@ static const char *const TAP_KFL =
     "end\n"
     "end\n";
 
+/* The fault fixture: the reward divides by zero when a caller drives
+ * the first action channel to 1.0, so a fault is induced at a step of
+ * the driver's choosing. Same channel shape as the fixture above, so
+ * the one decoder reads both artifacts' frames. */
+static const char *const FAULT_KFL =
+    "form RL_TAPFAULT\n"
+    "fn world tapfault_world\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft gm=1.0 parent=earth pos_x=7.0e6 vel_y=7350.0\n"
+    "    episode\n"
+    "        control_dt 0.1\n"
+    "        horizon 6\n"
+    "    end\n"
+    "    action push box 0.0 4.0 default 0.0\n"
+    "    action gear discrete 3 default 1\n"
+    "    observe craft from earth mode=geometric as trk\n"
+    "    objective\n"
+    "        reward 1.0 / (1.0 - push)\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
 enum { TAP_ENVS = 2, TAP_ACT = 2, TAP_OBS = 5, TAP_STEPS = 40 };
+enum { FAULT_AT = 3 };
 
 static double act_(uint32_t t, uint32_t e, uint32_t ch)
 {
@@ -281,9 +311,16 @@ typedef struct {
 } StepRec;
 
 typedef struct {
+    uint32_t ordinal, env, episode, steps;
+    uint16_t end_reason, fault_code;
+} EndRec;
+
+typedef struct {
     StepRec *recs;
     uint32_t count, cap;
     uint32_t starts, ends;
+    EndRec last_end;
+    uint32_t fault_steps;
 } Decoded;
 
 static void rec_push_(Decoded *d, const StepRec *r)
@@ -329,6 +366,8 @@ static void decode_chunk_(Decoded *d, const uint8_t *p, uint32_t plen,
         r.flags = rl_get_u32_(cols + (size_t)ncols8 * K * 8 + (size_t)i * 4);
         r.dt = rl_get_f64_(cols + (size_t)ncols8 * K * 8 + (size_t)K * 4 +
                            (size_t)i * 8);
+        if (r.flags & K26RL_FLAG_FAULT)
+            d->fault_steps++;
         rec_push_(d, &r);
     }
 }
@@ -357,6 +396,12 @@ static void decode_frame_(Decoded *d, const uint8_t *frame, uint32_t total,
         decode_chunk_(d, p, plen, episode_of_env);
         break;
     case K26RL_FRAME_EPISODE_END:
+        d->last_end.ordinal = rl_get_u32_(p);
+        d->last_end.env = rl_get_u32_(p + 4);
+        d->last_end.episode = rl_get_u32_(p + 8);
+        d->last_end.steps = rl_get_u32_(p + 12);
+        d->last_end.end_reason = rl_get_u16_(p + 16);
+        d->last_end.fault_code = rl_get_u16_(p + 18);
         d->ends++;
         break;
     default:
@@ -876,6 +921,149 @@ static void gate_late_attach_(const RlSurface *s)
     free(file.recs);
 }
 
+/* ---- Gate 8, fault arm: the one step record that is not a
+ *      transition ------------------------------------------------- */
+
+/* A faulted episode is where the format's rules are least ordinary:
+ * the final step record completes no transition, carries the faulting
+ * call's actions with the pre-step observations, zero reward and zero
+ * applied dt, and the fault bit alone, and the episode-end frame
+ * carries the reason from the status registry. The tap publishes that
+ * record through the same call the file writer takes, so this arm
+ * checks that both transports agree on the awkward case rather than
+ * only on the easy one. */
+static void gate_fault_(void)
+{
+    const char *n = tap_name_(6, "fault");
+    void *so;
+    RlSurface s;
+    K26RlEnv *env = NULL;
+    Decoded ring, file;
+    double act[TAP_ENVS * TAP_ACT];
+    pid_t pid;
+    int st = 0;
+    uint32_t i;
+    uint16_t ring_code;
+    int saw = 0;
+
+    memset(&ring, 0, sizeof ring);
+    memset(&file, 0, sizeof file);
+
+    rl_write_file_(WORK_DIR "/tapfault.kfl", FAULT_KFL);
+    rl_compile_(WORK_DIR "/tapfault.kfl", WORK_DIR "/tapfault", WORK_DIR);
+    ASSERT(rl_file_exists_(WORK_DIR "/tapfault.rlenv.so"));
+    so = rl_dlopen_(WORK_DIR "/tapfault.rlenv.so");
+    rl_resolve_surface_(so, &s);
+
+    pid = spawn_consumer_(CONSUME_ALL, n, WORK_DIR "/fault.frames");
+
+    ASSERT(s.create(23, TAP_ENVS, &env) == K26RL_OK);
+    ASSERT(s.output(env, WORK_DIR "/fault.k26epi") == K26RL_OK);
+    ASSERT(s.tap(env, n) == K26RL_OK);
+    for (int t = 0; t < 10; t++) {
+        memset(act, 0, sizeof act);
+        /* Environment 0 divides by zero at a step of our choosing;
+         * environment 1 keeps stepping normally beside it. */
+        if (t == FAULT_AT)
+            act[0] = 1.0;
+        ASSERT(s.step(env, act) == K26RL_OK);
+    }
+    s.destroy(env);
+    ASSERT(waitpid(pid, &st, 0) == pid);
+    ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
+
+    decode_dump_(WORK_DIR "/fault.frames", &ring);
+    ASSERT(ring.fault_steps == 1);
+
+    /* The ring's fault record: zero reward, zero applied dt, the
+     * fault bit and nothing else. */
+    for (i = 0; i < ring.count; i++) {
+        const StepRec *a = &ring.recs[i];
+        if (!(a->flags & K26RL_FLAG_FAULT))
+            continue;
+        ASSERT(a->env == 0);
+        ASSERT(a->flags == K26RL_FLAG_FAULT);
+        ASSERT(a->reward == 0.0);
+        ASSERT(a->dt == 0.0);
+        /* The faulting call's action reached the record. */
+        ASSERT(a->act[0] == 1.0);
+        saw = 1;
+    }
+    ASSERT(saw);
+
+    /* And the file agrees, record for record and reason for reason. */
+    decode_file_(WORK_DIR "/fault.k26epi", &file);
+    saw = 0;
+    for (i = 0; i < ring.count; i++) {
+        const StepRec *a = &ring.recs[i];
+        const StepRec *b = find_(&file, a);
+        uint32_t j;
+
+        if (!b)
+            continue;
+        for (j = 0; j < TAP_OBS; j++)
+            ASSERT(memcmp(&a->obs[j], &b->obs[j], sizeof(double)) == 0);
+        for (j = 0; j < TAP_ACT; j++)
+            ASSERT(memcmp(&a->act[j], &b->act[j], sizeof(double)) == 0);
+        ASSERT(memcmp(&a->reward, &b->reward, sizeof(double)) == 0);
+        ASSERT(a->flags == b->flags);
+        ASSERT(memcmp(&a->dt, &b->dt, sizeof(double)) == 0);
+        if (a->flags & K26RL_FLAG_FAULT)
+            saw = 1;
+    }
+    ASSERT(saw);   /* the fault record itself was one of the matches */
+
+    /* The end frame's reason and code, from the ring, against the
+     * file read back through the library's own reader. */
+    {
+        K26RlEpisodeReader *r = NULL;
+        K26RlEpisodeData ed;
+        uint32_t k, found = 0;
+
+        ring_code = 0;
+        for (i = 0; i < ring.count; i++) {
+            if (ring.recs[i].flags & K26RL_FLAG_FAULT)
+                break;
+        }
+        ASSERT(i < ring.count);
+
+        ASSERT(k26rl_episode_reader_open(WORK_DIR "/fault.k26epi", &r) ==
+               K26RL_OK);
+        {
+            K26RlEpisodeInfo info;
+            ASSERT(k26rl_episode_reader_info(r, &info) == K26RL_OK);
+            for (k = 0; k < info.episode_count; k++) {
+                uint32_t ord, e2, ep;
+                ASSERT(k26rl_episode_reader_at(r, k, &ord, &e2, &ep) ==
+                       K26RL_OK);
+                ASSERT(k26rl_episode_read(r, ord, e2, ep, &ed) == K26RL_OK);
+                if (ed.end_reason == K26RL_END_FAULT) {
+                    ASSERT(ed.fault_code != 0);
+                    ASSERT(e2 == ring.recs[i].env);
+                    ASSERT(ep == ring.recs[i].episode);
+                    /* The step count includes the fault record, which
+                     * is the format's one non-transition. */
+                    ASSERT(ed.step_count == ring.recs[i].step + 1);
+                    ring_code = ed.fault_code;
+                    found++;
+                }
+                k26rl_episode_free(&ed);
+            }
+        }
+        k26rl_episode_reader_close(r);
+        ASSERT(found == 1);
+        ASSERT(ring_code != 0);
+    }
+
+    printf("gate 8: the faulted episode agrees across both transports"
+           " (fault record and end reason, code %u): OK\n",
+           (unsigned)ring_code);
+
+    free(ring.recs);
+    free(file.recs);
+    dlclose(so);
+}
+
 int main(void)
 {
     if (!rl_libs_present_("test_rl_tap"))
@@ -899,6 +1087,8 @@ int main(void)
         gate_late_attach_(&s);
         dlclose(so);
     }
-    printf("test_rl_tap: gates 8, 9a-9d, 12, and 14 passed\n");
+    gate_fault_();
+    printf("test_rl_tap: gates 8 (transitions and the fault record),"
+           " 9a to 9d, 12, and 14 passed\n");
     return 0;
 }
