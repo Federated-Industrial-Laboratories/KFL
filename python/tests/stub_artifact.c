@@ -9,6 +9,18 @@
  * Build variants, selected by compile-time defines:
  *   STUB_ABI_MAJOR2   k26rl_abi_version reports major 2
  *   STUB_OMIT_SYMBOL  k26rl_env_reset_seeded is not exported
+ *   STUB_SPEC_SIZING_NEGATIVE
+ *                     the spec sizing call (capacity 0) returns the
+ *                     negated seed-reuse status; the fill call is
+ *                     unchanged
+ *   STUB_NULL_DECODE  k26rl_status_str returns NULL for the minted
+ *                     status 300
+ *   STUB_PAIR_SCALE   defines the global double k26rl_stub_pair_scale
+ *                     at the given value and scales every observation
+ *                     by it; two builds differing only in this value
+ *                     export the same symbol name, so a loader that
+ *                     lets one artifact's globals into the process
+ *                     scope changes the other's observations
  *   (default)         functional stub: create, spec, and the getters
  *                     work; step returns the unknown status 300;
  *                     reset_seeded returns the seed-reuse status,
@@ -28,6 +40,17 @@
 struct K26RlEnv {
     uint32_t n_envs;
 };
+
+#ifdef STUB_PAIR_SCALE
+/* Deliberately a global with default visibility, and deliberately the
+ * same name in every pair build: compiled without an export map,
+ * nothing confines it, so if the loader lets a previously loaded
+ * artifact's globals into the process scope, this artifact's reads of
+ * the symbol resolve against the other definition and its
+ * observations change scale. The isolation gate pins the isolated
+ * values. */
+double k26rl_stub_pair_scale = STUB_PAIR_SCALE;
+#endif
 
 uint32_t k26rl_abi_version(void)
 {
@@ -89,7 +112,11 @@ K26RlStatus k26rl_env_obs(const K26RlEnv *env, double *out)
     uint32_t i;
     if (!env || !out) return K26RL_E_NULL;
     for (i = 0; i < env->n_envs * STUB_OBS_TOTAL; i++) {
+#ifdef STUB_PAIR_SCALE
+        out[i] = 0.25 * (double)(i + 1u) * k26rl_stub_pair_scale;
+#else
         out[i] = 0.25 * (double)(i + 1u);
+#endif
     }
     return K26RL_OK;
 }
@@ -218,6 +245,12 @@ int32_t k26rl_env_spec(const K26RlEnv *env, uint8_t *out,
 {
     uint32_t need;
     if (!env) return -(int32_t)K26RL_E_NULL;
+#ifdef STUB_SPEC_SIZING_NEGATIVE
+    /* Only the sizing call fails, so a caller that drops the sign
+     * instead of decoding it proceeds to a fill call with a nonsense
+     * capacity and is caught on the size disagreement, not here. */
+    if (capacity == 0) return -(int32_t)K26RL_E_SEED_REUSE;
+#endif
     need = spec_write_(NULL, env);
     if (out && capacity >= need) (void)spec_write_(out, env);
     return (int32_t)need;
@@ -229,7 +262,13 @@ const char *k26rl_status_str(K26RlStatus status)
     case K26RL_OK:           return "stub ok";
     case K26RL_E_SEED_REUSE: return "stub altered seed reuse text";
     case (int)STUB_UNKNOWN_STATUS:
+#ifdef STUB_NULL_DECODE
+        /* A decoder with no string for this value: the caller must
+         * render the bare number and invent no name. */
+        return NULL;
+#else
         return "stub minted status 300";
+#endif
     default:                 return "stub other status";
     }
 }

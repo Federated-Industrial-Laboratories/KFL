@@ -374,7 +374,19 @@ class _Session:
                 "choose a seed not yet held" % seed)
         self.artifact.destroy(self._handle)
         self._handle = None
-        self._handle = self.artifact.create(seed, self.n_envs)
+        try:
+            self._handle = self.artifact.create(seed, self.n_envs)
+        except Exception as exc:
+            # The old handle is already destroyed, so this object
+            # cannot honestly continue; it closes, and every later
+            # call gets the use-after-close refusal instead of the
+            # artifact's null-handle error.
+            self._closed = True
+            raise K26RlError(
+                None,
+                "recreate for seed %d failed after the previous "
+                "handle was destroyed; the environment is now closed"
+                % seed) from exc
         self._current_key = seed
         self._untouched = True
         return self.read_obs()
@@ -434,33 +446,46 @@ class K26RlEnv(gymnasium.Env):
         self._needs_reset = False
 
     # ---- spec data exposed for consumers and tooling ------------------
+    #
+    # Like the methods, the spec-reading properties refuse after
+    # close(). The two record properties, seeds_held and output_path,
+    # stay readable: they are plain Python records of what the run
+    # did, wanted precisely after it, and reading them touches no
+    # artifact state.
 
     @property
     def env_spec(self):
         """The parsed spec value object."""
+        self._session.ensure_open()
         return self._session.spec
 
     @property
     def control_dt(self):
         """Simulated seconds per external step."""
+        self._session.ensure_open()
         return self._session.spec.control_dt
 
     @property
     def obs_channel_names(self):
+        self._session.ensure_open()
         return dict(self._session.spec.obs_channel_names)
 
     @property
     def obs_channel_kinds(self):
+        self._session.ensure_open()
         return dict(self._session.spec.obs_channel_kinds)
 
     @property
     def on_fault(self):
+        self._session.ensure_open()
         return self._session.on_fault
 
     @property
     def seeds_held(self):
         """Every seed this environment object's handles have held,
-        cumulative across recreates. Read-only."""
+        cumulative across recreates. Read-only, and still readable
+        after close(): the seed record of a finished run is exactly
+        what reproduction needs."""
         return self._session.seeds_held
 
     # ---- the API ------------------------------------------------------
@@ -521,9 +546,12 @@ class K26RlEnv(gymnasium.Env):
 
     @property
     def output_path(self):
+        """The enabled episode-output path, or None. Still readable
+        after close(): it locates the recorded file."""
         return self._session.output_path
 
     def close(self):
         # Idempotent, as the ecosystem expects; everything else on a
-        # closed environment is refused before any artifact call.
+        # closed environment is refused before any artifact call,
+        # except the seeds_held and output_path records.
         self._session.close()

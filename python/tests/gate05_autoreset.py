@@ -1,7 +1,9 @@
 """Gate 5: autoreset conformance.
 
-The vector shape against gymnasium's reset-on-next-step autoreset
-convention: the step that ends an episode delivers the final
+The vector shape declares the next-step autoreset mode in its
+metadata, and behaves as declared against gymnasium's
+reset-on-next-step autoreset convention: the step that ends an
+episode delivers the final
 observation and the terminal-adjusted reward with its ending bit; the
 following step delivers the new episode's initial observation with
 reward zero and neither bit. The single shape refuses a step after an
@@ -40,6 +42,13 @@ def main():
 
     # ---- vector shape, termination with terminal adjustment ----------
     env = K26RlVectorEnv(term_so, seed=3, n_envs=2)
+    # The declaration consumers dispatch on: the metadata must name
+    # the next-step autoreset mode this shape implements.
+    g.check(env.metadata.get("autoreset_mode")
+            is gymnasium.vector.AutoresetMode.NEXT_STEP,
+            "metadata autoreset_mode is %r, expected "
+            "AutoresetMode.NEXT_STEP"
+            % (env.metadata.get("autoreset_mode"),))
     initial, _ = env.reset()
     for step in (1, 2):
         _, rew, term, trunc, _ = env.step(zeros(2))

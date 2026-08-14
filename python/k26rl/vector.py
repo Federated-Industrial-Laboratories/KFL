@@ -63,33 +63,46 @@ class K26RlVectorEnv(VectorEnv):
             self.single_action_space, self.num_envs)
 
     # ---- spec data exposed for consumers and tooling ------------------
+    #
+    # Like the methods, the spec-reading properties refuse after
+    # close(). The two record properties, seeds_held and output_path,
+    # stay readable: they are plain Python records of what the run
+    # did, wanted precisely after it, and reading them touches no
+    # artifact state.
 
     @property
     def env_spec(self):
         """The parsed spec value object."""
+        self._session.ensure_open()
         return self._session.spec
 
     @property
     def control_dt(self):
         """Simulated seconds per external step."""
+        self._session.ensure_open()
         return self._session.spec.control_dt
 
     @property
     def obs_channel_names(self):
+        self._session.ensure_open()
         return dict(self._session.spec.obs_channel_names)
 
     @property
     def obs_channel_kinds(self):
+        self._session.ensure_open()
         return dict(self._session.spec.obs_channel_kinds)
 
     @property
     def on_fault(self):
+        self._session.ensure_open()
         return self._session.on_fault
 
     @property
     def seeds_held(self):
         """Every seed this environment object's handles have held,
-        cumulative across recreates. Read-only."""
+        cumulative across recreates. Read-only, and still readable
+        after close(): the seed record of a finished run is exactly
+        what reproduction needs."""
         return self._session.seeds_held
 
     # ---- the API ------------------------------------------------------
@@ -156,6 +169,8 @@ class K26RlVectorEnv(VectorEnv):
 
     @property
     def output_path(self):
+        """The enabled episode-output path, or None. Still readable
+        after close(): it locates the recorded file."""
         return self._session.output_path
 
     def close_extras(self, **kwargs):

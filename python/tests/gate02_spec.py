@@ -6,11 +6,16 @@ parse, spaces and buffer geometry equal to the declared totals, the
 endian probe validated, and an unknown-tag injection skipped cleanly
 with every recovered value unchanged.
 
-From synthetic blobs: the validation refusals (endian probe, agent
-count above 1, episode auto-reset bit clear), each naming what it
-found, and the four action-space branches: all box, single discrete,
-all discrete, and mixed declarations yield Box, Discrete,
-MultiDiscrete, and Tuple.
+Against a stub artifact whose sizing call returns a negated status:
+the typed raise with the negation undone and the message equal to the
+artifact's own decode.
+
+From synthetic blobs: the validation refusals (endian probe, ABI
+version echo, environment-count echo, agent count above 1, slice
+overrun, slice under-coverage, unknown action kind, action total 0,
+episode auto-reset bit clear), each naming what it found, and the
+four action-space branches: all box, single discrete, all discrete,
+and mixed declarations yield Box, Discrete, MultiDiscrete, and Tuple.
 
 Skips (77) when the built compiler, the stack archives, or gymnasium
 are absent.
@@ -43,7 +48,7 @@ def main():
 
     import numpy as np
     from gymnasium import spaces as gym_spaces
-    from k26rl import _abi, _spec
+    from k26rl import _abi, _spec, K26RlSeedReuseError
     from k26rl.env import build_action_space, build_observation_space
     from k26rl.vector import K26RlVectorEnv
 
@@ -113,22 +118,54 @@ def main():
 
     art.destroy(handle)
 
+    # ---- negated status on the sizing call ---------------------------
+    # A stub whose sizing call returns the negated seed-reuse status:
+    # the negation is undone, the raise is the typed one, and the
+    # message is the artifact's own decode of the value.
+    specneg = g.build_stub("specneg", ["STUB_SPEC_SIZING_NEGATIVE"])
+    ref = ctypes.CDLL(str(specneg))
+    ref.k26rl_status_str.restype = ctypes.c_char_p
+    ref.k26rl_status_str.argtypes = [ctypes.c_int]
+    reuse_text = ref.k26rl_status_str(_abi.E_SEED_REUSE).decode()
+
+    art_neg = _abi.Artifact(specneg)
+    h_neg = art_neg.create(1, 1)
+    try:
+        art_neg.spec_blob(h_neg)
+    except K26RlSeedReuseError as exc:
+        g.check(exc.status == _abi.E_SEED_REUSE,
+                "negated sizing status decoded to %r" % exc.status)
+        g.check(exc.message == reuse_text,
+                "negated sizing message %r, artifact says %r"
+                % (exc.message, reuse_text))
+    except Exception as exc:
+        g.check(False, "negated sizing status raised %s: %s"
+                % (type(exc).__name__, exc))
+    else:
+        g.check(False, "a negated sizing status was not raised")
+    art_neg.destroy(h_neg)
+
     # ---- synthetic blobs: refusals -----------------------------------
     def make_blob(agent_count=1, episode_flags=1, endian=0x01020304,
-                  acts=("box", "discrete")):
+                  acts=("box", "discrete"), abi=0x00010000, n_envs=1,
+                  obs_slice=(0, 0, 3), act_slice=None):
+        if act_slice is None:
+            act_slice = (0, 0, len(acts))
         parts = [
-            tlv(_spec.TAG_ABI_VERSION, u32(0x00010000)),
+            tlv(_spec.TAG_ABI_VERSION, u32(abi)),
             tlv(_spec.TAG_ENDIAN_PROBE, u32(endian)),
             tlv(_spec.TAG_AGENT_COUNT, u32(agent_count)),
-            tlv(_spec.TAG_N_ENVS, u32(1)),
+            tlv(_spec.TAG_N_ENVS, u32(n_envs)),
             tlv(_spec.TAG_CONTROL_DT, f64(0.5)),
             tlv(_spec.TAG_HORIZON, u32(10)),
             tlv(_spec.TAG_OBS_TOTAL, u32(3)),
             tlv(_spec.TAG_ACT_TOTAL, u32(len(acts))),
             tlv(_spec.TAG_AGENT_OBS_SLICE,
-                u32(0) + u32(0) + u32(3)),
+                u32(obs_slice[0]) + u32(obs_slice[1])
+                + u32(obs_slice[2])),
             tlv(_spec.TAG_AGENT_ACT_SLICE,
-                u32(0) + u32(0) + u32(len(acts))),
+                u32(act_slice[0]) + u32(act_slice[1])
+                + u32(act_slice[2])),
             tlv(_spec.TAG_EPISODE_FLAGS, u32(episode_flags)),
         ]
         for i, kind in enumerate(acts):
@@ -137,6 +174,9 @@ def main():
                                  u32(i) + f64(-1.0) + f64(1.0)))
                 parts.append(tlv(_spec.TAG_ACT_KIND,
                                  u32(i) + struct.pack("<H", 0)))
+            elif kind == "unknown":
+                parts.append(tlv(_spec.TAG_ACT_KIND,
+                                 u32(i) + struct.pack("<H", 7)))
             else:
                 arity = 3 + i
                 parts.append(tlv(_spec.TAG_ACT_KIND,
@@ -159,6 +199,18 @@ def main():
     expect_refusal(make_blob(agent_count=2), "2", "agent count 2")
     expect_refusal(make_blob(endian=0x04030201), "0x04030201",
                    "byte-swapped endian probe")
+    expect_refusal(make_blob(abi=0x00020000), "0x00020000",
+                   "ABI version echo mismatch")
+    expect_refusal(make_blob(n_envs=3), "3 environments",
+                   "environment-count echo mismatch")
+    expect_refusal(make_blob(obs_slice=(0, 0, 4)), "runs past",
+                   "slice overrun")
+    expect_refusal(make_blob(obs_slice=(0, 0, 2)), "cover 2",
+                   "slice under-coverage")
+    expect_refusal(make_blob(acts=("unknown",)), "unknown kind 7",
+                   "unknown action kind")
+    expect_refusal(make_blob(acts=()), "action total 0",
+                   "action total 0")
 
     # ---- synthetic blobs: the four action-space branches -------------
     def space_for(acts):

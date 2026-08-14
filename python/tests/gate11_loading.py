@@ -2,14 +2,27 @@
 
 A stub artifact reporting ABI major 2 is refused naming both majors;
 a stub with one symbol removed is refused naming the missing symbol;
-two artifacts loaded in one process each produce streams
-bit-identical to their solo runs, pinning the RTLD_LOCAL isolation;
-and every stateful public method of a closed environment raises the
-Python-side use-after-close refusal before any artifact call, with
-close itself idempotent.
+a missing artifact file is refused as the package's typed error with
+the loader's OSError chained.
 
-The stub halves need only a C compiler and gymnasium; the isolation
-half also needs the built compiler and stack archives.
+The isolation pin: two stubs built without export maps both export a
+global double named k26rl_stub_pair_scale, with different values,
+read by their observation getters through the GOT. Loaded RTLD_GLOBAL
+in this order, the second stub's reads would resolve against the
+first's definition and its observations take the first's scale;
+loaded RTLD_LOCAL, as the binding does, each stub sees only its own
+value, and this gate asserts those isolated values. Beside it, two
+compiled artifacts loaded together each produce streams bit-identical
+to their solo runs (coexistence, not a loader-mode pin: their export
+maps confine their globals under either mode).
+
+Use after close: every stateful public method and every spec-reading
+property of a closed environment raises the Python-side refusal
+before any artifact call; the seeds_held and output_path records stay
+readable; close itself is idempotent.
+
+The stub arms need only a C compiler and gymnasium; the coexistence
+arm also needs the built compiler and stack archives.
 """
 
 import sys
@@ -50,7 +63,43 @@ def main():
     else:
         g.check(False, "a missing symbol was accepted")
 
-    # ---- two artifacts in one process, isolated ----------------------
+    # ---- missing file, typed with the OSError chained ----------------
+    absent = str(g.WORK / "no_such_artifact.so")
+    try:
+        K26RlVectorEnv(absent, seed=1, n_envs=1)
+    except K26RlError as exc:
+        g.check(absent in str(exc),
+                "missing-file refusal does not name the path: %s"
+                % exc)
+        g.check(isinstance(exc.__cause__, OSError),
+                "the loader's OSError is not chained: %r"
+                % (exc.__cause__,))
+    else:
+        g.check(False, "a missing artifact file was accepted")
+
+    # ---- the RTLD_LOCAL pin: an unconfined shared symbol name --------
+    # Both pair stubs export the global k26rl_stub_pair_scale (no
+    # export map confines it) and scale their observations by it.
+    # Loaded RTLD_GLOBAL in this order, the second's reads would
+    # resolve against the first's definition; RTLD_LOCAL keeps each
+    # stub on its own value, asserted here.
+    pair_a = g.build_stub("pair_a", ["STUB_PAIR_SCALE=2.0"])
+    pair_b = g.build_stub("pair_b", ["STUB_PAIR_SCALE=3.0"])
+    base = np.array([0.25, 0.5, 0.75], dtype=np.float64)
+    env_a = K26RlVectorEnv(pair_a, seed=1, n_envs=1)
+    env_b = K26RlVectorEnv(pair_b, seed=1, n_envs=1)
+    obs_b, _ = env_b.reset()
+    g.check(obs_b.tobytes() == (base * 3.0).tobytes(),
+            "the second pair stub does not read its own scale "
+            "symbol: %r" % (obs_b,))
+    obs_a, _ = env_a.reset()
+    g.check(obs_a.tobytes() == (base * 2.0).tobytes(),
+            "the first pair stub does not read its own scale "
+            "symbol: %r" % (obs_a,))
+    env_a.close()
+    env_b.close()
+
+    # ---- two compiled artifacts in one process, coexisting -----------
     point_so = g.compile_fixture("rl_pointing")
     fault_so = g.compile_fixture("rl_shimfault", g.FAULT_KFL)
     n = 2
@@ -100,6 +149,10 @@ def main():
             g.check(False, "%s on a closed environment succeeded"
                     % what)
 
+    refusing_properties = ("env_spec", "control_dt",
+                           "obs_channel_names", "obs_channel_kinds",
+                           "on_fault")
+
     venv = K26RlVectorEnv(point_so, seed=11, n_envs=n)
     venv.close()
     venv.close()
@@ -109,6 +162,16 @@ def main():
     expect_closed(lambda: venv.reset(seed=12), "vector seeded reset")
     expect_closed(lambda: venv.set_output("/tmp/never.episode"),
                   "vector set_output")
+    for prop in refusing_properties:
+        expect_closed(lambda prop=prop: getattr(venv, prop),
+                      "vector property %s" % prop)
+    # The two record properties stay readable after close.
+    g.check(venv.seeds_held == frozenset({11}),
+            "seeds_held unreadable or wrong after close: %r"
+            % (venv.seeds_held,))
+    g.check(venv.output_path is None,
+            "output_path unreadable or wrong after close: %r"
+            % (venv.output_path,))
 
     senv = K26RlEnv(point_so, seed=13)
     senv.close()
@@ -117,6 +180,15 @@ def main():
     expect_closed(lambda: senv.reset(), "single reset")
     expect_closed(lambda: senv.set_output("/tmp/never.episode"),
                   "single set_output")
+    for prop in refusing_properties:
+        expect_closed(lambda prop=prop: getattr(senv, prop),
+                      "single property %s" % prop)
+    g.check(senv.seeds_held == frozenset({13}),
+            "seeds_held unreadable or wrong after close: %r"
+            % (senv.seeds_held,))
+    g.check(senv.output_path is None,
+            "output_path unreadable or wrong after close: %r"
+            % (senv.output_path,))
 
     g.ok(GATE)
 

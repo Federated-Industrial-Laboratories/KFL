@@ -7,7 +7,10 @@ and the typed error for the known one, each with a message equal to
 the loaded artifact's own k26rl_status_str output, so a status table
 cached at package build time fails here even for known values.
 
-Needs a C compiler for the stub and gymnasium for the environment
+A second stub variant decodes the minted value to NULL; the raise
+must carry the bare numeric rendering, the package inventing no name.
+
+Needs a C compiler for the stubs and gymnasium for the environment
 classes; skips (77) when gymnasium is absent.
 """
 
@@ -71,6 +74,26 @@ def main():
         g.check(False, "the stub's seed-reuse refusal was discarded")
 
     env.close()
+
+    # A decoder returning NULL for a value yields the bare numeric
+    # rendering; no name is invented for it.
+    nulldec = g.build_stub("nulldecode", ["STUB_NULL_DECODE"])
+    env_n = K26RlVectorEnv(nulldec, seed=1, n_envs=2)
+    try:
+        env_n.step(actions)
+    except K26RlError as exc:
+        g.check(type(exc) is K26RlError,
+                "NULL-decoded status raised %s, expected the base "
+                "type" % type(exc).__name__)
+        g.check(exc.status == UNKNOWN_STATUS,
+                "NULL-decoded status value %r" % exc.status)
+        g.check(exc.message == "status %d" % UNKNOWN_STATUS,
+                "NULL-decoded message %r, expected the bare numeric "
+                "rendering" % exc.message)
+    else:
+        g.check(False, "the NULL-decoded status was discarded")
+    env_n.close()
+
     g.ok(GATE)
 
 

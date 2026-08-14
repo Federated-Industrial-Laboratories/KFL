@@ -2,8 +2,12 @@
 # owns its skip conditions: it exits 77 with a printed reason when
 # the built compiler, a stack archive, or the gymnasium package is
 # absent, so `make test` completes everywhere and reports what it
-# could not check. PYTHON selects the interpreter (for instance a
-# virtual environment's); the default is python3.
+# could not check. Every gate runs; the summary line counts passes,
+# skips, and failures, the exit status is nonzero exactly when a
+# gate failed, and a run in which every gate skipped says so in one
+# line, because an all-skip exit 0 enforces nothing. PYTHON selects
+# the interpreter (for instance a virtual environment's); the
+# default is python3.
 #
 # Gate numbers 8 and 9 belong to the telemetry transport suite and
 # land with that component; the numbering here stays aligned with
@@ -23,12 +27,21 @@ GATES = tests/gate01_cross_driver.py \
 
 .PHONY: test
 test:
-	@for t in $(GATES); do \
+	@passed=0; skipped=0; failed=0; \
+	for t in $(GATES); do \
 	    $(PYTHON) $$t; rc=$$?; \
 	    if [ $$rc -eq 77 ]; then \
 	        echo "$$(basename $$t): SKIP"; \
+	        skipped=$$((skipped + 1)); \
 	    elif [ $$rc -ne 0 ]; then \
 	        echo "$$(basename $$t): FAIL (rc=$$rc)"; \
-	        exit $$rc; \
+	        failed=$$((failed + 1)); \
+	    else \
+	        passed=$$((passed + 1)); \
 	    fi; \
-	done
+	done; \
+	echo "gates: $$passed passed, $$skipped skipped, $$failed failed"; \
+	if [ $$passed -eq 0 ] && [ $$failed -eq 0 ]; then \
+	    echo "all gates skipped: no enforcement this run"; \
+	fi; \
+	[ $$failed -eq 0 ]

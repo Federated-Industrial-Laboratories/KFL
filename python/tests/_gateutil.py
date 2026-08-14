@@ -86,12 +86,18 @@ def _mtime(path):
     return path.stat().st_mtime
 
 
+# The frozen ABI header, an input of every stub build and, through
+# the generated C, of every compiled fixture.
+_ABI_HEADER = ROOT / "libk26rl" / "include" / "k26rl_env.h"
+
+
 def compile_fixture(name, source_text=None):
     """Compile a .kfl program into WORK and return the path of its
     companion shared object. With source_text None the source is the
     checked-in integration fixture of that name; otherwise the text
-    is written into WORK first. Cached on the source and compiler
-    timestamps."""
+    is written into WORK first. Cached on the timestamps of every
+    input: the source, the compiler, the linked archives, and the
+    frozen ABI header."""
     WORK.mkdir(parents=True, exist_ok=True)
     if source_text is None:
         src = ROOT / "kflc" / "integration_tests" / (name + ".kfl")
@@ -102,7 +108,8 @@ def compile_fixture(name, source_text=None):
             src.write_text(source_text)
     out = WORK / name
     so = WORK / (name + ".rlenv.so")
-    if so.exists() and _mtime(so) >= max(_mtime(src), _mtime(KFLC)):
+    inputs = [src, KFLC, _ABI_HEADER] + [ROOT / l for l in _LINK_LIBS]
+    if so.exists() and _mtime(so) >= max(_mtime(p) for p in inputs):
         return so
 
     cflags = ("-O2 -g -std=c++11 -Wno-format-truncation "
@@ -125,13 +132,17 @@ def compile_fixture(name, source_text=None):
 
 def build_c(source_name, out_name, extra_args=()):
     """Compile one helper C source from this directory into WORK,
-    cached on source timestamp and argument set."""
+    cached on the timestamps of the source and the included ABI
+    header, and on the argument set. The helpers link no stack
+    archive (the C driver dlopens its artifact), so the archives are
+    not inputs here."""
     WORK.mkdir(parents=True, exist_ok=True)
     src = Path(__file__).resolve().parent / source_name
     out = WORK / out_name
     stamp = WORK / (out_name + ".args")
     args_text = " ".join(extra_args)
-    fresh = (out.exists() and _mtime(out) >= _mtime(src)
+    fresh = (out.exists()
+             and _mtime(out) >= max(_mtime(src), _mtime(_ABI_HEADER))
              and stamp.exists() and stamp.read_text() == args_text)
     if not fresh:
         cmd = ["cc", "-O2", "-Wall",

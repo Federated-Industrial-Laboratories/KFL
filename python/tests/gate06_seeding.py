@@ -14,10 +14,12 @@ a touched handle advances episodes; the held-seed record is exposed
 as read-only data, accumulates across a recreate, and a seed held
 before the recreate still routes as held rather than being fed to the
 artifact's seeded reset as if fresh; the vector seed-list refusal;
-the non-empty options refusal; the out-of-range seed refusals; and
-the recreate-while-output-enabled refusal, tested beside a repeated
+the non-empty options refusal; the out-of-range seed refusals; the
+recreate-while-output-enabled refusal, tested beside a repeated
 reset(seed=S) to the current key with output enabled succeeding as a
-no-op.
+no-op; and a failed recreate closing the session, the raise stating
+so with the create error chained and later calls refused as
+use-after-close.
 
 Skips (77) when the built compiler, the stack archives, or gymnasium
 are absent.
@@ -229,6 +231,39 @@ def main():
     g.check(out.exists() and out.stat().st_size > 0,
             "no episode file was recorded")
     env_h.close()
+
+    # ---- a failed recreate closes the session ------------------------
+    # Route 3 destroys the old handle before creating the new one, so
+    # a create failure leaves nothing to continue with: the session
+    # must close, the raise must say so with the create error
+    # chained, and later calls must get the use-after-close refusal.
+    env_i = V(21)
+    run(env_i, 1)
+    art_i = env_i._session.artifact
+
+    def failing_create(seed, n_envs):
+        raise K26RlError(None, "simulated create failure")
+
+    art_i.create = failing_create
+    try:
+        env_i.reset(seed=21)
+    except K26RlError as exc:
+        g.check("closed" in str(exc),
+                "the failed-recreate raise does not state the closed "
+                "state: %s" % exc)
+        g.check(isinstance(exc.__cause__, K26RlError)
+                and "simulated create failure" in str(exc.__cause__),
+                "the create error is not chained: %r" % exc.__cause__)
+    else:
+        g.check(False, "a failed recreate did not raise")
+    g.check(env_i._session.closed,
+            "the session is not closed after a failed recreate")
+    acts = (np.zeros((n, 1)), np.zeros(n, dtype=np.int64))
+    expect(K26RlError, "closed", "step after a failed recreate",
+           lambda: env_i.step(acts))
+    expect(K26RlError, "closed", "reset after a failed recreate",
+           lambda: env_i.reset())
+    env_i.close()
 
     g.ok(GATE)
 

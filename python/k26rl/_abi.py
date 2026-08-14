@@ -89,8 +89,16 @@ class Artifact:
                 "artifact path must be a str or os.PathLike, not %s"
                 % type(path).__name__)
         self.path = os.fspath(path)
-        self._lib = ctypes.CDLL(self.path,
-                                mode=os.RTLD_NOW | os.RTLD_LOCAL)
+        try:
+            self._lib = ctypes.CDLL(self.path,
+                                    mode=os.RTLD_NOW | os.RTLD_LOCAL)
+        except OSError as exc:
+            # A missing or unloadable file surfaces as the package's
+            # typed error with the loader's own report chained.
+            raise K26RlError(
+                None,
+                "artifact %s could not be loaded: %s"
+                % (self.path, exc)) from exc
         self._fn = {}
         for name, restype, argtypes in _SIGNATURES:
             try:

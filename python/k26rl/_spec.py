@@ -210,6 +210,11 @@ def validate(spec, abi_version, n_envs):
     if spec.obs_total is None or spec.act_total is None:
         raise K26RlError(
             None, "spec declares no observation or action totals")
+    if spec.act_total == 0:
+        raise K26RlError(
+            None,
+            "spec declares action total 0; an environment with no "
+            "action channels cannot be stepped")
     if spec.agent_count != 1:
         raise K26RlError(
             None,
