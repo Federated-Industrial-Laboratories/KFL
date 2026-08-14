@@ -76,7 +76,9 @@ static const char *const ORDER_KFL =
 
 /* Fixture 2: the analytic single-step fixture. The observer is at the
  * origin and the craft's unwritten position components are zero, so
- * the range is the written component's magnitude. */
+ * the range is the written component's magnitude. The write is guarded
+ * by the action, so driving the action at zero leaves the world
+ * unwritten and measures the radius the fixture started from. */
 static const char *const SNAP_KFL =
     "form RL_SNAP\n"
     "fn world snap_world\n"
@@ -91,7 +93,12 @@ static const char *const SNAP_KFL =
     "    end\n"
     "    action place box 0.0 2.0e11 default 0.0\n"
     "    on_step\n"
-    "        craft.pos_x = place\n"
+    /* Guarded, so the leg that measures the unwritten radius really
+     * makes no write: an unguarded write of zero would put the craft
+     * on top of the observer. */
+    "        if place > 0.0\n"
+    "            craft.pos_x = place\n"
+    "        end\n"
     "    end\n"
     "    observe craft from earth mode=geometric as trk\n"
     "    objective\n"
@@ -277,6 +284,13 @@ static double act_b_(uint32_t t, uint32_t e)
 }
 static double act_zero_(uint32_t t, uint32_t e) { (void)t; (void)e; return 0.0; }
 
+/* Gate 4 drives a constant 5.0, which separates the three orderings
+ * the comparison is meant to catch: later-wins leaves vel_x 10 and
+ * vel_z 5, earlier-wins leaves 5 and 2.5, and a read that missed the
+ * write before it leaves vel_z 0. At action zero all three agree, so
+ * the gate would pass on any of them. */
+static double act_five_(uint32_t t, uint32_t e) { (void)t; (void)e; return 5.0; }
+
 static double g_place = 0.0;
 static double act_place_(uint32_t t, uint32_t e)
 {
@@ -354,8 +368,8 @@ int main(void)
         drive_(WORK_DIR "/snap.rlenv.so", 3, N, T, act_place_, post, NULL);
         const double r_post = range_at_(post, 0, N, 5);
 
-        printf("gate 2: written %.1f m, reported %.6f m, bound %.6f m,"
-               " unwritten %.1f m\n", R, r_post, bound, r_pre);
+        printf("gate 2: written %.1f m, reported %.6f m, bound %.6f m;"
+               " with no write %.3f m\n", R, r_post, bound, r_pre);
         ASSERT(fabs(r_post - R) <= bound);
         ASSERT(fabs(r_post - r_pre) > bound);
     }
@@ -391,8 +405,8 @@ int main(void)
     {
         enum { T = 15, N = 1 };
         static double o1[T * 5], o2[T * 5];
-        drive_(WORK_DIR "/order2.rlenv.so", 9, N, T, act_zero_, o1, NULL);
-        drive_(WORK_DIR "/order2ref.rlenv.so", 9, N, T, act_zero_, o2,
+        drive_(WORK_DIR "/order2.rlenv.so", 9, N, T, act_five_, o1, NULL);
+        drive_(WORK_DIR "/order2ref.rlenv.so", 9, N, T, act_five_, o2,
                NULL);
         ASSERT(memcmp(o1, o2, sizeof o1) == 0);
     }

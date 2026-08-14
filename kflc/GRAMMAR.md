@@ -510,8 +510,10 @@ carries as an `astro_body` attribute and as a `reset` target; the
 velocity keys are metres per second.
 
 The assigned expression must be side-effect free: it may call the scalar
-maths built-ins, and a call to a library built-in, directly or through a
-`fn`, is rejected. Outside `on_step` the dotted form is not a name at
+maths built-ins and the string helpers that only read their arguments
+(`strlen`, `streq`, `starts_with`, `ends_with`), while `concat`, which
+allocates, and every library built-in registered by a manifest are
+rejected, whether called directly or through a `fn`. Outside `on_step` the dotted form is not a name at
 all, and an objective or termination expression that names body state is
 told to read it through an `observe ... as` channel instead.
 
