@@ -68,6 +68,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "rl_gate_util.h"
@@ -170,9 +171,24 @@ static const char *tap_name_(int slot, const char *tag)
  * tap_name enables the tap when non-null, and dump_path records the
  * getter outputs of every step when non-null. Returns after destroy,
  * so the file is closed and the ring released. */
+static void wait_ready_(int fd)
+{
+    char b = 0;
+
+    if (fd < 0)
+        return;
+    /* One byte, written by the consumer only once it holds a mapping.
+     * Without this the consumer races the producer's whole window and
+     * can lose it, and an arm that claims to run with a consumer
+     * attached must know that one is. */
+    ASSERT(read(fd, &b, 1) == 1);
+    ASSERT(b == 'a');
+    close(fd);
+}
+
 static void drive_(const RlSurface *s, uint64_t seed, int steps,
                    const char *out_path, const char *tap_name,
-                   const char *dump_path)
+                   const char *dump_path, int ready_fd)
 {
     K26RlEnv *env = NULL;
     double act[TAP_ENVS * TAP_ACT];
@@ -191,6 +207,9 @@ static void drive_(const RlSurface *s, uint64_t seed, int steps,
         dump = fopen(dump_path, "wb");
         ASSERT(dump != NULL);
     }
+    /* The tap exists now, so a waiting consumer can attach; block
+     * until it has before any step is taken. */
+    wait_ready_(ready_fd);
     for (int t = 0; t < steps; t++) {
         for (uint32_t e = 0; e < TAP_ENVS; e++)
             for (uint32_t c = 0; c < TAP_ACT; c++)
@@ -224,24 +243,41 @@ typedef enum {
 /* Frames are dumped length-prefixed so the parent can walk them back
  * without knowing the geometry. */
 static pid_t spawn_consumer_(ConsumeMode mode, const char *name,
-                             const char *dump_path)
+                             const char *dump_path, int *out_ready)
 {
-    pid_t pid = fork();
+    int ready[2];
+    pid_t pid;
 
+    ASSERT(pipe(ready) == 0);
+    pid = fork();
     ASSERT(pid >= 0);
-    if (pid != 0)
+    if (pid != 0) {
+        close(ready[1]);
+        if (out_ready)
+            *out_ready = ready[0];
+        else
+            close(ready[0]);
         return pid;
+    }
 
     {
+        close(ready[0]);
         K26RlTapReader *r = NULL;
         FILE *dump = NULL;
         uint8_t *buf;
         uint32_t slot = 0;
         int tries;
 
-        for (tries = 0; tries < 100000; tries++) {
+        /* The producer enables the tap after this process starts, so
+         * the first attach waits for the object rather than spinning
+         * a fixed number of times and giving up. */
+        for (tries = 0; tries < 10000 && !r; tries++) {
+            struct timespec ts;
             if (k26rl_tap_attach(name, 1, &r) == K26RL_OK)
                 break;
+            ts.tv_sec = 0;
+            ts.tv_nsec = 1000000;   /* 1 ms; 10 s in total */
+            nanosleep(&ts, NULL);
         }
         if (!r)
             _exit(2);
@@ -255,6 +291,10 @@ static pid_t spawn_consumer_(ConsumeMode mode, const char *name,
             if (!dump)
                 _exit(2);
         }
+        /* Attached and ready to read: the producer may start. */
+        if (write(ready[1], "a", 1) != 1)
+            _exit(2);
+        close(ready[1]);
 
         for (;;) {
             uint32_t len = 0;
@@ -502,7 +542,7 @@ static void gate_enable_(const RlSurface *s)
     /* A run that never asks for a tap creates nothing. */
     before = shm_objects_();
     ASSERT(before >= 0);
-    drive_(s, 7, 5, NULL, NULL, NULL);
+    drive_(s, 7, 5, NULL, NULL, NULL, -1);
     after = shm_objects_();
     ASSERT(after == before);
 
@@ -575,12 +615,13 @@ static void gate_identity_(const RlSurface *s)
     const char *n = tap_name_(1, "ident");
     pid_t pid;
     int st = 0;
+    int ready = -1;
 
     /* 9a: never tapped, against tapped with nobody listening. */
     drive_(s, 11, TAP_STEPS, WORK_DIR "/untapped.k26epi", NULL,
-           WORK_DIR "/untapped.dump");
+           WORK_DIR "/untapped.dump", -1);
     drive_(s, 11, TAP_STEPS, WORK_DIR "/tapped.k26epi", n,
-           WORK_DIR "/tapped.dump");
+           WORK_DIR "/tapped.dump", -1);
     ASSERT(rl_files_equal_(WORK_DIR "/untapped.k26epi",
                            WORK_DIR "/tapped.k26epi"));
     ASSERT(rl_files_equal_(WORK_DIR "/untapped.dump",
@@ -592,15 +633,15 @@ static void gate_identity_(const RlSurface *s)
      * single frame and blocks for the remainder of the run. Neither
      * may move a byte, and the stalled one is the arm that proves a
      * slow consumer cannot hold a step. */
-    pid = spawn_consumer_(CONSUME_ALL, n, WORK_DIR "/watch.frames");
-    drive_(s, 11, TAP_STEPS, WORK_DIR "/watched.k26epi", n, NULL);
+    pid = spawn_consumer_(CONSUME_ALL, n, WORK_DIR "/watch.frames", &ready);
+    drive_(s, 11, TAP_STEPS, WORK_DIR "/watched.k26epi", n, NULL, ready);
     ASSERT(waitpid(pid, &st, 0) == pid);
     ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
     ASSERT(rl_files_equal_(WORK_DIR "/untapped.k26epi",
                            WORK_DIR "/watched.k26epi"));
 
-    pid = spawn_consumer_(CONSUME_STALL, n, NULL);
-    drive_(s, 11, TAP_STEPS, WORK_DIR "/stalled.k26epi", n, NULL);
+    pid = spawn_consumer_(CONSUME_STALL, n, NULL, &ready);
+    drive_(s, 11, TAP_STEPS, WORK_DIR "/stalled.k26epi", n, NULL, ready);
     ASSERT(kill(pid, SIGKILL) == 0);
     ASSERT(waitpid(pid, &st, 0) == pid);
     ASSERT(rl_files_equal_(WORK_DIR "/untapped.k26epi",
@@ -610,14 +651,14 @@ static void gate_identity_(const RlSurface *s)
 
     /* 9c: a consumer attaching and detaching throughout, and one
      * killed outright with its mapping live. */
-    pid = spawn_consumer_(CONSUME_FLAP, n, NULL);
-    drive_(s, 11, TAP_STEPS, WORK_DIR "/flapped.k26epi", n, NULL);
+    pid = spawn_consumer_(CONSUME_FLAP, n, NULL, &ready);
+    drive_(s, 11, TAP_STEPS, WORK_DIR "/flapped.k26epi", n, NULL, ready);
     (void)kill(pid, SIGKILL);
     ASSERT(waitpid(pid, &st, 0) == pid);
     ASSERT(rl_files_equal_(WORK_DIR "/untapped.k26epi",
                            WORK_DIR "/flapped.k26epi"));
 
-    pid = spawn_consumer_(CONSUME_DIE, n, NULL);
+    pid = spawn_consumer_(CONSUME_DIE, n, NULL, &ready);
     {
         K26RlEnv *env = NULL;
         double act[TAP_ENVS * TAP_ACT];
@@ -625,6 +666,7 @@ static void gate_identity_(const RlSurface *s)
         ASSERT(s->create(11, TAP_ENVS, &env) == K26RL_OK);
         ASSERT(s->output(env, WORK_DIR "/killed.k26epi") == K26RL_OK);
         ASSERT(s->tap(env, n) == K26RL_OK);
+        wait_ready_(ready);
         for (int t = 0; t < TAP_STEPS; t++) {
             for (uint32_t e = 0; e < TAP_ENVS; e++)
                 for (uint32_t c = 0; c < TAP_ACT; c++)
@@ -714,14 +756,14 @@ static void gate_cross_transport_(const RlSurface *s)
     const char *n = tap_name_(3, "xport");
     Decoded ring, file;
     pid_t pid;
-    int st = 0;
+    int st = 0, ready = -1;
     uint32_t i, matched = 0;
 
     memset(&ring, 0, sizeof ring);
     memset(&file, 0, sizeof file);
 
-    pid = spawn_consumer_(CONSUME_ALL, n, WORK_DIR "/xport.frames");
-    drive_(s, 17, TAP_STEPS, WORK_DIR "/xport.k26epi", n, NULL);
+    pid = spawn_consumer_(CONSUME_ALL, n, WORK_DIR "/xport.frames", &ready);
+    drive_(s, 17, TAP_STEPS, WORK_DIR "/xport.k26epi", n, NULL, ready);
     ASSERT(waitpid(pid, &st, 0) == pid);
     ASSERT(WIFEXITED(st) && WEXITSTATUS(st) == 0);
 
@@ -941,7 +983,7 @@ static void gate_fault_(void)
     Decoded ring, file;
     double act[TAP_ENVS * TAP_ACT];
     pid_t pid;
-    int st = 0;
+    int st = 0, ready = -1;
     uint32_t i;
     uint16_t ring_code;
     int saw = 0;
@@ -955,11 +997,12 @@ static void gate_fault_(void)
     so = rl_dlopen_(WORK_DIR "/tapfault.rlenv.so");
     rl_resolve_surface_(so, &s);
 
-    pid = spawn_consumer_(CONSUME_ALL, n, WORK_DIR "/fault.frames");
+    pid = spawn_consumer_(CONSUME_ALL, n, WORK_DIR "/fault.frames", &ready);
 
     ASSERT(s.create(23, TAP_ENVS, &env) == K26RL_OK);
     ASSERT(s.output(env, WORK_DIR "/fault.k26epi") == K26RL_OK);
     ASSERT(s.tap(env, n) == K26RL_OK);
+    wait_ready_(ready);
     for (int t = 0; t < 10; t++) {
         memset(act, 0, sizeof act);
         /* Environment 0 divides by zero at a step of our choosing;

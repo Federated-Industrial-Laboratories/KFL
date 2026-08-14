@@ -56,6 +56,7 @@
 
 #include "rl_gate_util.h"
 #include "k26rl_tap.h"
+#include <time.h>
 
 #define WORK_DIR "/tmp/kflc_rl_hotpath_test"
 
@@ -298,6 +299,8 @@ static int child_main_(void)
     {
         K26RlEnv *env = NULL;
         pid_t consumer;
+        int ready[2];
+        char ready_byte = 0;
 
         ASSERT(s.create(42, HP_ENVS, &env) == K26RL_OK);
         ASSERT(s.tap(env, tap_name) == K26RL_OK);
@@ -306,22 +309,40 @@ static int child_main_(void)
         /* A real consumer, in its own process, reading continuously
          * for as long as the producer runs. Its own allocations are
          * its own process's and cannot reach these counters, which is
-         * the point: a consumer is invisible to the producer. */
+         * the point: a consumer is invisible to the producer.
+         *
+         * The parent waits for the consumer to report itself attached
+         * before it arms and steps. Without that handshake the child
+         * races the whole measured window and can lose it on a busy
+         * machine, and a gate that claims to measure the cost with a
+         * consumer attached must know that one is. */
+        ASSERT(pipe(ready) == 0);
         consumer = fork();
         ASSERT(consumer >= 0);
         if (consumer == 0) {
             K26RlTapReader *r = NULL;
             uint32_t slot = 0;
-            for (int tries = 0; tries < 10000; tries++) {
+            close(ready[0]);
+            /* Attach with a wall-clock bound rather than a spin count,
+             * so a slow start waits instead of giving up. */
+            for (int tries = 0; tries < 10000 && !r; tries++) {
+                struct timespec ts;
                 if (k26rl_tap_attach(tap_name, 1, &r) == K26RL_OK)
                     break;
+                ts.tv_sec = 0;
+                ts.tv_nsec = 1000000;   /* 1 ms; 10 s in total */
+                nanosleep(&ts, NULL);
             }
             if (!r)
                 _exit(2);
-            ASSERT(k26rl_tap_reader_info(r, &slot, NULL) == K26RL_OK);
+            if (k26rl_tap_reader_info(r, &slot, NULL) != K26RL_OK)
+                _exit(2);
             uint8_t *buf = (uint8_t *)malloc(slot);
             if (!buf)
                 _exit(2);
+            if (write(ready[1], "a", 1) != 1)
+                _exit(2);
+            close(ready[1]);
             for (;;) {
                 uint32_t len = 0;
                 if (k26rl_tap_read(r, buf, slot, &len, NULL) != K26RL_OK)
@@ -331,6 +352,11 @@ static int child_main_(void)
             }
             _exit(0);
         }
+        close(ready[1]);
+        /* One byte, and only after the consumer holds a mapping. */
+        ASSERT(read(ready[0], &ready_byte, 1) == 1);
+        ASSERT(ready_byte == 'a');
+        close(ready[0]);
 
         counters_clear_();
         *armed_ = 1;
