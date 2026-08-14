@@ -23,7 +23,8 @@ GATES = tests/gate01_cross_driver.py \
         tests/gate06_seeding.py \
         tests/gate07_api_conformance.py \
         tests/gate10_marshalling.py \
-        tests/gate11_loading.py
+        tests/gate11_loading.py \
+        tests/gate12_environments.py
 
 .PHONY: test
 test:

@@ -130,8 +130,12 @@ int main(int argc, char **argv)
     uint32_t act_total = spec_u32_(blob, (uint32_t)spec_len,
                                    K26RL_TAG_ACT_TOTAL);
     free(blob);
-    if (act_total != 2u) DIE("fixture act_total is %u, expected 2",
-                             act_total);
+    /* One or two channels: channel 0 takes the thrust stream, the
+     * second, when the fixture declares one, takes the gear stream.
+     * The Python side computes the same values for the same shape. */
+    if (act_total != 1u && act_total != 2u) {
+        DIE("fixture act_total is %u, expected 1 or 2", act_total);
+    }
 
     FILE *dump = NULL;
     if (emit) {
@@ -152,7 +156,7 @@ int main(int argc, char **argv)
     for (uint32_t t = 0; t < T; t++) {
         for (uint32_t e = 0; e < n_envs; e++) {
             act[e * act_total + 0] = act_thrust_(t, e);
-            act[e * act_total + 1] = act_gear_(t, e);
+            if (act_total > 1) act[e * act_total + 1] = act_gear_(t, e);
         }
         if (s.step(env, act) != K26RL_OK) DIE("step %u failed", t);
         if (dump) {
