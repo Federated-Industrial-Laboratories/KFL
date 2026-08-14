@@ -66,6 +66,61 @@ static const char *const BODIES_KFL =
     "end\n"
     "end\n";
 
+/* The same shape, but the action drives the craft's position far out:
+ * at 1.5e11 m it sits past two sector edges of the runtime's position
+ * grid, whose edge is 2^36 m. Gate 3's near-field fixture keeps every
+ * body inside sector 0, where the exact and the flattened forms of a
+ * position subtraction are the same arithmetic and a flattened getter
+ * would pass; this one separates them. */
+static const char *const FAR_KFL =
+    "form RL_BODIES_FAR\n"
+    "fn world far_world\n"
+    "    astro_body star gm=1.32712440018e20 mass=1.989e30"
+    " pos_x=8.0e10 pos_y=1.3e9 pos_z=7.0e8"
+    " vel_x=11.0 vel_y=1300.0 vel_z=17.0\n"
+    "    astro_body craft gm=1.0"
+    " pos_x=1.5e11 pos_y=3.1e9 pos_z=1.1e9"
+    " vel_x=13.0 vel_y=1100.0 vel_z=19.0\n"
+    "    episode\n"
+    "        control_dt 1.0\n"
+    "        horizon 8\n"
+    "    end\n"
+    "    action place box 1.0e11 2.0e11 default 1.5e11\n"
+    "    on_step\n"
+    "        craft.pos_x = place\n"
+    "    end\n"
+    "    observe craft from star mode=geometric as trk\n"
+    "    objective\n"
+    "        reward 0.0\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* A fixture that faults on demand: the reward divides by zero when a
+ * caller drives the action to 1.0. It exists to pin what the getter
+ * reports after a fault, which is not what the observation getters
+ * report. */
+static const char *const FAULT_KFL =
+    "form RL_BODIES_FAULT\n"
+    "fn world bfault_world\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft gm=1.0 parent=earth pos_x=7.0e6 vel_y=7350.0\n"
+    "    episode\n"
+    "        control_dt 0.1\n"
+    "        horizon 6\n"
+    "    end\n"
+    "    action push box 0.0 4.0 default 0.0\n"
+    "    observe craft from earth mode=geometric as trk\n"
+    "    objective\n"
+    "        reward 1.0 / (1.0 - push)\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The runtime's sector edge, 2^36 m. A body beyond it is in a
+ * different sector from one near the origin. */
+#define SECTOR_EDGE_M 68719476736.0
+
 enum { N_ENVS = 2, N_BODIES = 2, N_ACT = 1, OBS_TOTAL = 10, PER_BODY = 6 };
 enum { EARTH = 0, CRAFT = 1 };
 
@@ -257,7 +312,141 @@ int main(void)
                " names in declaration order: OK\n");
     }
 
+    /* ---- Gate 5: the pin again, across a sector boundary ----------- */
+    {
+        void *fso;
+        RlSurface fs;
+        K26RlEnv *env = NULL;
+        double a[1 * 1];
+        double obs[1 * 5];
+        double fbuf[1 * N_BODIES * PER_BODY];
+        const int32_t fwant = (int32_t)(1 * N_BODIES * PER_BODY);
+        uint32_t compared = 0;
+        int crossed = 0;
+
+        rl_write_file_(WORK_DIR "/far.kfl", FAR_KFL);
+        rl_compile_(WORK_DIR "/far.kfl", WORK_DIR "/far", WORK_DIR);
+        ASSERT(rl_file_exists_(WORK_DIR "/far.rlenv.so"));
+        fso = rl_dlopen_(WORK_DIR "/far.rlenv.so");
+        rl_resolve_surface_(fso, &fs);
+        ASSERT(fs.create(3, 1, &env) == K26RL_OK);
+
+        for (uint32_t t = 0; t < 4; t++) {
+            const double *r;
+            double range, inv, dx, dy, dz;
+
+            a[0] = 1.5e11 + (double)t * 7.3e6;   /* stays past the edge */
+            ASSERT(fs.step(env, a) == K26RL_OK);
+            ASSERT(fs.obs(env, obs) == K26RL_OK);
+            ASSERT(fs.bodies(env, EARTH, fbuf, (uint32_t)fwant) == fwant);
+
+            /* The arm is only worth anything if the fixture really
+             * does straddle a sector boundary: without this the
+             * assertions below would pass on a flattened getter, which
+             * is exactly how the near-field gate failed to
+             * discriminate. */
+            ASSERT(fs.bodies(env, K26RL_BODY_REF_ORIGIN, fbuf,
+                             (uint32_t)fwant) == fwant);
+            {
+                double se = floor(fbuf[EARTH * PER_BODY + 0] / SECTOR_EDGE_M);
+                double sc = floor(fbuf[CRAFT * PER_BODY + 0] / SECTOR_EDGE_M);
+                /* Different sectors on the axis under test, and both
+                 * offsets carrying integration detail, which is the
+                 * condition under which a flattened subtraction loses
+                 * bits the exact one keeps. */
+                if (se != sc)
+                    crossed++;
+            }
+            ASSERT(fs.bodies(env, EARTH, fbuf, (uint32_t)fwant) == fwant);
+
+            r = fbuf + (size_t)CRAFT * PER_BODY;
+            range = sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+            inv = 1.0 / range;
+            dx = r[0] * inv; dy = r[1] * inv; dz = r[2] * inv;
+            ASSERT(memcmp(&range, &obs[3], sizeof(double)) == 0);
+            ASSERT(memcmp(&dx, &obs[0], sizeof(double)) == 0);
+            ASSERT(memcmp(&dy, &obs[1], sizeof(double)) == 0);
+            ASSERT(memcmp(&dz, &obs[2], sizeof(double)) == 0);
+            compared++;
+        }
+        ASSERT(compared == 4);
+        ASSERT(crossed == 4);
+        fs.destroy(env);
+        dlclose(fso);
+        printf("gate 5: %u steps with observer and target in different"
+               " sectors, the pin holding bitwise where a flattened"
+               " subtraction would not: OK\n", compared);
+    }
+
+    /* ---- Gate 6: what the getter reports after a fault ------------- */
+    {
+        void *xso;
+        RlSurface xs;
+        K26RlEnv *env = NULL;
+        double a[1];
+        double obs[5];
+        double xbuf[1 * N_BODIES * PER_BODY];
+        const int32_t xwant = (int32_t)(1 * N_BODIES * PER_BODY);
+        uint32_t fl[1];
+        double range;
+
+        rl_write_file_(WORK_DIR "/bfault.kfl", FAULT_KFL);
+        rl_compile_(WORK_DIR "/bfault.kfl", WORK_DIR "/bfault", WORK_DIR);
+        xso = rl_dlopen_(WORK_DIR "/bfault.rlenv.so");
+        rl_resolve_surface_(xso, &xs);
+        ASSERT(xs.create(5, 1, &env) == K26RL_OK);
+
+        /* An ordinary step first: the two surfaces agree, which is
+         * what makes the disagreement below meaningful. */
+        a[0] = 0.0;
+        ASSERT(xs.step(env, a) == K26RL_OK);
+        ASSERT(xs.obs(env, obs) == K26RL_OK);
+        ASSERT(xs.bodies(env, EARTH, xbuf, (uint32_t)xwant) == xwant);
+        {
+            const double *r = xbuf + (size_t)CRAFT * PER_BODY;
+            range = sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+            ASSERT(memcmp(&range, &obs[3], sizeof(double)) == 0);
+        }
+
+        /* Now fault it. The observation getters hold the pre-step
+         * values, by design; the body getter reads the live worlds
+         * and so reports the state the fault left. The two must
+         * therefore disagree, which is the contract the header
+         * states. */
+        a[0] = 1.0;
+        ASSERT(xs.step(env, a) == K26RL_OK);
+        ASSERT(xs.flags(env, fl) == K26RL_OK);
+        ASSERT(fl[0] & K26RL_FLAG_FAULT);
+        ASSERT(xs.obs(env, obs) == K26RL_OK);
+        ASSERT(xs.bodies(env, EARTH, xbuf, (uint32_t)xwant) == xwant);
+        {
+            const double *r = xbuf + (size_t)CRAFT * PER_BODY;
+            range = sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+            ASSERT(memcmp(&range, &obs[3], sizeof(double)) != 0);
+        }
+
+        /* And the next boundary reset discards it: the two surfaces
+         * agree again on the new episode's initial state. */
+        a[0] = 0.0;
+        ASSERT(xs.step(env, a) == K26RL_OK);
+        ASSERT(xs.flags(env, fl) == K26RL_OK);
+        ASSERT(fl[0] & K26RL_FLAG_RESET_BOUNDARY);
+        ASSERT(xs.obs(env, obs) == K26RL_OK);
+        ASSERT(xs.bodies(env, EARTH, xbuf, (uint32_t)xwant) == xwant);
+        {
+            const double *r = xbuf + (size_t)CRAFT * PER_BODY;
+            range = sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+            ASSERT(memcmp(&range, &obs[3], sizeof(double)) == 0);
+        }
+
+        xs.destroy(env);
+        dlclose(xso);
+        printf("gate 6: after a fault the getter reports the state the fault"
+               " left while the observation getters hold the last honest"
+               " values, and the boundary reset discards it: OK\n");
+    }
+
     dlclose(so);
-    printf("test_rl_bodies: 4 gates passed\n");
+    printf("test_rl_bodies: 6 gates passed\n");
     return 0;
 }

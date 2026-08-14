@@ -329,9 +329,19 @@ K26RlStatus  k26rl_env_tap(K26RlEnv *env, const char *name);
  * copying from the state the latest step or reset established. It
  * allocates nothing, performs no I/O, and never frees or retains a
  * caller buffer. Its values are bitwise deterministic under this
- * surface's standing contract, and on a faulted step it delivers the
- * pre-step values, as the other getters do and for the same reason:
- * no transition completed. */
+ * surface's standing contract.
+ *
+ * After a faulted step it reports the state the fault left, which the
+ * next boundary reset discards. It differs from the observation
+ * getters here, and deliberately: those return cached outputs the
+ * fault path leaves untouched, so they hold the last honestly
+ * computed values, while this one reads the live worlds, which a
+ * failed advance may already have moved. A consumer wanting the last
+ * honest state after a fault reads the observation getters, not this
+ * one; a consumer wanting to see what the fault did reads this one.
+ * Taking a per-step snapshot to make the two agree was considered and
+ * rejected: it would put a copy of every body on the stepping path to
+ * serve a case the episode ends on. */
 int32_t      k26rl_env_bodies(const K26RlEnv *env, uint32_t reference,
                               double *out, uint32_t capacity);
 
