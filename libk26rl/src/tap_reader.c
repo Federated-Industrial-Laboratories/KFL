@@ -77,8 +77,14 @@ K26RlStatus k26rl_tap_attach(const char *name, int from_start,
     if (!name || !out)
         return K26RL_E_NULL;
     *out = NULL;
-    if (strlen(name) == 0 || strlen(name) > (size_t)K26RL_TAP_NAME_MAX)
-        return K26RL_E_TAP_NAME;
+    {
+        /* The same name rule the producer applies, so a name that
+         * could never have created a ring is refused as a bad name
+         * rather than as a ring that happens not to be there. */
+        K26RlStatus nst = k26rl_tap_name_ok_(name);
+        if (nst != K26RL_OK)
+            return nst;
+    }
     if ((size_t)snprintf(object, sizeof object, "%s%s",
                          K26RL_TAP_OBJECT_PREFIX, name) >= sizeof object)
         return K26RL_E_TAP_NAME;

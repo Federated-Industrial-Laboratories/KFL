@@ -51,23 +51,6 @@ struct K26RlTap {
 
 /* ---- Naming and geometry ------------------------------------------ */
 
-static K26RlStatus name_check_(const char *name)
-{
-    size_t i, n;
-
-    n = strlen(name);
-    if (n == 0 || n > (size_t)K26RL_TAP_NAME_MAX)
-        return K26RL_E_TAP_NAME;
-    for (i = 0; i < n; i++) {
-        char c = name[i];
-        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                 (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
-        if (!ok)
-            return K26RL_E_TAP_NAME;
-    }
-    return K26RL_OK;
-}
-
 static uint64_t round_up_(uint64_t v, uint64_t quantum)
 {
     uint64_t r = v % quantum;
@@ -196,7 +179,7 @@ K26RlStatus k26rl_tap_open(const char *name, const K26RlEpisodeGeom *geom,
     *out = NULL;
     if (geom->n_envs == 0)
         return K26RL_E_GEOMETRY;
-    st = name_check_(name);
+    st = k26rl_tap_name_ok_(name);
     if (st != K26RL_OK)
         return st;
     glen = strlen(grammar_version);
@@ -403,6 +386,15 @@ void k26rl_tap_step(K26RlTap *t, uint32_t env, const double *obs,
         (t->geom.agent_count && !rewards))
         return;
     e = &t->envs[env];
+    /* A step record belongs to an episode. Publishing one for an
+     * environment with no episode open would attribute it to whatever
+     * identity this slot last held, which is the file writer's
+     * K26RL_E_OUTPUT_TIMING refusal expressed by a call that cannot
+     * refuse. Nothing is published and no sequence number is
+     * consumed: there is no loss here to report as a gap, because
+     * there was never a frame. */
+    if (!e->open)
+        return;
 
     plen = (uint32_t)(28 + t->ncols8 * 8);
     slot = claim_(t, plen);
@@ -441,6 +433,8 @@ void k26rl_tap_end(K26RlTap *t, uint32_t env, uint16_t end_reason,
     if (t->geom.agent_count && !terminal_adjustments)
         return;
     e = &t->envs[env];
+    if (!e->open)
+        return;   /* no episode to end; see k26rl_tap_step */
 
     plen = (uint32_t)(20 + (uint64_t)t->geom.agent_count * 8);
     slot = claim_(t, plen);

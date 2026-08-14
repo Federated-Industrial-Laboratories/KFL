@@ -12,6 +12,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "k26rl_env.h"
+
 /* Frame header byte offsets within the 24-byte header. */
 #define K26RL_FH_OFF_KIND     0
 #define K26RL_FH_OFF_FLAGS    2
@@ -132,6 +134,28 @@ static inline uint32_t k26rl_pub_load_u32_(const uint8_t *p)
         (const _Atomic uint32_t *)(const void *)p, memory_order_acquire);
 
     return k26rl_get_u32_((const uint8_t *)&word);
+}
+
+/* The tap name rule, shared by the producer that creates a ring and
+ * the reader that attaches to one, so a name either side rejects is
+ * rejected for the same reason with the same status. */
+static inline K26RlStatus k26rl_tap_name_ok_(const char *name)
+{
+    size_t i, n;
+
+    if (!name)
+        return K26RL_E_NULL;
+    n = strlen(name);
+    if (n == 0 || n > (size_t)K26RL_TAP_NAME_MAX)
+        return K26RL_E_TAP_NAME;
+    for (i = 0; i < n; i++) {
+        char c = name[i];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                 (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        if (!ok)
+            return K26RL_E_TAP_NAME;
+    }
+    return K26RL_OK;
 }
 
 #endif /* K26RL_INTERNAL_H */

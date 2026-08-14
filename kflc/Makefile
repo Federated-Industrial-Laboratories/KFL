@@ -83,7 +83,8 @@ $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB)
 # the sibling stack libraries are not built.
 RL_EMIT_TEST = tests/test_rl_emit
 $(RL_EMIT_TEST): tests/test_rl_emit.c ../libk26rl/include/k26rl_env.h \
-                 ../libk26rl/include/k26rl_episode.h
+                 ../libk26rl/include/k26rl_episode.h \
+                 ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
@@ -95,7 +96,8 @@ $(RL_EMIT_TEST): tests/test_rl_emit.c ../libk26rl/include/k26rl_env.h \
 RL_DET_TEST = tests/test_rl_determinism
 $(RL_DET_TEST): tests/test_rl_determinism.c tests/rl_gate_util.h \
                 ../libk26rl/include/k26rl_env.h \
-                ../libk26rl/include/k26rl_episode.h
+                ../libk26rl/include/k26rl_episode.h \
+                ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
@@ -107,7 +109,8 @@ $(RL_DET_TEST): tests/test_rl_determinism.c tests/rl_gate_util.h \
 RL_FAULT_TEST = tests/test_rl_fault
 $(RL_FAULT_TEST): tests/test_rl_fault.c tests/rl_gate_util.h \
                   ../libk26rl/include/k26rl_env.h \
-                  ../libk26rl/include/k26rl_episode.h
+                  ../libk26rl/include/k26rl_episode.h \
+                  ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
@@ -119,7 +122,8 @@ $(RL_FAULT_TEST): tests/test_rl_fault.c tests/rl_gate_util.h \
 RL_RESIM_TEST = tests/test_rl_resim
 $(RL_RESIM_TEST): tests/test_rl_resim.c tests/rl_gate_util.h \
                   ../libk26rl/include/k26rl_env.h \
-                  ../libk26rl/include/k26rl_episode.h
+                  ../libk26rl/include/k26rl_episode.h \
+                  ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
@@ -132,7 +136,8 @@ RL_DRAWS_TEST = tests/test_rl_draws
 $(RL_DRAWS_TEST): tests/test_rl_draws.c tests/rl_gate_util.h \
                   ../libk26rl/include/k26rl_env.h \
                   ../libk26rl/include/k26rl_episode.h \
-                  ../libk26rng/include/k26rng.h
+                  ../libk26rng/include/k26rng.h \
+                  ../libk26rl/libk26rl.a ../libk26rng/libk26rng.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -I../libk26rng/include \
 	    -o $@ $< ../libk26rl/libk26rl.a ../libk26rng/libk26rng.a \
 	    -ldl -lm
@@ -148,7 +153,8 @@ $(RL_DRAWS_TEST): tests/test_rl_draws.c tests/rl_gate_util.h \
 RL_STATE_TEST = tests/test_rl_state
 $(RL_STATE_TEST): tests/test_rl_state.c tests/rl_gate_util.h \
                   ../libk26rl/include/k26rl_env.h \
-                  ../libk26rl/include/k26rl_episode.h
+                  ../libk26rl/include/k26rl_episode.h \
+                  ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
@@ -170,13 +176,16 @@ RL_TAP_TEST = tests/test_rl_tap
 $(RL_TAP_TEST): tests/test_rl_tap.c tests/rl_gate_util.h \
                 ../libk26rl/include/k26rl_env.h \
                 ../libk26rl/include/k26rl_episode.h \
-                ../libk26rl/include/k26rl_tap.h
+                ../libk26rl/include/k26rl_tap.h \
+                ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
 RL_HOTPATH_TEST = tests/test_rl_hotpath
 $(RL_HOTPATH_TEST): tests/test_rl_hotpath.c tests/rl_gate_util.h \
-                    ../libk26rl/include/k26rl_env.h
+                    ../libk26rl/include/k26rl_env.h \
+                    ../libk26rl/include/k26rl_tap.h \
+                    ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 

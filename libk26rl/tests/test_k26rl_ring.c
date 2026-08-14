@@ -32,6 +32,13 @@
  *      current position.
  *   7. Close: the closed mark is visible to an attached consumer, the
  *      name is released, and a fresh producer may take it.
+ *   8. Episode scoping. A step or an end published for an environment
+ *      with no episode open is the producer API's version of the file
+ *      writer's timing refusal, and it must publish nothing and
+ *      consume no sequence number: a step record attributed to an
+ *      episode that never began would be worse than no record, and a
+ *      consumed sequence would report a gap where nothing was lost.
+ *      The reader's loss count is what pins the second half.
  */
 #include <fcntl.h>
 #include <stdio.h>
@@ -153,6 +160,17 @@ static void gate_naming_(void)
     over[K26RL_TAP_NAME_MAX] = '\0';
     ASSERT(open_(over, geom_(OBS, ACT, AGENTS, DRMAX), &t) == K26RL_OK);
     k26rl_tap_close(t);
+
+    /* The reader applies the producer's name rule, so a name that
+     * could never have created a ring is refused as a bad name and
+     * not as a ring that happens not to be there. */
+    {
+        K26RlTapReader *rr = NULL;
+        ASSERT(k26rl_tap_attach("has/separator", 1, &rr) == K26RL_E_TAP_NAME);
+        ASSERT(k26rl_tap_attach("", 1, &rr) == K26RL_E_TAP_NAME);
+        ASSERT(k26rl_tap_attach("has space", 1, &rr) == K26RL_E_TAP_NAME);
+        ASSERT(rr == NULL);
+    }
 
     ASSERT(open_(n, geom_(OBS, ACT, AGENTS, DRMAX), &t) == K26RL_OK);
     ASSERT(open_(n, geom_(OBS, ACT, AGENTS, DRMAX), &t2) ==
@@ -492,6 +510,80 @@ static void gate_late_and_close_(void)
     k26rl_tap_close(t);
 }
 
+/* ---- Gate 8: episode scoping --------------------------------------- */
+
+static void gate_scoping_(void)
+{
+    K26RlTap *t = NULL;
+    K26RlTapReader *r = NULL;
+    const char *n = tap_name_(2, "scope");
+    double obs[OBS], act[ACT], rew[AGENTS], adj[AGENTS];
+    uint8_t buf[4096];
+    uint32_t slot = 0, len = 0, i;
+    uint64_t lost = 0;
+    const uint8_t *p;
+
+    for (i = 0; i < OBS; i++)
+        obs[i] = 2.0 + (double)i;
+    for (i = 0; i < ACT; i++)
+        act[i] = (double)i;
+    rew[0] = 4.0;
+    adj[0] = 0.0;
+
+    ASSERT(open_(n, geom_(OBS, ACT, AGENTS, DRMAX), &t) == K26RL_OK);
+    ASSERT(k26rl_tap_attach(n, 1, &r) == K26RL_OK);
+    ASSERT(k26rl_tap_reader_info(r, &slot, NULL) == K26RL_OK);
+
+    /* Nothing has begun, so nothing may be published for either
+     * environment, and the counter must not move. */
+    ASSERT(k26rl_tap_published(t) == 0);
+    k26rl_tap_step(t, 0, obs, act, rew, 0, 0.25);
+    k26rl_tap_end(t, 0, K26RL_END_TERMINATED, 0, adj);
+    k26rl_tap_step(t, 1, obs, act, rew, 0, 0.25);
+    ASSERT(k26rl_tap_published(t) == 0);
+    ASSERT(k26rl_tap_read(r, buf, slot, &len, &lost) == K26RL_OK);
+    ASSERT(len == 0 && lost == 0);
+
+    /* An episode begins and publication follows it. */
+    k26rl_tap_start(t, 0, 6, obs, NULL, NULL, 0);
+    k26rl_tap_step(t, 0, obs, act, rew, 0, 0.25);
+    k26rl_tap_end(t, 0, K26RL_END_TERMINATED, 0, adj);
+    ASSERT(k26rl_tap_published(t) == 3);
+
+    /* And it ends, after which a further step is out of scope again. */
+    k26rl_tap_step(t, 0, obs, act, rew, 0, 0.25);
+    ASSERT(k26rl_tap_published(t) == 3);
+
+    /* Three frames arrive in order with no gap reported anywhere: the
+     * skipped calls consumed no sequence number, which is the half a
+     * consumed number would have turned into a phantom gap. */
+    ASSERT(k26rl_tap_read(r, buf, slot, &len, &lost) == K26RL_OK);
+    ASSERT(len > 0 && lost == 0);
+    ASSERT(k26rl_get_u16_(buf + K26RL_FH_OFF_KIND) ==
+           K26RL_FRAME_EPISODE_START);
+    ASSERT(k26rl_tap_read(r, buf, slot, &len, &lost) == K26RL_OK);
+    ASSERT(len > 0 && lost == 0);
+    ASSERT(k26rl_get_u16_(buf + K26RL_FH_OFF_KIND) == K26RL_FRAME_STEP_CHUNK);
+    p = buf + K26RL_EPISODE_FRAME_HEADER_SIZE;
+    /* The step index counts from the start of the episode that did
+     * begin, not from the calls that were out of scope. */
+    ASSERT(k26rl_get_u32_(p + 8) == 0);
+    ASSERT(k26rl_tap_read(r, buf, slot, &len, &lost) == K26RL_OK);
+    ASSERT(len > 0 && lost == 0);
+    ASSERT(k26rl_get_u16_(buf + K26RL_FH_OFF_KIND) == K26RL_FRAME_EPISODE_END);
+    p = buf + K26RL_EPISODE_FRAME_HEADER_SIZE;
+    ASSERT(k26rl_get_u32_(p + 8) == 6);    /* the episode that began */
+    ASSERT(k26rl_get_u32_(p + 12) == 1);   /* one transition in it */
+
+    ASSERT(k26rl_tap_read(r, buf, slot, &len, &lost) == K26RL_OK);
+    ASSERT(len == 0);
+    ASSERT(k26rl_tap_reader_accepted(r) == 3);
+    ASSERT(k26rl_tap_reader_lost(r) == 0);
+
+    k26rl_tap_detach(r);
+    k26rl_tap_close(t);
+}
+
 int main(void)
 {
     gate_geometry_();
@@ -500,6 +592,7 @@ int main(void)
     gate_overwrite_();
     gate_tear_();
     gate_late_and_close_();
+    gate_scoping_();
     printf("test_k26rl_ring: all gates pass\n");
     return 0;
 }

@@ -118,11 +118,19 @@ K26RlStatus k26rl_tap_open(const char *name, const K26RlEpisodeGeom *geom,
  * to alter a step's control flow. A null tap is a no-op, which is how
  * a disabled tap costs one pointer test.
  *
- * The one frame that cannot be published is one whose payload exceeds
- * the slot the geometry sized, which only a domain-randomisation
- * record larger than the declared dr_max can produce. Such a frame is
- * skipped and its sequence number is consumed, so the loss shows up
- * as a gap rather than as a silent substitution. */
+ * Two frames go unpublished, and the two cases are deliberately
+ * different. A frame whose payload exceeds the slot the geometry
+ * sized, which only a domain-randomisation record larger than the
+ * declared dr_max can produce, is skipped with its sequence number
+ * consumed, so the loss shows up as a gap rather than as a silent
+ * substitution. A step or an end for an environment with no episode
+ * open is skipped with no sequence number consumed: a step record
+ * belongs to an episode, publishing one outside an episode would
+ * attribute it to whatever identity that environment last held, and
+ * there is no loss to report because there was never a frame. That
+ * second case is what the file writer refuses with
+ * K26RL_E_OUTPUT_TIMING, expressed by a call that cannot refuse. A
+ * caller that follows the writer's own call order never meets it. */
 void k26rl_tap_start(K26RlTap *t, uint32_t env, uint32_t episode,
                      const double *initial_obs, const uint32_t *dr_tags,
                      const double *dr_values, uint32_t dr_count);
