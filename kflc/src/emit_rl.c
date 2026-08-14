@@ -61,6 +61,14 @@
 static uint16_t rl_observe_mode_(const KflcNode *n)
 {
     if (!n) return 1;
+    /* An attitude observe reports a body's own orientation and rate.
+     * There is no observer, no light time and no aberration, so the
+     * only true answer among the published modes is the geometric
+     * one; the default astrometric value would claim a correction
+     * that is not applied. */
+    for (const KflcAttr *k = n->attrs; k; k = k->next) {
+        if (k->name && strcmp(k->name, "attitude") == 0) return 0;
+    }
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "mode") == 0 &&
             a->value.kind == KFLV_IDENT && a->value.u.s) {
@@ -345,6 +353,19 @@ static const KflcNode *rl_find_world_binding_(const KflcNode *stmts,
 
 /* Collect the program model from the form. Returns 0 on success;
  * nonzero after reporting diagnostics. */
+/* Whether a model body binds a vehicle assembly. Attitude state is
+ * only advanced for a body that does, since the advance needs the
+ * inertia tensor the assembly derives, so the three places that can
+ * set attitude all ask this before accepting it. */
+static int rl_body_has_assembly_(const RlModel *m, int bi)
+{
+    if (bi < 0 || bi >= m->n_bodies) return 0;
+    for (const KflcAttr *a = m->bodies[bi].body->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, "assembly") == 0) return 1;
+    }
+    return 0;
+}
+
 static int rl_collect_(RlModel *m, const KflcNode *form,
                        KflcArena *arena, KflcDiag *diag)
 {
@@ -553,6 +574,18 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
                 "episode reset: unknown body `%s` (reset lines target "
                 "bodies declared with astro_body in this world)",
                 r->name ? r->name : "?");
+            err = 1;
+            continue;
+        }
+        const char *rk = (r->position.kind == KFLV_IDENT)
+                         ? r->position.u.s : NULL;
+        if (rk && kflc_body_state_is_attitude(rk) &&
+            !rl_body_has_assembly_(m, found)) {
+            kflc_diag_errorf(diag, r->line,
+                "episode reset: `%s.%s` sets attitude state, but `%s` "
+                "declares no `assembly=`, so it has no inertia tensor and "
+                "its attitude is never advanced; bind an assembly or drop "
+                "the attitude keys", r->name, rk, r->name);
             err = 1;
         }
     }
@@ -958,6 +991,22 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
                     m->bodies[i].body->name ? m->bodies[i].body->name : "?");
         }
         fputs("};\n\n", out);
+    }
+
+    /* Vehicle slot to body index, in the order the vehicles are
+     * created, so the step can find each vehicle's own body and the
+     * body it is attracted by without searching. */
+    {
+        int n_v = 0;
+        for (int i = 0; i < m->n_bodies; i++) {
+            if (!rl_body_has_assembly_(m, i)) continue;
+            if (n_v == 0) {
+                fputs("static const int kflrl_vehicle_body_[] = {\n", out);
+            }
+            fprintf(out, "    %d,\n", i);
+            n_v++;
+        }
+        if (n_v > 0) fputs("};\n\n", out);
     }
 
     /* Assembly identity, per body that carries one. The assembly is
@@ -1422,8 +1471,11 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                 fprintf(out,
                 "        k26astro_vehicle_bind_body(_kfl_v, "
                 "k26astro_world_body_at(world, _kfl_body_%s_idx));\n"
-                "        (void)k26astro_world_register_vehicle(world, "
-                "_kfl_v);\n"
+                "        if (k26astro_world_register_vehicle(world, "
+                "_kfl_v) != 0) {\n"
+                "            k26astro_vehicle_destroy(_kfl_v);\n"
+                "            return -1;\n"
+                "        }\n"
                 "        if (_kfl_veh) _kfl_veh[%d] = _kfl_v;\n",
                         s->name, veh_i);
                 veh_i++;
@@ -1840,6 +1892,16 @@ static int rl_state_key_index_(const char *k)
 static int rl_bs_slot_(RlModel *m, int body, int key, int write, int line,
                        KflcDiag *diag)
 {
+    const char *kn = kflc_body_state_key_name(key);
+    if (kn && kflc_body_state_is_attitude(kn) &&
+        !rl_body_has_assembly_(m, body)) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s.%s` is attitude state, but `%s` declares no "
+            "`assembly=`, so it has no inertia tensor and its attitude is "
+            "never advanced; bind an assembly or drop the attitude keys",
+            m->bodies[body].body->name, kn, m->bodies[body].body->name);
+        return -2;
+    }
     for (int i = 0; i < m->n_bs; i++) {
         if (m->bs[i].body == body && m->bs[i].key == key) {
             if (write) m->bs[i].written = 1;
@@ -2349,10 +2411,7 @@ static void rl_emit_env_core_(FILE *out)
 "     * takes the remainder instead, so the advanced time sums to\n"
 "     * control_dt exactly however the division rounded. */\n"
 "    uint32_t  substeps;\n"
-"    double    sub_dt;\n"
-"", out);
-    fputs(
-"", out);
+"    double    sub_dt;\n", out);
     fputs(
 "    double    act_lo[KFLRL_ACT_TOTAL ? KFLRL_ACT_TOTAL : 1];\n"
 "    double    act_hi[KFLRL_ACT_TOTAL ? KFLRL_ACT_TOTAL : 1];\n"
@@ -2627,17 +2686,19 @@ static void rl_emit_env_core_(FILE *out)
 "    h->control_dt = kflrl_control_dt_();\n"
 "    h->horizon = kflrl_horizon_();\n"
 "    h->substeps = kflrl_substeps_();\n"
-"    if (h->substeps < 1u) h->substeps = 1u;\n"
-"", out);
+"    if (h->substeps < 1u) h->substeps = 1u;\n", out);
     fputs(
+"    /* The control period is checked first and keeps the status it\n"
+"     * has always returned; the subdivision's own check follows, so\n"
+"     * that adding one cannot change what a bad period reports. */\n"
+"    if (!(h->control_dt > 0.0) || !std::isfinite(h->control_dt)) {\n"
+"        free(h);\n"
+"        return K26RL_E_INTERNAL;\n"
+"    }\n"
 "    h->sub_dt = h->control_dt / (double)h->substeps;\n"
 "    if (!(h->sub_dt > 0.0) || !std::isfinite(h->sub_dt)) {\n"
 "        kflrl_free_handle_(h);\n"
 "        return K26RL_E_GEOMETRY;\n"
-"    }\n"
-"    if (!(h->control_dt > 0.0) || !std::isfinite(h->control_dt)) {\n"
-"        free(h);\n"
-"        return K26RL_E_INTERNAL;\n"
 "    }\n"
 "    kflrl_act_params_(h->act_lo, h->act_hi, h->act_arity, h->act_kind);\n"
 "\n"
@@ -2672,6 +2733,9 @@ static void rl_emit_env_core_(FILE *out)
 "    if (!h->seen_seeds || !h->worlds || !h->baseline || !h->baseline_t ||\n"
 "        !h->episode || !h->steps || !h->ended || !h->obs || !h->rew ||\n"
 "        !h->flags || !h->fault || !h->dr_vals || !h->wscal ||\n"
+"#if KFLRL_N_VEHICLES > 0\n"
+"        !h->vehicles ||\n"
+"#endif\n"
 "        !h->scratch) {\n"
 "        kflrl_free_handle_(h);\n"
 "        return K26RL_E_INTERNAL;\n"
@@ -2726,8 +2790,7 @@ static void rl_emit_env_core_(FILE *out)
 "                       h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
 "    }\n"
 "\n"
-"    h->spec_len = kflrl_spec_write_(NULL, h);\n"
-"", out);
+"    h->spec_len = kflrl_spec_write_(NULL, h);\n", out);
     fputs(
 "    h->spec = (uint8_t *)malloc(h->spec_len);\n"
 "    if (!h->spec) {\n"
@@ -2735,8 +2798,7 @@ static void rl_emit_env_core_(FILE *out)
 "        return K26RL_E_INTERNAL;\n"
 "    }\n"
 "    (void)kflrl_spec_write_(h->spec, h);\n"
-"\n"
-"", out);
+"\n", out);
     fputs(
 "    h->at_boundary = 1;\n"
 "    h->magic = KFLRL_MAGIC;\n"
@@ -2949,11 +3011,33 @@ static void rl_emit_env_core_(FILE *out)
 "                           : h->sub_dt;\n"
 "            rc = k26astro_world_step_exact(h->worlds[e], step_dt);\n"
 "            if (rc != 0) break;\n"
-"            advanced += step_dt;\n"
+"            advanced += step_dt;\n", out);
+    fputs(
 "#if KFLRL_N_VEHICLES > 0\n"
+"            /* The gravity-gradient torque is part of the torque sum\n"
+"             * and is computed per vehicle from its own separation\n"
+"             * from the body it orbits. A vehicle whose body declares\n"
+"             * no parent has no attractor named and takes no torque\n"
+"             * from this source. */\n"
+"            K26V3 gg[KFLRL_N_VEHICLES];\n"
+"            for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"                gg[vi].x = gg[vi].y = gg[vi].z = 0.0;\n"
+"                K26AstroVehicle *veh =\n"
+"                    h->vehicles[(size_t)e * KFLRL_N_VEHICLES + vi];\n"
+"                if (!veh) continue;\n"
+"                const K26AstroBody *vb = k26astro_world_body_at(\n"
+"                    h->worlds[e], kflrl_body_idx_[kflrl_vehicle_body_[vi]]);\n"
+"                if (!vb || vb->parent_body_idx < 0) continue;\n"
+"                const K26AstroBody *pb = k26astro_world_body_at(\n"
+"                    h->worlds[e], vb->parent_body_idx);\n"
+"                if (!pb) continue;\n"
+"                K26V3 rw = k26astro_pos_sub(&pb->pos, &vb->pos);\n"
+"                (void)k26astro_att_gravity_gradient(veh, rw, pb->gm,\n"
+"                                                    &gg[vi]);\n"
+"            }\n"
 "            K26AstroAttStatus ast = k26astro_att_step_all(\n"
 "                h->vehicles + (size_t)e * KFLRL_N_VEHICLES,\n"
-"                KFLRL_N_VEHICLES, step_dt);\n"
+"                KFLRL_N_VEHICLES, gg, step_dt);\n"
 "            if (ast != K26ASTRO_ATT_OK) {\n"
 "                att_reason = (ast == K26ASTRO_ATT_E_DIVERGED)\n"
 "                    ? (uint16_t)K26RL_E_DIVERGED\n"
@@ -3272,8 +3356,7 @@ static void rl_emit_env_core_(FILE *out)
 "    return (int32_t)need;\n"
 "#endif\n"
 "}\n"
-"\n"
-"", out);
+"\n", out);
     fputs(
 "extern \"C\" int32_t k26rl_env_attitudes(const K26RlEnv *h, double *out,\n"
 "                                        uint32_t capacity)\n"
@@ -3597,7 +3680,10 @@ static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
         kflc_arena_release(arena);
         return 1;
     }
-    if (rl_emit_observe_(out, &m, diag)) return 1;
+    if (rl_emit_observe_(out, &m, diag)) {
+        kflc_arena_release(arena);
+        return 1;
+    }
     if (rl_emit_on_step_(out, &m, form, arena, user_fn_arr, n_user_fns,
                          diag) ||
         rl_emit_objective_(out, &m, form, arena, user_fn_arr, n_user_fns,

@@ -58,6 +58,21 @@ static int att_inverse_is_zero_(const K26M3 *inv)
     return 1;
 }
 
+/* Load the bound body's orientation and rate into the vehicle's
+ * attitude state. The body is the state; this state is the
+ * integrator's working copy and the inertia it works with. Every
+ * entry that reads or advances attitude calls this first, so none of
+ * them can report a stale copy of something a declaration, a reset
+ * draw or a step-time write has since changed. */
+static void att_load_from_body_(K26AstroVehicle *v,
+                                K26AstroAttitudeStateExt *a)
+{
+    K26AstroBody *b = k26astro_vehicle_body(v);
+    if (!b) return;
+    a->q          = b->attitude;
+    a->omega_body = b->omega;
+}
+
 K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
                                     double dt)
 {
@@ -65,25 +80,15 @@ K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
     K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
     if (!a) return K26ASTRO_ATT_E_NULL;
     if (!isfinite(dt) || dt < 0.0) return K26ASTRO_ATT_E_BAD_DT;
+    /* The load happens before the interval is examined, so a step of
+     * zero duration resynchronises the working copy with the body
+     * rather than leaving a caller holding a stale one. */
+    att_load_from_body_(v, a);
     if (dt == 0.0) return K26ASTRO_ATT_OK;
     if (att_inverse_is_zero_(&a->inertia_inverse)) {
         return K26ASTRO_ATT_E_SINGULAR;
     }
     if (!att_finite_v3_(torque)) return K26ASTRO_ATT_E_DIVERGED;
-
-    /* The bound body is the state; this vehicle's attitude state is
-     * the integrator's working copy and the inertia it works with.
-     * Anything that writes a body's orientation or rate, a
-     * declaration, an episode reset draw, or a step-time assignment,
-     * writes the body, so the body is loaded here rather than
-     * assumed to agree. With no body bound the state stands on its
-     * own, which is the detached propagation the body library's own
-     * interface describes. */
-    K26AstroBody *b = k26astro_vehicle_body(v);
-    if (b) {
-        a->q          = b->attitude;
-        a->omega_body = b->omega;
-    }
 
     K26Quat q0 = a->q;
     K26V3   w0 = a->omega_body;
@@ -108,6 +113,7 @@ K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
         return K26ASTRO_ATT_E_DIVERGED;
     }
 
+    K26AstroBody *b = k26astro_vehicle_body(v);
     if (b) {
         b->attitude = a->q;
         b->omega    = a->omega_body;
@@ -115,15 +121,61 @@ K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
     return K26ASTRO_ATT_OK;
 }
 
+K26AstroAttStatus k26astro_att_gravity_gradient(const K26AstroVehicle *v,
+                                                K26V3 r_world, double mu,
+                                                K26V3 *out)
+{
+    if (!v || !out) return K26ASTRO_ATT_E_NULL;
+    out->x = out->y = out->z = 0.0;
+    K26AstroAttitudeStateExt *a =
+        k26astro_vehicle_attitude_ext((K26AstroVehicle *)v);
+    if (!a) return K26ASTRO_ATT_E_NULL;
+    att_load_from_body_((K26AstroVehicle *)v, a);
+
+    double r2 = r_world.x * r_world.x + r_world.y * r_world.y
+              + r_world.z * r_world.z;
+    if (!(r2 > 0.0) || !(mu > 0.0) || !isfinite(r2) || !isfinite(mu)) {
+        /* No separation or no attractor is no torque, not an error:
+         * a body at the origin of its own attraction is a
+         * configuration, not a failure. */
+        return K26ASTRO_ATT_OK;
+    }
+    /* The expression is three mu over r cubed, times r-hat crossed
+     * with I r-hat. Written with the unnormalised separation it is
+     * three mu over r to the fifth, times r crossed with I r, which
+     * spends one square root instead of three divisions and keeps the
+     * two forms algebraically identical. */
+    K26V3 r_body = k26m3d_quat_rotate_v3(k26m3d_quat_conj(a->q), r_world);
+    K26V3 Ir;
+    Ir.x = a->inertia.m[0][0] * r_body.x + a->inertia.m[0][1] * r_body.y
+         + a->inertia.m[0][2] * r_body.z;
+    Ir.y = a->inertia.m[1][0] * r_body.x + a->inertia.m[1][1] * r_body.y
+         + a->inertia.m[1][2] * r_body.z;
+    Ir.z = a->inertia.m[2][0] * r_body.x + a->inertia.m[2][1] * r_body.y
+         + a->inertia.m[2][2] * r_body.z;
+    K26V3 cross = k26m3d_v3_cross(r_body, Ir);
+    double r  = sqrt(r2);
+    double k  = 3.0 * mu / (r2 * r2 * r);
+    out->x = k * cross.x;
+    out->y = k * cross.y;
+    out->z = k * cross.z;
+    if (!att_finite_v3_(*out)) {
+        out->x = out->y = out->z = 0.0;
+        return K26ASTRO_ATT_E_DIVERGED;
+    }
+    return K26ASTRO_ATT_OK;
+}
+
 K26AstroAttStatus k26astro_att_step_all(K26AstroVehicle *const *v, int n,
-                                        double dt)
+                                        const K26V3 *torques, double dt)
 {
     if (!v && n > 0) return K26ASTRO_ATT_E_NULL;
     K26AstroAttStatus first = K26ASTRO_ATT_OK;
     K26V3 zero = { 0.0, 0.0, 0.0 };
     for (int i = 0; i < n; i++) {
         if (!v[i]) continue;
-        K26AstroAttStatus s = k26astro_att_step(v[i], zero, dt);
+        K26AstroAttStatus s =
+            k26astro_att_step(v[i], torques ? torques[i] : zero, dt);
         if (s != K26ASTRO_ATT_OK && first == K26ASTRO_ATT_OK) first = s;
     }
     return first;
@@ -136,6 +188,7 @@ K26AstroAttStatus k26astro_att_momentum_world(const K26AstroVehicle *v,
     K26AstroAttitudeStateExt *a =
         k26astro_vehicle_attitude_ext((K26AstroVehicle *)v);
     if (!a) return K26ASTRO_ATT_E_NULL;
+    att_load_from_body_((K26AstroVehicle *)v, a);
     K26V3 h_body;
     h_body.x = a->inertia.m[0][0] * a->omega_body.x
              + a->inertia.m[0][1] * a->omega_body.y

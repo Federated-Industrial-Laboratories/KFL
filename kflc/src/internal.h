@@ -151,6 +151,7 @@ void      kfl_emit_stmt_drain_root(FILE *out, int indent);
 int         kflc_body_state_key_count(void);
 const char *kflc_body_state_key_name(int i);
 int         kflc_body_state_key_index(const char *k);
+int         kflc_body_state_is_attitude(const char *k);
 char        kflc_body_state_key_comp(const char *k);
 void        kflc_emit_body_state_write(FILE *out, int indent, const char *lv,
                                        const char *key,

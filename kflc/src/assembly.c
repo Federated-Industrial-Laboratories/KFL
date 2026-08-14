@@ -44,6 +44,7 @@
  * and which no rearrangement removes.
  */
 #include "assembly.h"
+#include "internal.h"
 
 #include "k26rl_digest.h"
 
@@ -1045,13 +1046,38 @@ int kflc_assembly_for_body(const KflcNode *body, const char *src_path,
     if (out) *out = NULL;
     if (!body) return 0;
     const KflcAttr *asm_attr = NULL, *mass_attr = NULL, *gm_attr = NULL;
+    const KflcAttr *att_attr = NULL;
     for (const KflcAttr *a = body->attrs; a; a = a->next) {
         if (!a->name) continue;
         if (strcmp(a->name, "assembly") == 0)  asm_attr  = a;
         else if (strcmp(a->name, "mass") == 0) mass_attr = a;
         else if (strcmp(a->name, "gm") == 0)   gm_attr   = a;
+        else if (!att_attr && kflc_body_state_is_attitude(a->name)) {
+            att_attr = a;
+        }
     }
-    if (!asm_attr) return 0;
+    if (!asm_attr) {
+        /* Attitude on a body that cannot be advanced. The advance
+         * needs an inertia tensor, which comes from an assembly, so a
+         * body without one never rotates however it is declared: it
+         * would report the angular velocity it was given while its
+         * orientation stood still, and a policy would train against a
+         * body that is spinning and static at once. Refused rather
+         * than warned, because the program cannot mean what it says.
+         *
+         * The refusal is additive: no Grammar 3.1 program carries an
+         * attitude key, since the keys arrive with this surface. */
+        if (att_attr) {
+            kflc_diag_errorf(diag, body->line,
+                "astro_body `%s`: `%s=` sets attitude state, but the body "
+                "declares no `assembly=`, so it has no inertia tensor and "
+                "its attitude is never advanced; bind an assembly or drop "
+                "the attitude keys",
+                body->name ? body->name : "_anon", att_attr->name);
+            return 1;
+        }
+        return 0;
+    }
 
     const KflcAttr *clash = mass_attr ? mass_attr : gm_attr;
     if (clash) {

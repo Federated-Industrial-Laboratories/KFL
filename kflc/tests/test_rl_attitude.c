@@ -159,6 +159,75 @@ static const char *const ATT_ASM =
     "    end\n"
     "end\n";
 
+/* The same program at a declared subdivision the test substitutes,
+ * so convergence can be measured through the declaration rather than
+ * through a raw interval. The craft is asymmetric and tumbling, so
+ * the splitting error is large enough to have a rate. */
+static const char *const ATT_KFL_CONV_FMT =
+    "form RL_ATTC%u\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft assembly=\"conv.k26asm\" parent=earth"
+    " pos_x=7.0e6 vel_y=7546.0"
+    " omega_x=0.9 omega_y=0.9 omega_z=0.12\n"
+    "    episode\n"
+    "        control_dt 0.02\n"
+    "        horizon 200\n"
+    "        substeps %u\n"
+    "    end\n"
+    "    observe attitude of craft as att\n"
+    "    objective\n"
+    "        reward 0.0\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* An asymmetric assembly: three unequal moments, so the body-frame
+ * rate genuinely moves within an interval and the splitting has
+ * something to lose. */
+static const char *const CONV_ASM =
+    "assembly conv_box\n"
+    "    frame x_to_port\n"
+    "    provenance mass \"calibration shape, not a craft\" computed\n"
+    "    component hull\n"
+    "        mass 1000.0\n"
+    "        at 0 0 0\n"
+    "        collider box 1.6 0.9 0.4\n"
+    "    end\n"
+    "end\n";
+
+/* A zero-norm quaternion written under a subdivision greater than
+ * one. The first sub-advance completes its translation and then the
+ * attitude step fails, so the world has advanced part of a control
+ * period when the fault is recorded, which the record states as an
+ * applied dt of zero. That is the case the suspicion is about. */
+static const char *const ATT_KFL_PARTIAL =
+    "form RL_ATTP\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft assembly=\"att.k26asm\" parent=earth"
+    " pos_x=7.0e6 vel_y=7546.0"
+    " quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0"
+    " omega_x=0.0 omega_y=0.0 omega_z=0.2\n"
+    "    episode\n"
+    "        control_dt 0.5\n"
+    "        horizon 3\n"
+    "        substeps 4\n"
+    "    end\n"
+    "    action zap box 0.0 1.0 default 0.0\n"
+    "    on_step\n"
+    "        craft.quat_w = 1.0 - zap\n"
+    "        craft.quat_x = 0.0\n"
+    "        craft.quat_y = 0.0\n"
+    "        craft.quat_z = 0.0\n"
+    "    end\n"
+    "    observe craft from earth mode=geometric as trk\n"
+    "    objective\n"
+    "        reward 0.0\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
 static int n_pass = 0;
 
 /* Find the channel index published under `want`, or -1. */
@@ -257,9 +326,14 @@ int main(void)
         double a[2 * 7];
         ASSERT(s.attitudes(env, a, 14) == 14);
         /* Analytic: a rotation of omega * t about z, with the
-         * quaternion's scalar part cos(theta/2). The step is the
-         * first-order one the attitude library documents, and about a
-         * fixed principal axis it is exact, so the bound is tight. */
+         * quaternion's scalar part cos(theta/2). About a fixed
+         * principal axis the integrator itself is exact, so the whole
+         * of the deviation below is physics rather than method: the
+         * gravity-gradient torque acts on this craft and a pure
+         * rotation is not quite what happens. The bound is stated at
+         * the scale that torque produces here, and the arm asserts
+         * the deviation is both small and not zero, so neither a
+         * missing torque nor a wrong one passes. */
         double t     = 0.5 * steps;
         double theta = 0.4 * t;
         double want_w = cos(theta / 2.0);
@@ -268,14 +342,36 @@ int main(void)
         printf("  after %d steps: quat w %.12f (analytic %.12f), "
                "z %.12f (analytic %.12f)\n", steps, got_w, want_w,
                got_z, want_z);
-        ASSERT(fabs(got_w - want_w) < 1e-9);
-        ASSERT(fabs(got_z - want_z) < 1e-9);
+        double qdev = fabs(got_w - want_w) + fabs(got_z - want_z);
+        printf("  deviation from a pure rotation: %.3e\n", qdev);
+        ASSERT(qdev < 1e-4);
+        ASSERT(qdev > 0.0);
         ASSERT(fabs(a[8]) < 1e-15 && fabs(a[9]) < 1e-15);
-        /* No torque acts, so the rate is untouched. */
-        ASSERT(a[13] == 0.4);
-        ASSERT(a[11] == 0.0 && a[12] == 0.0);
-        printf("  a declared rate rotates the body, and no torque means "
-               "no rate change: OK\n");
+        /* The rate is no longer exactly conserved, because a torque
+         * now acts: the gravity gradient. The bound below is computed
+         * rather than guessed, and the first version of this comment
+         * was a decade out, which is why it is written down.
+         *
+         * The craft is a uniform box of 1000 kg and half extents 1.0
+         * by 0.5 by 0.5 m, so its moments are 166.7 and 416.7 kg m^2
+         * and their difference is 250. At seven thousand kilometres
+         * from a body of mu 3.986e14, three mu over r cubed is
+         * 3.486e-6 per second squared, so the torque is at most half
+         * of that times the difference, 4.36e-4 N m, and the angular
+         * acceleration at most 1.05e-6 rad/s^2. Over the four seconds
+         * this arm runs that is 4.18e-6 rad/s, or 1.05e-5 of the
+         * declared rate; measured, 6.55e-6. The bound is set at five
+         * times the prediction, and the arm also asserts the drift is
+         * not zero, so a torque that vanished would fail here as
+         * surely as one that was too large. */
+        double drift = fabs(a[13] - 0.4) / 0.4;
+        printf("  rate after %d steps: %.15f, relative drift from the "
+               "declared 0.4 is %.3e\n", steps, a[13], drift);
+        ASSERT(drift < 5.0e-5);
+        ASSERT(a[13] != 0.4);
+        printf("  a declared rate rotates the body, and the "
+               "gravity-gradient torque perturbs it within the "
+               "predicted %.2e: OK\n", 1.046e-5);
         n_pass++;
 
         /* 6. The attitude observation channels carry the same values
@@ -292,6 +388,37 @@ int main(void)
         }
         printf("  the attitude channels publish under their names and "
                "equal the getter bitwise: OK\n");
+        n_pass++;
+
+        /* Their published mode is the geometric one, because that is
+         * what is true: an attitude observe has no observer, applies
+         * no light-time correction and no aberration, so the
+         * astrometric value would claim a correction that never
+         * happens. The line-of-sight observe beside it keeps the mode
+         * its own declaration asked for, so this is not a blanket
+         * change. */
+        uint32_t off = 0;
+        int att_modes = 0, los_geometric = 0;
+        while (off + 6 <= (uint32_t)blen) {
+            uint16_t tag = rl_get_u16_(blob + off);
+            uint32_t l   = rl_get_u32_(blob + off + 2);
+            if (off + 6 + l > (uint32_t)blen) break;
+            if (tag == K26RL_TAG_OBS_CHANNEL_MODE && l == 6) {
+                uint32_t ch = rl_get_u32_(blob + off + 6);
+                uint16_t md = rl_get_u16_(blob + off + 10);
+                if ((int)ch >= base && (int)ch < base + 7) {
+                    ASSERT(md == K26RL_OBS_MODE_GEOMETRIC);
+                    att_modes++;
+                } else if (md == K26RL_OBS_MODE_GEOMETRIC) {
+                    los_geometric++;
+                }
+            }
+            off += 6 + l;
+        }
+        ASSERT(att_modes == 7);
+        ASSERT(los_geometric == 5);   /* the observe declared geometric */
+        printf("  all seven attitude channels publish the geometric "
+               "mode, which is the one that is true: OK\n");
         n_pass++;
         s.destroy(env);
     }
@@ -335,6 +462,82 @@ int main(void)
         n_pass++;
         s.destroy(e8);
         s1.destroy(e1);
+    }
+
+    /* ---- D7: convergence through the declared subdivision -------- */
+    {
+        /* The design asks that the bound improve as the declared
+         * substep count rises, at the rate a first-order method
+         * gives. That is not the same as measuring against a raw
+         * interval: the last sub-advance takes a remainder, so the
+         * effective step is not uniform, and only driving the
+         * declaration itself exercises what ships.
+         *
+         * The measure is the angular momentum a torque-free body
+         * should conserve. The craft here is asymmetric and tumbling,
+         * and the gravity-gradient torque is orders below the
+         * splitting error at this rate, so what moves the momentum is
+         * the integrator.
+         *
+         * The control period is deliberately short. A first-order
+         * method has a convergence rate only inside its asymptotic
+         * range, and at half a second with this body turning at more
+         * than a radian a second the rotation per step is most of a
+         * radian: the first version of this arm measured drifts of
+         * 7e-2, 2.5 and 0.76 at one, two and four subdivisions, which
+         * is not a rate but a method outside the range where it has
+         * one. At twenty milliseconds it is inside it. */
+        rl_write_file_(WORK_DIR "/conv.k26asm", CONV_ASM);
+        double drift[3];
+        const uint32_t subs[3] = { 1, 2, 4 };
+        for (int i = 0; i < 3; i++) {
+            char src[2048], kfl[256], bin[256];
+            snprintf(src, sizeof src, ATT_KFL_CONV_FMT, subs[i], subs[i]);
+            snprintf(kfl, sizeof kfl, WORK_DIR "/conv%u.kfl", subs[i]);
+            snprintf(bin, sizeof bin, WORK_DIR "/conv%u", subs[i]);
+            rl_write_file_(kfl, src);
+            rl_compile_(kfl, bin, WORK_DIR);
+            char so[300];
+            snprintf(so, sizeof so, "%s.rlenv.so", bin);
+            void *h = rl_dlopen_(so);
+            RlSurface sc;
+            rl_resolve_surface_(h, &sc);
+            K26RlEnv *env = NULL;
+            ASSERT(sc.create(31u, 1u, &env) == K26RL_OK);
+            double a0[14];
+            ASSERT(sc.attitudes(env, a0, 14) == 14);
+            /* The momentum magnitude in the body frame is what the
+             * getter exposes; for a torque-free body the world-frame
+             * momentum is conserved, and its magnitude equals the
+             * body-frame one. The inertia here is the assembly's
+             * derived tensor for a uniform box. */
+            const double Ixx = 1000.0 * (0.9 * 0.9 + 0.4 * 0.4) / 3.0;
+            const double Iyy = 1000.0 * (1.6 * 1.6 + 0.4 * 0.4) / 3.0;
+            const double Izz = 1000.0 * (1.6 * 1.6 + 0.9 * 0.9) / 3.0;
+            double hx0 = Ixx * a0[11], hy0 = Iyy * a0[12], hz0 = Izz * a0[13];
+            double h0 = sqrt(hx0 * hx0 + hy0 * hy0 + hz0 * hz0);
+            double act[1] = { 0.0 };
+            for (int k = 0; k < 200; k++) {
+                if (sc.step(env, act) != K26RL_OK) break;
+            }
+            double a1[14];
+            ASSERT(sc.attitudes(env, a1, 14) == 14);
+            double hx1 = Ixx * a1[11], hy1 = Iyy * a1[12], hz1 = Izz * a1[13];
+            double h1 = sqrt(hx1 * hx1 + hy1 * hy1 + hz1 * hz1);
+            drift[i] = fabs(h1 - h0) / h0;
+            sc.destroy(env);
+        }
+        printf("  momentum drift by declared substeps: 1 -> %.3e, "
+               "2 -> %.3e, 4 -> %.3e\n", drift[0], drift[1], drift[2]);
+        double r1 = drift[0] / drift[1], r2 = drift[1] / drift[2];
+        printf("  ratios as the declaration doubles: %.2f and %.2f\n",
+               r1, r2);
+        ASSERT(drift[0] > drift[1] && drift[1] > drift[2]);
+        ASSERT(r1 > 1.6 && r1 < 2.6);
+        ASSERT(r2 > 1.6 && r2 < 2.6);
+        printf("  the error falls at the first-order rate as the "
+               "declared subdivision rises: OK\n");
+        n_pass++;
     }
 
     /* ---- 4. Determinism and vector independence ------------------ */
@@ -545,6 +748,59 @@ int main(void)
         printf("  the remainder form is exact on every pair and the "
                "quotient form is not, which is why it is there: OK\n");
         n_pass++;
+    }
+
+    /* ---- A fault after a partial advance ------------------------ */
+    {
+        /* When the attitude step fails at a sub-advance, the world
+         * has already advanced the translation of that sub-advance
+         * and of any before it, while the fault record states an
+         * applied dt of zero. The record is true about the
+         * transition, which did not complete, and it is made true
+         * about the world by the boundary reset, which restores the
+         * episode's baseline whole. This arm is what shows the second
+         * half: after such a fault the next episode begins at the
+         * declared state exactly, not at a state carrying a fraction
+         * of a control period of motion. */
+        rl_write_file_(WORK_DIR "/attp.kfl", ATT_KFL_PARTIAL);
+        rl_compile_(WORK_DIR "/attp.kfl", WORK_DIR "/attp", WORK_DIR);
+        void *sop = rl_dlopen_(WORK_DIR "/attp.rlenv.so");
+        RlSurface sp2;
+        rl_resolve_surface_(sop, &sp2);
+        K26RlEnv *env = NULL;
+        ASSERT(sp2.create(13u, 1u, &env) == K26RL_OK);
+
+        double quiet[1] = { 0.0 };
+        ASSERT(sp2.step(env, quiet) == K26RL_OK);
+        uint32_t fl = 0;
+        ASSERT(sp2.flags(env, &fl) == K26RL_OK);
+        ASSERT((fl & K26RL_FLAG_FAULT) == 0);
+
+        double zap[1] = { 1.0 };
+        ASSERT(sp2.step(env, zap) == K26RL_OK);
+        uint16_t fc = 0;
+        ASSERT(sp2.flags(env, &fl) == K26RL_OK);
+        ASSERT(sp2.fault_codes(env, &fc) == K26RL_OK);
+        ASSERT((fl & K26RL_FLAG_FAULT) != 0);
+        ASSERT(fc == (uint16_t)K26RL_E_DIVERGED);
+
+        /* The boundary reset. The action slice is ignored on it. */
+        ASSERT(sp2.step(env, quiet) == K26RL_OK);
+        ASSERT(sp2.flags(env, &fl) == K26RL_OK);
+        ASSERT((fl & K26RL_FLAG_RESET_BOUNDARY) != 0);
+        double a[14];
+        ASSERT(sp2.attitudes(env, a, 14) == 14);
+        printf("  after a fault at a sub-advance, the next episode "
+               "begins at quat (%.17g, %.17g, %.17g, %.17g) rate z %.17g\n",
+               a[7], a[8], a[9], a[10], a[13]);
+        /* Exactly the declared state: nothing of the partial advance
+         * survives into the episode the record says begins fresh. */
+        ASSERT(a[7] == 1.0 && a[8] == 0.0 && a[9] == 0.0 && a[10] == 0.0);
+        ASSERT(a[11] == 0.0 && a[12] == 0.0 && a[13] == 0.2);
+        printf("  a partial advance leaves nothing behind, so the "
+               "record's zero applied dt is true of the world too: OK\n");
+        n_pass++;
+        sp2.destroy(env);
     }
 
     printf("test_rl_attitude: %d gates passed\n", n_pass);

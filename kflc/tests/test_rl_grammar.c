@@ -77,6 +77,24 @@ static int run_mode_(const char *mode, const char *fixture, char **err_out)
     return WEXITSTATUS(rc);
 }
 
+/* Attitude state is only accepted on a body that binds a vehicle
+ * assembly, because the advance needs the inertia tensor an assembly
+ * derives. The fixtures below that carry attitude keys bind this one,
+ * written beside them so the relative path resolves. */
+static void write_attitude_asset_(void)
+{
+    write_fixture_("/tmp/kflc_rl_att.k26asm",
+        "assembly grammar_box\n"
+        "    frame x_to_port\n"
+        "    provenance mass \"calibration shape, not a craft\" computed\n"
+        "    component hull\n"
+        "        mass 1000.0\n"
+        "        at 0 0 0\n"
+        "        collider box 1.0 0.5 0.5\n"
+        "    end\n"
+        "end\n");
+}
+
 static int n_pass = 0;
 
 /* One fixture, one expectation under the given kflc mode:
@@ -114,6 +132,8 @@ static void expect_(const char *tag, const char *src, int expect_rc,
 
 int main(void)
 {
+    write_attitude_asset_();
+
     /* Positive: the full RL surface parses and checks clean. */
     expect_("full",
         "form RL_FULL\n"
@@ -957,21 +977,120 @@ int main(void)
         "form RL_ATTK\n"
         "fn world w\n"
         "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
-        "    astro_body craft gm=1.0 parent=earth"
+        "    astro_body craft assembly=\"kflc_rl_att.k26asm\" parent=earth"
         " pos_x=7.0e6 vel_y=7546.0"
         " quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0"
         " omega_x=0.0 omega_y=0.0 omega_z=0.05\n"
         "    episode\n"
         "        control_dt 1.0\n"
         "        horizon 4\n"
-        "        reset craft.omega_z uniform(-0.1, 0.1)\n"
         "        reset craft.quat_w normal(1.0, 0.0)\n"
+        "        reset craft.quat_x normal(0.0, 0.0)\n"
+        "        reset craft.quat_y normal(0.0, 0.0)\n"
+        "        reset craft.quat_z normal(0.0, 0.0)\n"
+        "        reset craft.omega_x uniform(-0.1, 0.1)\n"
+        "        reset craft.omega_y uniform(-0.1, 0.1)\n"
+        "        reset craft.omega_z uniform(-0.1, 0.1)\n"
         "    end\n"
         "    action a box -1.0 1.0 default 0.0\n"
         "    on_step\n"
-        "        craft.omega_x = a * 0.01\n"
-        "        craft.omega_y = craft.omega_x\n"
-        "        craft.quat_z = craft.quat_z + 0.0\n"
+        "        craft.quat_w = craft.quat_w\n"
+        "        craft.quat_x = craft.quat_x\n"
+        "        craft.quat_y = craft.quat_y\n"
+        "        craft.quat_z = craft.quat_z\n"
+        "        craft.omega_x = craft.omega_x + a * 0.01\n"
+        "        craft.omega_y = craft.omega_y\n"
+        "        craft.omega_z = craft.omega_z\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    /* Attitude state on a body that cannot be advanced. Without an
+     * assembly there is no inertia tensor, so the advance never runs
+     * and the body would report the rate it was given while its
+     * orientation stood still. Refused on all three paths that can
+     * set it. */
+    expect_("attitude_attr_without_assembly",
+        "form RL_ATTNA\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0 omega_z=0.4\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "its attitude is never advanced", NULL);
+
+    expect_("attitude_reset_without_assembly",
+        "form RL_ATTNR\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "        reset craft.omega_z uniform(-0.1, 0.1)\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "its attitude is never advanced", NULL);
+
+    expect_("attitude_on_step_without_assembly",
+        "form RL_ATTNO\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    on_step\n"
+        "        craft.omega_z = a\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "its attitude is never advanced", NULL);
+
+    /* Translation keys are untouched by that rule: a body with no
+     * assembly still takes position and velocity, which is every
+     * program written before this surface existed. */
+    expect_("translation_without_assembly",
+        "form RL_ATTNT\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "        reset craft.pos_x uniform(6.9e6, 7.1e6)\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    on_step\n"
+        "        craft.vel_x = a * 0.01\n"
         "    end\n"
         "    observe craft from earth mode=geometric as trk\n"
         "    objective\n"
@@ -1032,7 +1151,7 @@ int main(void)
         "form RL_ATTOBS\n"
         "fn world w\n"
         "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
-        "    astro_body craft gm=1.0 parent=earth"
+        "    astro_body craft assembly=\"kflc_rl_att.k26asm\" parent=earth"
         " pos_x=7.0e6 vel_y=7546.0 omega_z=0.05\n"
         "    episode\n"
         "        control_dt 1.0\n"

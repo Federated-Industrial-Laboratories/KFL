@@ -51,6 +51,15 @@ const char *kflc_body_state_key_name(int i)
     return BODY_STATE_KEYS_[i];
 }
 
+/* Whether a key names attitude state rather than translation. The
+ * distinction matters at the binding: attitude is advanced from an
+ * inertia tensor, which only an assembly supplies. */
+int kflc_body_state_is_attitude(const char *k)
+{
+    if (!k) return 0;
+    return strncmp(k, "quat_", 5) == 0 || strncmp(k, "omega_", 6) == 0;
+}
+
 int kflc_body_state_key_index(const char *k)
 {
     if (!k) return -1;

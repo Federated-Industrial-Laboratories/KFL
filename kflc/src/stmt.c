@@ -1470,9 +1470,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * own orientation and rate, rather than a line of sight from
          * one body to another. It is spelled as a distinct form
          * because it is one: there is no observer and no target, only
-         * a body reporting itself. A body named `attitude` cannot be
-         * observed by the ordinary form, which is diagnosed here
-         * rather than silently taking the other branch. */
+         * a body reporting itself. The two forms are told apart by
+         * what follows the first name, not by the name itself: a body
+         * genuinely called `attitude` is still observed by the
+         * ordinary form, because `observe attitude from earth` has no
+         * `of` after the name and takes the other branch. */
         int attitude_form = 0;
         if (strcmp(target_ident, "attitude") == 0 &&
             is_ident_named(cur, "of"))

@@ -18,6 +18,19 @@
  * and at the same subdivision of it, by whoever owns the stepping
  * loop.
  *
+ * A caller that subdivides a control period should know what a
+ * failure part-way through means. When an advance fails at the k-th
+ * sub-interval, the k sub-intervals before it have already been
+ * applied, so the world has moved while no transition completed. The
+ * honest reading is that the record states the transition, not the
+ * world: a failed transition records an applied duration of zero, and
+ * what makes that true of the world as well is the caller's boundary
+ * reset, which restores the episode's baseline whole. The reinforcement
+ * learning layer does exactly that, and gates it: after a fault at a
+ * sub-advance the next episode begins at the declared state exactly.
+ * A caller that does not reset after a failure keeps a partially
+ * advanced world, and that is the caller's to handle.
+ *
  * Ordering, per sub-advance of duration h: translation advances
  * first, then attitude advances by the same h, with the torque
  * evaluated at the interval's start. That splitting is first order in
@@ -83,14 +96,42 @@ const char *k26astro_att_status_str(K26AstroAttStatus s);
  *        bound the vehicle's own attitude state stands alone. The
  *        orientation is normalised at the point of use, since a
  *        quaternion is written one component at a time; one with zero
- *        norm is reported as divergence rather than propagated. A step that produces a
- *        non-finite orientation or rate is reported as diverged and
- *        the body is left holding the last finite state, so a caller
+ *        norm is reported as divergence rather than propagated. A
+ *        step that produces a non-finite orientation or rate is
+ *        reported as diverged and the body is left holding the last
+ *        finite state, so a caller
  *        can end an episode honestly rather than publishing a value
  *        that is not a number.
  */
 K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
                                     double dt);
+
+/**
+ * @brief Gravity-gradient torque on a vehicle, in its body frame.
+ * @param v       The vehicle; its orientation rotates the separation
+ *                into the body frame and its inertia tensor scales
+ *                the result.
+ * @param r_world Vector from the vehicle's body to the attracting
+ *                body, in the world frame, metres.
+ * @param mu      The attracting body's gravitational parameter,
+ *                cubic metres per second squared.
+ * @param out     Receives the torque, newton metres.
+ * @return K26ASTRO_ATT_OK, or a status describing why it is zero.
+ * @note  The torque is three mu over the cube of the separation,
+ *        times the cross product of the unit separation with the
+ *        inertia tensor applied to it. libk26astro_body implements
+ *        the same expression for a diagonal inertia
+ *        (k26astro_torque_gravity_gradient) and cites Wertz (1978)
+ *        section 17.2 for it; this entry exists because a vehicle
+ *        built from an assembly carries a full tensor whose products
+ *        of inertia that entry cannot see, and dropping them would
+ *        quietly change the torque on any vehicle that is not
+ *        symmetric. The two agree exactly when the tensor is
+ *        diagonal, which is gated.
+ */
+K26AstroAttStatus k26astro_att_gravity_gradient(const K26AstroVehicle *v,
+                                                K26V3 r_world, double mu,
+                                                K26V3 *out);
 
 /**
  * @brief Advance a set of vehicles in the order given.
@@ -99,12 +140,13 @@ K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
  * @param dt  Interval, seconds.
  * @return The first non-OK status, or K26ASTRO_ATT_OK.
  * @note  Registration order is the iteration order and is fixed by
- *        the caller, which is what makes a run reproducible.
- *        Torque-free: this entry exists for the common case of a set
- *        of bodies with no actuator commanded this interval.
+ *        the caller, which is what makes a run reproducible. The
+ *        torque applied to each is the caller's array entry, so a
+ *        caller that has computed gravity-gradient torques passes
+ *        them and one that has not passes zeroes.
  */
 K26AstroAttStatus k26astro_att_step_all(K26AstroVehicle *const *v, int n,
-                                        double dt);
+                                        const K26V3 *torques, double dt);
 
 /**
  * @brief Total angular momentum of a vehicle in the world frame.
@@ -114,7 +156,10 @@ K26AstroAttStatus k26astro_att_step_all(K26AstroVehicle *const *v, int n,
  * @note  The inertia tensor times the body-frame angular velocity,
  *        rotated into the world frame by the orientation. Torque-free
  *        motion conserves it, which is what the analytic gates use to
- *        measure the integrator rather than trusting it.
+ *        measure the integrator rather than trusting it. Like the
+ *        advance, this reads the bound body first, so it reports the
+ *        momentum of the state a body actually holds rather than of
+ *        a working copy that may predate the last write to it.
  */
 K26AstroAttStatus k26astro_att_momentum_world(const K26AstroVehicle *v,
                                               K26V3 *out);

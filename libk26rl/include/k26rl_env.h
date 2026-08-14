@@ -389,8 +389,14 @@ int32_t      k26rl_env_bodies(const K26RlEnv *env, uint32_t reference,
  * observation channels; one wanting to see what the fault did reads
  * this.
  *
- * A body that is not advanced in attitude reports the identity
- * quaternion and a zero rate, which is what it holds. */
+ * Every body reports what it holds. A body the compiler refuses to
+ * give attitude state to, because it binds no vehicle assembly and so
+ * has no inertia tensor to advance one with, holds the identity
+ * quaternion and a zero rate and reports those; a body that does bind
+ * one reports the orientation and rate its advance produced. There is
+ * no third case, because a body carrying declared attitude state that
+ * nothing advances is refused at compile time rather than published
+ * as a body that is spinning and static at once. */
 int32_t      k26rl_env_attitudes(const K26RlEnv *env, double *out,
                                  uint32_t capacity);
 

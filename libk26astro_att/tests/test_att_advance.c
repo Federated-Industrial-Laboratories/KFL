@@ -30,6 +30,7 @@
 #include "k26astro_att/att.h"
 
 #include "k26astro_body/body.h"
+#include "k26astro_body/attitude.h"
 
 #include <math.h>
 #include <stdio.h>
@@ -71,6 +72,15 @@ static void set_omega_(K26AstroVehicle *v, double x, double y, double z)
         b->omega    = a->omega_body;
         b->attitude = a->q;
     }
+}
+
+/* Relative error, for comparisons against a closed form. */
+static double relerr_(double got, double want)
+{
+    double d = got - want;
+    if (d < 0.0) d = -d;
+    double w = want < 0.0 ? -want : want;
+    return w > 0.0 ? d / w : d;
 }
 
 static double v3len_(K26V3 v)
@@ -148,8 +158,8 @@ int main(void)
         double rate_err_a = 0.0, rate_err_b = 0.0;
         double ang_a = spin_axis_error_(2000, 4.0, &rate_err_a);
         double ang_b = spin_axis_error_(4000, 4.0, &rate_err_b);
-        printf("  4 turns: angle error %.3e at 2000 steps, %.3e at 4000 "
-               "(ratio %.2f)\n", ang_a, ang_b, ang_a / ang_b);
+        printf("  4 turns: angle error %.3e at 2000 steps, %.3e at 4000\n",
+               ang_a, ang_b);
         printf("  rate error %.3e and %.3e\n", rate_err_a, rate_err_b);
         /* The rate about a principal axis is exactly conserved by the
          * update: with the angular velocity along a principal axis
@@ -164,9 +174,14 @@ int main(void)
          * with the step, which is why this arm asserts rounding
          * rather than convergence, and why the convergence arm is the
          * asymmetric one below, where the rate genuinely moves within
-         * an interval. Measured: 1.1e-16 rad after four turns in 2000
-         * steps and 7.3e-15 in 4000, the growth being accumulated
-         * rounding over more operations, not truncation. */
+         * an interval. Measured here, repeatably across runs but not
+         * necessarily across hosts or library versions, since these
+         * are accumulated rounding and the orientation update calls
+         * the platform's sine and cosine: 2.758e-16 rad after four
+         * turns in 2000 steps and 7.169e-15 in 4000. The growth with
+         * step count is more operations accumulating rounding, not
+         * truncation, so no ratio is printed: there is no convergence
+         * rate here to report. */
         ASSERT(rate_err_a < 1e-15);
         ASSERT(rate_err_b < 1e-15);
         ASSERT(ang_a < 1e-12);
@@ -269,6 +284,178 @@ int main(void)
         k26astro_vehicle_destroy(v);
     }
 
+    printf("the bound body is the state:\n");
+    {
+        /* The vehicle's own attitude state is left untouched and only
+         * the body is written, which is what every writer in the
+         * compiler does: a declaration, a reset draw and a step-time
+         * assignment all write the body. The advance must therefore
+         * load from it. Without that load the vehicle would integrate
+         * its own stale copy, the body would be overwritten with the
+         * result, and a declared rate would silently vanish; that is
+         * the defect this arm exists to catch, and the library's own
+         * suite could not see it before. */
+        K26AstroBody body;
+        K26AstroVehicle *v = make_vehicle_(200.0, 200.0, 200.0, &body);
+        K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
+        ASSERT(a->omega_body.x == 0.0 && a->omega_body.y == 0.0 &&
+               a->omega_body.z == 0.0);
+        /* Body only. The working copy still reads zero. */
+        body.omega = k26m3d_v3(0.0, 0.0, 0.25);
+        ASSERT(a->omega_body.z == 0.0);
+
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), 2.0) ==
+               K26ASTRO_ATT_OK);
+        /* The rate the body carried is the rate that was integrated,
+         * and it survives the step. */
+        ASSERT(body.omega.z == 0.25);
+        ASSERT(a->omega_body.z == 0.25);
+        /* Two seconds at a quarter radian per second is half a
+         * radian, and the quaternion's vector part is the sine of
+         * half of that about z. */
+        double want = sin(0.25);
+        printf("  body-only write: quat z %.12f, analytic %.12f\n",
+               body.attitude.z, want);
+        ASSERT(fabs(body.attitude.z - want) < 1e-12);
+        ASSERT(fabs(body.attitude.w - cos(0.25)) < 1e-12);
+        printf("  a write to the body alone is what the advance "
+               "integrates: OK\n");
+        n_pass++;
+
+        /* A step of zero duration resynchronises the working copy
+         * with the body rather than leaving a stale one behind. */
+        body.omega = k26m3d_v3(0.0, 0.0, -0.75);
+        ASSERT(a->omega_body.z == 0.25);
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), 0.0) ==
+               K26ASTRO_ATT_OK);
+        ASSERT(a->omega_body.z == -0.75);
+        printf("  a zero-length step resynchronises the working copy: "
+               "OK\n");
+        n_pass++;
+
+        /* And the momentum query reports the body's state, not a copy
+         * that predates the last write to it. */
+        body.omega = k26m3d_v3(0.0, 0.0, 0.5);
+        K26V3 h;
+        ASSERT(k26astro_att_momentum_world(v, &h) == K26ASTRO_ATT_OK);
+        printf("  momentum from a body-only write: |h| %.6f "
+               "(analytic %.6f)\n", v3len_(h), 200.0 * 0.5);
+        ASSERT(relerr_(v3len_(h), 200.0 * 0.5) < 1e-12);
+        printf("  the momentum query reads the body too: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v);
+    }
+
+    printf("gravity-gradient torque:\n");
+    {
+        /* Against the body library's own expression. That entry sees
+         * only a diagonal inertia, so the two must agree exactly when
+         * the tensor is diagonal; the full-tensor form exists because
+         * a vehicle built from an assembly is not generally diagonal,
+         * and the second arm shows the two parting company when it is
+         * not, which is the term that would otherwise be dropped. */
+        K26AstroBody body;
+        K26AstroVehicle *v = make_vehicle_(120.0, 300.0, 380.0, &body);
+        /* An orientation that is not the identity, so the rotation
+         * into the body frame is doing work. */
+        K26V3 axis = { 0.0, 0.0, 1.0 };
+        K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
+        a->q = k26m3d_quat_from_axis_angle(axis, 0.6);
+        body.attitude = a->q;
+
+        const double mu = 3.986004418e14;
+        K26V3 r_world = { 6.9e6, 1.1e6, -0.4e6 };
+        K26V3 got;
+        ASSERT(k26astro_att_gravity_gradient(v, r_world, mu, &got) ==
+               K26ASTRO_ATT_OK);
+
+        /* The reference: rotate into the body frame here, then call
+         * the body library with the diagonal it can see. */
+        K26V3 r_body = k26m3d_quat_rotate_v3(k26m3d_quat_conj(a->q),
+                                             r_world);
+        double r = v3len_(r_body);
+        K26V3 diag = { 120.0, 300.0, 380.0 };
+        K26V3 want = k26astro_torque_gravity_gradient(r_body, r, mu, diag);
+        printf("  diagonal tensor: got (%.6e, %.6e, %.6e)\n",
+               got.x, got.y, got.z);
+        printf("  body library:    got (%.6e, %.6e, %.6e)\n",
+               want.x, want.y, want.z);
+        ASSERT(relerr_(got.x, want.x) < 1e-14);
+        ASSERT(relerr_(got.y, want.y) < 1e-14);
+        ASSERT(relerr_(got.z, want.z) < 1e-14);
+        ASSERT(v3len_(want) > 0.0);
+        printf("  the full-tensor form agrees with the body library's "
+               "diagonal one to rounding: OK\n");
+        n_pass++;
+
+        /* With products of inertia the two part company, which is the
+         * whole reason this entry exists. */
+        K26M3 full;
+        memset(&full, 0, sizeof full);
+        full.m[0][0] = 120.0; full.m[1][1] = 300.0; full.m[2][2] = 380.0;
+        full.m[0][1] = full.m[1][0] = -40.0;
+        full.m[1][2] = full.m[2][1] =  25.0;
+        k26astro_vehicle_set_inertia_full(v, full);
+        K26V3 got2;
+        ASSERT(k26astro_att_gravity_gradient(v, r_world, mu, &got2) ==
+               K26ASTRO_ATT_OK);
+        double sep = v3len_(k26m3d_v3_sub(got2, want)) / v3len_(want);
+        printf("  with products of inertia the torque differs from the "
+               "diagonal-only answer by %.1f per cent\n", sep * 100.0);
+        ASSERT(sep > 0.01);
+        printf("  the products of inertia change the torque, so dropping "
+               "them would not be free: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v);
+    }
+    {
+        /* The analytic case: a body whose principal axes are aligned
+         * with the separation feels no gravity-gradient torque, since
+         * the inertia tensor applied to the separation is parallel to
+         * it and their cross product vanishes. Any torque here would
+         * be a sign or frame error. */
+        K26AstroBody body;
+        K26AstroVehicle *v = make_vehicle_(120.0, 300.0, 380.0, &body);
+        K26V3 r_world = { 7.0e6, 0.0, 0.0 };
+        K26V3 got;
+        ASSERT(k26astro_att_gravity_gradient(v, r_world, 3.986004418e14,
+                                             &got) == K26ASTRO_ATT_OK);
+        printf("  aligned with a principal axis: |torque| %.3e\n",
+               v3len_(got));
+        ASSERT(v3len_(got) < 1e-12);
+
+        /* Rotated by an angle about z, the classic case. With the
+         * separation along world x, the body-frame separation is the
+         * unit vector (cos t, -sin t, 0), so the inertia tensor
+         * applied to it is (Ixx cos t, -Iyy sin t, 0) and their cross
+         * product has only a z component, equal to
+         * (Ixx - Iyy) sin t cos t. The torque is therefore three mu
+         * over two r cubed times (Ixx - Iyy) sin 2t, which at
+         * forty-five degrees is three mu over two r cubed times
+         * (Ixx - Iyy). Ixx is the smaller moment here, so the torque
+         * is negative: the sign is part of the assertion, and the
+         * first version of this arm had it backwards while the
+         * magnitude matched, which is exactly the error an assertion
+         * on magnitude alone would have let through. */
+        K26V3 zaxis = { 0.0, 0.0, 1.0 };
+        K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
+        a->q = k26m3d_quat_from_axis_angle(zaxis, M_PI / 4.0);
+        body.attitude = a->q;
+        ASSERT(k26astro_att_gravity_gradient(v, r_world, 3.986004418e14,
+                                             &got) == K26ASTRO_ATT_OK);
+        double r  = 7.0e6;
+        double mu = 3.986004418e14;
+        double want_z = 1.5 * mu / (r * r * r) * (120.0 - 300.0);
+        printf("  at forty-five degrees: torque z %.9e, analytic %.9e\n",
+               got.z, want_z);
+        ASSERT(fabs(got.x) < 1e-12 && fabs(got.y) < 1e-12);
+        ASSERT(relerr_(got.z, want_z) < 1e-12);
+        printf("  the closed form for a principal-axis body at "
+               "forty-five degrees is reproduced: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v);
+    }
+
     printf("contract:\n");
     {
         K26AstroBody body;
@@ -327,7 +514,8 @@ int main(void)
         set_omega_(v1, 0.0, 0.0, 0.5);
         set_omega_(v2, 0.0, 0.0, 0.5);
         K26AstroVehicle *set[3] = { v1, NULL, v2 };
-        ASSERT(k26astro_att_step_all(set, 3, 0.25) == K26ASTRO_ATT_OK);
+        ASSERT(k26astro_att_step_all(set, 3, NULL, 0.25) ==
+               K26ASTRO_ATT_OK);
         ASSERT(b1.attitude.z != 0.0);
         ASSERT(b2.attitude.z == b1.attitude.z);
         printf("  the set entry advances every vehicle it is given and "

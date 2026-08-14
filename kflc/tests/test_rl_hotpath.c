@@ -67,19 +67,42 @@
  * predicate: episodes truncate on a fixed cadence inside the armed
  * window. The block writes body state, one velocity key and one
  * position key, so the state accessors and the position fold are
- * measured too. */
+ * measured too.
+ *
+ * The craft binds a vehicle assembly and declares a subdivision and
+ * every attitude key, so the attitude advance, the per-environment
+ * vehicles, the gravity-gradient torque and the substep loop are all
+ * inside the measured window. Without an assembly the vehicle count
+ * is zero and the whole of that path compiles out of the artifact,
+ * which would leave the fixed requirement unmeasured for everything
+ * this phase added rather than proven for it. */
+static const char *const HP_ASM =
+    "assembly hotpath_box\n"
+    "    frame x_to_port\n"
+    "    provenance mass \"calibration shape, not a craft\" computed\n"
+    "    component hull\n"
+    "        mass 1000.0\n"
+    "        at 0 0 0\n"
+    "        collider box 1.0 0.5 0.5\n"
+    "    end\n"
+    "end\n";
+
 static const char *const HP_KFL =
     "form RL_HOTPATH\n"
     "fn world hp_world\n"
     "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
-    "    astro_body craft gm=1.0 parent=earth"
+    "    astro_body craft assembly=\"hotpath.k26asm\" parent=earth"
     " pos_x=uniform(6.9e6,7.1e6) pos_y=0.0 pos_z=0.0"
-    " vel_x=0.0 vel_y=normal(7350.0,10.0) vel_z=0.0\n"
+    " vel_x=0.0 vel_y=normal(7350.0,10.0) vel_z=0.0"
+    " quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0"
+    " omega_x=0.01 omega_y=0.02 omega_z=0.03\n"
     "    episode\n"
     "        control_dt 0.1\n"
     "        horizon 24\n"
+    "        substeps 8\n"
     "        reset craft.pos_x uniform(6.9e6, 7.1e6)\n"
     "        reset craft.vel_y normal(7350.0, 10.0)\n"
+    "        reset craft.omega_z uniform(-0.05, 0.05)\n"
     "    end\n"
     "    action push box -1.0 1.0 default 0.25\n"
     "    action gear discrete 3 default 1\n"
@@ -90,10 +113,12 @@ static const char *const HP_KFL =
      * window rather than beside it. */
     "        craft.vel_x = craft.vel_x + push * 0.01\n"
     "        craft.pos_z = craft.pos_z + push\n"
+    "        craft.omega_x = craft.omega_x + push * 0.0001\n"
     "    end\n"
     "    observe craft from earth mode=geometric as trk\n"
+    "    observe attitude of craft as att\n"
     "    objective\n"
-    "        reward trk_range + push\n"
+    "        reward trk_range + push + att_omega_z\n"
     "    end\n"
     "end\n"
     "end\n";
@@ -396,6 +421,7 @@ int main(void)
     if (!rl_libs_present_("test_rl_hotpath")) return 77;
     rl_run_or_die_("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
 
+    rl_write_file_(WORK_DIR "/hotpath.k26asm", HP_ASM);
     rl_write_file_(WORK_DIR "/hp.kfl", HP_KFL);
     rl_compile_(WORK_DIR "/hp.kfl", WORK_DIR "/hp", WORK_DIR);
     ASSERT(rl_file_exists_(WORK_DIR "/hp.rlenv.so"));
