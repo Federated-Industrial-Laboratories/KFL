@@ -57,6 +57,8 @@ static K26AstroVehicle *make_vehicle_(double ixx, double iyy, double izz,
     return v;
 }
 
+/* The bound body is the state, so a rate is set there; with no body
+ * bound the vehicle's own state is set instead. */
 static void set_omega_(K26AstroVehicle *v, double x, double y, double z)
 {
     K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
@@ -64,6 +66,11 @@ static void set_omega_(K26AstroVehicle *v, double x, double y, double z)
     a->omega_body.x = x;
     a->omega_body.y = y;
     a->omega_body.z = z;
+    K26AstroBody *b = k26astro_vehicle_body(v);
+    if (b) {
+        b->omega    = a->omega_body;
+        b->attitude = a->q;
+    }
 }
 
 static double v3len_(K26V3 v)

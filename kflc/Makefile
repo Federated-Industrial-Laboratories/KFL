@@ -28,7 +28,7 @@ LIB      = libkflc.a
 # this archive also links $(RL_LIB) for the asset digest.
 LIB_OBJS = src/util.o src/lexer.o src/parser.o src/dump.o src/serialize.o \
            src/expr.o src/stmt.o src/check.o src/opaque.o \
-           src/assembly.o \
+           src/assembly.o src/body_state.o \
            src/builtin_register_astro.o \
            src/builtin_loader.o src/runtime.o
 # Driver objects: emitters + CLI driver. Only the kflc binary needs these.
@@ -212,6 +212,16 @@ $(RL_BODIES_TEST): tests/test_rl_bodies.c tests/rl_gate_util.h \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# Attitude through the stepping surface: the getter's geometry, the
+# advance, the published subdivision, determinism, and the
+# faulted-step contract.
+RL_ATT_TEST = tests/test_rl_attitude
+$(RL_ATT_TEST): tests/test_rl_attitude.c tests/rl_gate_util.h \
+                ../libk26rl/include/k26rl_env.h \
+                ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_VIEW_TEST = tests/test_rl_view
 $(RL_VIEW_TEST): tests/test_rl_view.c tests/rl_gate_util.h \
                  ../libk26rl/include/k26rl_env.h \
@@ -259,7 +269,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -278,7 +288,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
-	          $(RL_BODIES_TEST); do \
+	          $(RL_BODIES_TEST) $(RL_ATT_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \

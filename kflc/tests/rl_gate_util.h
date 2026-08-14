@@ -29,7 +29,8 @@ static const char *const RL_INCLUDE_DIRS_[] = {
     "../libk26astro_rt/include",   "../libk26astro_body/include",
     "../libk26astro_core/include", "../libk26astro_grav/include",
     "../libk26astro_conics/include", "../libk26astro_ephem/include",
-    "../libk26astro_vehicle/include", "../libk26astro_atmos/include",
+    "../libk26astro_vehicle/include", "../libk26astro_att/include",
+    "../libk26astro_atmos/include",
     "../libk26tick/include",       "../libk26compute/include",
     "../libk26m3d/include",        "../libk26rl/include",
     "../libk26rng/include",        NULL
@@ -39,6 +40,7 @@ static const char *const RL_LINK_LIBS_[] = {
     "../libk26rl/libk26rl.a",
     "../libk26rng/libk26rng.a",
     "../libk26astro_rt/libk26astro_rt.a",
+    "../libk26astro_att/libk26astro_att.a",
     "../libk26astro_vehicle/libk26astro_vehicle.a",
     "../libk26astro_atmos/libk26astro_atmos.a",
     "../libk26astro_grav/libk26astro_grav.a",
@@ -147,6 +149,7 @@ typedef struct {
     int32_t     (*spec)(const K26RlEnv *, uint8_t *, uint32_t);
     int32_t     (*bodies)(const K26RlEnv *, uint32_t, double *,
                           uint32_t);
+    int32_t     (*attitudes)(const K26RlEnv *, double *, uint32_t);
     const char *(*status_str)(K26RlStatus);
     void        (*destroy)(K26RlEnv *);
 } RlSurface;
@@ -173,6 +176,7 @@ static inline void rl_resolve_surface_(void *so, RlSurface *s)
     RL_RESOLVE_(fault_codes,  "k26rl_env_fault_codes");
     RL_RESOLVE_(spec,         "k26rl_env_spec");
     RL_RESOLVE_(bodies,       "k26rl_env_bodies");
+    RL_RESOLVE_(attitudes,    "k26rl_env_attitudes");
     RL_RESOLVE_(status_str,   "k26rl_status_str");
     RL_RESOLVE_(destroy,      "k26rl_env_destroy");
 #undef RL_RESOLVE_

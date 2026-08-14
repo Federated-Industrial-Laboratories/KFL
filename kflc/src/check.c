@@ -369,6 +369,31 @@ static const char *suffixed_(KflcArena *arena, const char *base,
  * bound baked into the artifact's spec, so it must be decidable at
  * compile time: literals and + - * / arithmetic over them. Returns 1
  * with the value in *out, 0 when the expression is not constant. */
+/* The channel suffixes an observe contributes. A line-of-sight
+ * observe publishes five; an attitude observe publishes its body's
+ * own orientation and rate, which is seven. The two lists live here
+ * and at the emitter, and the gates compare the published names
+ * against both. */
+static const char *const OBS_SFX_LOS_[] =
+    { "_dir_x", "_dir_y", "_dir_z", "_range", "_range_rate", NULL };
+static const char *const OBS_SFX_ATT_[] =
+    { "_quat_w", "_quat_x", "_quat_y", "_quat_z",
+      "_omega_x", "_omega_y", "_omega_z", NULL };
+
+static int observe_is_attitude_(const KflcNode *n)
+{
+    if (!n) return 0;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, "attitude") == 0) return 1;
+    }
+    return 0;
+}
+
+static const char *const *observe_suffixes_(const KflcNode *n)
+{
+    return observe_is_attitude_(n) ? OBS_SFX_ATT_ : OBS_SFX_LOS_;
+}
+
 static int horizon_const_eval_(const KflcExpr *e, double *out)
 {
     if (!e) return 0;
@@ -492,16 +517,14 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
      * pre-existing sets may reuse one of those names: an action or a
      * component silently shadowing a user's `let` or `arg` would read
      * back the wrong value with no diagnostic at all. */
-    static const char *const comp_sfx_[5] =
-        { "_dir_x", "_dir_y", "_dir_z", "_range", "_range_rate" };
     NameList comps;
     memset(&comps, 0, sizeof comps);
     for (int j = 0; j < st.observes_as.n; j++) {
         const char *base = observe_as_name_(st.observes_as.items[j]);
         if (!base) continue;
-        for (int k = 0; k < 5; k++) {
-            namelist_push_(&comps, suffixed_(arena, base, comp_sfx_[k]),
-                           arena);
+        const char *const *sfx = observe_suffixes_(st.observes_as.items[j]);
+        for (int k = 0; sfx[k]; k++) {
+            namelist_push_(&comps, suffixed_(arena, base, sfx[k]), arena);
         }
     }
     for (int i = 0; i < st.actions.n; i++) {
@@ -601,12 +624,10 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
     for (int i = 0; i < st.observes_as.n; i++) {
         const char *base = observe_as_name_(st.observes_as.items[i]);
         if (!base) continue;
-        namelist_push_(&allowed, suffixed_(arena, base, "_dir_x"), arena);
-        namelist_push_(&allowed, suffixed_(arena, base, "_dir_y"), arena);
-        namelist_push_(&allowed, suffixed_(arena, base, "_dir_z"), arena);
-        namelist_push_(&allowed, suffixed_(arena, base, "_range"), arena);
-        namelist_push_(&allowed, suffixed_(arena, base, "_range_rate"),
-                       arena);
+        const char *const *sfx = observe_suffixes_(st.observes_as.items[i]);
+        for (int c = 0; sfx[c]; c++) {
+            namelist_push_(&allowed, suffixed_(arena, base, sfx[c]), arena);
+        }
     }
 
     for (int i = 0; i < st.episodes.n; i++) {
@@ -635,6 +656,28 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
      * checks clean. */
     if (st.episodes.n > 0) {
         const KflcNode *ep = st.episodes.items[0];
+        /* The subdivision of a control period. It changes the physics,
+         * so it is part of the program's identity and is published in
+         * the spec; it must therefore const-evaluate to a positive
+         * whole number, like the horizon beside it. */
+        const KflcAttr *sb = node_attr_(ep, "substeps");
+        if (sb && sb->expr) {
+            double sv = 0.0;
+            if (!horizon_const_eval_(sb->expr, &sv)) {
+                kflc_diag_errorf(diag, sb->line,
+                    "episode: `substeps` must be a compile-time constant "
+                    "expression");
+            } else if (!(sv >= 1.0) || sv != (double)(long)sv) {
+                kflc_diag_errorf(diag, sb->line,
+                    "episode: `substeps` must be a whole number of at "
+                    "least 1 (evaluates to %g)", sv);
+            } else if (sv > 65536.0) {
+                kflc_diag_errorf(diag, sb->line,
+                    "episode: `substeps` exceeds 65536 (evaluates to %g); "
+                    "a subdivision that fine costs more than it buys",
+                    sv);
+            }
+        }
         const KflcAttr *hz = node_attr_(ep, "horizon");
         const KflcAttr *tw = node_attr_(ep, "terminated_when");
         double hv = 0.0;

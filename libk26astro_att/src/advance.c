@@ -71,8 +71,32 @@ K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
     }
     if (!att_finite_v3_(torque)) return K26ASTRO_ATT_E_DIVERGED;
 
+    /* The bound body is the state; this vehicle's attitude state is
+     * the integrator's working copy and the inertia it works with.
+     * Anything that writes a body's orientation or rate, a
+     * declaration, an episode reset draw, or a step-time assignment,
+     * writes the body, so the body is loaded here rather than
+     * assumed to agree. With no body bound the state stands on its
+     * own, which is the detached propagation the body library's own
+     * interface describes. */
+    K26AstroBody *b = k26astro_vehicle_body(v);
+    if (b) {
+        a->q          = b->attitude;
+        a->omega_body = b->omega;
+    }
+
     K26Quat q0 = a->q;
     K26V3   w0 = a->omega_body;
+
+    /* A quaternion is written component by component, so it arrives
+     * here in whatever state the writer left it. Normalising at the
+     * point of use is what makes that safe; a zero-norm quaternion
+     * cannot be normalised and is reported as divergence below rather
+     * than propagated. */
+    double n2 = a->q.w * a->q.w + a->q.x * a->q.x
+              + a->q.y * a->q.y + a->q.z * a->q.z;
+    if (!isfinite(n2) || n2 == 0.0) return K26ASTRO_ATT_E_DIVERGED;
+    a->q = k26m3d_quat_norm(a->q);
 
     k26astro_attitude_step_torque_ext(a, torque, dt);
 
@@ -84,7 +108,6 @@ K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
         return K26ASTRO_ATT_E_DIVERGED;
     }
 
-    K26AstroBody *b = k26astro_vehicle_body(v);
     if (b) {
         b->attitude = a->q;
         b->omega    = a->omega_body;

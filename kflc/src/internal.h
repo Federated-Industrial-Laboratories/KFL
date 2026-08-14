@@ -139,4 +139,23 @@ void      kfl_emit_stmt_reset_scopes_ex(KflcArena  *arena,
                                          const char *fn_return_subtype);
 void      kfl_emit_stmt_drain_root(FILE *out, int indent);
 
+
+/* ---- Body state keys (src/body_state.c) --------------------------- *
+ *
+ * The scalar state keys an `astro_body` attribute, an `episode reset`
+ * line, and an `on_step` assignment share, and the one emission of a
+ * write and a read for each. Every emitter that touches body state
+ * calls these, so a key cannot come to mean two things in one
+ * compiler.
+ */
+int         kflc_body_state_key_count(void);
+const char *kflc_body_state_key_name(int i);
+int         kflc_body_state_key_index(const char *k);
+char        kflc_body_state_key_comp(const char *k);
+void        kflc_emit_body_state_write(FILE *out, int indent, const char *lv,
+                                       const char *key,
+                                       const char *value_text);
+void        kflc_emit_body_state_read(FILE *out, const char *lv,
+                                      const char *key);
+
 #endif /* KFLC_INTERNAL_H */

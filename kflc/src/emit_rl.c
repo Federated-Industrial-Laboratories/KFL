@@ -55,13 +55,6 @@
 #define RL_MAX_WSCAL    256
 #define RL_MAX_BS       128
 
-/* The six scalar state keys astro_body, reset lines, and on_step
- * assignments share. Order is the key index used by the state
- * accessors; membership is what the other callers ask about. */
-static const char *const RL_STATE_KEYS_[6] = {
-    "pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z"
-};
-
 /* The published observer-mode value of an as-bound observe. The
  * grammar's default when no mode= attribute is given is the runtime's
  * default, astrometric, which is what the observation path selects. */
@@ -82,11 +75,7 @@ static uint16_t rl_observe_mode_(const KflcNode *n)
 
 static int rl_is_state_key_(const char *k)
 {
-    if (!k) return 0;
-    for (int i = 0; i < 6; i++) {
-        if (strcmp(k, RL_STATE_KEYS_[i]) == 0) return 1;
-    }
-    return 0;
+    return kflc_body_state_key_index(k) >= 0;
 }
 
 /* The components one `observe ... as` contributes, in observation
@@ -97,6 +86,50 @@ static int rl_is_state_key_(const char *k)
 static const char *const RL_OBS_COMP_[RL_OBS_COMPS] = {
     "_dir_x", "_dir_y", "_dir_z", "_range", "_range_rate"
 };
+
+/* An attitude observe publishes a body's own orientation and rate
+ * instead of a line of sight, so its channel set is its own. Widths
+ * differ per observe from here on, which is why offsets are carried
+ * rather than computed as an index times a constant. */
+#define RL_ATT_COMPS 7
+static const char *const RL_ATT_COMP_[RL_ATT_COMPS] = {
+    "_quat_w", "_quat_x", "_quat_y", "_quat_z",
+    "_omega_x", "_omega_y", "_omega_z"
+};
+
+static int rl_observe_is_attitude_(const KflcNode *n)
+{
+    if (!n) return 0;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, "attitude") == 0) return 1;
+    }
+    return 0;
+}
+
+static int rl_observe_width_(const KflcNode *n)
+{
+    return rl_observe_is_attitude_(n) ? RL_ATT_COMPS : RL_OBS_COMPS;
+}
+
+static const char *rl_observe_comp_(const KflcNode *n, int c)
+{
+    return rl_observe_is_attitude_(n) ? RL_ATT_COMP_[c] : RL_OBS_COMP_[c];
+}
+
+/* The first channel index of observe `i`, and the total width. Both
+ * walk the declarations in source order, which is the order channels
+ * are allocated in. */
+static int rl_obs_offset_(const KflcNode *const *obs, int i)
+{
+    int off = 0;
+    for (int k = 0; k < i; k++) off += rl_observe_width_(obs[k]);
+    return off;
+}
+
+static int rl_obs_total_(const KflcNode *const *obs, int n)
+{
+    return rl_obs_offset_(obs, n);
+}
 
 /* ---- Program model -------------------------------------------------- */
 
@@ -115,7 +148,7 @@ typedef struct {
 /* One (body, state key) pair an on_step body reads or assigns. */
 typedef struct {
     int body;      /* index into the model's bodies[] */
-    int key;       /* index into RL_STATE_KEYS_ */
+    int key;       /* index into the shared body state key table */
     int written;   /* 1 when an assignment targets it */
 } RlStateRef;
 
@@ -154,6 +187,7 @@ typedef struct {
     int             n_bs;
 
     const KflcAttr *control_dt;
+    const KflcAttr *substeps;
     const KflcAttr *horizon;          /* or NULL */
     const KflcAttr *terminated_when;  /* or NULL */
     const KflcAttr *reward;           /* or NULL */
@@ -278,8 +312,9 @@ static int rl_scope_name_taken_(const RlModel *m, const char *name)
         if (!base) continue;
         size_t bl = strlen(base);
         if (strncmp(name, base, bl) != 0) continue;
-        for (int c = 0; c < RL_OBS_COMPS; c++) {
-            if (strcmp(name + bl, RL_OBS_COMP_[c]) == 0) return 1;
+        for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
+            if (strcmp(name + bl, rl_observe_comp_(m->observes[i], c)) == 0)
+                return 1;
         }
     }
     return 0;
@@ -445,6 +480,7 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
     }
     m->control_dt      = rl_attr_(m->episode, "control_dt");
     m->horizon         = rl_attr_(m->episode, "horizon");
+    m->substeps        = rl_attr_(m->episode, "substeps");
     m->terminated_when = rl_attr_(m->episode, "terminated_when");
     if (m->objective) {
         m->reward   = rl_attr_(m->objective, "reward");
@@ -702,12 +738,13 @@ static void rl_emit_scope_prelude_(FILE *out, const RlModel *m, int indent)
     }
     for (int i = 0; i < m->n_observes; i++) {
         const char *base = rl_observe_as_(m->observes[i]);
-        for (int c = 0; c < RL_OBS_COMPS; c++) {
+        for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
             rl_emit_indent_(out, indent);
             fprintf(out,
                 "const double %s%s = _kfl_obs_v[%d]; (void)%s%s;\n",
-                base, RL_OBS_COMP_[c], i * RL_OBS_COMPS + c,
-                base, RL_OBS_COMP_[c]);
+                base, rl_observe_comp_(m->observes[i], c),
+                rl_obs_offset_(m->observes, i) + c,
+                base, rl_observe_comp_(m->observes[i], c));
         }
     }
     for (int i = 0; i < m->n_wscal; i++) {
@@ -734,11 +771,12 @@ static void rl_scope_bindings_(const RlModel *m, const KflcNode *form,
     for (int i = 0; i < m->n_observes; i++) {
         const char *base = rl_observe_as_(m->observes[i]);
         if (!base) continue;
-        for (int c = 0; c < RL_OBS_COMPS; c++) {
-            size_t bl = strlen(base), sl = strlen(RL_OBS_COMP_[c]);
+        for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
+            const char *cmp = rl_observe_comp_(m->observes[i], c);
+            size_t bl = strlen(base), sl = strlen(cmp);
             char *nm = (char *)kflc_arena_alloc(arena, bl + sl + 1);
             memcpy(nm, base, bl);
-            memcpy(nm + bl, RL_OBS_COMP_[c], sl + 1);
+            memcpy(nm + bl, cmp, sl + 1);
             rl_push_binding_(arena, live, live_n, live_cap, nm,
                              KFLT_DOUBLE);
         }
@@ -780,16 +818,7 @@ static void rl_emit_body_write_(FILE *out, int indent, const char *lv,
                                 const char *key, const char *value_text)
 {
     if (rl_is_state_key_(key)) {
-        char axis = key[4];             /* x, y, or z */
-        if (strncmp(key, "pos_", 4) == 0) {
-            rl_emit_indent_(out, indent);
-            fprintf(out, "%spos.s%c = 0; %spos.l%c = (%s); "
-                         "k26astro_pos_normalise(&%spos);\n",
-                    lv, axis, lv, axis, value_text, lv);
-        } else {
-            rl_emit_indent_(out, indent);
-            fprintf(out, "%svel.%c = (%s);\n", lv, axis, value_text);
-        }
+        kflc_emit_body_state_write(out, indent, lv, key, value_text);
         return;
     }
     rl_emit_indent_(out, indent);
@@ -805,6 +834,20 @@ static void rl_emit_body_write_var_(FILE *out, int indent, const char *lv,
 }
 
 /* ---- Generated-code sections ----------------------------------------- */
+
+/* The number of bodies in this program that carry a vehicle
+ * assembly. Each gets one vehicle per environment, owned by the
+ * handle. */
+static int rl_n_vehicles_(const RlModel *m)
+{
+    int n = 0;
+    for (int i = 0; i < m->n_bodies; i++) {
+        for (const KflcAttr *a = m->bodies[i].body->attrs; a; a = a->next) {
+            if (a->name && strcmp(a->name, "assembly") == 0) { n++; break; }
+        }
+    }
+    return n;
+}
 
 static int rl_emit_prologue_(FILE *out, const RlModel *m,
                              const KflcNode *form, KflcDiag *diag)
@@ -829,6 +872,8 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         "#include <k26astro_grav/ias15.h>\n"
         "#include <k26astro_body/body.h>\n"
         "#include <k26astro_core/pos.h>\n"
+        "#include <k26astro_vehicle/vehicle.h>\n"
+        "#include <k26astro_att/att.h>\n"
         "#include \"k26rl_env.h\"\n"
         "#include \"k26rl_episode.h\"\n"
         "#include \"k26rl_tap.h\"\n"
@@ -851,11 +896,14 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         "#define KFLRL_N_REC %d\n"
         "#define KFLRL_N_WSCAL %d\n"
         "#define KFLRL_HAS_TERMINATED %d\n"
+        "#define KFLRL_N_VEHICLES %d\n"
         "#define KFLRL_MAGIC 0x4b524c45u\n"
         "\n",
-        m->n_bodies, m->n_observes * RL_OBS_COMPS, m->n_actions,
+        m->n_bodies, rl_obs_total_(m->observes, m->n_observes),
+        m->n_actions,
         m->n_resets, m->n_dr, m->n_resets + m->n_dr,
-        m->n_wscal, m->terminated_when ? 1 : 0);
+        m->n_wscal, m->terminated_when ? 1 : 0,
+        rl_n_vehicles_(m));
 
     /* Domain-randomisation record tags, ascending (class, channel):
      * reset-state entries (class 0x0001) then domain-randomisation
@@ -879,8 +927,9 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
               "[KFLRL_OBS_TOTAL] = {\n", out);
         for (int i = 0; i < m->n_observes; i++) {
             const char *base = rl_observe_as_(m->observes[i]);
-            for (int c = 0; c < RL_OBS_COMPS; c++) {
-                fprintf(out, "    \"%s%s\",\n", base, RL_OBS_COMP_[c]);
+            for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
+                fprintf(out, "    \"%s%s\",\n", base,
+                        rl_observe_comp_(m->observes[i], c));
             }
         }
         fputs("};\n\n", out);
@@ -892,7 +941,7 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
               "[KFLRL_OBS_TOTAL] = {\n", out);
         for (int i = 0; i < m->n_observes; i++) {
             uint16_t md = rl_observe_mode_(m->observes[i]);
-            for (int c = 0; c < RL_OBS_COMPS; c++) {
+            for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
                 fprintf(out, "    %u,\n", (unsigned)md);
             }
         }
@@ -1094,6 +1143,19 @@ static int rl_emit_params_(FILE *out, const RlModel *m,
     if (kflc_emit_expr(out, m->control_dt->expr, arg_ctx, diag)) return 1;
     fputs(");\n}\n\n", out);
 
+    /* The subdivision of a control period. Emitted as an accessor
+     * beside the horizon, for the horizon's reason: it is a declared
+     * expression, and create is where a declared value is read and
+     * checked once. */
+    fputs("static uint32_t kflrl_substeps_(void)\n{\n    return (uint32_t)(",
+          out);
+    if (m->substeps && m->substeps->expr) {
+        if (kflc_emit_expr(out, m->substeps->expr, arg_ctx, diag)) return 1;
+    } else {
+        fputs("1", out);
+    }
+    fputs(");\n}\n\n", out);
+
     fputs("static uint32_t kflrl_horizon_(void)\n{\n    return (uint32_t)(",
           out);
     if (m->horizon && m->horizon->expr) {
@@ -1170,11 +1232,12 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
           "K26RngKey _kfl_key,\n"
           "                              uint32_t _kfl_envi, "
           "double *_kfl_wscal,\n"
-          "                              double *_kfl_dr0)\n"
+          "                              double *_kfl_dr0,\n"
+          "                              K26AstroVehicle **_kfl_veh)\n"
           "{\n"
           "    const uint32_t _kfl_ep = 0;\n"
           "    (void)_kfl_key; (void)_kfl_envi; (void)_kfl_ep; "
-          "(void)_kfl_wscal; (void)_kfl_dr0;\n", out);
+          "(void)_kfl_wscal; (void)_kfl_dr0; (void)_kfl_veh;\n", out);
 
     /* Known-body index locals, the batch emitter's convention, so the
      * shared statement emitter resolves parent/observe targets. A
@@ -1232,6 +1295,7 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
     kfl_emit_stmt_reset_scopes(arena, KFLT_VOID);
 
     int body_i = 0;
+    int veh_i  = 0;
     for (const KflcNode *s = m->world->children; s; s = s->next) {
         switch (s->kind) {
         case KFLN_STMT_EPISODE:
@@ -1326,9 +1390,45 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                 "        _kfl_body_%s_idx = "
                 "k26astro_world_add_body(world, _kfl_b);\n"
                 "        if (_kfl_body_%s_idx < 0) return -1;\n"
-                "        kflrl_body_idx_[%d] = _kfl_body_%s_idx;\n"
-                "    }\n",
+                "        kflrl_body_idx_[%d] = _kfl_body_%s_idx;\n",
                 s->name, s->name, body_i, s->name);
+            if (asmb) {
+                /* The vehicle carries the derived inertia tensor and
+                 * the centre-of-mass offset, and binds the body the
+                 * world now owns. The world's registry is
+                 * non-owning, so the handle owns the vehicle and
+                 * destroys it; this is the one place that knows both
+                 * when a world appears and when it goes. */
+                fprintf(out,
+                "        K26AstroVehicle *_kfl_v = k26astro_vehicle_new();\n"
+                "        if (!_kfl_v) return -1;\n"
+                "        k26astro_vehicle_set_dry_mass(_kfl_v, %.17g);\n"
+                "        k26astro_vehicle_set_com_offset(_kfl_v, "
+                "%.17g, %.17g, %.17g);\n",
+                        asmb->mass, asmb->com[0], asmb->com[1],
+                        asmb->com[2]);
+                fprintf(out,
+                "        K26M3 _kfl_I;\n"
+                "        _kfl_I.m[0][0] = %.17g; _kfl_I.m[0][1] = %.17g; "
+                "_kfl_I.m[0][2] = %.17g;\n"
+                "        _kfl_I.m[1][0] = %.17g; _kfl_I.m[1][1] = %.17g; "
+                "_kfl_I.m[1][2] = %.17g;\n"
+                "        _kfl_I.m[2][0] = %.17g; _kfl_I.m[2][1] = %.17g; "
+                "_kfl_I.m[2][2] = %.17g;\n"
+                "        k26astro_vehicle_set_inertia_full(_kfl_v, _kfl_I);\n",
+                        asmb->inertia[0], asmb->inertia[3], asmb->inertia[4],
+                        asmb->inertia[3], asmb->inertia[1], asmb->inertia[5],
+                        asmb->inertia[4], asmb->inertia[5], asmb->inertia[2]);
+                fprintf(out,
+                "        k26astro_vehicle_bind_body(_kfl_v, "
+                "k26astro_world_body_at(world, _kfl_body_%s_idx));\n"
+                "        (void)k26astro_world_register_vehicle(world, "
+                "_kfl_v);\n"
+                "        if (_kfl_veh) _kfl_veh[%d] = _kfl_v;\n",
+                        s->name, veh_i);
+                veh_i++;
+            }
+            fputs("    }\n", out);
             kflc_arena_release(asm_a);
             body_i++;
             continue;
@@ -1421,7 +1521,8 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
  * channels each. The range channel is the magnitude of the relative
  * position vector between the corrected target position and the
  * observer, in metres. */
-static void rl_emit_observe_(FILE *out, const RlModel *m)
+static int rl_emit_observe_(FILE *out, const RlModel *m,
+                            KflcDiag *diag)
 {
     fputs("static void kflrl_observe_(K26AstroWorld *world, "
           "double *out_v)\n"
@@ -1429,6 +1530,43 @@ static void rl_emit_observe_(FILE *out, const RlModel *m)
           "    (void)world; (void)out_v;\n", out);
     for (int i = 0; i < m->n_observes; i++) {
         const KflcNode *s = m->observes[i];
+        int off = rl_obs_offset_(m->observes, i);
+        if (rl_observe_is_attitude_(s)) {
+            /* A body reporting itself: the orientation and the rate
+             * as they stand after the advance, with no observer, no
+             * light-time correction and no aberration to apply. */
+            int tgt = rl_body_index_of_(m, s->name);
+            if (tgt < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe attitude of `%s`: no astro_body of that name "
+                    "is declared in this world", s->name);
+                return 1;
+            }
+            fprintf(out,
+                "    {\n"
+                "        const K26AstroBody *_kfl_b = "
+                "k26astro_world_body_at(world, kflrl_body_idx_[%d]);\n"
+                "        if (_kfl_b) {\n"
+                "            out_v[%d] = _kfl_b->attitude.w;\n"
+                "            out_v[%d] = _kfl_b->attitude.x;\n"
+                "            out_v[%d] = _kfl_b->attitude.y;\n"
+                "            out_v[%d] = _kfl_b->attitude.z;\n"
+                "            out_v[%d] = _kfl_b->omega.x;\n"
+                "            out_v[%d] = _kfl_b->omega.y;\n"
+                "            out_v[%d] = _kfl_b->omega.z;\n"
+                "        } else {\n"
+                "            out_v[%d] = 1.0;\n"
+                "            out_v[%d] = 0.0; out_v[%d] = 0.0; "
+                "out_v[%d] = 0.0;\n"
+                "            out_v[%d] = 0.0; out_v[%d] = 0.0; "
+                "out_v[%d] = 0.0;\n"
+                "        }\n"
+                "    }\n",
+                tgt, off, off + 1, off + 2, off + 3, off + 4, off + 5,
+                off + 6, off, off + 1, off + 2, off + 3, off + 4,
+                off + 5, off + 6);
+            continue;
+        }
         const char *observer = "_observer";
         const char *mode_kw = NULL;
         for (const KflcAttr *a = s->attrs; a; a = a->next) {
@@ -1517,11 +1655,10 @@ static void rl_emit_observe_(FILE *out, const RlModel *m)
             "        out_v[%d] = _kfl_range;\n"
             "        out_v[%d] = _kfl_rrate;\n"
             "    }\n",
-            i * RL_OBS_COMPS, i * RL_OBS_COMPS + 1,
-            i * RL_OBS_COMPS + 2, i * RL_OBS_COMPS + 3,
-            i * RL_OBS_COMPS + 4);
+            off, off + 1, off + 2, off + 3, off + 4);
     }
     fputs("}\n\n", out);
+    return 0;
 }
 
 /* ---- Statements and calls the stepping path forbids ----------------- */
@@ -1695,10 +1832,7 @@ static int rl_dotted_split_(const char *name, char *lhs, size_t lcap,
 
 static int rl_state_key_index_(const char *k)
 {
-    for (int i = 0; i < 6; i++) {
-        if (k && strcmp(k, RL_STATE_KEYS_[i]) == 0) return i;
-    }
-    return -1;
+    return kflc_body_state_key_index(k);
 }
 
 /* Record a (body, key) reference, one slot per pair, in first-mention
@@ -1729,7 +1863,8 @@ static void rl_bs_fn_name_(const RlModel *m, int slot, int set,
 {
     const RlStateRef *r = &m->bs[slot];
     snprintf(out, cap, "kflrl_bs_%s_%s_%s", set ? "set" : "get",
-             m->bodies[r->body].body->name, RL_STATE_KEYS_[r->key]);
+             m->bodies[r->body].body->name,
+             kflc_body_state_key_name(r->key));
 }
 
 /* Resolve a dotted name used inside on_step. Returns the slot, -1 when
@@ -1763,7 +1898,8 @@ static int rl_bs_resolve_(RlModel *m, const char *name, int write,
     if (ki < 0) {
         kflc_diag_errorf(diag, line,
             "on_step: `%s`: `%s` is not a body state key (expected "
-            "pos_x, pos_y, pos_z, vel_x, vel_y, or vel_z)", name, k);
+            "pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, quat_w, quat_x, "
+            "quat_y, quat_z, omega_x, omega_y, or omega_z)", name, k);
         return -2;
     }
     return rl_bs_slot_(m, bi, ki, write, line, diag);
@@ -1879,8 +2015,7 @@ static void rl_emit_state_accessors_(FILE *out, const RlModel *m)
 {
     for (int i = 0; i < m->n_bs; i++) {
         const RlStateRef *r = &m->bs[i];
-        const char *key = RL_STATE_KEYS_[r->key];
-        char axis = key[4];
+        const char *key = kflc_body_state_key_name(r->key);
         char fn[192];
 
         rl_bs_fn_name_(m, i, 0, fn, sizeof fn);
@@ -1890,13 +2025,7 @@ static void rl_emit_state_accessors_(FILE *out, const RlModel *m)
             "    K26AstroBody *b = k26astro_world_body_at(world, "
             "kflrl_body_idx_[%d]);\n"
             "    if (!b) return 0.0;\n", fn, r->body);
-        if (strncmp(key, "pos_", 4) == 0) {
-            fprintf(out,
-                "    return (double)b->pos.s%c * K26ASTRO_SECTOR_EDGE_M"
-                " + b->pos.l%c;\n", axis, axis);
-        } else {
-            fprintf(out, "    return b->vel.%c;\n", axis);
-        }
+        kflc_emit_body_state_read(out, "b->", key);
         fputs("}\n\n", out);
 
         if (!r->written) continue;
@@ -2194,6 +2323,12 @@ static void rl_emit_env_core_(FILE *out)
 "    uint64_t *seen_seeds;\n"
 "    uint32_t n_seen, cap_seen;\n"
 "    K26AstroWorld **worlds;\n"
+"    /* One vehicle slot per assembly-bearing body per environment,\n"
+"     * allocated at create and destroyed at destroy. The world holds\n"
+"     * a non-owning pointer to each, so the handle owns them: this is\n"
+"     * the one place that can, since it is the one thing that outlives\n"
+"     * a world and knows when the world goes. */\n"
+"    K26AstroVehicle **vehicles;\n"
 "    K26AstroBody *baseline;      /* n_envs * KFLRL_N_BODIES */\n"
 "    K26AstroEpoch *baseline_t;   /* n_envs */\n"
 "    uint32_t *episode;\n"
@@ -2209,6 +2344,16 @@ static void rl_emit_env_core_(FILE *out)
 "    double   *scratch;           /* KFLRL_OBS_TOTAL */\n"
 "    double    control_dt;\n"
 "    uint32_t  horizon;\n"
+"    /* The declared subdivision of a control period, and the interval\n"
+"     * each sub-advance takes. The last sub-advance of a transition\n"
+"     * takes the remainder instead, so the advanced time sums to\n"
+"     * control_dt exactly however the division rounded. */\n"
+"    uint32_t  substeps;\n"
+"    double    sub_dt;\n"
+"", out);
+    fputs(
+"", out);
+    fputs(
 "    double    act_lo[KFLRL_ACT_TOTAL ? KFLRL_ACT_TOTAL : 1];\n"
 "    double    act_hi[KFLRL_ACT_TOTAL ? KFLRL_ACT_TOTAL : 1];\n"
 "    uint32_t  act_arity[KFLRL_ACT_TOTAL ? KFLRL_ACT_TOTAL : 1];\n"
@@ -2328,6 +2473,8 @@ static void rl_emit_env_core_(FILE *out)
 "    total += kflrl_tlv_(&p, K26RL_TAG_N_ENVS, 4, v);\n"
 "    kflrl_put_u64_(v, kflrl_f64_bits_(h->control_dt));\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_CONTROL_DT, 8, v);\n"
+"    kflrl_put_u32_(v, h->substeps);\n"
+"    total += kflrl_tlv_(&p, K26RL_TAG_SUBSTEPS, 4, v);\n"
 "    kflrl_put_u32_(v, h->horizon);\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_HORIZON, 4, v);\n"
 "    kflrl_put_u32_(v, KFLRL_OBS_TOTAL);\n"
@@ -2421,6 +2568,24 @@ static void rl_emit_env_core_(FILE *out)
 "static void kflrl_free_handle_(K26RlEnv *h)\n"
 "{\n"
 "    if (!h) return;\n"
+"#if KFLRL_N_VEHICLES > 0\n"
+"    /* Vehicles first: a vehicle's teardown notifies its subsystems\n"
+"     * and unregisters from the world, so the world must still be\n"
+"     * there when it runs. */\n"
+"    if (h->vehicles) {\n"
+"        for (uint32_t i = 0; i < h->n_envs * KFLRL_N_VEHICLES; i++) {\n"
+"            if (h->vehicles[i]) {\n"
+"                uint32_t e = i / KFLRL_N_VEHICLES;\n"
+"                if (h->worlds && h->worlds[e]) {\n"
+"                    k26astro_world_unregister_vehicle(h->worlds[e],\n"
+"                                                      h->vehicles[i]);\n"
+"                }\n"
+"                k26astro_vehicle_destroy(h->vehicles[i]);\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    free(h->vehicles);\n"
+"#endif\n"
 "    if (h->worlds) {\n"
 "        for (uint32_t e = 0; e < h->n_envs; e++) {\n"
 "            if (h->worlds[e]) k26astro_world_destroy(h->worlds[e]);\n"
@@ -2461,6 +2626,15 @@ static void rl_emit_env_core_(FILE *out)
 "    h->rekey_ordinal = 0;\n"
 "    h->control_dt = kflrl_control_dt_();\n"
 "    h->horizon = kflrl_horizon_();\n"
+"    h->substeps = kflrl_substeps_();\n"
+"    if (h->substeps < 1u) h->substeps = 1u;\n"
+"", out);
+    fputs(
+"    h->sub_dt = h->control_dt / (double)h->substeps;\n"
+"    if (!(h->sub_dt > 0.0) || !std::isfinite(h->sub_dt)) {\n"
+"        kflrl_free_handle_(h);\n"
+"        return K26RL_E_GEOMETRY;\n"
+"    }\n"
 "    if (!(h->control_dt > 0.0) || !std::isfinite(h->control_dt)) {\n"
 "        free(h);\n"
 "        return K26RL_E_INTERNAL;\n"
@@ -2470,6 +2644,10 @@ static void rl_emit_env_core_(FILE *out)
 "    h->cap_seen = 4;\n"
 "    h->seen_seeds = (uint64_t *)malloc(h->cap_seen * sizeof(uint64_t));\n"
 "    h->worlds = (K26AstroWorld **)calloc(n_envs, sizeof(*h->worlds));\n"
+"#if KFLRL_N_VEHICLES > 0\n"
+"    h->vehicles = (K26AstroVehicle **)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_VEHICLES, sizeof(*h->vehicles));\n"
+"#endif\n"
 "    h->baseline = (K26AstroBody *)calloc(\n"
 "        (size_t)n_envs * (KFLRL_N_BODIES ? KFLRL_N_BODIES : 1),\n"
 "        sizeof(K26AstroBody));\n"
@@ -2515,7 +2693,13 @@ static void rl_emit_env_core_(FILE *out)
 "        double *dr0 = NULL;\n"
 "#endif\n"
 "        if (kflrl_build_world_(h->worlds[e], h->key, e,\n"
-"                h->wscal + (size_t)e * KFLRL_N_WSCAL, dr0) != 0) {\n"
+"                h->wscal + (size_t)e * KFLRL_N_WSCAL, dr0,\n"
+"#if KFLRL_N_VEHICLES > 0\n"
+"                h->vehicles + (size_t)e * KFLRL_N_VEHICLES\n"
+"#else\n"
+"                NULL\n"
+"#endif\n"
+"                ) != 0) {\n"
 "            kflrl_free_handle_(h);\n"
 "            return K26RL_E_INTERNAL;\n"
 "        }\n"
@@ -2543,6 +2727,8 @@ static void rl_emit_env_core_(FILE *out)
 "    }\n"
 "\n"
 "    h->spec_len = kflrl_spec_write_(NULL, h);\n"
+"", out);
+    fputs(
 "    h->spec = (uint8_t *)malloc(h->spec_len);\n"
 "    if (!h->spec) {\n"
 "        kflrl_free_handle_(h);\n"
@@ -2550,6 +2736,8 @@ static void rl_emit_env_core_(FILE *out)
 "    }\n"
 "    (void)kflrl_spec_write_(h->spec, h);\n"
 "\n"
+"", out);
+    fputs(
 "    h->at_boundary = 1;\n"
 "    h->magic = KFLRL_MAGIC;\n"
 "    *out_env = h;\n"
@@ -2739,7 +2927,46 @@ static void rl_emit_env_core_(FILE *out)
 "", out);
     fputs(
 "        kflrl_on_step_(h->worlds[e], aslice);\n"
-"        int rc = k26astro_world_step_exact(h->worlds[e], h->control_dt);\n"
+"        /* One transition is `substeps` sub-advances. Translation\n"
+"         * advances first, then attitude by the same interval with\n"
+"         * the torque held at its start, which is the splitting the\n"
+"         * attitude library documents and its gates measure.\n"
+"         *\n"
+"         * The last sub-advance takes the remainder rather than the\n"
+"         * quotient, so the simulated time a transition advances sums\n"
+"         * to control_dt exactly however the division rounded. That\n"
+"         * subtraction is exact: by the last sub-advance at least\n"
+"         * half the period has been advanced, so the two operands lie\n"
+"         * within a factor of two of each other and the difference is\n"
+"         * representable.\n"
+"         */\n"
+"        int rc = 0;\n"
+"        uint16_t att_reason = 0;\n"
+"        double advanced = 0.0;\n"
+"        for (uint32_t sub = 0; sub < h->substeps; sub++) {\n"
+"            double step_dt = (sub + 1u == h->substeps)\n"
+"                           ? (h->control_dt - advanced)\n"
+"                           : h->sub_dt;\n"
+"            rc = k26astro_world_step_exact(h->worlds[e], step_dt);\n"
+"            if (rc != 0) break;\n"
+"            advanced += step_dt;\n"
+"#if KFLRL_N_VEHICLES > 0\n"
+"            K26AstroAttStatus ast = k26astro_att_step_all(\n"
+"                h->vehicles + (size_t)e * KFLRL_N_VEHICLES,\n"
+"                KFLRL_N_VEHICLES, step_dt);\n"
+"            if (ast != K26ASTRO_ATT_OK) {\n"
+"                att_reason = (ast == K26ASTRO_ATT_E_DIVERGED)\n"
+"                    ? (uint16_t)K26RL_E_DIVERGED\n"
+"                    : (uint16_t)K26RL_E_ENV_INTERNAL;\n"
+"                break;\n"
+"            }\n"
+"#endif\n"
+"        }\n"
+"        if (att_reason != 0) {\n"
+"            K26RlStatus fst = kflrl_fault_(h, e, aslice, att_reason);\n"
+"            if (fst != K26RL_OK) return fst;\n"
+"            continue;\n"
+"        }\n"
 "        if (rc != 0) {\n"
 "            int code = rc < 0 ? -rc : rc;\n"
 "            if (code == K26ASTRO_RT_E_FPU_RACE) return K26RL_E_FPU_RACE;\n"
@@ -3046,6 +3273,43 @@ static void rl_emit_env_core_(FILE *out)
 "#endif\n"
 "}\n"
 "\n"
+"", out);
+    fputs(
+"extern \"C\" int32_t k26rl_env_attitudes(const K26RlEnv *h, double *out,\n"
+"                                        uint32_t capacity)\n"
+"{\n"
+"    if (!h) return -(int32_t)K26RL_E_NULL;\n"
+"    if (!kflrl_live_(h)) return -(int32_t)K26RL_E_USE_AFTER_DESTROY;\n"
+"#if KFLRL_N_BODIES <= 0\n"
+"    (void)out; (void)capacity;\n"
+"    return 0;\n"
+"#else\n"
+"    uint64_t need = (uint64_t)h->n_envs * (uint32_t)KFLRL_N_BODIES * 7u;\n"
+"    if (need > 0x7FFFFFFFu) return -(int32_t)K26RL_E_GEOMETRY;\n"
+"    if (capacity < need) return (int32_t)need;\n"
+"    if (!out) return -(int32_t)K26RL_E_NULL;\n"
+"    for (uint32_t e = 0; e < h->n_envs; e++) {\n"
+"        K26AstroWorld *w = h->worlds[e];\n"
+"        for (uint32_t b = 0; b < (uint32_t)KFLRL_N_BODIES; b++) {\n"
+"            const K26AstroBody *bd =\n"
+"                k26astro_world_body_at(w, kflrl_body_idx_[b]);\n"
+"            double *o = out + ((size_t)e * (uint32_t)KFLRL_N_BODIES + b) * 7;\n"
+"            if (!bd) {\n"
+"                /* No body, no orientation: the identity, which is\n"
+"                 * what an untracked attitude holds. */\n"
+"                o[0] = 1.0; o[1] = o[2] = o[3] = 0.0;\n"
+"                o[4] = o[5] = o[6] = 0.0;\n"
+"                continue;\n"
+"            }\n"
+"            o[0] = bd->attitude.w; o[1] = bd->attitude.x;\n"
+"            o[2] = bd->attitude.y; o[3] = bd->attitude.z;\n"
+"            o[4] = bd->omega.x; o[5] = bd->omega.y; o[6] = bd->omega.z;\n"
+"        }\n"
+"    }\n"
+"    return (int32_t)need;\n"
+"#endif\n"
+"}\n"
+"\n"
 "extern \"C\" void k26rl_env_destroy(K26RlEnv *h)\n"
 "{\n"
 "    if (!h || !kflrl_live_(h)) return;\n"
@@ -3333,7 +3597,7 @@ static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
         kflc_arena_release(arena);
         return 1;
     }
-    rl_emit_observe_(out, &m);
+    if (rl_emit_observe_(out, &m, diag)) return 1;
     if (rl_emit_on_step_(out, &m, form, arena, user_fn_arr, n_user_fns,
                          diag) ||
         rl_emit_objective_(out, &m, form, arena, user_fn_arr, n_user_fns,

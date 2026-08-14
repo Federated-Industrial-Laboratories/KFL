@@ -62,7 +62,8 @@ static const char *const INCLUDE_DIRS[] = {
     "../libk26astro_rt/include",   "../libk26astro_body/include",
     "../libk26astro_core/include", "../libk26astro_grav/include",
     "../libk26astro_conics/include", "../libk26astro_ephem/include",
-    "../libk26astro_vehicle/include", "../libk26astro_atmos/include",
+    "../libk26astro_vehicle/include", "../libk26astro_att/include",
+    "../libk26astro_atmos/include",
     "../libk26tick/include",       "../libk26compute/include",
     "../libk26m3d/include",        "../libk26rl/include",
     "../libk26rng/include",        NULL
@@ -72,6 +73,7 @@ static const char *const LINK_LIBS[] = {
     "../libk26rl/libk26rl.a",
     "../libk26rng/libk26rng.a",
     "../libk26astro_rt/libk26astro_rt.a",
+    "../libk26astro_att/libk26astro_att.a",
     "../libk26astro_vehicle/libk26astro_vehicle.a",
     "../libk26astro_atmos/libk26astro_atmos.a",
     "../libk26astro_grav/libk26astro_grav.a",
@@ -89,6 +91,7 @@ static const char *const LINK_LIBS[] = {
  * below produces it. */
 static const char *const FROZEN_EXPORTS =
     "k26rl_abi_version\n"
+    "k26rl_env_attitudes\n"
     "k26rl_env_bodies\n"
     "k26rl_env_create\n"
     "k26rl_env_destroy\n"

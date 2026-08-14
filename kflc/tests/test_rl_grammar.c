@@ -950,6 +950,198 @@ int main(void)
         "end\n",
         0, NULL, "error");
 
+    /* The seven attitude state keys, on the same three paths the six
+     * translation keys take: an attribute, a reset target, and a read
+     * or assignment inside on_step. */
+    expect_("attitude_keys_all",
+        "form RL_ATTK\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0"
+        " quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0"
+        " omega_x=0.0 omega_y=0.0 omega_z=0.05\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "        reset craft.omega_z uniform(-0.1, 0.1)\n"
+        "        reset craft.quat_w normal(1.0, 0.0)\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    on_step\n"
+        "        craft.omega_x = a * 0.01\n"
+        "        craft.omega_y = craft.omega_x\n"
+        "        craft.quat_z = craft.quat_z + 0.0\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    /* A key that looks like one of them is still refused, and the
+     * diagnostic names the whole set. */
+    expect_("attitude_key_unknown",
+        STATE_WORLD("", "        craft.quat_v = a\n", "0.0"),
+        1, "is not a body state key", NULL);
+
+    expect_("attitude_key_outside_on_step",
+        "form RL_ATTO\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    craft.omega_z = 0.5\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, NULL, NULL);
+
+    expect_("attitude_reset_unknown_key",
+        "form RL_ATTR\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "        reset craft.spin_z uniform(-0.1, 0.1)\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "unknown state key", NULL);
+
+    /* The attitude observe form publishes seven channels under the
+     * names the emitter and the checker both know, and they are
+     * readable in the objective like any other channel. */
+    expect_("attitude_observe",
+        "form RL_ATTOBS\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0 omega_z=0.05\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    observe attitude of craft as att\n"
+        "    objective\n"
+        "        reward att_omega_z + att_quat_w * 0.0 + trk_range * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    /* A channel the attitude form does not publish is still refused,
+     * so the two suffix sets do not leak into each other. */
+    expect_("attitude_observe_wrong_channel",
+        "form RL_ATTOBSW\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe attitude of craft as att\n"
+        "    objective\n"
+        "        reward att_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "unknown name `att_range`", NULL);
+
+    expect_("attitude_observe_unknown_body",
+        "form RL_ATTOBSB\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe attitude of ghost as att\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, NULL, NULL);
+
+    /* The subdivision: accepted as a whole number, refused otherwise,
+     * and the diagnostic says what it evaluates to. */
+    expect_("substeps_ok",
+        "form RL_SUBOK\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "        substeps 8\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    expect_("substeps_fractional",
+        "form RL_SUBF\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "        substeps 2.5\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "whole number of at least 1", NULL);
+
+    expect_("substeps_zero",
+        "form RL_SUBZ\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 1.0\n"
+        "        horizon 4\n"
+        "        substeps 0\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "whole number of at least 1", NULL);
+
     /* The range-rate component is a readable channel like the four
      * beside it. */
     expect_("chan_range_rate",

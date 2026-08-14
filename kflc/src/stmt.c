@@ -487,14 +487,14 @@ static const KflcAttr *stmt_find_attr_(const KflcNode *n, const char *key)
     return NULL;
 }
 
-/* Scalar state keys accepted on an episode reset line. The same six
- * keys are accepted as astro_body attributes (parsed generically
- * there; the emission pass maps them). */
+/* Scalar state keys accepted on an episode reset line. The same keys
+ * are accepted as astro_body attributes (parsed generically there;
+ * the emission pass maps them). Six are translation; the other seven
+ * are the body-to-world quaternion's components and the body-frame
+ * angular velocity. */
 static int is_reset_state_key_(const char *s)
 {
-    return strcmp(s, "pos_x") == 0 || strcmp(s, "pos_y") == 0 ||
-           strcmp(s, "pos_z") == 0 || strcmp(s, "vel_x") == 0 ||
-           strcmp(s, "vel_y") == 0 || strcmp(s, "vel_z") == 0;
+    return kflc_body_state_key_index(s) >= 0;
 }
 
 /* Returns 1 when `e` is a well-formed distribution call:
@@ -558,14 +558,15 @@ static KflcNode *parse_episode_(Lexer *L, Token *cur,
         if (cur->kind != T_IDENT || !cur->str) {
             kflc_diag_errorf(diag, cur->line,
                 "episode: expected a keyword line (control_dt, horizon, "
-                "`terminated when`, reset, or end)");
+                "substeps, `terminated when`, reset, or end)");
             *had_error = 1;
             rl_drain_line_(L, cur, arena, had_error);
             continue;
         }
 
         if (is_ident_named(cur, "control_dt") ||
-            is_ident_named(cur, "horizon"))
+            is_ident_named(cur, "horizon") ||
+            is_ident_named(cur, "substeps"))
         {
             const char *key = cur->str;
             int lineK = cur->line;
@@ -659,7 +660,8 @@ static KflcNode *parse_episode_(Lexer *L, Token *cur,
             if (!is_reset_state_key_(key)) {
                 kflc_diag_errorf(diag, lineK,
                     "episode reset: unknown state key `%s` (expected pos_x, "
-                    "pos_y, pos_z, vel_x, vel_y, or vel_z)", key);
+                    "pos_y, pos_z, vel_x, vel_y, vel_z, quat_w, quat_x, "
+                    "quat_y, quat_z, omega_x, omega_y, or omega_z)", key);
                 *had_error = 1;
                 continue;
             }
@@ -1464,7 +1466,33 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         }
         char *target_ident = cur->str;
         advance(L, cur, had_error);
-        if (!is_ident_named(cur, "from")) {
+        /* `observe attitude of <body> as <name>` publishes a body's
+         * own orientation and rate, rather than a line of sight from
+         * one body to another. It is spelled as a distinct form
+         * because it is one: there is no observer and no target, only
+         * a body reporting itself. A body named `attitude` cannot be
+         * observed by the ordinary form, which is diagnosed here
+         * rather than silently taking the other branch. */
+        int attitude_form = 0;
+        if (strcmp(target_ident, "attitude") == 0 &&
+            is_ident_named(cur, "of"))
+        {
+            advance(L, cur, had_error);
+            if (cur->kind != T_IDENT) {
+                kflc_diag_errorf(diag, line0,
+                    "observe attitude of: expected a body name");
+                *had_error = 1;
+                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
+                if (at_nl(cur)) advance(L, cur, had_error);
+                return NULL;
+            }
+            /* The cursor stays on the body name, where the ordinary
+             * form leaves it on the observer: the trailing-clause
+             * scan below takes the remainder of the line from there. */
+            target_ident   = cur->str;
+            attitude_form  = 1;
+        }
+        if (!attitude_form && !is_ident_named(cur, "from")) {
             kflc_diag_errorf(diag, line0,
                 "observe %s: expected `from` keyword", target_ident);
             *had_error = 1;
@@ -1472,16 +1500,20 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             if (at_nl(cur)) advance(L, cur, had_error);
             return NULL;
         }
-        advance(L, cur, had_error);
-        if (cur->kind != T_IDENT) {
-            kflc_diag_errorf(diag, line0,
-                "observe %s from: expected observer ident", target_ident);
-            *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            return NULL;
+        char *observer_ident = target_ident;
+        if (!attitude_form) {
+            advance(L, cur, had_error);
+            if (cur->kind != T_IDENT) {
+                kflc_diag_errorf(diag, line0,
+                    "observe %s from: expected observer ident",
+                    target_ident);
+                *had_error = 1;
+                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
+                if (at_nl(cur)) advance(L, cur, had_error);
+                return NULL;
+            }
+            observer_ident = cur->str;
         }
-        char *observer_ident = cur->str;
         /* Capture rest of line for trailing named-args. */
         char *raw = take_line_remainder(L, arena);
         advance(L, cur, had_error);
@@ -1493,6 +1525,13 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         memset(&ov, 0, sizeof ov);
         ov.kind = KFLV_IDENT; ov.u.s = observer_ident;
         stmt_append_attr(arena, n, "observer", ov, line0);
+        if (attitude_form) {
+            KflcValue kv;
+            memset(&kv, 0, sizeof kv);
+            kv.kind = KFLV_IDENT;
+            kv.u.s  = kflc_arena_strdup(arena, "1");
+            stmt_append_attr(arena, n, "attitude", kv, line0);
+        }
 
         /* Parse trailing `key=value` pairs (whitespace-separated).
          * Each value lexes as an identifier (KFLV_IDENT). A trailing
@@ -2515,25 +2554,13 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
                             "k26astro_world_find_body(world, \"%s\");\n",
                             val);
                 }
-            } else if ((strncmp(a->name, "pos_", 4) == 0 ||
-                        strncmp(a->name, "vel_", 4) == 0) &&
-                       (a->name[4] == 'x' || a->name[4] == 'y' ||
-                        a->name[4] == 'z') && a->name[5] == '\0') {
-                /* The six scalar state keys map onto the compound
-                 * position and velocity fields: metres and metres per
-                 * second in the world frame. A position component
-                 * lands in the local offset with its sector index
-                 * zeroed, then re-normalises, which is exactly the
-                 * pos_from_m construction applied per component. */
-                char axis = a->name[4];
-                emit_indent(out, indent + 4);
-                if (a->name[0] == 'p') {
-                    fprintf(out, "_kfl_b.pos.s%c = 0; _kfl_b.pos.l%c = "
-                            "(%s); k26astro_pos_normalise(&_kfl_b.pos);\n",
-                            axis, axis, val);
-                } else {
-                    fprintf(out, "_kfl_b.vel.%c = (%s);\n", axis, val);
-                }
+            } else if (kflc_body_state_key_index(a->name) >= 0) {
+                /* The scalar state keys map onto compound fields, so
+                 * they take the shared write rather than the generic
+                 * passthrough below; every emitter that touches body
+                 * state uses that one emission. */
+                kflc_emit_body_state_write(out, indent + 4, "_kfl_b.",
+                                           a->name, val);
             } else {
                 emit_indent(out, indent + 4);
                 fprintf(out, "_kfl_b.%s = (%s);\n", a->name, val);

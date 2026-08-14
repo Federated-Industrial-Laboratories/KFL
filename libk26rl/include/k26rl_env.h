@@ -51,9 +51,9 @@ extern "C" {
 
 /* Major in the high 16 bits, minor in the low 16. Minor 1 adds
  * k26rl_env_tap, minor 2 adds k26rl_env_bodies, minor 3 adds the two
- * assembly tags; a consumer checks major equality and minor
- * at-least. */
-#define K26RL_ABI_VERSION ((uint32_t)0x00010003u)
+ * assembly tags, minor 4 adds k26rl_env_attitudes and the subdivision
+ * tag; a consumer checks major equality and minor at-least. */
+#define K26RL_ABI_VERSION ((uint32_t)0x00010004u)
 
 /* One handle owns n_envs worlds; layout is private to the artifact. */
 typedef struct K26RlEnv K26RlEnv;
@@ -132,6 +132,11 @@ typedef enum {
  * that produced it. Bodies without an assembly carry neither tag. */
 #define K26RL_TAG_ASSEMBLY_DIGEST   ((uint16_t)0x0013) /* body u32, 32 bytes */
 #define K26RL_TAG_ASSEMBLY_NAME     ((uint16_t)0x0014) /* body u32, UTF-8 name */
+/* Added at minor 4. The number of equal sub-advances a transition is
+ * divided into. It changes the physics, so it belongs to the
+ * program's identity and is published; the simulated time a
+ * transition advances is control_dt whatever it is. */
+#define K26RL_TAG_SUBSTEPS          ((uint16_t)0x0015) /* uint32, at least 1 */
 
 /* Action kinds for K26RL_TAG_ACT_KIND. */
 #define K26RL_ACT_KIND_BOX      ((uint16_t)0)
@@ -351,6 +356,43 @@ K26RlStatus  k26rl_env_tap(K26RlEnv *env, const char *name);
  * serve a case the episode ends on. */
 int32_t      k26rl_env_bodies(const K26RlEnv *env, uint32_t reference,
                               double *out, uint32_t capacity);
+
+/* Attitude of every body, env-major, seven doubles each: the
+ * body-to-world quaternion's w, x, y and z, then the body-frame
+ * angular velocity's three components in radians per second. Sizing
+ * follows k26rl_env_spec's convention, as k26rl_env_bodies does: the
+ * required element count is returned as a positive value, the buffer
+ * is written when `capacity` is at least that, nothing is written and
+ * the requirement is still returned when it is smaller, so a capacity
+ * of 0 sizes it, and an error is the negated K26RlStatus. The
+ * required count is n_envs * body_count * 7, over the same bodies in
+ * the same declaration order the body getter uses and the
+ * K26RL_TAG_BODY_NAME tags name.
+ *
+ * There is no reference argument, and the reason is the reason there
+ * is one on the body getter: a quaternion carries no sector grid and
+ * no scale, so there is no precision question to answer and nothing
+ * to be relative to. An angular velocity is in the body's own frame
+ * by definition.
+ *
+ * A pure read with the standing properties of this surface's getters:
+ * callable wherever they are and as often, allocating nothing,
+ * performing no I/O, never retaining a caller buffer, and bitwise
+ * deterministic under the same contract.
+ *
+ * After a faulted step it reports the state the fault left, which the
+ * next boundary reset discards, exactly as the body getter does and
+ * for the same reason: it reads the live worlds, while the
+ * observation getters return cached outputs the fault path leaves
+ * untouched and therefore hold the last honestly computed values. A
+ * consumer wanting the last honest attitude after a fault reads the
+ * observation channels; one wanting to see what the fault did reads
+ * this.
+ *
+ * A body that is not advanced in attitude reports the identity
+ * quaternion and a zero rate, which is what it holds. */
+int32_t      k26rl_env_attitudes(const K26RlEnv *env, double *out,
+                                 uint32_t capacity);
 
 #ifdef __cplusplus
 }

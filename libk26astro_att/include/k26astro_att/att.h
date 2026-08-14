@@ -75,9 +75,15 @@ const char *k26astro_att_status_str(K26AstroAttStatus s);
  *               rate applies.
  * @param dt     Interval, seconds; zero is accepted and does nothing.
  * @return K26ASTRO_ATT_OK, or a status describing why nothing moved.
- * @note  On success the bound body's attitude and angular velocity
- *        are updated to match the vehicle's state, so consumers that
- *        read the body see the advance. A step that produces a
+ * @note  The bound body is the state. Its orientation and rate are
+ *        loaded before the step and written back after, so anything
+ *        that writes a body, a declaration, a reset draw, or a
+ *        step-time assignment, is what the advance integrates, and
+ *        consumers that read the body see the result. With no body
+ *        bound the vehicle's own attitude state stands alone. The
+ *        orientation is normalised at the point of use, since a
+ *        quaternion is written one component at a time; one with zero
+ *        norm is reported as divergence rather than propagated. A step that produces a
  *        non-finite orientation or rate is reported as diverged and
  *        the body is left holding the last finite state, so a caller
  *        can end an episode honestly rather than publishing a value
