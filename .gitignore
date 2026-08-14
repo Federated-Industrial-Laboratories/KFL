@@ -68,3 +68,6 @@ packaging/debian/kfl-stack-aux/
 packaging/debian/kfl-stack-astro/
 packaging/debian/libk26*0/
 packaging/debian/libk26*-dev/
+
+# Python bytecode caches (python/k26rl and its gates)
+__pycache__/
