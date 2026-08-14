@@ -146,6 +146,43 @@ typedef struct {
     int             index;     /* world body index (source order) */
 } RlBody;
 
+/* Actuator descriptors, copied out of each body's assembly at model
+ * build so the emitter needs no assembly afterwards. `veh` is the
+ * vehicle slot, which is the order assembly-bearing bodies appear in;
+ * `body` is the model body index; `name` is what a program commands
+ * it by. */
+#define RL_MAX_ACT 64
+
+typedef struct {
+    int    veh, body;
+    char   name[KFLC_ASM_NAME_MAX];
+    double axis[3];
+    double spin_inertia, max_momentum, max_torque;
+    double viscous, coulomb, dead_rate;
+} RlWheel;
+
+typedef struct {
+    int    veh, body;
+    char   name[KFLC_ASM_NAME_MAX];
+    double axis[3];
+    double max_dipole;
+} RlTorquer;
+
+typedef struct {
+    int    veh, body;
+    char   name[KFLC_ASM_NAME_MAX];
+    double at[3], dir[3];
+    double max_thrust;
+} RlThruster;
+
+/* One resolved actuator command or read inside on_step. */
+typedef struct {
+    int kind;      /* 0 wheel, 1 magnetorquer, 2 thruster */
+    int index;     /* into the model's array for that kind */
+    int field;     /* 0 command, 1 momentum, 2 rate */
+    int written;
+} RlActRef;
+
 typedef struct {
     int             body;      /* index into bodies[] */
     const KflcAttr *attr;      /* the distribution-valued attribute */
@@ -196,6 +233,16 @@ typedef struct {
 
     const KflcAttr *control_dt;
     const KflcAttr *substeps;
+    RlWheel     wheels[RL_MAX_ACT];
+    int         n_wheels;
+    RlTorquer   torquers[RL_MAX_ACT];
+    int         n_torquers;
+    RlThruster  thrusters[RL_MAX_ACT];
+    int         n_thrusters;
+    double      veh_com[RL_MAX_ACT][3];
+    int         n_veh;
+    RlActRef    acts[RL_MAX_ACT];
+    int         n_acts;
     const KflcAttr *horizon;          /* or NULL */
     const KflcAttr *terminated_when;  /* or NULL */
     const KflcAttr *reward;           /* or NULL */
@@ -363,6 +410,97 @@ static int rl_body_has_assembly_(const RlModel *m, int bi)
     for (const KflcAttr *a = m->bodies[bi].body->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "assembly") == 0) return 1;
     }
+    return 0;
+}
+
+/* Copy each assembly-bearing body's actuators into the model, in
+ * vehicle order and, within a vehicle, in the order the assembly
+ * declares them. That order is the command surface's order and the
+ * emitted tables', so a program's actuators are named by the asset
+ * and indexed the same way everywhere. */
+static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
+{
+    int veh = 0;
+    for (int i = 0; i < m->n_bodies; i++) {
+        if (!rl_body_has_assembly_(m, i)) continue;
+        KflcArena *ar = kflc_arena_create();
+        if (!ar) return 1;
+        KflcAssembly *a = NULL;
+        if (kflc_assembly_for_body(m->bodies[i].body, diag->path, ar, diag,
+                                   &a) || !a) {
+            kflc_arena_release(ar);
+            return 1;
+        }
+        if (veh >= RL_MAX_ACT) {
+            kflc_diag_errorf(diag, m->bodies[i].body->line,
+                "more than %d bodies carry an assembly", RL_MAX_ACT);
+            kflc_arena_release(ar);
+            return 1;
+        }
+        for (int k = 0; k < 3; k++) m->veh_com[veh][k] = a->com[k];
+
+        for (int f = 0; f < a->n_features; f++) {
+            const KflcAsmFeature *ft = &a->features[f];
+            if (ft->kind == KFLC_FEAT_WHEEL) {
+                if (m->n_wheels >= RL_MAX_ACT) {
+                    kflc_diag_errorf(diag, ft->line,
+                        "more than %d wheels in this program", RL_MAX_ACT);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
+                RlWheel *w = &m->wheels[m->n_wheels++];
+                w->veh = veh; w->body = i;
+                snprintf(w->name, sizeof w->name, "%s", ft->name);
+                for (int k = 0; k < 3; k++) w->axis[k] = ft->axis[k];
+                w->spin_inertia = ft->spin_inertia;
+                w->max_momentum = ft->max_momentum;
+                w->max_torque   = ft->max_torque;
+                w->viscous      = ft->viscous;
+                w->coulomb      = ft->coulomb;
+                w->dead_rate    = ft->dead_rate;
+                if (!(w->spin_inertia > 0.0)) {
+                    kflc_diag_errorf(diag, ft->line,
+                        "wheel `%s`: `spin_inertia` must be positive, since "
+                        "the wheel's rate is its momentum divided by it",
+                        ft->name);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
+            } else if (ft->kind == KFLC_FEAT_TORQUER) {
+                if (m->n_torquers >= RL_MAX_ACT) {
+                    kflc_diag_errorf(diag, ft->line,
+                        "more than %d magnetorquers in this program",
+                        RL_MAX_ACT);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
+                RlTorquer *q = &m->torquers[m->n_torquers++];
+                q->veh = veh; q->body = i;
+                snprintf(q->name, sizeof q->name, "%s", ft->name);
+                for (int k = 0; k < 3; k++) q->axis[k] = ft->axis[k];
+                q->max_dipole = ft->max_dipole;
+            } else if (ft->kind == KFLC_FEAT_THRUSTER) {
+                if (m->n_thrusters >= RL_MAX_ACT) {
+                    kflc_diag_errorf(diag, ft->line,
+                        "more than %d thrusters in this program",
+                        RL_MAX_ACT);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
+                RlThruster *t = &m->thrusters[m->n_thrusters++];
+                t->veh = veh; t->body = i;
+                snprintf(t->name, sizeof t->name, "%s", ft->name);
+                for (int k = 0; k < 3; k++) {
+                    t->at[k]  = ft->at[k];
+                    t->dir[k] = ft->dir[k];
+                }
+                t->max_thrust = ft->thrust;
+            }
+        }
+        veh++;
+        kflc_arena_release(ar);
+    }
+    m->n_veh = veh;
     return 0;
 }
 
@@ -589,6 +727,8 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
             err = 1;
         }
     }
+
+    if (!err && rl_collect_actuators_(m, diag)) err = 1;
 
     return err;
 }
@@ -882,6 +1022,250 @@ static int rl_n_vehicles_(const RlModel *m)
     return n;
 }
 
+/* The actuator tables and the per-environment block their commands
+ * and wheel momenta live in. The tables are what the assemblies
+ * declared and never change; the block is state, one per environment,
+ * allocated at create and reset with the episode. */
+static void rl_emit_actuators_(FILE *out, const RlModel *m)
+{
+    fprintf(out,
+        "#define KFLRL_N_WHEELS %d\n"
+        "#define KFLRL_N_TORQUERS %d\n"
+        "#define KFLRL_N_THRUSTERS %d\n"
+        "#define KFLRL_N_CMD (KFLRL_N_WHEELS + KFLRL_N_TORQUERS + "
+        "KFLRL_N_THRUSTERS)\n\n",
+        m->n_wheels, m->n_torquers, m->n_thrusters);
+
+    if (m->n_wheels > 0) {
+        fputs("static const K26AstroAttWheel kflrl_wheel_desc_[] = {\n",
+              out);
+        for (int i = 0; i < m->n_wheels; i++) {
+            const RlWheel *w = &m->wheels[i];
+            fprintf(out,
+                "    { { %.17g, %.17g, %.17g }, %.17g, %.17g, %.17g, "
+                "%.17g, %.17g, %.17g, 0.0, 0.0 },\n",
+                w->axis[0], w->axis[1], w->axis[2], w->spin_inertia,
+                w->max_momentum, w->max_torque, w->viscous, w->coulomb,
+                w->dead_rate);
+        }
+        fputs("};\n", out);
+        fputs("static const int kflrl_wheel_veh_[] = {\n", out);
+        for (int i = 0; i < m->n_wheels; i++) {
+            fprintf(out, "    %d,\n", m->wheels[i].veh);
+        }
+        fputs("};\n\n", out);
+    }
+    if (m->n_torquers > 0) {
+        fputs("static const K26AstroAttTorquer kflrl_torquer_desc_[] = {\n",
+              out);
+        for (int i = 0; i < m->n_torquers; i++) {
+            const RlTorquer *q = &m->torquers[i];
+            fprintf(out, "    { { %.17g, %.17g, %.17g }, %.17g, 0.0 },\n",
+                    q->axis[0], q->axis[1], q->axis[2], q->max_dipole);
+        }
+        fputs("};\n", out);
+        fputs("static const int kflrl_torquer_veh_[] = {\n", out);
+        for (int i = 0; i < m->n_torquers; i++) {
+            fprintf(out, "    %d,\n", m->torquers[i].veh);
+        }
+        fputs("};\n\n", out);
+    }
+    if (m->n_thrusters > 0) {
+        fputs("static const K26AstroAttThruster kflrl_thruster_desc_[] "
+              "= {\n", out);
+        for (int i = 0; i < m->n_thrusters; i++) {
+            const RlThruster *t = &m->thrusters[i];
+            fprintf(out,
+                "    { { %.17g, %.17g, %.17g }, { %.17g, %.17g, %.17g }, "
+                "%.17g, 0.0 },\n",
+                t->at[0], t->at[1], t->at[2], t->dir[0], t->dir[1],
+                t->dir[2], t->max_thrust);
+        }
+        fputs("};\n", out);
+        fputs("static const int kflrl_thruster_veh_[] = {\n", out);
+        for (int i = 0; i < m->n_thrusters; i++) {
+            fprintf(out, "    %d,\n", m->thrusters[i].veh);
+        }
+        fputs("};\n\n", out);
+    }
+    if (m->n_veh > 0) {
+        fputs("static const double kflrl_veh_com_[][3] = {\n", out);
+        for (int i = 0; i < m->n_veh; i++) {
+            fprintf(out, "    { %.17g, %.17g, %.17g },\n",
+                    m->veh_com[i][0], m->veh_com[i][1], m->veh_com[i][2]);
+        }
+        fputs("};\n\n", out);
+    }
+
+    fputs(
+"/* One environment's actuator state. Commands are written by on_step\n"
+" * once per control period and held across the sub-advances, which is\n"
+" * what a zero-order hold means; wheel momentum is the only state that\n"
+" * persists between transitions, and the episode reset clears both. */\n"
+"typedef struct {\n"
+"    double wheel_h[KFLRL_N_WHEELS > 0 ? KFLRL_N_WHEELS : 1];\n"
+"    double cmd[KFLRL_N_CMD > 0 ? KFLRL_N_CMD : 1];\n"
+"} KflrlAct;\n\n", out);
+
+    /* The accessors a command or reading in on_step lowers to. */
+    for (int i = 0; i < m->n_acts; i++) {
+        const RlActRef *r = &m->acts[i];
+        int base = (r->kind == 0) ? r->index
+                 : (r->kind == 1) ? m->n_wheels + r->index
+                                  : m->n_wheels + m->n_torquers + r->index;
+        if (r->field == 0) {
+            fprintf(out,
+                "static void kflrl_act_set_%d(KflrlAct *a, double v)\n"
+                "{\n    a->cmd[%d] = v;\n}\n\n", i, base);
+        } else if (r->field == 1) {
+            fprintf(out,
+                "static double kflrl_act_get_%d(const KflrlAct *a)\n"
+                "{\n    return a->wheel_h[%d];\n}\n\n", i, r->index);
+        } else {
+            fprintf(out,
+                "static double kflrl_act_get_%d(const KflrlAct *a)\n"
+                "{\n    return a->wheel_h[%d] / %.17g;\n}\n\n",
+                i, r->index, m->wheels[r->index].spin_inertia);
+        }
+    }
+
+    if (m->n_torquers > 0) {
+        fputs(
+"/* The magnetic field a magnetorquer works against, in the body\n"
+" * frame. The chain is where this model would go wrong quietly, so\n"
+" * it is written out step by step:\n"
+" *\n"
+" *   the vehicle's position relative to the body it orbits, in the\n"
+" *   world frame; rotated into that body's own rotating frame by its\n"
+" *   rotation model, which is what makes a longitude mean anything;\n"
+" *   converted to a geodetic latitude, longitude and height on the\n"
+" *   ellipsoid, which is where the field model is defined; evaluated\n"
+" *   there, giving north, east and down in tesla; turned into east,\n"
+" *   north and up, rotated back out to the rotating frame, then to\n"
+" *   the world frame, then into the body frame by the conjugate of\n"
+" *   the vehicle's own orientation.\n"
+" *\n"
+" * The parent's rotation model is found by its NAIF id, which is how\n"
+" * a program says which body it is orbiting: the body library's table\n"
+" * is keyed by that id and by a model name of its own, and a name\n"
+" * declared here is a grammar identifier, so the id is the only key a\n"
+" * program can supply.\n"
+" *\n"
+" * A vehicle whose body names no parent, or whose parent names no\n"
+" * rotation model, gets a zero field: there is no frame in which to\n"
+" * ask the question, and a zero field is the honest answer rather\n"
+" * than a field taken in the wrong one. Such a magnetorquer produces\n"
+" * no torque, which the reading channels show. */\n"
+"static K26V3 kflrl_field_body_(K26AstroWorld *w, K26AstroVehicle *v,\n"
+"                               int veh)\n"
+"{\n"
+"    K26V3 zero = { 0.0, 0.0, 0.0 };\n"
+"    if (!w || !v) return zero;\n"
+"    const K26AstroBody *vb = k26astro_world_body_at(\n"
+"        w, kflrl_body_idx_[kflrl_vehicle_body_[veh]]);\n"
+"    if (!vb || vb->parent_body_idx < 0) return zero;\n"
+"    const K26AstroBody *pb = k26astro_world_body_at(\n"
+"        w, vb->parent_body_idx);\n"
+"    if (!pb) return zero;\n"
+"    if (pb->ephem_naif_id == 0) return zero;\n"
+"    const K26AstroIAURotation *rot =\n"
+"        k26astro_rotation_by_naif(pb->ephem_naif_id);\n"
+"    if (!rot) return zero;\n"
+"    K26AstroGravState *g = k26astro_world_grav(w);\n"
+"    if (!g) return zero;\n"
+"\n"
+"    K26V3 r_world = k26astro_pos_sub(&vb->pos, &pb->pos);\n"
+"    K26Quat fixed_from_world = k26astro_rotation_quaternion(rot, &g->t);\n"
+"    K26V3 r_fixed = k26m3d_quat_rotate_v3(fixed_from_world, r_world);\n"
+"\n"
+"    double lat = 0.0, lon = 0.0, alt = 0.0;\n"
+"    if (k26astro_att_geodetic(r_fixed, &lat, &lon, &alt) !=\n"
+"        K26ASTRO_ATT_OK) return zero;\n"
+"\n"
+"    /* The field model's epoch argument is years past J2000. */\n"
+"    double yrs = ((double)g->t.days_since_J2000 +\n"
+"                  g->t.seconds_of_day / 86400.0) / 365.25;\n"
+"    K26V3 ned = k26astro_geomag_field_v3(lat, lon, alt, yrs);\n"
+"    /* North, east, down as the model reports it, into east, north\n"
+"     * and up as the rotation below expects. The sign on the third\n"
+"     * component is the whole of the conversion. */\n"
+"    K26V3 enu = { ned.y, ned.x, -ned.z };\n"
+"    K26V3 b_fixed = k26astro_att_enu_to_ecef(enu, lat, lon);\n"
+"    K26V3 b_world = k26m3d_quat_rotate_v3(\n"
+"        k26m3d_quat_conj(fixed_from_world), b_fixed);\n"
+"    return k26m3d_quat_rotate_v3(k26m3d_quat_conj(vb->attitude),\n"
+"                                 b_world);\n"
+"}\n\n", out);
+    }
+    if (m->n_veh > 0 && m->n_torquers == 0) {
+        fputs(
+"/* No magnetorquer is declared, so no field is needed and none is\n"
+" * computed. This is what keeps the Fortran-backed field model out of\n"
+" * a program that does not ask for it. */\n"
+"static K26V3 kflrl_field_body_(K26AstroWorld *w, K26AstroVehicle *v,\n"
+"                               int veh)\n"
+"{\n"
+"    (void)w; (void)v; (void)veh;\n"
+"    return k26m3d_v3(0.0, 0.0, 0.0);\n"
+"}\n\n", out);
+    }
+    if (m->n_veh > 0) {
+        fputs(
+"/* Build one vehicle's actuator view over the environment's state.\n"
+" * The descriptors are constants and the mutable parts are copied in\n"
+" * and out around the call, so nothing here allocates and the state\n"
+" * stays where the handle can reset it. */\n"
+"static void kflrl_act_view_(KflrlAct *a, int veh,\n"
+"                            K26AstroAttWheel *wh, K26AstroAttTorquer *tq,\n"
+"                            K26AstroAttThruster *th,\n"
+"                            K26AstroAttActuators *out, int *w_map)\n"
+"{\n"
+"    int nw = 0, nq = 0, nt = 0;\n"
+"#if KFLRL_N_WHEELS > 0\n"
+"    for (int i = 0; i < KFLRL_N_WHEELS; i++) {\n"
+"        if (kflrl_wheel_veh_[i] != veh) continue;\n"
+"        wh[nw] = kflrl_wheel_desc_[i];\n"
+"        wh[nw].momentum = a->wheel_h[i];\n"
+"        wh[nw].command  = a->cmd[i];\n"
+"        w_map[nw] = i;\n"
+"        nw++;\n"
+"    }\n"
+"#endif\n"
+"#if KFLRL_N_TORQUERS > 0\n"
+"    for (int i = 0; i < KFLRL_N_TORQUERS; i++) {\n"
+"        if (kflrl_torquer_veh_[i] != veh) continue;\n"
+"        tq[nq] = kflrl_torquer_desc_[i];\n"
+"        tq[nq].command = a->cmd[KFLRL_N_WHEELS + i];\n"
+"        nq++;\n"
+"    }\n"
+"#endif\n"
+"#if KFLRL_N_THRUSTERS > 0\n"
+"    for (int i = 0; i < KFLRL_N_THRUSTERS; i++) {\n"
+"        if (kflrl_thruster_veh_[i] != veh) continue;\n"
+"        th[nt] = kflrl_thruster_desc_[i];\n"
+"        th[nt].command =\n"
+"            a->cmd[KFLRL_N_WHEELS + KFLRL_N_TORQUERS + i];\n"
+"        nt++;\n"
+"    }\n"
+"#endif\n"
+"    out->wheels = wh; out->n_wheels = nw;\n"
+"    out->torquers = tq; out->n_torquers = nq;\n"
+"    out->thrusters = th; out->n_thrusters = nt;\n"
+"    out->com = k26m3d_v3(kflrl_veh_com_[veh][0], kflrl_veh_com_[veh][1],\n"
+"                         kflrl_veh_com_[veh][2]);\n"
+"}\n\n"
+"/* Copy the wheel momenta back, which is the only part of the view\n"
+" * that is state rather than description. */\n"
+"static void kflrl_act_store_(KflrlAct *a, const K26AstroAttActuators *v,\n"
+"                             const int *w_map)\n"
+"{\n"
+"    for (int i = 0; i < v->n_wheels; i++) {\n"
+"        a->wheel_h[w_map[i]] = v->wheels[i].momentum;\n"
+"    }\n"
+"}\n\n", out);
+    }
+}
+
 static int rl_emit_prologue_(FILE *out, const RlModel *m,
                              const KflcNode *form, KflcDiag *diag)
 {
@@ -903,10 +1287,19 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         "#include <k26astro_rt/world_rng.h>\n"
         "#include <k26astro_grav/grav.h>\n"
         "#include <k26astro_grav/ias15.h>\n"
+        "#include <k26astro_grav/perturb.h>\n"
         "#include <k26astro_body/body.h>\n"
         "#include <k26astro_core/pos.h>\n"
         "#include <k26astro_vehicle/vehicle.h>\n"
-        "#include <k26astro_att/att.h>\n"
+        "#include <k26astro_att/att.h>\n", out);
+    if (m->n_torquers > 0) {
+        /* Only a program that declares a magnetorquer pulls in the
+         * field model, which is Fortran-backed: the dependency is a
+         * consequence of a declaration and not of the tier existing. */
+        fputs("#include <k26astro_geomag/geomag.h>\n"
+              "#include <k26astro_body/rotation_model.h>\n", out);
+    }
+    fputs(
         "#include \"k26rl_env.h\"\n"
         "#include \"k26rl_episode.h\"\n"
         "#include \"k26rl_tap.h\"\n"
@@ -1889,6 +2282,130 @@ static int rl_state_key_index_(const char *k)
 
 /* Record a (body, key) reference, one slot per pair, in first-mention
  * order. Returns the slot or -2 when the model's table is full. */
+/* Split a three-part dotted name. Returns 1 when the name has
+ * exactly three identifier parts. The two-part splitter beside this
+ * one refuses those, so the two resolvers never see each other's
+ * shapes. */
+static int rl_dotted_split3_(const char *name, char *a, size_t acap,
+                             char *b, size_t bcap, char *c, size_t ccap)
+{
+    if (!name) return 0;
+    const char *d1 = strchr(name, '.');
+    if (!d1 || d1 == name) return 0;
+    const char *d2 = strchr(d1 + 1, '.');
+    if (!d2 || d2 == d1 + 1 || d2[1] == '\0') return 0;
+    if (strchr(d2 + 1, '.')) return 0;
+    size_t la = (size_t)(d1 - name), lb = (size_t)(d2 - d1 - 1);
+    if (la + 1 > acap || lb + 1 > bcap || strlen(d2 + 1) + 1 > ccap) return 0;
+    memcpy(a, name, la); a[la] = '\0';
+    memcpy(b, d1 + 1, lb); b[lb] = '\0';
+    snprintf(c, ccap, "%s", d2 + 1);
+    return 1;
+}
+
+/* Resolve `<body>.<component>.<field>` to an actuator slot. Returns
+ * the slot, -1 when the name is not a three-part one, and -2 when it
+ * is but is refused, with the diagnostic already raised. The refusals
+ * mirror the body-state form's: an unknown body, a body with no
+ * assembly, an unknown component, an unknown field for that kind, and
+ * a write to a read-only field. */
+static int rl_act_resolve_(RlModel *m, const char *name, int write,
+                           int line, KflcDiag *diag)
+{
+    char bn[128], cn[KFLC_ASM_NAME_MAX], fn[64];
+    if (!rl_dotted_split3_(name, bn, sizeof bn, cn, sizeof cn,
+                           fn, sizeof fn)) {
+        return -1;
+    }
+    int bi = rl_body_index_of_(m, bn);
+    if (bi < 0) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s`: no astro_body named `%s` is declared in this "
+            "world", name, bn);
+        return -2;
+    }
+    if (!rl_body_has_assembly_(m, bi)) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s`: `%s` declares no `assembly=`, so it has no "
+            "components to command", name, bn);
+        return -2;
+    }
+    int kind = -1, idx = -1;
+    for (int i = 0; i < m->n_wheels; i++) {
+        if (m->wheels[i].body == bi && strcmp(m->wheels[i].name, cn) == 0) {
+            kind = 0; idx = i;
+        }
+    }
+    for (int i = 0; i < m->n_torquers; i++) {
+        if (m->torquers[i].body == bi &&
+            strcmp(m->torquers[i].name, cn) == 0) { kind = 1; idx = i; }
+    }
+    for (int i = 0; i < m->n_thrusters; i++) {
+        if (m->thrusters[i].body == bi &&
+            strcmp(m->thrusters[i].name, cn) == 0) { kind = 2; idx = i; }
+    }
+    if (kind < 0) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s`: `%s` has no wheel, magnetorquer or thruster "
+            "named `%s`; the commandable names are the assembly's own",
+            name, bn, cn);
+        return -2;
+    }
+
+    int field = -1, readonly = 0;
+    if (kind == 0) {
+        if (strcmp(fn, "torque") == 0)        field = 0;
+        else if (strcmp(fn, "momentum") == 0) { field = 1; readonly = 1; }
+        else if (strcmp(fn, "rate") == 0)     { field = 2; readonly = 1; }
+        else {
+            kflc_diag_errorf(diag, line,
+                "on_step: `%s`: a wheel takes `torque` and reads "
+                "`momentum` and `rate`, not `%s`", name, fn);
+            return -2;
+        }
+    } else if (kind == 1) {
+        if (strcmp(fn, "dipole") == 0) field = 0;
+        else {
+            kflc_diag_errorf(diag, line,
+                "on_step: `%s`: a magnetorquer takes `dipole`, not `%s`",
+                name, fn);
+            return -2;
+        }
+    } else {
+        if (strcmp(fn, "throttle") == 0) field = 0;
+        else {
+            kflc_diag_errorf(diag, line,
+                "on_step: `%s`: a thruster takes `throttle`, not `%s`",
+                name, fn);
+            return -2;
+        }
+    }
+    if (write && readonly) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s`: `%s` is a reading, not a command", name, fn);
+        return -2;
+    }
+
+    for (int i = 0; i < m->n_acts; i++) {
+        if (m->acts[i].kind == kind && m->acts[i].index == idx &&
+            m->acts[i].field == field) {
+            if (write) m->acts[i].written = 1;
+            return i;
+        }
+    }
+    if (m->n_acts >= RL_MAX_ACT) {
+        kflc_diag_errorf(diag, line,
+            "on_step: more than %d distinct actuator references",
+            RL_MAX_ACT);
+        return -2;
+    }
+    m->acts[m->n_acts].kind    = kind;
+    m->acts[m->n_acts].index   = idx;
+    m->acts[m->n_acts].field   = field;
+    m->acts[m->n_acts].written = write;
+    return m->n_acts++;
+}
+
 static int rl_bs_slot_(RlModel *m, int body, int key, int write, int line,
                        KflcDiag *diag)
 {
@@ -1977,6 +2494,14 @@ static int rl_bs_rewrite_expr_(RlModel *m, KflcExpr *e, int line,
     if (!e) return 0;
     switch (e->kind) {
     case KFLE_IDENT: {
+        int aslot = rl_act_resolve_(m, e->u.ident, 0, line, diag);
+        if (aslot == -2) return 1;
+        if (aslot >= 0) {
+            char call[128];
+            snprintf(call, sizeof call, "kflrl_act_get_%d(_kfl_a)", aslot);
+            e->u.ident = kflc_arena_strdup(arena, call);
+            return 0;
+        }
         int slot = rl_bs_resolve_(m, e->u.ident, 0, line, diag);
         if (slot == -1) return 0;
         if (slot < 0) return 1;
@@ -2022,6 +2547,40 @@ static int rl_bs_rewrite_stmts_(RlModel *m, KflcNode *stmts,
     for (KflcNode *s = stmts; s; s = s->next) {
         if (s->kind == KFLN_STMT_ASSIGN && s->name &&
             strchr(s->name, '.')) {
+            int aslot = rl_act_resolve_(m, s->name, 1, s->line, diag);
+            if (aslot == -2) return 1;
+            if (aslot >= 0) {
+                if (rl_bs_rewrite_expr_(m, s->expr, s->line, arena, diag)) {
+                    return 1;
+                }
+                if (rl_reject_impure_(form, s->expr,
+                                      "on_step: an actuator command",
+                                      s->line, diag)) return 1;
+                char fn[64];
+                snprintf(fn, sizeof fn, "kflrl_act_set_%d", aslot);
+                KflcExpr *blk = (KflcExpr *)kflc_arena_alloc(arena,
+                                                             sizeof *blk);
+                memset(blk, 0, sizeof *blk);
+                blk->kind    = KFLE_IDENT;
+                blk->line    = s->line;
+                blk->u.ident = kflc_arena_strdup(arena, "_kfl_a");
+                KflcExpr **args = (KflcExpr **)kflc_arena_alloc(
+                    arena, 2 * sizeof *args);
+                args[0] = blk;
+                args[1] = s->expr;
+                KflcExpr *call = (KflcExpr *)kflc_arena_alloc(arena,
+                                                              sizeof *call);
+                memset(call, 0, sizeof *call);
+                call->kind          = KFLE_CALL;
+                call->line          = s->line;
+                call->u.call.name   = kflc_arena_strdup(arena, fn);
+                call->u.call.args   = args;
+                call->u.call.n_args = 2;
+                s->kind = KFLN_STMT_EXPR;
+                s->name = NULL;
+                s->expr = call;
+                continue;
+            }
             int slot = rl_bs_resolve_(m, s->name, 1, s->line, diag);
             if (slot < 0) return 1;
             if (rl_bs_rewrite_expr_(m, s->expr, s->line, arena, diag)) {
@@ -2124,12 +2683,15 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
             return 1;
         }
         rl_emit_state_accessors_(out, m);
+        /* After the rewrite above, which is what populates the
+         * actuator reference table this emits accessors for. */
+        rl_emit_actuators_(out, m);
 
         /* The accessors resolve as ordinary calls in this body alone:
          * they are emitted in this translation unit and named only
          * here. */
-        if (m->n_bs > 0) {
-            n_fns = n_user_fns + 2 * m->n_bs;
+        if (m->n_bs > 0 || m->n_acts > 0) {
+            n_fns = n_user_fns + 2 * m->n_bs + m->n_acts;
             fns = (KflcExprFn *)kflc_arena_alloc(
                 arena, (size_t)n_fns * sizeof *fns);
             for (int i = 0; i < n_user_fns; i++) fns[i] = user_fn_arr[i];
@@ -2145,14 +2707,38 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
                 fns[at].arity = 2;
                 at++;
             }
+            /* The actuator accessors resolve the same way: emitted in
+             * this translation unit, named only here, and reachable
+             * only from the block that was rewritten to call them. */
+            for (int i = 0; i < m->n_acts; i++) {
+                char nm[64];
+                if (m->acts[i].field == 0) {
+                    snprintf(nm, sizeof nm, "kflrl_act_set_%d", i);
+                    fns[at].arity = 2;
+                } else {
+                    snprintf(nm, sizeof nm, "kflrl_act_get_%d", i);
+                    fns[at].arity = 1;
+                }
+                fns[at].name = kflc_arena_strdup(arena, nm);
+                at++;
+            }
             n_fns = at;
         }
+    } else {
+        /* No on_step body, so nothing was rewritten and no actuator
+         * is referenced; the block is still emitted because the
+         * handle carries it and the signature below takes it either
+         * way. It comes out with the counts at zero and costs one
+         * unused pointer, which is cheaper than making every use of
+         * the type conditional on the declaration. */
+        rl_emit_actuators_(out, m);
     }
 
     fputs("static void kflrl_on_step_(K26AstroWorld *world, "
-          "const double *_kfl_act_v)\n"
+          "const double *_kfl_act_v,\n"
+          "                           KflrlAct *_kfl_a)\n"
           "{\n"
-          "    (void)world; (void)_kfl_act_v;\n", out);
+          "    (void)world; (void)_kfl_act_v; (void)_kfl_a;\n", out);
     if (m->on_step) {
         for (int i = 0; i < m->n_actions; i++) {
             fprintf(out,
@@ -2178,7 +2764,25 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
             rl_push_binding_(arena, &live, &live_n, &live_cap,
                              kflc_arena_strdup(arena, call), KFLT_DOUBLE);
         }
+        /* An actuator reading resolves the same way a body state
+         * reading does: the rewrite turned the dotted name into the
+         * accessor call's text, and that text is what the expression
+         * scope knows as a double. */
+        for (int i = 0; i < m->n_acts; i++) {
+            if (m->acts[i].field == 0) continue;
+            char call[64];
+            snprintf(call, sizeof call, "kflrl_act_get_%d(_kfl_a)", i);
+            rl_push_binding_(arena, &live, &live_n, &live_cap,
+                             kflc_arena_strdup(arena, call), KFLT_DOUBLE);
+        }
         rl_push_binding_(arena, &live, &live_n, &live_cap, "world",
+                         KFLT_OPAQUE);
+        live[live_n - 1].type_subtype = "world";
+        /* The environment's actuator block, which the rewritten
+         * commands and readings are called with. Like `world` it is a
+         * name the block never sees in source: a program writes
+         * `<body>.<component>.<field>` and the rewrite supplies this. */
+        rl_push_binding_(arena, &live, &live_n, &live_cap, "_kfl_a",
                          KFLT_OPAQUE);
         live[live_n - 1].type_subtype = "world";
 
@@ -2376,6 +2980,13 @@ static void rl_emit_env_core_(FILE *out)
     fputs(
 "/* ---- Environment handle ------------------------------------------ */\n"
 "\n"
+"/* The context a thrust perturbation is registered with: the handle\n"
+" * and which environment it speaks for. Both are fixed at create. */\n"
+"typedef struct KflrlThrustCtx {\n"
+"    struct K26RlEnv *h;\n"
+"    uint32_t         e;\n"
+"} KflrlThrustCtx;\n"
+"\n"
 "struct K26RlEnv {\n"
 "    uint32_t magic;\n"
 "    uint32_t n_envs;\n"
@@ -2391,6 +3002,10 @@ static void rl_emit_env_core_(FILE *out)
 "     * the one place that can, since it is the one thing that outlives\n"
 "     * a world and knows when the world goes. */\n"
 "    K26AstroVehicle **vehicles;\n"
+"    /* One actuator block per environment: commands written by\n"
+"     * on_step and the wheel momenta that persist between them. */\n"
+"    KflrlAct *act;\n"
+"    struct KflrlThrustCtx *thrust_ctx;\n"
 "    K26AstroBody *baseline;      /* n_envs * KFLRL_N_BODIES */\n"
 "    K26AstroEpoch *baseline_t;   /* n_envs */\n"
 "    uint32_t *episode;\n"
@@ -2444,6 +3059,15 @@ static void rl_emit_env_core_(FILE *out)
 "static void kflrl_reset_env_(K26RlEnv *h, uint32_t e, uint32_t ep)\n"
 "{\n"
 "    K26AstroWorld *w = h->worlds[e];\n"
+"#if KFLRL_N_VEHICLES > 0\n"
+"    /* Actuator state is episode state: a wheel's stored momentum and\n"
+"     * every standing command belong to the episode that produced\n"
+"     * them, so both are cleared here with the rest of the baseline.\n"
+"     * A wheel left spun up across a reset would make episode k+1 a\n"
+"     * function of episode k, which is exactly what the identity\n"
+"     * triple says it is not. */\n"
+"    memset(&h->act[e], 0, sizeof h->act[e]);\n"
+"#endif\n"
 "#if KFLRL_N_BODIES > 0\n"
 "    K26AstroBody *b0 = k26astro_world_body_at(w, 0);\n"
 "    if (b0) {\n"
@@ -2644,6 +3268,8 @@ static void rl_emit_env_core_(FILE *out)
 "        }\n"
 "    }\n"
 "    free(h->vehicles);\n"
+"    free(h->act);\n"
+"    free(h->thrust_ctx);\n"
 "#endif\n"
 "    if (h->worlds) {\n"
 "        for (uint32_t e = 0; e < h->n_envs; e++) {\n"
@@ -2670,6 +3296,55 @@ static void rl_emit_env_core_(FILE *out)
 "\n"
 "", out);
     fputs(
+"#if KFLRL_N_THRUSTERS > 0\n"
+"/* Thrust reaches translation as an acceleration on the gravity\n"
+" * state's perturbation registry, which the integrator evaluates at\n"
+" * its own stages: the thrust is integrated with everything else\n"
+" * rather than added to a finished step. The registry is additive and\n"
+" * is dispatched in registration order, which is fixed at create.\n"
+" *\n"
+" * The same declaration that gives a thruster its torque gives it its\n"
+" * force, so a program cannot have one without the other. */\n"
+"static void kflrl_thrust_perturb_(const K26AstroGravState *st,\n"
+"                                  const K26AstroGravView *vw,\n"
+"                                  K26V3 *accel, void *ctx)\n"
+"{\n"
+"    (void)st; (void)vw;\n"
+"    KflrlThrustCtx *c = (KflrlThrustCtx *)ctx;\n"
+"    if (!c || !c->h || !accel) return;\n"
+"    for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"        K26AstroVehicle *veh =\n"
+"            c->h->vehicles[(size_t)c->e * KFLRL_N_VEHICLES + vi];\n"
+"        if (!veh) continue;\n"
+"        K26AstroAttWheel wbuf[KFLRL_N_WHEELS > 0 ? KFLRL_N_WHEELS : 1];\n"
+"        K26AstroAttTorquer qbuf[KFLRL_N_TORQUERS > 0 ?\n"
+"                                KFLRL_N_TORQUERS : 1];\n"
+"        K26AstroAttThruster tbuf[KFLRL_N_THRUSTERS > 0 ?\n"
+"                                 KFLRL_N_THRUSTERS : 1];\n"
+"        int wmap[KFLRL_N_WHEELS > 0 ? KFLRL_N_WHEELS : 1];\n"
+"        K26AstroAttActuators view;\n"
+"        kflrl_act_view_(&c->h->act[c->e], vi, wbuf, qbuf, tbuf, &view,\n"
+"                        wmap);\n"
+"        K26V3 f_body;\n"
+"        if (k26astro_att_thrusters_wrench(&view, &f_body, NULL) !=\n"
+"            K26ASTRO_ATT_OK) continue;\n"
+"        if (f_body.x == 0.0 && f_body.y == 0.0 && f_body.z == 0.0) {\n"
+"            continue;\n"
+"        }\n"
+"        K26AstroBody *b = k26astro_vehicle_body(veh);\n"
+"        if (!b || !(b->mass > 0.0)) continue;\n"
+"        K26V3 f_world = k26m3d_quat_rotate_v3(b->attitude, f_body);\n"
+"        int bi = kflrl_body_idx_[kflrl_vehicle_body_[vi]];\n"
+"        if (bi < 0) continue;\n"
+"        accel[bi].x += f_world.x / b->mass;\n"
+"        accel[bi].y += f_world.y / b->mass;\n"
+"        accel[bi].z += f_world.z / b->mass;\n"
+"    }\n"
+"}\n"
+"#endif\n"
+"\n", out);
+    fputs(
+
 "extern \"C\" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,\n"
 "                                         K26RlEnv **out_env)\n"
 "{\n"
@@ -2701,13 +3376,17 @@ static void rl_emit_env_core_(FILE *out)
 "        return K26RL_E_GEOMETRY;\n"
 "    }\n"
 "    kflrl_act_params_(h->act_lo, h->act_hi, h->act_arity, h->act_kind);\n"
-"\n"
+"\n", out);
+    fputs(
 "    h->cap_seen = 4;\n"
 "    h->seen_seeds = (uint64_t *)malloc(h->cap_seen * sizeof(uint64_t));\n"
 "    h->worlds = (K26AstroWorld **)calloc(n_envs, sizeof(*h->worlds));\n"
 "#if KFLRL_N_VEHICLES > 0\n"
 "    h->vehicles = (K26AstroVehicle **)calloc(\n"
 "        (size_t)n_envs * KFLRL_N_VEHICLES, sizeof(*h->vehicles));\n"
+"    h->act = (KflrlAct *)calloc(n_envs, sizeof(*h->act));\n"
+"    h->thrust_ctx = (KflrlThrustCtx *)calloc(n_envs,\n"
+"                                             sizeof(*h->thrust_ctx));\n"
 "#endif\n"
 "    h->baseline = (K26AstroBody *)calloc(\n"
 "        (size_t)n_envs * (KFLRL_N_BODIES ? KFLRL_N_BODIES : 1),\n"
@@ -2734,7 +3413,7 @@ static void rl_emit_env_core_(FILE *out)
 "        !h->episode || !h->steps || !h->ended || !h->obs || !h->rew ||\n"
 "        !h->flags || !h->fault || !h->dr_vals || !h->wscal ||\n"
 "#if KFLRL_N_VEHICLES > 0\n"
-"        !h->vehicles ||\n"
+"        !h->vehicles || !h->act || !h->thrust_ctx ||\n"
 "#endif\n"
 "        !h->scratch) {\n"
 "        kflrl_free_handle_(h);\n"
@@ -2742,7 +3421,8 @@ static void rl_emit_env_core_(FILE *out)
 "    }\n"
 "    h->seen_seeds[0] = seed;\n"
 "    h->n_seen = 1;\n"
-"\n"
+"\n", out);
+    fputs(
 "    for (uint32_t e = 0; e < n_envs; e++) {\n"
 "        h->worlds[e] = k26astro_world_create(K26ASTRO_MODE_PORTABLE,\n"
 "                                             K26ASTRO_COORDS_SECTOR_GRID);\n"
@@ -2767,6 +3447,20 @@ static void rl_emit_env_core_(FILE *out)
 "            kflrl_free_handle_(h);\n"
 "            return K26RL_E_INTERNAL;\n"
 "        }\n"
+"#if KFLRL_N_THRUSTERS > 0\n"
+"        /* Registered here rather than at world build because the\n"
+"         * context is the handle and this environment's index, and\n"
+"         * the handle is what owns them. Registration order is fixed\n"
+"         * by this loop. */\n"
+"        h->thrust_ctx[e].h = h;\n"
+"        h->thrust_ctx[e].e = e;\n"
+"        if (k26astro_grav_register_perturb(\n"
+"                k26astro_world_grav(h->worlds[e]),\n"
+"                kflrl_thrust_perturb_, &h->thrust_ctx[e]) != 0) {\n"
+"            kflrl_free_handle_(h);\n"
+"            return K26RL_E_INTERNAL;\n"
+"        }\n"
+"#endif\n"
 "#if KFLRL_N_BODIES > 0\n"
 "        {\n"
 "            K26AstroBody *b0 = k26astro_world_body_at(h->worlds[e], 0);\n"
@@ -2988,7 +3682,7 @@ static void rl_emit_env_core_(FILE *out)
 "\n"
 "", out);
     fputs(
-"        kflrl_on_step_(h->worlds[e], aslice);\n"
+"        kflrl_on_step_(h->worlds[e], aslice, &h->act[e]);\n"
 "        /* One transition is `substeps` sub-advances. Translation\n"
 "         * advances first, then attitude by the same interval with\n"
 "         * the torque held at its start, which is the splitting the\n"
@@ -3035,9 +3729,34 @@ static void rl_emit_env_core_(FILE *out)
 "                (void)k26astro_att_gravity_gradient(veh, rw, pb->gm,\n"
 "                                                    &gg[vi]);\n"
 "            }\n"
-"            K26AstroAttStatus ast = k26astro_att_step_all(\n"
-"                h->vehicles + (size_t)e * KFLRL_N_VEHICLES,\n"
-"                KFLRL_N_VEHICLES, gg, step_dt);\n"
+"            /* Each vehicle advances with its own actuators, its own\n"
+"             * gravity-gradient torque, and the local magnetic field\n"
+"             * a magnetorquer needs. The actuator view is built over\n"
+"             * the environment's state and the momenta are stored\n"
+"             * back, so the state lives where the reset can clear it\n"
+"             * and nothing here allocates. */\n", out);
+    fputs(
+"            K26AstroAttStatus ast = K26ASTRO_ATT_OK;\n"
+"            for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"                K26AstroVehicle *veh =\n"
+"                    h->vehicles[(size_t)e * KFLRL_N_VEHICLES + vi];\n"
+"                if (!veh) continue;\n"
+"                K26AstroAttWheel wbuf[KFLRL_N_WHEELS > 0 ?\n"
+"                                      KFLRL_N_WHEELS : 1];\n"
+"                K26AstroAttTorquer qbuf[KFLRL_N_TORQUERS > 0 ?\n"
+"                                        KFLRL_N_TORQUERS : 1];\n"
+"                K26AstroAttThruster tbuf[KFLRL_N_THRUSTERS > 0 ?\n"
+"                                         KFLRL_N_THRUSTERS : 1];\n"
+"                int wmap[KFLRL_N_WHEELS > 0 ? KFLRL_N_WHEELS : 1];\n"
+"                K26AstroAttActuators view;\n"
+"                kflrl_act_view_(&h->act[e], vi, wbuf, qbuf, tbuf,\n"
+"                                &view, wmap);\n"
+"                K26V3 bfield = kflrl_field_body_(h->worlds[e], veh, vi);\n"
+"                ast = k26astro_att_step_actuated(veh, &view, gg[vi],\n"
+"                                                 bfield, step_dt);\n"
+"                kflrl_act_store_(&h->act[e], &view, wmap);\n"
+"                if (ast != K26ASTRO_ATT_OK) break;\n"
+"            }\n"
 "            if (ast != K26ASTRO_ATT_OK) {\n"
 "                att_reason = (ast == K26ASTRO_ATT_E_DIVERGED)\n"
 "                    ? (uint16_t)K26RL_E_DIVERGED\n"

@@ -130,9 +130,139 @@ static void expect_(const char *tag, const char *src, int expect_rc,
     expect_mode_("--check", tag, src, expect_rc, expect_msg, absent_msg);
 }
 
+/* The same expectation on the checking path and on the emitting one.
+ * A refusal only the checker performs does not stop a compile, which
+ * is the defect class the mode gates below already pin; every
+ * actuator case is therefore asserted twice rather than trusted to
+ * one path. */
+static void expect_both_(const char *tag, const char *src, int expect_rc,
+                         const char *expect_msg, const char *absent_msg)
+{
+    char t[96];
+    snprintf(t, sizeof t, "%s_chk", tag);
+    expect_mode_("--check", t, src, expect_rc, expect_msg, absent_msg);
+    snprintf(t, sizeof t, "%s_emit", tag);
+    expect_mode_("--emit", t, src, expect_rc, expect_msg, absent_msg);
+}
+
+/* An assembly carrying one of each commandable component, so the
+ * refusals below can be about the name or the field rather than
+ * about the asset. */
+static void write_actuator_asset_(void)
+{
+    write_fixture_("/tmp/kflc_rl_act.k26asm",
+        "assembly grammar_act\n"
+        "    frame x_to_port\n"
+        "    provenance mass \"calibration shape, not a craft\" computed\n"
+        "    component hull\n"
+        "        mass 1000.0\n"
+        "        at 0 0 0\n"
+        "        collider box 1.0 0.5 0.5\n"
+        "    end\n"
+        "    wheel yaw\n"
+        "        axis 0.0 0.0 1.0\n"
+        "        spin_inertia 0.05\n"
+        "        max_momentum 15.0\n"
+        "        max_torque 0.20\n"
+        "    end\n"
+        "    magnetorquer m_y\n"
+        "        axis 0.0 1.0 0.0\n"
+        "        max_dipole 30.0\n"
+        "    end\n"
+        "    thruster rcs_py\n"
+        "        at 1.05 0.92 0.0\n"
+        "        dir 0.0 -1.0 0.0\n"
+        "        thrust 400.0\n"
+        "    end\n"
+        "end\n");
+}
+
+/* A world with `craft` bound to that assembly and `probe` bound to
+ * none, so the no-assembly refusal has a body to name. STEP is the
+ * on_step body and REWARD the reward expression. */
+#define ACT_WORLD(STEP, REWARD) \
+    "form RL_ACTG\n" \
+    "fn world w\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body craft assembly=\"kflc_rl_act.k26asm\" parent=earth" \
+    " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n" \
+    "    astro_body probe gm=1.0 parent=earth" \
+    " pos_x=8.0e6 vel_y=7000.0\n" \
+    "    episode\n" \
+    "        control_dt 0.5\n" \
+    "        horizon 4\n" \
+    "    end\n" \
+    "    action a box -1.0 1.0 default 0.0\n" \
+    "    on_step\n" \
+    STEP \
+    "    end\n" \
+    "    observe craft from earth mode=geometric as trk\n" \
+    "    objective\n" \
+    "        reward " REWARD "\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+/* The three-part command surface: one accepted shape per component
+ * kind and the six refusals. The positive case is what keeps the
+ * refusals from passing vacuously: a build that rejected every
+ * three-part name would fail it. */
+static void actuator_cases_(void)
+{
+    write_actuator_asset_();
+
+    expect_both_("act_ok",
+        ACT_WORLD(
+        "        craft.yaw.torque = a * 0.2\n"
+        "        craft.m_y.dipole = a * 30.0\n"
+        "        craft.rcs_py.throttle = a * 0.0 + 0.5\n"
+        "        let h: double = craft.yaw.momentum\n"
+        "        let r: double = craft.yaw.rate\n"
+        "        craft.omega_x = h * 0.0 + r * 0.0\n", "0.0"),
+        0, NULL, "error");
+
+    expect_both_("act_unknown_body",
+        ACT_WORLD("        ghost.yaw.torque = a\n", "0.0"),
+        1, "no astro_body named `ghost` is declared in this world", NULL);
+
+    expect_both_("act_no_assembly",
+        ACT_WORLD("        probe.yaw.torque = a\n", "0.0"),
+        1, "`probe` declares no `assembly=`", NULL);
+
+    expect_both_("act_unknown_component",
+        ACT_WORLD("        craft.pitch.torque = a\n", "0.0"),
+        1, "has no wheel, magnetorquer or thruster named `pitch`", NULL);
+
+    expect_both_("act_wheel_field",
+        ACT_WORLD("        craft.yaw.spin = a\n", "0.0"),
+        1, "a wheel takes `torque` and reads `momentum` and `rate`, "
+           "not `spin`", NULL);
+
+    expect_both_("act_torquer_field",
+        ACT_WORLD("        craft.m_y.torque = a\n", "0.0"),
+        1, "a magnetorquer takes `dipole`, not `torque`", NULL);
+
+    expect_both_("act_thruster_field",
+        ACT_WORLD("        craft.rcs_py.dipole = a\n", "0.0"),
+        1, "a thruster takes `throttle`, not `dipole`", NULL);
+
+    expect_both_("act_readonly",
+        ACT_WORLD("        craft.yaw.momentum = a\n", "0.0"),
+        1, "`momentum` is a reading, not a command", NULL);
+
+    /* Outside on_step: the same name in the objective is refused,
+     * because a reward read of a command surface would be a read of
+     * state the step has already moved on from. */
+    expect_both_("act_outside_on_step",
+        ACT_WORLD("        craft.yaw.torque = a\n",
+                  "craft.yaw.momentum"),
+        1, "only inside an on_step block", NULL);
+}
+
 int main(void)
 {
     write_attitude_asset_();
+    actuator_cases_();
 
     /* Positive: the full RL surface parses and checks clean. */
     expect_("full",

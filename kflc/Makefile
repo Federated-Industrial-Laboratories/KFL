@@ -93,8 +93,11 @@ $(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB)
 # action / on_step / objective / observe-as parse + check, with the
 # negative diagnostics pinned. Runs the built kflc binary over /tmp
 # fixtures (test_reserved_keywords pattern).
+# $(BIN) is a prerequisite because the actuator cases below drive the
+# emitter, so a compiler left behind by an edit would have this gate
+# measuring the previous one.
 RL_GRAMMAR_TEST = tests/test_rl_grammar
-$(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB)
+$(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Gate for the Grammar 3.2 dual-mode artifact: kflc -o on an RL
@@ -215,6 +218,21 @@ $(RL_BODIES_TEST): tests/test_rl_bodies.c tests/rl_gate_util.h \
 # Attitude through the stepping surface: the getter's geometry, the
 # advance, the published subdivision, determinism, and the
 # faulted-step contract.
+# Actuators through the stepping surface: commands reaching the
+# physics, actuator state resetting with the episode, and the split
+# that keeps the field model's Fortran runtime out of a program that
+# declares no magnetorquer.
+RL_ACTUATOR_TEST = tests/test_rl_actuators
+# $(BIN) is a prerequisite because this gate drives the compiler: what
+# it measures is the emitted artifact, so a compiler left behind by an
+# edit would have it measuring the previous emitter and reporting
+# green for code that is no longer there.
+$(RL_ACTUATOR_TEST): tests/test_rl_actuators.c tests/rl_gate_util.h \
+                     ../libk26rl/include/k26rl_env.h \
+                     ../libk26rl/libk26rl.a $(BIN)
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_ATT_TEST = tests/test_rl_attitude
 $(RL_ATT_TEST): tests/test_rl_attitude.c tests/rl_gate_util.h \
                 ../libk26rl/include/k26rl_env.h \
@@ -269,7 +287,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -288,7 +306,8 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
-	          $(RL_BODIES_TEST) $(RL_ATT_TEST); do \
+	          $(RL_BODIES_TEST) $(RL_ATT_TEST) \
+	          $(RL_ACTUATOR_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
