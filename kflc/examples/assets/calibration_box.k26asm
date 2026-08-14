@@ -1,0 +1,29 @@
+# calibration_box.k26asm - a calibration shape, not a spacecraft.
+#
+# This asset exists so the mass-property derivation can be exercised
+# against a solid whose analytic answer is known exactly, and so the
+# assembly format has a worked example in the tree. It is a uniform
+# rectangular box of 2.0 by 1.0 by 1.0 m and 1000 kg, for which the
+# closed forms give, about the centre of mass:
+#
+#   Ixx = m (hy^2 + hz^2) / 3 = 1000 (0.25 + 0.25) / 3 = 166.666... kg m^2
+#   Iyy = m (hx^2 + hz^2) / 3 = 1000 (1.00 + 0.25) / 3 = 416.666... kg m^2
+#   Izz = m (hx^2 + hy^2) / 3 = 1000 (1.00 + 0.25) / 3 = 416.666... kg m^2
+#
+# It is deliberately not a craft. An assembly describing a real
+# vehicle carries that vehicle's published properties with a
+# provenance line per property naming the document they came from;
+# nothing about a real vehicle is invented to fill a field, and an
+# asset carrying a working figure it has not checked is marked
+# unverified and does not ship in this tree.
+assembly calibration_box
+    frame x_to_port
+    provenance mass "the shape's own definition, above" computed
+    provenance inertia "derived from the geometry by the compiler" computed
+    component hull
+        mass 1000.0
+        at 0.0 0.0 0.0
+        mesh calibration_box.k26mesh
+        collider box 1.0 0.5 0.5
+    end
+end

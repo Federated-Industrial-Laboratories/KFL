@@ -33,6 +33,7 @@
 
 #include "kflc.h"
 #include "internal.h"
+#include "assembly.h"
 
 /* ---- Block-scope tracker for heap-typed lets --------------------- */
 
@@ -2446,6 +2447,21 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
      * + `<k26astro_rt/observer.h>` + `<k26astro_body/body.h>` in
      * the linking translation unit. */
     case KFLN_STMT_ASTRO_BODY: {
+        /* assembly= binds a vehicle assembly to the body: the
+         * compiler reads the asset, derives the mass properties from
+         * the geometry, and writes them here as constants, so nothing
+         * opens an asset file while a simulation runs. The binding's
+         * rules live in one place (assembly.c), because the
+         * environment emitter has its own body emission and the two
+         * must not be able to disagree. */
+        KflcAssembly *asmb = NULL;
+        KflcArena    *asm_arena = kflc_arena_create();
+        if (!asm_arena) return 1;
+        if (kflc_assembly_for_body(s, diag->path, asm_arena, diag, &asmb)) {
+            kflc_arena_release(asm_arena);
+            return 1;
+        }
+
         emit_indent(out, indent);
         fputs("{\n", out);
         emit_indent(out, indent + 4);
@@ -2454,8 +2470,36 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
         fprintf(out,
             "snprintf(_kfl_b.name, sizeof _kfl_b.name, \"%%s\", \"%s\");\n",
             s->name ? s->name : "_anon");
+        if (asmb) {
+            char hex[2 * KFLC_ASM_DIGEST + 1];
+            kflc_assembly_digest_hex(asmb->digest, hex);
+            emit_indent(out, indent + 4);
+            fprintf(out, "/* assembly `%s` from %s\n", asmb->name,
+                    asmb->path);
+            emit_indent(out, indent + 4);
+            fprintf(out, " * digest %s */\n", hex);
+            emit_indent(out, indent + 4);
+            fprintf(out, "k26astro_body_set_mass(&_kfl_b, %.17g);\n",
+                    asmb->mass);
+            /* The centre of mass and the inertia tensor are derived
+             * here and emitted as constants beside the body. The
+             * attitude path is what consumes them; they are written
+             * now so the numbers in an artifact are the asset's. */
+            emit_indent(out, indent + 4);
+            fprintf(out, "static const double _kfl_asm_com[3] = "
+                    "{ %.17g, %.17g, %.17g };\n",
+                    asmb->com[0], asmb->com[1], asmb->com[2]);
+            emit_indent(out, indent + 4);
+            fprintf(out, "static const double _kfl_asm_inertia[6] = "
+                    "{ %.17g, %.17g, %.17g, %.17g, %.17g, %.17g };\n",
+                    asmb->inertia[0], asmb->inertia[1], asmb->inertia[2],
+                    asmb->inertia[3], asmb->inertia[4], asmb->inertia[5]);
+            emit_indent(out, indent + 4);
+            fputs("(void)_kfl_asm_com; (void)_kfl_asm_inertia;\n", out);
+        }
         for (const KflcAttr *a = s->attrs; a; a = a->next) {
             if (!a->name) continue;
+            if (strcmp(a->name, "assembly") == 0) continue;
             const char *val = (a->value.kind == KFLV_IDENT && a->value.u.s)
                               ? a->value.u.s : "0";
             /* parent= is a name string → resolve at runtime via find_body
@@ -2509,6 +2553,7 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
         }
         emit_indent(out, indent);
         fputs("}\n", out);
+        kflc_arena_release(asm_arena);
         return 0;
     }
 

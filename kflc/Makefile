@@ -24,7 +24,8 @@ BIN      = bin/kflc
 LIB      = libkflc.a
 # Library objects: parser + lexer + dump + arena/diag util. Linked by
 # both the kflc binary and any embedding tool (k26form) that needs to
-# load .kfl files.
+# load .kfl files. Since the assembly reader lives here, a consumer of
+# this archive also links $(RL_LIB) for the asset digest.
 LIB_OBJS = src/util.o src/lexer.o src/parser.o src/dump.o src/serialize.o \
            src/expr.o src/stmt.o src/check.o src/opaque.o \
            src/assembly.o \
@@ -43,43 +44,43 @@ all: $(BIN) $(LIB)
 TEST_BIN = tests/round_trip
 TEST_EXAMPLES = $(sort $(wildcard examples/*.kfl))
 
-$(TEST_BIN): tests/round_trip.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+$(TEST_BIN): tests/round_trip.c $(LIB) $(RL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 MANIFEST_TEST = tests/test_manifest_loader
-$(MANIFEST_TEST): tests/test_manifest_loader.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+$(MANIFEST_TEST): tests/test_manifest_loader.c $(LIB) $(RL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Emit-side test for parse-time body bindings. Compiles a fixture
 # via `kflc --emit` and greps the output for `_kfl_body_<NAME>_idx`
 # declarations + idx-deref uses, and the absence of runtime
 # `find_body` calls for known names.
 BODY_BINDING_TEST = tests/test_body_binding_emit
-$(BODY_BINDING_TEST): tests/test_body_binding_emit.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+$(BODY_BINDING_TEST): tests/test_body_binding_emit.c $(LIB) $(RL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Emit-side test for the KFL memory model. Verifies form-level
 # arena declarations + init factory + fn-body allocator binding +
 # conditional kflc_runtime.h include + slim include surface for
 # forms that do not use the memory keywords.
 W8_ARENA_TEST = tests/test_w8_arena_emit
-$(W8_ARENA_TEST): tests/test_w8_arena_emit.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+$(W8_ARENA_TEST): tests/test_w8_arena_emit.c $(LIB) $(RL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Gate for compile-time enforcement of own / borrow / ptr / arena
 # qualifiers. Writes small .kfl fixtures to /tmp, runs the built
 # kflc binary against them, asserts that positive cases emit the
 # expected C++ shape and negative cases trigger the right diag error.
 MEMORY_QUAL_TEST = tests/test_memory_qualifiers
-$(MEMORY_QUAL_TEST): tests/test_memory_qualifiers.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+$(MEMORY_QUAL_TEST): tests/test_memory_qualifiers.c $(LIB) $(RL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Gate for the reserved-keyword warning list: identifiers that will
 # become keywords in a future grammar version warn today, so authors
 # rename before the keyword lands and binds.
 RESERVED_KW_TEST = tests/test_reserved_keywords
-$(RESERVED_KW_TEST): tests/test_reserved_keywords.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+$(RESERVED_KW_TEST): tests/test_reserved_keywords.c $(LIB) $(RL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Vehicle assemblies: the format, the mass-property derivation, the
 # identity digest, and the provenance rules. Links libkflc.a for the
@@ -93,8 +94,8 @@ $(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB)
 # negative diagnostics pinned. Runs the built kflc binary over /tmp
 # fixtures (test_reserved_keywords pattern).
 RL_GRAMMAR_TEST = tests/test_rl_grammar
-$(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+$(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Gate for the Grammar 3.2 dual-mode artifact: kflc -o on an RL
 # program produces the batch executable plus the companion shared

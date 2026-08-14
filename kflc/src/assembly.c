@@ -1038,6 +1038,63 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
 #undef ASM_VEC3
 }
 
+int kflc_assembly_for_body(const KflcNode *body, const char *src_path,
+                           KflcArena *arena, KflcDiag *diag,
+                           KflcAssembly **out)
+{
+    if (out) *out = NULL;
+    if (!body) return 0;
+    const KflcAttr *asm_attr = NULL, *mass_attr = NULL, *gm_attr = NULL;
+    for (const KflcAttr *a = body->attrs; a; a = a->next) {
+        if (!a->name) continue;
+        if (strcmp(a->name, "assembly") == 0)  asm_attr  = a;
+        else if (strcmp(a->name, "mass") == 0) mass_attr = a;
+        else if (strcmp(a->name, "gm") == 0)   gm_attr   = a;
+    }
+    if (!asm_attr) return 0;
+
+    const KflcAttr *clash = mass_attr ? mass_attr : gm_attr;
+    if (clash) {
+        kflc_diag_errorf(diag, body->line,
+            "astro_body `%s`: `%s=` on line %d and `assembly=` on line %d "
+            "both set the body's mass; the assembly derives it from the "
+            "geometry, so drop the other one",
+            body->name ? body->name : "_anon", clash->name, clash->line,
+            asm_attr->line);
+        return 1;
+    }
+    const char *raw = (asm_attr->value.kind == KFLV_STR ||
+                       asm_attr->value.kind == KFLV_IDENT)
+                      ? asm_attr->value.u.s : NULL;
+    char path[KFLC_ASM_PATH_MAX];
+    if (kflc_assembly_unquote(raw, path, sizeof path) || !*path) {
+        kflc_diag_errorf(diag, body->line,
+            "astro_body `%s`: `assembly=` takes a path",
+            body->name ? body->name : "_anon");
+        return 1;
+    }
+    KflcAssembly *a = kflc_assembly_load(path, src_path, asm_attr->line,
+                                         arena, diag);
+    if (!a) return 1;
+    if (out) *out = a;
+    return 0;
+}
+
+int kflc_assembly_unquote(const char *raw, char *out, size_t out_sz)
+{
+    if (!raw || !*raw || !out || out_sz == 0) return 1;
+    size_t n = strlen(raw);
+    if (n >= 2 && raw[0] == '"' && raw[n - 1] == '"') {
+        if (n - 1 > out_sz) return 1;
+        memcpy(out, raw + 1, n - 2);
+        out[n - 2] = '\0';
+        return 0;
+    }
+    if (n + 1 > out_sz) return 1;
+    memcpy(out, raw, n + 1);
+    return 0;
+}
+
 void kflc_assembly_digest_hex(const uint8_t d[KFLC_ASM_DIGEST],
                               char out[2 * KFLC_ASM_DIGEST + 1])
 {

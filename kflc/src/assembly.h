@@ -16,11 +16,11 @@
  *
  * Determinism. The derivation walks components in source order and
  * triangles in file order, and its arithmetic is addition,
- * subtraction, multiplication, and division only: no library call, no
- * square root, and nothing whose result depends on evaluation order.
- * Under the float-control flags in this directory's Makefile the
- * derived constants are therefore a function of the asset bytes
- * alone.
+ * subtraction, multiplication, division, and one square root, all of
+ * which IEEE-754 requires to be correctly rounded; nothing here
+ * depends on evaluation order or on a library approximation. Under
+ * the float-control flags in this directory's Makefile the derived
+ * constants are therefore a function of the asset bytes alone.
  */
 #ifndef KFLC_ASSEMBLY_H
 #define KFLC_ASSEMBLY_H
@@ -154,6 +154,36 @@ typedef struct {
 KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
                                  int line, KflcArena *arena,
                                  KflcDiag *diag);
+
+/**
+ * @brief Resolve the assembly an `astro_body` statement binds, if any.
+ * @param body     The KFLN_STMT_ASTRO_BODY node.
+ * @param src_path Path of the source file, for relative resolution.
+ * @param arena    Arena the result is allocated from.
+ * @param diag     Diagnostics.
+ * @param out      Receives the derived assembly, or NULL when the body
+ *                 binds none.
+ * @return 0 when the body is acceptable, 1 when it was refused.
+ * @note  This is the one place the binding's rules live, because the
+ *        batch emitter and the environment emitter each have their own
+ *        body emission and must not be able to disagree about them.
+ *        Declaring `mass=` or `gm=` beside `assembly=` is refused
+ *        here, naming both sites.
+ */
+int kflc_assembly_for_body(const KflcNode *body, const char *src_path,
+                           KflcArena *arena, KflcDiag *diag,
+                           KflcAssembly **out);
+
+/**
+ * @brief Strip the quotes an attribute value still carries.
+ * @param raw    Attribute text as the parser captured it.
+ * @param out    Receives the unquoted path.
+ * @param out_sz Capacity of out.
+ * @return 0 on success, 1 when the value is absent or does not fit.
+ * @note  Attribute values arrive as verbatim source text, so a quoted
+ *        path arrives with its quotes attached.
+ */
+int kflc_assembly_unquote(const char *raw, char *out, size_t out_sz);
 
 /**
  * @brief Render a digest as lowercase hexadecimal.

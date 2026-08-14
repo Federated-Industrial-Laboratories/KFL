@@ -50,9 +50,10 @@ extern "C" {
 #endif
 
 /* Major in the high 16 bits, minor in the low 16. Minor 1 adds
- * k26rl_env_tap, minor 2 adds k26rl_env_bodies; a consumer checks
- * major equality and minor at-least. */
-#define K26RL_ABI_VERSION ((uint32_t)0x00010002u)
+ * k26rl_env_tap, minor 2 adds k26rl_env_bodies, minor 3 adds the two
+ * assembly tags; a consumer checks major equality and minor
+ * at-least. */
+#define K26RL_ABI_VERSION ((uint32_t)0x00010003u)
 
 /* One handle owns n_envs worlds; layout is private to the artifact. */
 typedef struct K26RlEnv K26RlEnv;
@@ -125,6 +126,12 @@ typedef enum {
 /* Added at minor 2. */
 #define K26RL_TAG_OBS_CHANNEL_MODE  ((uint16_t)0x0011) /* channel u32, mode u16 */
 #define K26RL_TAG_BODY_NAME         ((uint16_t)0x0012) /* body u32, UTF-8 name */
+/* Added at minor 3. A body built from a vehicle assembly publishes
+ * the assembly's name and the digest of the asset bytes it was
+ * derived from, so a recording can be traced to the exact geometry
+ * that produced it. Bodies without an assembly carry neither tag. */
+#define K26RL_TAG_ASSEMBLY_DIGEST   ((uint16_t)0x0013) /* body u32, 32 bytes */
+#define K26RL_TAG_ASSEMBLY_NAME     ((uint16_t)0x0014) /* body u32, UTF-8 name */
 
 /* Action kinds for K26RL_TAG_ACT_KIND. */
 #define K26RL_ACT_KIND_BOX      ((uint16_t)0)

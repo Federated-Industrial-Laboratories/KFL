@@ -37,7 +37,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
+#include <limits.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* NDEBUG-immune: a gate built with release flags must still gate. */
@@ -281,6 +284,428 @@ static void expect_refused_(const char *tag, const char *file,
     free(buf);
     kflc_arena_release(arena);
     printf("  refusal %-22s OK\n", tag);
+    n_pass++;
+}
+
+/* ---- Compiler-level gates ------------------------------------------ */
+
+/* Run the built compiler and return its exit status; stderr lands in
+ * `errlog` and stdout in `outfile` (either may be NULL). */
+static int run_kflc_(const char *binary, const char *args,
+                     const char *outfile, const char *errlog)
+{
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd, "%s %s >%s 2>%s", binary, args,
+             outfile ? outfile : "/dev/null",
+             errlog ? errlog : "/dev/null");
+    int rc = system(cmd);
+    return WEXITSTATUS(rc);
+}
+
+static char *slurp_(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *b = (char *)malloc((size_t)sz + 1);
+    if (!b) { fclose(f); return NULL; }
+    size_t got = sz > 0 ? fread(b, 1, (size_t)sz, f) : 0;
+    b[got] = '\0';
+    fclose(f);
+    return b;
+}
+
+/* Pull the emitted constant line that starts with `key`. */
+static char *find_line_(const char *text, const char *key)
+{
+    const char *p = strstr(text, key);
+    if (!p) return NULL;
+    const char *e = strchr(p, '\n');
+    size_t n = e ? (size_t)(e - p) : strlen(p);
+    char *out = (char *)malloc(n + 1);
+    memcpy(out, p, n);
+    out[n] = '\0';
+    return out;
+}
+
+static void compiler_gates_(void)
+{
+    /* A program binding an assembly, written beside its asset so the
+     * relative path resolution is exercised too.
+     *
+     * The geometry is deliberately not axis-aligned and the placement
+     * is deliberately not round. An axis-aligned box at a round offset
+     * derives through arithmetic that happens to be exact, so its
+     * constants are identical whatever the compiler does with
+     * multiply-add contraction, and the optimisation-level arm below
+     * would pass without testing anything. Measured on this fixture:
+     * a compiler built with contraction enabled moves the last two
+     * digits of every moment. */
+    const double ca = cos(0.5), sa = sin(0.5);
+    const double cb = cos(0.3), sb = sin(0.3);
+    double Rz[3][3] = { { ca, -sa, 0 }, { sa, ca, 0 }, { 0, 0, 1 } };
+    double Rx[3][3] = { { 1, 0, 0 }, { 0, cb, -sb }, { 0, sb, cb } };
+    double Rb[3][3];
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            Rb[i][j] = Rx[i][0] * Rz[0][j] + Rx[i][1] * Rz[1][j]
+                     + Rx[i][2] * Rz[2][j];
+        }
+    }
+    write_rotated_box_mesh_(WORK "/bind.k26mesh", 1.5, 0.75, 0.5, Rb);
+    write_file_(WORK "/bind.k26asm",
+        "assembly bind_hull\n"
+        "    frame x_to_port\n"
+        "    provenance mass \"calibration shape\" computed\n"
+        "    component hull\n"
+        "        mass 1234.5678\n"
+        "        at 0.31415 -0.2718 0.1414\n"
+        "        mesh bind.k26mesh\n"
+        "    end\n"
+        "end\n");
+    write_file_(WORK "/bind.kfl",
+        "form ASM_BIND\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft assembly=\"bind.k26asm\" parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "end\n"
+        "end\n");
+
+    /* Gate 5: the emitted numbers are the derivation's own. The
+     * expected values come from this process calling the reader
+     * directly, so the assertion compares two independent routes to
+     * the same asset rather than the compiler against itself. */
+    KflcArena *arena = NULL;
+    KflcDiag   diag;
+    KflcAssembly *a = load_(WORK "/bind.k26asm", &arena, &diag, stderr);
+    ASSERT(a != NULL && diag.errors == 0);
+
+    ASSERT(run_kflc_("./bin/kflc", "--emit " WORK "/bind.kfl",
+                     WORK "/bind.cc", WORK "/bind.err") == 0);
+    char *cc = slurp_(WORK "/bind.cc");
+    ASSERT(cc != NULL);
+
+    char want_mass[128], want_inertia[512];
+    snprintf(want_mass, sizeof want_mass,
+             "k26astro_body_set_mass(&_kfl_b, %.17g);", a->mass);
+    snprintf(want_inertia, sizeof want_inertia,
+             "static const double _kfl_asm_inertia[6] = "
+             "{ %.17g, %.17g, %.17g, %.17g, %.17g, %.17g };",
+             a->inertia[0], a->inertia[1], a->inertia[2],
+             a->inertia[3], a->inertia[4], a->inertia[5]);
+    if (!strstr(cc, want_mass) || !strstr(cc, want_inertia)) {
+        fprintf(stderr, "emitted source does not carry the derived "
+                "constants\nwanted:\n  %s\n  %s\n", want_mass, want_inertia);
+    }
+    ASSERT(strstr(cc, want_mass) != NULL);
+    ASSERT(strstr(cc, want_inertia) != NULL);
+    /* The centre of mass is the component placement plus the mesh's
+     * own centre, which for this fixture is the placement itself. */
+    char want_com[256];
+    snprintf(want_com, sizeof want_com,
+             "static const double _kfl_asm_com[3] = { %.17g, %.17g, %.17g };",
+             a->com[0], a->com[1], a->com[2]);
+    ASSERT(strstr(cc, want_com) != NULL);
+    ASSERT(fabs(a->com[0] - 0.31415) < 1e-13);
+    ASSERT(fabs(a->com[1] + 0.2718) < 1e-13);
+    /* The products of inertia are large, so the optimisation-level
+     * comparison below has real digits to disagree about. */
+    ASSERT(fabs(a->inertia[3]) > 1.0);
+    printf("  the emitted body carries the derivation's mass, centre of "
+           "mass, and inertia: OK\n");
+    n_pass++;
+
+    /* Gate 3, first arm: two runs of one compiler agree bitwise, and
+     * the constants are read back from the artifact rather than
+     * recomputed. */
+    ASSERT(run_kflc_("./bin/kflc", "--emit " WORK "/bind.kfl",
+                     WORK "/bind2.cc", WORK "/bind.err") == 0);
+    char *cc2 = slurp_(WORK "/bind2.cc");
+    ASSERT(cc2 != NULL);
+    ASSERT(strcmp(cc, cc2) == 0);
+    printf("  two compilations of one assembly emit identical source: "
+           "OK\n");
+    n_pass++;
+
+    /* Gate 3, second arm: a second compiler, built at a higher
+     * optimisation level and for a processor that actually has a
+     * fused multiply-add, derives the same constants. This is the
+     * float-control condition asserted by outcome rather than by
+     * reading a flag.
+     *
+     * What this arm catches, established by trying each alternative
+     * rather than assumed:
+     *
+     *   - A comparison build at -O0 agrees with anything, because the
+     *     host compiler forms no fused multiply-adds when it is not
+     *     optimising. An arm built that way passes while testing
+     *     nothing, which is why the second level is a higher one.
+     *   - A comparison build for the baseline processor agrees too:
+     *     the baseline instruction set has no fused multiply-add to
+     *     contract into. Pointing the second build at this host's own
+     *     processor is what puts the instruction within reach.
+     *   - With -std=c11 and no explicit contraction flag this
+     *     compiler already suppresses contraction, so the flags in
+     *     the Makefile are belt and braces here and become
+     *     load-bearing under a compiler whose default is not the
+     *     strict one.
+     *   - Building the compiler under test so that it may contract,
+     *     with the Makefile's flags replaced by -ffp-contract=fast
+     *     and a processor that has the instruction, makes this arm
+     *     fail on the last digits of three of the six moments. That
+     *     is the regression it exists to catch.
+     */
+    {
+        const char *cc_base =
+            "cc -O3 -g -std=c11 -Iinclude -Isrc -I../libk26rl/include "
+            "-ffp-contract=off -fexcess-precision=standard ";
+        char cmd[1024];
+        snprintf(cmd, sizeof cmd,
+                 "%s-march=native -o " WORK "/kflc_alt src/*.c "
+                 "../libk26rl/libk26rl.a -lm 2>" WORK "/alt.log", cc_base);
+        int rc = system(cmd);
+        if (WEXITSTATUS(rc) != 0) {
+            /* A host whose compiler does not take -march=native still
+             * gets the optimisation-level half of this arm. */
+            fprintf(stderr, "note: -march=native unavailable, comparing "
+                    "at the baseline target\n");
+            snprintf(cmd, sizeof cmd,
+                     "%s-o " WORK "/kflc_alt src/*.c "
+                     "../libk26rl/libk26rl.a -lm 2>" WORK "/alt.log",
+                     cc_base);
+            rc = system(cmd);
+        }
+        if (WEXITSTATUS(rc) != 0) {
+            fprintf(stderr, "could not build the second compiler; see "
+                    WORK "/alt.log\n");
+        }
+        ASSERT(WEXITSTATUS(rc) == 0);
+        ASSERT(run_kflc_(WORK "/kflc_alt", "--emit " WORK "/bind.kfl",
+                         WORK "/bind_o0.cc", WORK "/bind.err") == 0);
+        char *o0 = slurp_(WORK "/bind_o0.cc");
+        ASSERT(o0 != NULL);
+        char *l1 = find_line_(cc, "static const double _kfl_asm_inertia");
+        char *l2 = find_line_(o0, "static const double _kfl_asm_inertia");
+        char *m1 = find_line_(cc, "k26astro_body_set_mass");
+        char *m2 = find_line_(o0, "k26astro_body_set_mass");
+        char *c1 = find_line_(cc, "static const double _kfl_asm_com");
+        char *c2 = find_line_(o0, "static const double _kfl_asm_com");
+        ASSERT(l1 && l2 && m1 && m2 && c1 && c2);
+        if (strcmp(l1, l2) != 0) {
+            fprintf(stderr, "the two compilers disagree:\n  base %s\n"
+                    "  alt  %s\n", l1, l2);
+        }
+        ASSERT(strcmp(l1, l2) == 0);
+        ASSERT(strcmp(m1, m2) == 0);
+        ASSERT(strcmp(c1, c2) == 0);
+        printf("  a compiler built at -O3 for this processor derives the "
+               "same constants as the -O2 baseline build: OK\n");
+        n_pass++;
+        free(l1); free(l2); free(m1); free(m2); free(c1); free(c2);
+        free(o0);
+    }
+    free(cc);
+    free(cc2);
+    kflc_arena_release(arena);
+
+    /* The environment emitter has its own body emission, so binding
+     * an assembly is asserted on that path too and not only on the
+     * batch one. This arm exists because the first implementation
+     * bound only the batch path: the environment emitter fell through
+     * to its generic attribute passthrough and emitted
+     * `_kfl_b.assembly = "..."`, which is not a field of the body
+     * struct and failed at the host compiler rather than at kflc. */
+    {
+        write_file_(WORK "/rl.kfl",
+            "form ASM_RLBIND\n"
+            "fn world w\n"
+            "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+            "    astro_body craft assembly=\"bind.k26asm\" parent=earth"
+            " pos_x=7.0e6 vel_y=7546.0\n"
+            "    episode\n"
+            "        control_dt 1.0\n"
+            "        horizon 4\n"
+            "    end\n"
+            "    observe craft from earth mode=geometric as trk\n"
+            "    objective\n"
+            "        reward 0.0 - trk_range\n"
+            "    end\n"
+            "end\n"
+            "end\n");
+        ASSERT(run_kflc_("./bin/kflc", "--emit " WORK "/rl.kfl",
+                         WORK "/rl.cc", WORK "/rl.err") == 0);
+        char *rc2 = slurp_(WORK "/rl.cc");
+        ASSERT(rc2 != NULL);
+
+        KflcArena *ar = NULL;
+        KflcDiag   dg;
+        KflcAssembly *ra = load_(WORK "/bind.k26asm", &ar, &dg, stderr);
+        ASSERT(ra != NULL && dg.errors == 0);
+
+        /* The attribute never reaches the struct passthrough. */
+        ASSERT(strstr(rc2, "_kfl_b.assembly") == NULL);
+
+        char want[256];
+        snprintf(want, sizeof want,
+                 "k26astro_body_set_mass(&_kfl_b, %.17g);", ra->mass);
+        ASSERT(strstr(rc2, want) != NULL);
+
+        /* The spec table carries the body index, the assembly name,
+         * and the digest the reader computed independently. */
+        ASSERT(strstr(rc2, "kflrl_assemblies_[] = {") != NULL);
+        ASSERT(strstr(rc2, "#define KFLRL_N_ASSEMBLIES 1") != NULL);
+        char dig[8 * KFLC_ASM_DIGEST];
+        int  n = snprintf(dig, sizeof dig, "{ 1, \"%s\", {", ra->name);
+        for (int k = 0; k < KFLC_ASM_DIGEST; k++) {
+            n += snprintf(dig + n, sizeof dig - (size_t)n, "%s0x%02x",
+                          k ? "," : "", (unsigned)ra->digest[k]);
+        }
+        n += snprintf(dig + n, sizeof dig - (size_t)n, "} }");
+        if (!strstr(rc2, dig)) {
+            fprintf(stderr, "the emitted assembly table does not carry the "
+                    "expected row:\n  %s\n", dig);
+        }
+        ASSERT(strstr(rc2, dig) != NULL);
+        printf("  an environment program binds the assembly and publishes "
+               "its digest in the spec: OK\n");
+        n_pass++;
+        free(rc2);
+        kflc_arena_release(ar);
+    }
+
+    /* Gate 5's refusals, on the compile path. */
+    write_file_(WORK "/clash.kfl",
+        "form ASM_CLASH\n"
+        "fn world w\n"
+        "    astro_body craft assembly=\"bind.k26asm\" mass=1000.0\n"
+        "end\n"
+        "end\n");
+    ASSERT(run_kflc_("./bin/kflc", "--emit " WORK "/clash.kfl",
+                     NULL, WORK "/clash.err") == 1);
+    {
+        char *e = slurp_(WORK "/clash.err");
+        ASSERT(e != NULL);
+        ASSERT(strstr(e, "both set the body's mass") != NULL);
+        ASSERT(strstr(e, "mass=") != NULL);
+        free(e);
+        printf("  refusal mass_and_assembly       OK\n");
+        n_pass++;
+    }
+
+    write_file_(WORK "/gone.kfl",
+        "form ASM_GONE\n"
+        "fn world w\n"
+        "    astro_body craft assembly=\"not_here.k26asm\"\n"
+        "end\n"
+        "end\n");
+    ASSERT(run_kflc_("./bin/kflc", "--emit " WORK "/gone.kfl",
+                     NULL, WORK "/gone.err") == 1);
+    {
+        char *e = slurp_(WORK "/gone.err");
+        ASSERT(e != NULL);
+        ASSERT(strstr(e, "cannot open assembly") != NULL);
+        ASSERT(strstr(e, "not_here.k26asm") != NULL);
+        free(e);
+        printf("  refusal missing_asset_path      OK\n");
+        n_pass++;
+    }
+}
+
+/* Every assembly shipped in this tree is loaded, and every one of
+ * them must derive cleanly and carry no unverified provenance. The
+ * language lets an author keep a working figure; this tree does not
+ * ship one. */
+static void shipped_assets_(void)
+{
+    const char *dir = "examples/assets";
+    DIR *d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "cannot open %s\n", dir);
+        exit(1);
+    }
+    /* Names are collected and sorted, so the gate reports in the same
+     * order on every run whatever the directory hands back. */
+    char  names[64][NAME_MAX + 1];
+    int   n = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL && n < 64) {
+        size_t ln = strlen(e->d_name);
+        if (ln > 7 && strcmp(e->d_name + ln - 7, ".k26asm") == 0) {
+            if (ln >= sizeof names[n]) continue;
+            memcpy(names[n], e->d_name, ln + 1);
+            n++;
+        }
+    }
+    closedir(d);
+    ASSERT(n > 0);
+    for (int i = 0; i < n; i++) {
+        for (int j = i + 1; j < n; j++) {
+            if (strcmp(names[j], names[i]) < 0) {
+                char t[NAME_MAX + 1];
+                memcpy(t, names[i], sizeof t);
+                memcpy(names[i], names[j], sizeof t);
+                memcpy(names[j], t, sizeof t);
+            }
+        }
+    }
+    for (int i = 0; i < n; i++) {
+        char path[NAME_MAX + 64], src[NAME_MAX + 64];
+        snprintf(path, sizeof path, "%s/%.*s", dir, NAME_MAX,
+                 names[i]);
+        snprintf(src, sizeof src, "%s/program.kfl", dir);
+        KflcArena *arena = kflc_arena_create();
+        KflcDiag   diag;
+        kflc_diag_init(&diag, src, stderr);
+        KflcAssembly *a = kflc_assembly_load(names[i], src, 1, arena, &diag);
+        if (!a || diag.errors != 0) {
+            fprintf(stderr, "shipped asset %s does not load\n", path);
+        }
+        ASSERT(a != NULL);
+        ASSERT(diag.errors == 0);
+        if (a->n_unverified != 0) {
+            fprintf(stderr, "shipped asset %s carries %d unverified "
+                    "provenance line(s); this tree ships none\n",
+                    path, a->n_unverified);
+        }
+        ASSERT(a->n_unverified == 0);
+        ASSERT(a->n_provenance > 0);
+        char hex[2 * KFLC_ASM_DIGEST + 1];
+        kflc_assembly_digest_hex(a->digest, hex);
+        printf("  %-28s mass %10.3f kg  digest %.16s...\n",
+               names[i], a->mass, hex);
+        n_pass++;
+        kflc_arena_release(arena);
+    }
+
+    /* The same gate applied to an asset that does carry one, so the
+     * refusal above is a rule and not an accident of what happens to
+     * be in the directory. */
+    write_file_(WORK "/shipped_bad.k26asm",
+        "assembly shipped_bad\n"
+        "    frame x_to_port\n"
+        "    provenance thruster_position \"a working figure\" unverified\n"
+        "    component hull\n"
+        "        mass 1.0\n"
+        "        collider box 1 1 1\n"
+        "    end\n"
+        "end\n");
+    KflcArena *arena = kflc_arena_create();
+    KflcDiag   diag;
+    FILE *sink = fopen("/dev/null", "w");
+    ASSERT(sink != NULL);
+    kflc_diag_init(&diag, WORK "/program.kfl", sink);
+    KflcAssembly *bad = kflc_assembly_load(WORK "/shipped_bad.k26asm",
+                                           WORK "/program.kfl", 1, arena,
+                                           &diag);
+    ASSERT(bad != NULL);
+    ASSERT(bad->n_unverified == 1);
+    fclose(sink);
+    kflc_arena_release(arena);
+    printf("  an asset carrying an unverified line is what the rule "
+           "above rejects: OK\n");
     n_pass++;
 }
 
@@ -967,6 +1392,12 @@ int main(void)
         n_pass++;
         kflc_arena_release(arena);
     }
+
+    printf("assets shipped in this tree:\n");
+    shipped_assets_();
+
+    printf("compiler gates:\n");
+    compiler_gates_();
 
     printf("test_assembly: %d check(s) passed\n", n_pass);
     return 0;
