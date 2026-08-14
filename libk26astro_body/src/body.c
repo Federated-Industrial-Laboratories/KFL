@@ -277,8 +277,13 @@ int k26astro_body_load_major(K26AstroBody *b, const char *name)
     b->j2            = m->j2;
     b->ephem_naif_id = m->naif_id;
     b->attitude_mode = K26ASTRO_ATT_ROTATION_MODEL;
-    /* rotation_model_id is resolved by libk26astro_rt at world
-     * construction via rotation_model.h:k26astro_rotation_lookup. */
+    /* rotation_model_id is left at zero and nothing resolves it: no
+     * caller in this tree sets it and no lookup consults it. A body's
+     * rotation model is found by its NAIF id, through
+     * rotation_model.h:k26astro_rotation_by_naif, or by a name of the
+     * model table's own form through k26astro_rotation_lookup. This
+     * field is reserved and inert; a reader who takes it for a
+     * resolved handle gets a wrong answer quietly. */
     b->rotation_model_id = 0;
     return 0;
 }
