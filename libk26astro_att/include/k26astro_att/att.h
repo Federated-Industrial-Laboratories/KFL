@@ -148,6 +148,153 @@ K26AstroAttStatus k26astro_att_gravity_gradient(const K26AstroVehicle *v,
 K26AstroAttStatus k26astro_att_step_all(K26AstroVehicle *const *v, int n,
                                         const K26V3 *torques, double dt);
 
+/* ---- Actuators ---------------------------------------------------- *
+ *
+ * A vehicle's actuators are described by the assembly it was built
+ * from and their state lives in the caller's storage, not in a heap
+ * object of this library's: the stepping path allocates nothing, and
+ * a set of plain arrays is what an environment can hold per
+ * environment and reset without freeing anything.
+ *
+ * Commands are separate from state. A control loop writes a command
+ * once per control period and the advance consumes it at each
+ * sub-interval, which is what a zero-order hold means.
+ */
+
+/* A reaction wheel. The axis is a unit vector in the body frame; the
+ * momentum is the state, along that axis. Friction is a viscous term
+ * proportional to wheel rate plus a constant Coulomb term opposing
+ * motion, the latter switched off below the dead rate so a wheel at
+ * rest does not chatter across a sign change. */
+typedef struct {
+    K26V3  axis;
+    double spin_inertia;   /* kg m^2, about the spin axis */
+    double max_momentum;   /* N m s */
+    double max_torque;     /* N m */
+    double viscous;        /* N m per rad/s */
+    double coulomb;        /* N m */
+    double dead_rate;      /* rad/s */
+    double momentum;       /* state, N m s */
+    double command;        /* commanded torque, N m */
+} K26AstroAttWheel;
+
+/* A magnetorquer. The command is the signed dipole magnitude along
+ * the declared axis. */
+typedef struct {
+    K26V3  axis;
+    double max_dipole;     /* A m^2 */
+    double command;        /* A m^2, signed along the axis */
+} K26AstroAttTorquer;
+
+/* A thruster. Position and direction are in the body frame; the
+ * command is a throttle in the closed unit interval. */
+typedef struct {
+    K26V3  at;
+    K26V3  dir;
+    double max_thrust;     /* N */
+    double command;        /* throttle, 0 to 1 */
+} K26AstroAttThruster;
+
+/* One vehicle's actuators, and the centre of mass their torques are
+ * taken about. Any count may be zero. */
+typedef struct {
+    K26AstroAttWheel    *wheels;
+    int                  n_wheels;
+    K26AstroAttTorquer  *torquers;
+    int                  n_torquers;
+    K26AstroAttThruster *thrusters;
+    int                  n_thrusters;
+    K26V3                com;          /* body frame, metres */
+} K26AstroAttActuators;
+
+/**
+ * @brief Advance the wheels and report their reaction on the body.
+ * @param act    The actuator set; wheel momenta are updated in place.
+ * @param dt     Interval, seconds.
+ * @param torque Receives the reaction torque on the body, which is
+ *               the negated rate of change of the stored momentum.
+ * @param stored Receives the total stored momentum in the body frame,
+ *               after the update; may be NULL.
+ * @return K26ASTRO_ATT_OK, or a status.
+ * @note  The commanded torque is clamped to the wheel's limit.
+ *        Saturation clamps the state, not the command: at maximum
+ *        momentum the part of the rate of change that would increase
+ *        the magnitude is dropped, so the wheel delivers no further
+ *        torque in that direction while friction can still slow it,
+ *        and the body's momentum has to be dumped by something else.
+ */
+K26AstroAttStatus k26astro_att_wheels_step(K26AstroAttActuators *act,
+                                           double dt, K26V3 *torque,
+                                           K26V3 *stored);
+
+/**
+ * @brief Torque from the magnetorquers, in the body frame.
+ * @param act    The actuator set.
+ * @param b_body The local magnetic flux density in the body frame,
+ *               tesla.
+ * @param out    Receives the torque, newton metres.
+ * @return K26ASTRO_ATT_OK, or a status.
+ * @note  The torque is the commanded dipole crossed with the field,
+ *        so it is exactly zero along the field: a magnetorquer set
+ *        cannot control the axis parallel to the field, and a task
+ *        built on them alone is a three-axis problem with a
+ *        time-varying uncontrollable direction. That is a property of
+ *        the actuator, not a limitation of this implementation.
+ */
+K26AstroAttStatus k26astro_att_torquers_torque(
+    const K26AstroAttActuators *act, K26V3 b_body, K26V3 *out);
+
+/**
+ * @brief Force and torque from the thrusters, in the body frame.
+ * @param act   The actuator set.
+ * @param force Receives the summed force, newtons; may be NULL.
+ * @param out   Receives the torque about the centre of mass, newton
+ *              metres; may be NULL.
+ * @return K26ASTRO_ATT_OK, or a status.
+ * @note  Each thruster's throttle is clamped to the closed unit
+ *        interval. One declaration serves translation and rotation
+ *        together: the force is the throttle times the maximum thrust
+ *        along the direction, and the torque is the offset from the
+ *        centre of mass crossed with that force, so a thruster
+ *        through the centre of mass produces none.
+ */
+K26AstroAttStatus k26astro_att_thrusters_wrench(
+    const K26AstroAttActuators *act, K26V3 *force, K26V3 *out);
+
+/**
+ * @brief Advance a vehicle's attitude with stored momentum.
+ * @param v     The vehicle.
+ * @param act   Its actuators, or NULL for a body with none.
+ * @param extra Any further body-frame torque for this interval, such
+ *              as the gravity gradient.
+ * @param dt    Interval, seconds.
+ * @return K26ASTRO_ATT_OK, or a status.
+ * @note  The equation is the momentum-exchange form of Euler's
+ *        rotational equation: the inertia times the angular
+ *        acceleration equals the applied torque, less the cross
+ *        product of the angular velocity with the sum of the body's
+ *        own angular momentum and the wheels' stored momentum, less
+ *        the rate of change of that stored momentum. The last two
+ *        terms are what a wheel does to a spacecraft and what the
+ *        unaugmented equation omits.
+ *
+ *        Provenance: libk26astro_body implements and cites the
+ *        unaugmented equation (Markley and Crassidis 2014 section
+ *        3.6.2, Hughes 1986 section 4.5, Wertz 1978 section 16.3).
+ *        The augmented form is the same equation with the wheel
+ *        momentum carried inside the gyroscopic term, and is standard
+ *        in all three; the section citation for it is verified at
+ *        intake rather than asserted here. What is not left to
+ *        citation is its behaviour: the gates check that total
+ *        angular momentum is conserved under wheel commands alone,
+ *        which is the property the augmented terms exist to produce
+ *        and which the unaugmented equation does not have.
+ */
+K26AstroAttStatus k26astro_att_step_actuated(K26AstroVehicle *v,
+                                             K26AstroAttActuators *act,
+                                             K26V3 extra, K26V3 b_body,
+                                             double dt);
+
 /**
  * @brief Total angular momentum of a vehicle in the world frame.
  * @param v The vehicle.
