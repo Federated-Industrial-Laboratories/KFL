@@ -1169,6 +1169,142 @@ int main(void)
     expect_refused_("prov_status", WORK "/prov_bad.k26asm",
                     "is not a provenance status");
 
+    /* ---- Actuator declarations ---------------------------------- *
+     *
+     * Each of these was a plausible number downstream before it was a
+     * diagnostic here: a direction of twice unit length doubles the
+     * declared thrust, an axis of twice unit length doubles the body
+     * torque while the wheel's own rate and its saturation clamp
+     * still use the unscaled scalar, a negative maximum inverts the
+     * clamp's bounds so that a command of zero produces permanent
+     * uncommanded torque, and a zero momentum limit removes
+     * saturation altogether. The positive case runs first, because a
+     * reader that refused every actuator would pass all of the
+     * refusals below and none of this one. */
+    {
+#define ACT_ASM(BODY)         "assembly act_check\n"         "    frame x_to_port\n"         "    provenance mass \"calibration shape\" computed\n"         "    component hull\n"         "        mass 1000.0\n"         "        at 0 0 0\n"         "        collider box 1.0 0.5 0.5\n"         "    end\n"         BODY         "end\n"
+
+        const char *const good =
+            ACT_ASM(
+            "    wheel yaw\n"
+            "        axis 0.6 0.8 0.0\n"
+            "        spin_inertia 0.05\n"
+            "        max_momentum 15.0\n"
+            "        max_torque 0.2\n"
+            "        viscous 1.0e-4\n"
+            "        coulomb 1.0e-4\n"
+            "        dead_rate 0.1\n"
+            "    end\n"
+            "    magnetorquer m_y\n"
+            "        axis 0.0 1.0 0.0\n"
+            "        max_dipole 30.0\n"
+            "    end\n"
+            "    thruster rcs\n"
+            "        at 1.05 0.92 0.0\n"
+            "        dir 0.0 -1.0 0.0\n"
+            "        thrust 400.0\n"
+            "    end\n");
+        write_file_(WORK "/act_ok.k26asm", good);
+        {
+            KflcArena *arena = NULL;
+            KflcDiag   diag;
+            KflcAssembly *a = load_(WORK "/act_ok.k26asm", &arena, &diag,
+                                    stderr);
+            ASSERT(a != NULL);
+            ASSERT(diag.errors == 0);
+            kflc_arena_release(arena);
+            printf("  one of each actuator kind, off-axis, is "
+                   "accepted: OK\n");
+            n_pass++;
+        }
+
+        write_file_(WORK "/act_dir.k26asm", ACT_ASM(
+            "    thruster rcs\n"
+            "        at 1.0 0.0 0.0\n"
+            "        dir 0.0 -2.0 0.0\n"
+            "        thrust 400.0\n"
+            "    end\n"));
+        expect_refused_("act_dir_not_unit", WORK "/act_dir.k26asm",
+                        "`dir` is not a unit vector");
+
+        write_file_(WORK "/act_thrust.k26asm", ACT_ASM(
+            "    thruster rcs\n"
+            "        at 1.0 0.0 0.0\n"
+            "        dir 0.0 -1.0 0.0\n"
+            "        thrust -400.0\n"
+            "    end\n"));
+        expect_refused_("act_thrust_negative", WORK "/act_thrust.k26asm",
+                        "`thrust` is -400");
+
+        write_file_(WORK "/act_axis.k26asm", ACT_ASM(
+            "    wheel yaw\n"
+            "        axis 0.0 0.0 2.0\n"
+            "        spin_inertia 0.05\n"
+            "        max_momentum 15.0\n"
+            "        max_torque 0.2\n"
+            "    end\n"));
+        expect_refused_("act_axis_not_unit", WORK "/act_axis.k26asm",
+                        "`axis` is not a unit vector");
+
+        write_file_(WORK "/act_torque.k26asm", ACT_ASM(
+            "    wheel yaw\n"
+            "        axis 0.0 0.0 1.0\n"
+            "        spin_inertia 0.05\n"
+            "        max_momentum 15.0\n"
+            "        max_torque -0.2\n"
+            "    end\n"));
+        expect_refused_("act_max_torque_negative", WORK "/act_torque.k26asm",
+                        "`max_torque` is -0.2");
+
+        write_file_(WORK "/act_hzero.k26asm", ACT_ASM(
+            "    wheel yaw\n"
+            "        axis 0.0 0.0 1.0\n"
+            "        spin_inertia 0.05\n"
+            "        max_momentum 0.0\n"
+            "        max_torque 0.2\n"
+            "    end\n"));
+        expect_refused_("act_max_momentum_zero", WORK "/act_hzero.k26asm",
+                        "never saturates and never needs dumping");
+
+        write_file_(WORK "/act_spin.k26asm", ACT_ASM(
+            "    wheel yaw\n"
+            "        axis 0.0 0.0 1.0\n"
+            "        spin_inertia 0.0\n"
+            "        max_momentum 15.0\n"
+            "        max_torque 0.2\n"
+            "    end\n"));
+        expect_refused_("act_spin_inertia_zero", WORK "/act_spin.k26asm",
+                        "`spin_inertia` is 0");
+
+        write_file_(WORK "/act_fric.k26asm", ACT_ASM(
+            "    wheel yaw\n"
+            "        axis 0.0 0.0 1.0\n"
+            "        spin_inertia 0.05\n"
+            "        max_momentum 15.0\n"
+            "        max_torque 0.2\n"
+            "        viscous -1.0e-4\n"
+            "    end\n"));
+        expect_refused_("act_friction_negative", WORK "/act_fric.k26asm",
+                        "drives the wheel instead of slowing it");
+
+        write_file_(WORK "/act_dip.k26asm", ACT_ASM(
+            "    magnetorquer m_y\n"
+            "        axis 0.0 1.0 0.0\n"
+            "        max_dipole -30.0\n"
+            "    end\n"));
+        expect_refused_("act_max_dipole_negative", WORK "/act_dip.k26asm",
+                        "`max_dipole` is -30");
+
+        write_file_(WORK "/act_taxis.k26asm", ACT_ASM(
+            "    magnetorquer m_y\n"
+            "        axis 0.0 1.5 0.0\n"
+            "        max_dipole 30.0\n"
+            "    end\n"));
+        expect_refused_("act_torquer_axis", WORK "/act_taxis.k26asm",
+                        "magnetorquer `m_y`: `axis` is not a unit vector");
+#undef ACT_ASM
+    }
+
     /* A mesh with one face removed is no longer closed. */
     {
         write_box_mesh_(WORK "/open.k26mesh", 1.0, 1.0, 1.0);

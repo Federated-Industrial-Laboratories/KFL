@@ -65,6 +65,17 @@
  * orientation. The bound is on the squared norm, which needs no root. */
 #define ASM_QUAT_TOL 1.0e-9
 
+/* A declared direction is a direction, and this reader refuses one
+ * that is not of unit length on the same terms as the quaternion
+ * above. The consequence of normalising instead is not cosmetic: a
+ * thruster direction of twice unit length would deliver twice the
+ * thrust the author declared, and a wheel axis of twice unit length
+ * would put twice the torque on the body while the wheel's own rate
+ * and its saturation clamp still used the unscaled scalar, so the
+ * declaration and the behaviour would disagree in two directions at
+ * once. The bound is on the squared norm, which needs no root. */
+#define ASM_AXIS_TOL 1.0e-9
+
 /* ---- File bytes ----------------------------------------------------- */
 
 typedef struct {
@@ -924,6 +935,109 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
             "%s: assembly declares no components, so it has no mass "
             "properties to derive", resolved);
         return NULL;
+    }
+
+    /* ---- Actuator declarations ------------------------------------ *
+     *
+     * Every quantity an actuator model divides by, clamps to, or
+     * scales a command by is checked here, at the one place it is
+     * declared, rather than left to produce a plausible number
+     * downstream. Each of these was a silent wrong answer before it
+     * was a diagnostic: a negative maximum inverts the clamp's bounds
+     * so that a command of zero produces permanent uncommanded
+     * torque, and a zero momentum limit disables saturation
+     * altogether, which is the momentum-management task quietly
+     * removed rather than solved. A wheel with no momentum limit is
+     * not a wheel this model can represent. */
+    for (int i = 0; i < a->n_features; i++) {
+        const KflcAsmFeature *f = &a->features[i];
+        if (f->kind == KFLC_FEAT_PORT) continue;
+
+        if (f->kind == KFLC_FEAT_THRUSTER) {
+            double nn = f->dir[0] * f->dir[0] + f->dir[1] * f->dir[1]
+                      + f->dir[2] * f->dir[2];
+            double dev = nn - 1.0;
+            if (dev < 0.0) dev = -dev;
+            if (dev > ASM_AXIS_TOL) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: thruster `%s`: `dir` is not a unit vector (its "
+                    "squared norm is %.17g); this reader refuses one "
+                    "rather than normalising it, so a typed direction is "
+                    "a diagnostic instead of a different thrust",
+                    resolved, f->name, nn);
+                return NULL;
+            }
+            if (!(f->thrust > 0.0)) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: thruster `%s`: `thrust` is %.17g; a maximum is a "
+                    "positive quantity, and a negative one inverts the "
+                    "throttle clamp", resolved, f->name, f->thrust);
+                return NULL;
+            }
+            continue;
+        }
+
+        {
+            double nn = f->axis[0] * f->axis[0] + f->axis[1] * f->axis[1]
+                      + f->axis[2] * f->axis[2];
+            double dev = nn - 1.0;
+            if (dev < 0.0) dev = -dev;
+            if (dev > ASM_AXIS_TOL) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: %s `%s`: `axis` is not a unit vector (its "
+                    "squared norm is %.17g); this reader refuses one "
+                    "rather than normalising it, so a typed axis is a "
+                    "diagnostic instead of a different torque",
+                    resolved,
+                    f->kind == KFLC_FEAT_WHEEL ? "wheel" : "magnetorquer",
+                    f->name, nn);
+                return NULL;
+            }
+        }
+
+        if (f->kind == KFLC_FEAT_WHEEL) {
+            if (!(f->spin_inertia > 0.0)) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: wheel `%s`: `spin_inertia` is %.17g; the wheel's "
+                    "rate is its momentum divided by this, so it must be "
+                    "positive", resolved, f->name, f->spin_inertia);
+                return NULL;
+            }
+            if (!(f->max_torque > 0.0)) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: wheel `%s`: `max_torque` is %.17g; a maximum is "
+                    "a positive quantity, and a negative one inverts the "
+                    "command clamp", resolved, f->name, f->max_torque);
+                return NULL;
+            }
+            if (!(f->max_momentum > 0.0)) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: wheel `%s`: `max_momentum` is %.17g; a wheel "
+                    "with no momentum limit never saturates and never "
+                    "needs dumping, which is not a wheel this model "
+                    "represents", resolved, f->name, f->max_momentum);
+                return NULL;
+            }
+            if (f->viscous < 0.0 || f->coulomb < 0.0 || f->dead_rate < 0.0) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: wheel `%s`: `viscous`, `coulomb` and `dead_rate` "
+                    "describe friction and are never negative (they are "
+                    "%.17g, %.17g and %.17g); a negative one drives the "
+                    "wheel instead of slowing it",
+                    resolved, f->name, f->viscous, f->coulomb,
+                    f->dead_rate);
+                return NULL;
+            }
+            continue;
+        }
+
+        if (!(f->max_dipole > 0.0)) {
+            kflc_diag_errorf(diag, f->line,
+                "%s: magnetorquer `%s`: `max_dipole` is %.17g; a maximum "
+                "is a positive quantity, and a negative one inverts the "
+                "command clamp", resolved, f->name, f->max_dipole);
+            return NULL;
+        }
     }
 
     /* ---- Derivation, components first, in source order ------------ */
