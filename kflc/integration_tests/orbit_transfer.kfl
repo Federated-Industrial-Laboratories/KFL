@@ -1,0 +1,68 @@
+# orbit_transfer.kfl: reach a target circular orbit.
+#
+# A craft starts on a near-circular orbit about the Earth at roughly
+# 7000 km and must arrive at a target radius of 7200 km with its radial
+# motion nearly stopped, which is what the top of a well-sized transfer
+# looks like. The single action is a velocity change along the craft's
+# own velocity direction, so the agent flies the transfer the way a
+# spacecraft does: burn prograde to raise the far side of the orbit,
+# then coast to it.
+#
+# The episode terminates on success, which is the target radius held
+# within 10 km with a radial speed under 15 m/s, and truncates at the
+# horizon otherwise. Both bounds are read off the observation the agent
+# has: the range channel and the range-rate channel. The reward is
+# shaped on the radius miss, so the gradient points at the target from
+# the first step, with a bonus paid once on arrival.
+#
+# Seeds drive the initial radius and speed through the episode's reset
+# draws. The drawn speeds keep the starting orbit's high point below
+# 7060 km, so no episode can reach the target by coasting: the action
+# has to do it.
+
+form ORBIT_TRANSFER
+title "Orbit transfer to a target radius"
+
+fn world transfer_world
+    astro_body earth gm=3.986004418e14 mass=5.972e24 radius=6.371e6 pos_x=0.0 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=0.0 vel_z=0.0
+    astro_body craft gm=1.0 parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0
+
+    const target_radius: double = 7.2e6
+    const radius_tol: double = 1.0e4
+    const rate_tol: double = 15.0
+    const miss_scale: double = 2.0e5
+
+    episode
+        control_dt 60.0
+        horizon 90
+        terminated when trk_range > target_radius - radius_tol && trk_range < target_radius + radius_tol && trk_range_rate < rate_tol && trk_range_rate > 0.0 - rate_tol
+        reset craft.pos_x uniform(6.98e6, 7.02e6)
+        reset craft.vel_y uniform(7500.0, 7560.0)
+    end
+
+    action burn box -40.0 40.0 default 0.0
+
+    on_step
+        # A world binding is not in scope inside on_step, so the guard
+        # constant is declared here beside its use.
+        let min_speed: double = 1.0
+        let vx: double = craft.vel_x
+        let vy: double = craft.vel_y
+        let vz: double = craft.vel_z
+        let speed: double = sqrt(vx * vx + vy * vy + vz * vz)
+        if speed > min_speed
+            craft.vel_x = vx + burn * vx / speed
+            craft.vel_y = vy + burn * vy / speed
+            craft.vel_z = vz + burn * vz / speed
+        end
+    end
+
+    observe craft from earth mode=geometric as trk
+
+    objective
+        reward 0.0 - abs(trk_range - target_radius) / miss_scale
+        terminal 10.0
+    end
+end
+
+end

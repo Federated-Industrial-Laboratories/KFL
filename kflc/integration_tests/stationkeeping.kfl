@@ -1,0 +1,63 @@
+# stationkeeping.kfl: hold a station box at a reference radius.
+#
+# A craft is placed on a perturbed orbit about the Earth near 7000 km
+# and must stay inside a station box, which is the shell 20 km either
+# side of that radius. The single action is a velocity change along the
+# craft's own velocity direction; used at the right point in the orbit
+# it takes eccentricity out, which is what keeps the radius inside the
+# box.
+#
+# The episode terminates when the craft leaves the box and truncates at
+# the horizon, so surviving the horizon is the win and the two endings
+# are distinct. The reward is one per step at the centre of the box,
+# falling to zero at its wall, with a penalty paid once on leaving.
+#
+# Seeds drive the initial tangential and radial speeds through the
+# episode's reset draws. The draws are wide enough that an uncorrected
+# orbit swings outside the box within about a quarter of an orbit, so
+# doing nothing loses.
+
+form STATIONKEEPING
+title "Station box hold at a reference radius"
+
+fn world station_world
+    astro_body earth gm=3.986004418e14 mass=5.972e24 radius=6.371e6 pos_x=0.0 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=0.0 vel_z=0.0
+    astro_body craft gm=1.0 parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0
+
+    const station_radius: double = 7.0e6
+    const box_half_width: double = 2.0e4
+
+    episode
+        control_dt 30.0
+        horizon 100
+        terminated when trk_range > station_radius + box_half_width || trk_range < station_radius - box_half_width
+        reset craft.vel_y uniform(7506.0, 7586.0)
+        reset craft.vel_x uniform(-20.0, 20.0)
+    end
+
+    action burn box -5.0 5.0 default 0.0
+
+    on_step
+        # A world binding is not in scope inside on_step, so the guard
+        # constant is declared here beside its use.
+        let min_speed: double = 1.0
+        let vx: double = craft.vel_x
+        let vy: double = craft.vel_y
+        let vz: double = craft.vel_z
+        let speed: double = sqrt(vx * vx + vy * vy + vz * vz)
+        if speed > min_speed
+            craft.vel_x = vx + burn * vx / speed
+            craft.vel_y = vy + burn * vy / speed
+            craft.vel_z = vz + burn * vz / speed
+        end
+    end
+
+    observe craft from earth mode=geometric as trk
+
+    objective
+        reward 1.0 - abs(trk_range - station_radius) / box_half_width
+        terminal 0.0 - 10.0
+    end
+end
+
+end
