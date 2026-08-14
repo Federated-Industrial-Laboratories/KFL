@@ -390,6 +390,190 @@ int main(void)
         n_pass++;
     }
 
+    /* ---- More than one unit, off the coordinate axes ------------- *
+     *
+     * Every arm above declares a single unit on a single coordinate
+     * axis, and that shape cannot see four distinct mistakes: a loop
+     * that steps only its first element, an axis whose components are
+     * transposed, a sum that keeps only its first term, and a sign
+     * flipped on one component. Each of those is invisible when there
+     * is one unit and two of its three axis components are zero. The
+     * configuration below has neither property, and it is also the
+     * only configuration in which momentum management exists at all,
+     * since one wheel on one axis has nothing to dump into.
+     */
+    printf("more than one unit, off the coordinate axes:\n");
+    {
+        K26AstroAttWheel w[2];
+        memset(w, 0, sizeof w);
+        w[0].axis         = k26m3d_v3(0.6, 0.8, 0.0);
+        w[0].spin_inertia = 0.05;
+        w[0].max_momentum = 15.0;
+        w[0].max_torque   = 0.5;
+        w[0].command      = 0.3;
+        w[1].axis         = k26m3d_v3(0.0, 0.6, 0.8);
+        w[1].spin_inertia = 0.04;
+        w[1].max_momentum = 12.0;
+        w[1].max_torque   = 0.5;
+        w[1].command      = -0.2;
+
+        K26AstroAttActuators act;
+        memset(&act, 0, sizeof act);
+        act.wheels   = w;
+        act.n_wheels = 2;
+
+        const double dt = 0.5;
+        K26V3 torque, stored;
+        ASSERT(k26astro_att_wheels_step(&act, dt, &torque, &stored) ==
+               K26ASTRO_ATT_OK);
+
+        /* No friction and no saturation here, so each wheel takes
+         * exactly its commanded torque for the interval and the
+         * analytic values are the sums over both units. Summed in the
+         * implementation's own order, so the comparison is exact
+         * rather than to a tolerance that would hide a small error. */
+        double h0 = 0.3 * dt, h1 = -0.2 * dt;
+        K26V3 want_h = { 0.0, 0.0, 0.0 };
+        want_h.x += h0 * w[0].axis.x; want_h.y += h0 * w[0].axis.y;
+        want_h.z += h0 * w[0].axis.z;
+        want_h.x += h1 * w[1].axis.x; want_h.y += h1 * w[1].axis.y;
+        want_h.z += h1 * w[1].axis.z;
+        K26V3 want_t = { 0.0, 0.0, 0.0 };
+        want_t.x -= 0.3 * w[0].axis.x; want_t.y -= 0.3 * w[0].axis.y;
+        want_t.z -= 0.3 * w[0].axis.z;
+        want_t.x -= -0.2 * w[1].axis.x; want_t.y -= -0.2 * w[1].axis.y;
+        want_t.z -= -0.2 * w[1].axis.z;
+
+        printf("  wheel momenta %.12f and %.12f\n",
+               w[0].momentum, w[1].momentum);
+        printf("  stored (%.12f, %.12f, %.12f), analytic "
+               "(%.12f, %.12f, %.12f)\n", stored.x, stored.y, stored.z,
+               want_h.x, want_h.y, want_h.z);
+        printf("  reaction (%.12f, %.12f, %.12f), analytic "
+               "(%.12f, %.12f, %.12f)\n", torque.x, torque.y, torque.z,
+               want_t.x, want_t.y, want_t.z);
+
+        /* Both wheels moved, so a loop that stepped only the first
+         * would leave the second at zero. */
+        ASSERT(w[0].momentum == h0);
+        ASSERT(w[1].momentum == h1);
+        ASSERT(w[1].momentum != 0.0);
+        /* Every component of both vectors, so a transposition or a
+         * sign flip on one axis has nowhere to hide. */
+        ASSERT(stored.x == want_h.x);
+        ASSERT(stored.y == want_h.y);
+        ASSERT(stored.z == want_h.z);
+        ASSERT(torque.x == want_t.x);
+        ASSERT(torque.y == want_t.y);
+        ASSERT(torque.z == want_t.z);
+        /* And no component is zero, so an assertion of equality on it
+         * is not an assertion that nothing happened. */
+        ASSERT(stored.x != 0.0 && stored.y != 0.0 && stored.z != 0.0);
+        ASSERT(torque.x != 0.0 && torque.y != 0.0 && torque.z != 0.0);
+        /* The two axes are genuinely different, so a run that used
+         * one wheel's axis for both would differ. */
+        ASSERT(w[0].axis.x != w[1].axis.x);
+        printf("  two wheels on two off-axis directions give the "
+               "analytic stored momentum and reaction in every "
+               "component: OK\n");
+        n_pass++;
+    }
+    {
+        K26AstroAttTorquer q[2];
+        memset(q, 0, sizeof q);
+        q[0].axis       = k26m3d_v3(0.8, 0.0, 0.6);
+        q[0].max_dipole = 30.0;
+        q[0].command    = 20.0;
+        q[1].axis       = k26m3d_v3(0.0, 1.0, 0.0);
+        q[1].max_dipole = 25.0;
+        q[1].command    = -15.0;
+
+        K26AstroAttActuators act;
+        memset(&act, 0, sizeof act);
+        act.torquers   = q;
+        act.n_torquers = 2;
+
+        K26V3 field = { 3.0e-5, 1.0e-5, 2.0e-5 };
+        K26V3 out;
+        ASSERT(k26astro_att_torquers_torque(&act, field, &out) ==
+               K26ASTRO_ATT_OK);
+
+        /* The dipoles sum and the sum crosses the field once, which
+         * is the implementation's own order. */
+        K26V3 m = { 0.0, 0.0, 0.0 };
+        m.x += 20.0 * q[0].axis.x; m.y += 20.0 * q[0].axis.y;
+        m.z += 20.0 * q[0].axis.z;
+        m.x += -15.0 * q[1].axis.x; m.y += -15.0 * q[1].axis.y;
+        m.z += -15.0 * q[1].axis.z;
+        K26V3 want = k26m3d_v3_cross(m, field);
+        printf("  two dipoles: (%.9e, %.9e, %.9e), analytic "
+               "(%.9e, %.9e, %.9e)\n", out.x, out.y, out.z,
+               want.x, want.y, want.z);
+        ASSERT(out.x == want.x && out.y == want.y && out.z == want.z);
+        ASSERT(out.x != 0.0 && out.y != 0.0 && out.z != 0.0);
+
+        /* The second unit contributes: the same call with it removed
+         * gives a different answer, so a sum that kept only the first
+         * term would be a different number and not a rounding of this
+         * one. */
+        act.n_torquers = 1;
+        K26V3 first_only;
+        ASSERT(k26astro_att_torquers_torque(&act, field, &first_only) ==
+               K26ASTRO_ATT_OK);
+        printf("  first unit alone: (%.9e, %.9e, %.9e)\n",
+               first_only.x, first_only.y, first_only.z);
+        ASSERT(first_only.x != out.x || first_only.y != out.y ||
+               first_only.z != out.z);
+        printf("  two magnetorquers sum their dipoles before the cross "
+               "product, and the second one counts: OK\n");
+        n_pass++;
+    }
+
+    /* ---- The guards the actuated entry owns ---------------------- *
+     *
+     * This is the entry an emitted artifact takes. A guard the
+     * unactuated entry carries and this one does not protects a path
+     * the product does not use, so the same condition is asserted
+     * here on the same vehicle rather than assumed to carry over. */
+    printf("the actuated entry's own guards:\n");
+    {
+        K26AstroBody body;
+        K26AstroVehicle *v = make_vehicle_(120.0, 300.0, 380.0, &body);
+        K26AstroAttWheel w;
+        memset(&w, 0, sizeof w);
+        w.axis         = k26m3d_v3(0.0, 0.0, 1.0);
+        w.spin_inertia = 0.05;
+        w.max_momentum = 15.0;
+        w.max_torque   = 0.2;
+        w.command      = 0.1;
+        K26AstroAttActuators act;
+        memset(&act, 0, sizeof act);
+        act.wheels = &w;
+        act.n_wheels = 1;
+
+        /* Sound tensor first, so the refusal below is the tensor and
+         * not the fixture. */
+        ASSERT(k26astro_att_step_actuated(v, &act, ZERO, ZERO, 0.1) ==
+               K26ASTRO_ATT_OK);
+
+        K26M3 zero;
+        memset(&zero, 0, sizeof zero);
+        k26astro_vehicle_set_inertia_full(v, zero);
+        K26AstroAttStatus st =
+            k26astro_att_step_actuated(v, &act, ZERO, ZERO, 0.1);
+        printf("  singular tensor through the actuated entry: %d "
+               "(%s)\n", (int)st, k26astro_att_status_str(st));
+        ASSERT(st == K26ASTRO_ATT_E_SINGULAR);
+        /* The unactuated entry on the same vehicle agrees, which is
+         * the point: one library, one answer. */
+        ASSERT(k26astro_att_step(v, ZERO, 0.1) ==
+               K26ASTRO_ATT_E_SINGULAR);
+        printf("  both entries report a singular tensor rather than "
+               "stepping through it: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v);
+    }
+
     printf("thruster:\n");
     {
         K26AstroAttThruster th[2];

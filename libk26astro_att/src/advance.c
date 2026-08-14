@@ -22,6 +22,13 @@
 
 #include <math.h>
 
+#include "att_internal.h"
+
+static int att_finite_v3_(K26V3 v)
+{
+    return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
+}
+
 const char *k26astro_att_status_str(K26AstroAttStatus s)
 {
     switch (s) {
@@ -39,24 +46,6 @@ static int att_finite_quat_(K26Quat q)
     return isfinite(q.w) && isfinite(q.x) && isfinite(q.y) && isfinite(q.z);
 }
 
-static int att_finite_v3_(K26V3 v)
-{
-    return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
-}
-
-/* The inertia inverse is zeroed by the body library when the tensor it
- * was given is singular, which is exactly the state in which a torque
- * step would silently do nothing. Detecting it here turns that into a
- * status. */
-static int att_inverse_is_zero_(const K26M3 *inv)
-{
-    for (int i = 0; i < 3; i++) {
-        for (int j = 0; j < 3; j++) {
-            if (inv->m[i][j] != 0.0) return 0;
-        }
-    }
-    return 1;
-}
 
 /* Load the bound body's orientation and rate into the vehicle's
  * attitude state. The body is the state; this state is the

@@ -279,10 +279,10 @@ K26AstroAttStatus k26astro_att_thrusters_wrench(
  *        libk26geo states as the WGS84 equatorial radius, and the
  *        flattening 1/298.257223563 is what libk26astro_core's
  *        constants carry marked WGS84. The rounded equatorial radius
- *        in that same header is not used here, since pairing it with
- *        the exact flattening would misplace a point by of order a
- *        hundred metres. The standard itself is the authority for
- *        both and is verified at intake.
+ *        in that same header, 6378100 m, is not used here: it is 37 m
+ *        short of the defining value, and pairing it with the exact
+ *        flattening would misplace a point by that much. The standard
+ *        itself is the authority for both and is verified at intake.
  */
 K26AstroAttStatus k26astro_att_geodetic(K26V3 ecef, double *lat,
                                         double *lon, double *alt);

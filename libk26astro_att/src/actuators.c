@@ -21,6 +21,8 @@
 
 #include <math.h>
 
+#include "att_internal.h"
+
 static int act_finite3_(K26V3 v)
 {
     return isfinite(v.x) && isfinite(v.y) && isfinite(v.z);
@@ -196,6 +198,14 @@ K26AstroAttStatus k26astro_att_step_actuated(K26AstroVehicle *v,
         a->omega_body = b->omega;
     }
     if (dt == 0.0) return K26ASTRO_ATT_OK;
+    /* The same guard the unactuated entry carries, on the same terms.
+     * This is the entry an emitted artifact takes, so a guard present
+     * only on the other one protects a path the product does not
+     * use: a singular tensor would step here and silently do nothing
+     * rather than be reported. */
+    if (att_inverse_is_zero_(&a->inertia_inverse)) {
+        return K26ASTRO_ATT_E_SINGULAR;
+    }
     if (!act_finite3_(extra)) return K26ASTRO_ATT_E_DIVERGED;
 
     double n2 = a->q.w * a->q.w + a->q.x * a->q.x
