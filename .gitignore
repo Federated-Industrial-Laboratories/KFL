@@ -29,6 +29,9 @@ kflc/tests/bench_parse
 !*/tests/test_*.h
 */tests/*.log
 
+# Host tool binaries
+tools/k26rl_view/k26rl_view
+
 # pkg-config generated files
 */*.pc
 !*/*.pc.in

@@ -160,11 +160,21 @@ compiler:
 # Host-side tooling. k26astro_replay is the REFERENCED-mode op-log
 # inspector consumed by KFL_Verify replay claims and by
 # tests/astro/test_referenced_replay.c (which expects the binary at
-# tools/k26astro_replay/k26astro_replay relative to the test). Requires
-# the full astro stack to be linkable, so build after astro.
+# tools/k26astro_replay/k26astro_replay relative to the test).
+# k26rl_view is the episode file viewer for the reinforcement learning
+# layer; its gate (kflc/tests/test_rl_view) skips when the binary is
+# absent, so a tree built without the interface development packages
+# still tests green. Requires the full astro stack to be linkable, so
+# build after astro.
 tools: astro
 	@echo "==> tools/k26astro_replay"
 	@$(MAKE) -C tools/k26astro_replay
+	@echo "==> tools/k26rl_view"
+	@if pkg-config --exists imgui glfw3 2>/dev/null; then \
+	    $(MAKE) -C tools/k26rl_view; \
+	else \
+	    echo "    SKIP: needs libimgui-dev and libglfw3-dev"; \
+	fi
 
 # ----- Tests -------------------------------------------------------
 

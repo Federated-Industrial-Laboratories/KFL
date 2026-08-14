@@ -100,6 +100,21 @@ Hipparcos-2 bright-star subset
              Catalogue distributed by the ESA / Hipparcos archive
              without restrictive licensing.
 
+== Vendored interface libraries ==
+
+ImPlot
+  Path:      tools/k26rl_view/upstream/implot/
+  Source:    Evan Pezent (2020-2023), https://github.com/epezent/implot
+  Version:   v0.16 (upstream tag v0.16, commit
+             18c72431f8265e2b0b5378a3a73d8a883b2175ff).
+  License:   MIT; full text at
+             tools/k26rl_view/upstream/implot/LICENSE.
+  Scope:     plotting widgets for the episode viewer's panels. Built
+             into the k26rl_view tool alone; no library in this
+             distribution links it, and neither does any compiled
+             simulation. Dear ImGui, which it extends, and GLFW are
+             system dependencies rather than vendored code.
+
 == Deterministic sampling reference material ==
 
 The following values are transcribed from open publications and ship

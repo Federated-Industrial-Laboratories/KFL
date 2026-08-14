@@ -55,6 +55,13 @@ License: LicenseRef-NRL-PD
  nrlmsise00/README.txt for the upstream paper (Picone et al., 2002,
  JGR Space Physics, 2002JA009430).
 
+Files: tools/k26rl_view/upstream/implot/*
+Copyright: 2020-2023 Evan Pezent
+License: MIT
+Comment: ImPlot v0.16 (upstream tag v0.16, commit
+ 18c72431f8265e2b0b5378a3a73d8a883b2175ff), plotting widgets for the
+ episode viewer. Built into the k26rl_view tool only.
+
 License: MIT
  Permission is hereby granted, free of charge, to any person obtaining
  a copy of this software and associated documentation files (the

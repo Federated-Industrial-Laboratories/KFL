@@ -10,6 +10,9 @@ Build-Depends: debhelper-compat (= 13),
  libexpat1-dev,
  zlib1g-dev,
  libcjson-dev,
+ libimgui-dev,
+ libglfw3-dev,
+ libgl-dev,
  pkg-config
 Standards-Version: 4.6.2
 Homepage: https://github.com/Federated-Industrial-Laboratories/KFL_Stack
