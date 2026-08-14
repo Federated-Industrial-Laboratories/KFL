@@ -75,7 +75,21 @@
  * inside the measured window. Without an assembly the vehicle count
  * is zero and the whole of that path compiles out of the artifact,
  * which would leave the fixed requirement unmeasured for everything
- * this phase added rather than proven for it. */
+ * this phase added rather than proven for it.
+ *
+ * The assembly carries all three actuator kinds, and the block below
+ * commands each of them, for the same reason one step further on.
+ * The counts are compile-time constants in the emitted source, so an
+ * assembly declaring no wheel compiles the wheel step, the actuator
+ * view and the momentum write-back out of the artifact entirely; an
+ * assembly declaring no magnetorquer compiles out the whole field
+ * chain including the field model call; and an assembly declaring no
+ * thruster compiles out the perturbation callback, which is the one
+ * piece of this phase that runs at every stage of the integrator
+ * rather than once per sub-advance. A fixture that omits them
+ * measures a smaller program than the one this phase produces. Two
+ * of each are declared, since a loop over one unit and a loop over
+ * many are not the same loop. */
 static const char *const HP_ASM =
     "assembly hotpath_box\n"
     "    frame x_to_port\n"
@@ -85,12 +99,51 @@ static const char *const HP_ASM =
     "        at 0 0 0\n"
     "        collider box 1.0 0.5 0.5\n"
     "    end\n"
+    /* Off the coordinate axes, so the frame rotations in the wheel
+     * and magnetorquer models are exercised rather than reduced to a
+     * single component. */
+    "    wheel w_a\n"
+    "        axis 0.6 0.8 0.0\n"
+    "        spin_inertia 0.05\n"
+    "        max_momentum 15.0\n"
+    "        max_torque 0.2\n"
+    "        viscous 1.0e-4\n"
+    "        coulomb 1.0e-4\n"
+    "        dead_rate 0.1\n"
+    "    end\n"
+    "    wheel w_b\n"
+    "        axis 0.0 0.6 0.8\n"
+    "        spin_inertia 0.04\n"
+    "        max_momentum 12.0\n"
+    "        max_torque 0.15\n"
+    "    end\n"
+    "    magnetorquer m_a\n"
+    "        axis 0.8 0.0 0.6\n"
+    "        max_dipole 30.0\n"
+    "    end\n"
+    "    magnetorquer m_b\n"
+    "        axis 0.0 1.0 0.0\n"
+    "        max_dipole 25.0\n"
+    "    end\n"
+    "    thruster t_a\n"
+    "        at 1.05 0.92 0.0\n"
+    "        dir 0.0 -1.0 0.0\n"
+    "        thrust 400.0\n"
+    "    end\n"
+    "    thruster t_b\n"
+    "        at -1.05 -0.92 0.0\n"
+    "        dir 0.0 1.0 0.0\n"
+    "        thrust 400.0\n"
+    "    end\n"
     "end\n";
 
 static const char *const HP_KFL =
     "form RL_HOTPATH\n"
     "fn world hp_world\n"
-    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    /* The magnetorquers make the parent's rotation model a
+     * precondition, and its NAIF id is what names it. */
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24"
+    " ephem_naif_id=399\n"
     "    astro_body craft assembly=\"hotpath.k26asm\" parent=earth"
     " pos_x=uniform(6.9e6,7.1e6) pos_y=0.0 pos_z=0.0"
     " vel_x=0.0 vel_y=normal(7350.0,10.0) vel_z=0.0"
@@ -114,6 +167,17 @@ static const char *const HP_KFL =
     "        craft.vel_x = craft.vel_x + push * 0.01\n"
     "        craft.pos_z = craft.pos_z + push\n"
     "        craft.omega_x = craft.omega_x + push * 0.0001\n"
+    /* Every actuator commanded, and one wheel read back, so the
+     * command store, the wheel step, the field chain, the
+     * perturbation callback and the reading accessors are all inside
+     * the measured window. */
+    "        craft.w_a.torque = push * 0.2\n"
+    "        craft.w_b.torque = push * -0.15\n"
+    "        craft.m_a.dipole = push * 30.0\n"
+    "        craft.m_b.dipole = push * -25.0\n"
+    "        craft.t_a.throttle = 0.5 + push * 0.0\n"
+    "        craft.t_b.throttle = 0.25 + push * 0.0\n"
+    "        craft.pos_y = craft.pos_y + craft.w_a.momentum * 0.0\n"
     "    end\n"
     "    observe craft from earth mode=geometric as trk\n"
     "    observe attitude of craft as att\n"
@@ -260,6 +324,38 @@ static int child_main_(void)
         s.destroy(env);
     }
     printf("gate 2: zero allocations, zero writes: OK\n");
+
+    /* Gate 2b: the same drive at three episode lengths. Zero at one
+     * length already implies zero per episode, but a count that grew
+     * with the number of episodes is the shape a per-episode leak
+     * takes, and reading it at 1, 4 and 16 episodes says so directly
+     * rather than by inference. The horizon is 24, so each length is
+     * a whole number of episodes and crosses every boundary it
+     * implies. */
+    {
+        static const int eps[] = { 1, 4, 16 };
+        for (int k = 0; k < 3; k++) {
+            K26RlEnv *env = NULL;
+            ASSERT(s.create(42, HP_ENVS, &env) == K26RL_OK);
+            ASSERT(s.reset(env) == K26RL_OK);
+            int steps = eps[k] * 24;
+            counters_clear_();
+            *armed_ = 1;
+            for (int t = 0; t < steps; t++) {
+                ASSERT(s.step(env, act) == K26RL_OK);
+            }
+            *armed_ = 0;
+            unsigned long a = alloc_total_(), w = write_total_();
+            printf("gate 2b: %2d episode(s), %3d steps x %d envs:"
+                   " alloc-family %lu, write-family %lu\n",
+                   eps[k], steps, HP_ENVS, a, w);
+            ASSERT(a == 0);
+            ASSERT(w == 0);
+            s.destroy(env);
+        }
+        printf("gate 2b: the counts do not grow with the number of "
+               "episodes: OK\n");
+    }
 
     /* Gate 3: output enabled. Steps still allocate nothing; the
      * writer's flushes stay within the frame bound derived in the

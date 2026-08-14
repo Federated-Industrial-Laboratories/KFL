@@ -168,6 +168,31 @@ static const char *const MAG_KFL =
 static int n_pass = 0;
 
 /* The needed-library list of an artifact. */
+/* Defined symbols from the field model in an artifact. This is the
+ * structural observable: archive extraction is what does or does not
+ * pull the field model's objects into the link, and its outcome is
+ * the presence of that code. The needed-library list below is a
+ * consequence of it under this toolchain, but only under this one:
+ * positioned before the runtime, -Wl,--no-as-needed records a
+ * DT_NEEDED entry for a library whose code was never extracted, so a
+ * gate resting on that alone would report a failure that is a link
+ * option and not a drift, and could not tell the two apart. Both are
+ * asserted, and this is the one that cannot move. */
+static int geomag_symbols_(const char *path)
+{
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd,
+             "nm -C %s 2>/dev/null | grep -c k26astro_geomag_ > "
+             WORK_DIR "/syms.txt", path);
+    (void)!system(cmd);
+    FILE *f = fopen(WORK_DIR "/syms.txt", "rb");
+    if (!f) return -1;
+    int n = 0;
+    if (fscanf(f, "%d", &n) != 1) n = -1;
+    fclose(f);
+    return n;
+}
+
 static int needs_fortran_(const char *path)
 {
     char cmd[1024];
@@ -414,8 +439,21 @@ int main(void)
          * the caller passed. */
         ASSERT(mag_needs == 1);
         ASSERT(act_needs == 0);
+
+        int mag_syms = geomag_symbols_(WORK_DIR "/mag");
+        int act_syms = geomag_symbols_(WORK_DIR "/act");
+        printf("  field model symbols: magnetorquer program %d, wheel "
+               "and thruster program %d\n", mag_syms, act_syms);
+        /* The count on the left is asserted as non-zero rather than
+         * as its present value, so that the field model gaining or
+         * losing an entry point is not read here as a split that
+         * failed. The count on the right is the whole of the claim
+         * and is exact. */
+        ASSERT(mag_syms > 0);
+        ASSERT(act_syms == 0);
         printf("  the Fortran runtime follows the declaration, not the "
-               "link line: OK\n");
+               "link line, and the field model's code is in one "
+               "artifact and not the other: OK\n");
         n_pass++;
 
         /* And the field chain runs: a commanded magnetorquer moves the

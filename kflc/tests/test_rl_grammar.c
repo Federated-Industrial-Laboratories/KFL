@@ -179,11 +179,17 @@ static void write_actuator_asset_(void)
 
 /* A world with `craft` bound to that assembly and `probe` bound to
  * none, so the no-assembly refusal has a body to name. STEP is the
- * on_step body and REWARD the reward expression. */
+ * on_step body and REWARD the reward expression.
+ *
+ * `earth` carries its NAIF id because the assembly declares a
+ * magnetorquer, and a magnetorquer's parent must name a rotation
+ * model: that is what the field chain is evaluated in. The refusal
+ * that enforces it is gated below. */
 #define ACT_WORLD(STEP, REWARD) \
     "form RL_ACTG\n" \
     "fn world w\n" \
-    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24" \
+    " ephem_naif_id=399\n" \
     "    astro_body craft assembly=\"kflc_rl_act.k26asm\" parent=earth" \
     " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n" \
     "    astro_body probe gm=1.0 parent=earth" \
@@ -249,6 +255,100 @@ static void actuator_cases_(void)
     expect_both_("act_readonly",
         ACT_WORLD("        craft.yaw.momentum = a\n", "0.0"),
         1, "`momentum` is a reading, not a command", NULL);
+
+    /* The magnetorquer's frame chain, as a precondition on the
+     * declaration rather than a zero at run time. Without a rotation
+     * model on the parent there is no frame the field is defined in,
+     * and a magnetorquer that compiled, accepted commands and
+     * produced no torque would be a training run wasted rather than a
+     * compile failed. The positive case is ACT_WORLD itself, which
+     * every case above compiles or refuses for another reason, so
+     * these three are refusals of exactly this precondition. */
+    expect_both_("act_mag_parent_no_naif",
+        "form RL_ACTN\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft assembly=\"kflc_rl_act.k26asm\" parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    on_step\n"
+        "        craft.m_y.dipole = a * 30.0\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "declares no `ephem_naif_id=`", NULL);
+
+    expect_both_("act_mag_no_parent",
+        "form RL_ACTP\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24"
+        " ephem_naif_id=399\n"
+        "    astro_body craft assembly=\"kflc_rl_act.k26asm\""
+        " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    on_step\n"
+        "        craft.m_y.dipole = a * 30.0\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "declares no `parent=`", NULL);
+
+    /* The refusal is about the magnetorquer and not about assemblies
+     * in general: the same world, with an assembly carrying only a
+     * wheel, compiles with no id on the parent. */
+    write_fixture_("/tmp/kflc_rl_wheelonly.k26asm",
+        "assembly grammar_wheel\n"
+        "    frame x_to_port\n"
+        "    provenance mass \"calibration shape\" computed\n"
+        "    component hull\n"
+        "        mass 1000.0\n"
+        "        at 0 0 0\n"
+        "        collider box 1.0 0.5 0.5\n"
+        "    end\n"
+        "    wheel yaw\n"
+        "        axis 0.0 0.0 1.0\n"
+        "        spin_inertia 0.05\n"
+        "        max_momentum 15.0\n"
+        "        max_torque 0.20\n"
+        "    end\n"
+        "end\n");
+    expect_both_("act_wheel_needs_no_naif",
+        "form RL_ACTW\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft assembly=\"kflc_rl_wheelonly.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    on_step\n"
+        "        craft.yaw.torque = a * 0.2\n"
+        "    end\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
 
     /* Outside on_step: the same name in the objective is refused,
      * because a reward read of a command surface would be a read of

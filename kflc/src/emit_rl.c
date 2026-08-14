@@ -418,6 +418,16 @@ static int rl_body_has_assembly_(const RlModel *m, int bi)
  * declares them. That order is the command surface's order and the
  * emitted tables', so a program's actuators are named by the asset
  * and indexed the same way everywhere. */
+/* The attribute of that name on a body, or NULL. */
+static const KflcAttr *rl_body_attr_(const KflcNode *body, const char *name)
+{
+    if (!body || !name) return NULL;
+    for (const KflcAttr *a = body->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, name) == 0) return a;
+    }
+    return NULL;
+}
+
 static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
 {
     int veh = 0;
@@ -458,14 +468,6 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
                 w->viscous      = ft->viscous;
                 w->coulomb      = ft->coulomb;
                 w->dead_rate    = ft->dead_rate;
-                if (!(w->spin_inertia > 0.0)) {
-                    kflc_diag_errorf(diag, ft->line,
-                        "wheel `%s`: `spin_inertia` must be positive, since "
-                        "the wheel's rate is its momentum divided by it",
-                        ft->name);
-                    kflc_arena_release(ar);
-                    return 1;
-                }
             } else if (ft->kind == KFLC_FEAT_TORQUER) {
                 if (m->n_torquers >= RL_MAX_ACT) {
                     kflc_diag_errorf(diag, ft->line,
@@ -495,6 +497,62 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
                     t->dir[k] = ft->dir[k];
                 }
                 t->max_thrust = ft->thrust;
+            }
+        }
+
+        /* A magnetorquer works against the local magnetic field, and
+         * the field model is defined at a geodetic position on a
+         * rotating body. Reaching one needs the parent's rotation
+         * model, and the only key a program can supply for it is the
+         * parent's NAIF id: the model table is keyed by that id and
+         * by a name of its own form, which a grammar identifier can
+         * never be. A declaration that cannot reach a field is
+         * refused here rather than run: the alternative is a
+         * magnetorquer that compiles, accepts commands, and produces
+         * no torque, which is the kind of wrong answer that costs a
+         * training run rather than a compile. */
+        {
+            int has_torquer = 0;
+            for (int q = 0; q < m->n_torquers; q++) {
+                if (m->torquers[q].body == i) has_torquer = 1;
+            }
+            if (has_torquer) {
+                const KflcNode *b = m->bodies[i].body;
+                const KflcAttr *pa = rl_body_attr_(b, "parent");
+                const char *pn = (pa && pa->value.kind == KFLV_IDENT)
+                               ? pa->value.u.s : NULL;
+                int pi = -1;
+                for (int j = 0; pn && j < m->n_bodies; j++) {
+                    const char *nm = m->bodies[j].body->name;
+                    if (nm && strcmp(nm, pn) == 0) pi = j;
+                }
+                if (!pn) {
+                    kflc_diag_errorf(diag, b->line,
+                        "`%s` carries a magnetorquer but declares no "
+                        "`parent=`, so there is no rotating body whose "
+                        "field it could work against", b->name);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
+                if (pi < 0) {
+                    kflc_diag_errorf(diag, b->line,
+                        "`%s` carries a magnetorquer and names `%s` as its "
+                        "parent, but no astro_body of that name is declared "
+                        "in this world", b->name, pn);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
+                if (!rl_body_attr_(m->bodies[pi].body, "ephem_naif_id")) {
+                    kflc_diag_errorf(diag, m->bodies[pi].body->line,
+                        "`%s` carries a magnetorquer, and its parent `%s` "
+                        "declares no `ephem_naif_id=`; that is what names "
+                        "the parent's rotation model, without which the "
+                        "field has no frame and the magnetorquer would "
+                        "produce no torque (Earth is 399)",
+                        b->name, pn);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
             }
         }
         veh++;
@@ -1145,17 +1203,19 @@ static void rl_emit_actuators_(FILE *out, const RlModel *m)
 " *   the world frame, then into the body frame by the conjugate of\n"
 " *   the vehicle's own orientation.\n"
 " *\n"
-" * The parent's rotation model is found by its NAIF id, which is how\n"
-" * a program says which body it is orbiting: the body library's table\n"
-" * is keyed by that id and by a model name of its own, and a name\n"
-" * declared here is a grammar identifier, so the id is the only key a\n"
-" * program can supply.\n"
+" * The parent's rotation model is found by its `ephem_naif_id=`,\n"
+" * which the compiler requires on the parent of any body carrying a\n"
+" * magnetorquer: the body library's table is keyed by that id and by\n"
+" * a model name of its own form, and a name declared in a program is\n"
+" * a grammar identifier, so the id is the only key a program can\n"
+" * supply.\n"
 " *\n"
-" * A vehicle whose body names no parent, or whose parent names no\n"
-" * rotation model, gets a zero field: there is no frame in which to\n"
-" * ask the question, and a zero field is the honest answer rather\n"
-" * than a field taken in the wrong one. Such a magnetorquer produces\n"
-" * no torque, which the reading channels show. */\n"
+" * The zero returns below are therefore defensive and not a\n"
+" * behaviour a program can reach: the compiler refuses a\n"
+" * magnetorquer whose parent carries no id, so the lookup here\n"
+" * cannot fail for that reason. A zero would be the honest answer\n"
+" * rather than a field taken in the wrong frame, but the refusal is\n"
+" * the answer the author gets. */\n"
 "static K26V3 kflrl_field_body_(K26AstroWorld *w, K26AstroVehicle *v,\n"
 "                               int veh)\n"
 "{\n"
@@ -3754,8 +3814,13 @@ static void rl_emit_env_core_(FILE *out)
 "                K26V3 bfield = kflrl_field_body_(h->worlds[e], veh, vi);\n"
 "                ast = k26astro_att_step_actuated(veh, &view, gg[vi],\n"
 "                                                 bfield, step_dt);\n"
-"                kflrl_act_store_(&h->act[e], &view, wmap);\n"
+"                /* The wheel momenta are written back only when the\n"
+"                 * advance stood. A failed advance leaves the\n"
+"                 * orientation and rate as they were, so writing the\n"
+"                 * momenta back would leave the two halves of one\n"
+"                 * step disagreeing about whether it happened. */\n"
 "                if (ast != K26ASTRO_ATT_OK) break;\n"
+"                kflrl_act_store_(&h->act[e], &view, wmap);\n"
 "            }\n"
 "            if (ast != K26ASTRO_ATT_OK) {\n"
 "                att_reason = (ast == K26ASTRO_ATT_E_DIVERGED)\n"
