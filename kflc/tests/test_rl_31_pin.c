@@ -120,14 +120,6 @@ static int count_(const char *hay, const char *needle)
     return n;
 }
 
-static int files_equal_(const char *a, const char *b)
-{
-    char *ca = slurp_(a), *cb = slurp_(b);
-    int equal = (strcmp(ca, cb) == 0);
-    free(ca);
-    free(cb);
-    return equal;
-}
 
 /* Emit a fixture through the given kflc binary; returns the exit
  * code, with stdout and stderr captured to files. */
