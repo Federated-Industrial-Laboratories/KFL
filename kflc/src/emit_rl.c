@@ -61,6 +61,24 @@ static const char *const RL_STATE_KEYS_[6] = {
     "pos_x", "pos_y", "pos_z", "vel_x", "vel_y", "vel_z"
 };
 
+/* The published observer-mode value of an as-bound observe. The
+ * grammar's default when no mode= attribute is given is the runtime's
+ * default, astrometric, which is what the observation path selects. */
+static uint16_t rl_observe_mode_(const KflcNode *n)
+{
+    if (!n) return 1;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, "mode") == 0 &&
+            a->value.kind == KFLV_IDENT && a->value.u.s) {
+            if (strcmp(a->value.u.s, "geometric") == 0) return 0;
+            if (strcmp(a->value.u.s, "astrometric") == 0) return 1;
+            if (strcmp(a->value.u.s, "apparent") == 0) return 2;
+            if (strcmp(a->value.u.s, "topocentric") == 0) return 3;
+        }
+    }
+    return 1;
+}
+
 static int rl_is_state_key_(const char *k)
 {
     if (!k) return 0;
@@ -863,6 +881,31 @@ static void rl_emit_prologue_(FILE *out, const RlModel *m,
             for (int c = 0; c < RL_OBS_COMPS; c++) {
                 fprintf(out, "    \"%s%s\",\n", base, RL_OBS_COMP_[c]);
             }
+        }
+        fputs("};\n\n", out);
+
+        /* The mode each channel's observe declared, published per
+         * channel so a consumer reads it without reconstructing
+         * observe grouping. */
+        fputs("static const uint16_t kflrl_obs_modes_"
+              "[KFLRL_OBS_TOTAL] = {\n", out);
+        for (int i = 0; i < m->n_observes; i++) {
+            uint16_t md = rl_observe_mode_(m->observes[i]);
+            for (int c = 0; c < RL_OBS_COMPS; c++) {
+                fprintf(out, "    %u,\n", (unsigned)md);
+            }
+        }
+        fputs("};\n\n", out);
+    }
+
+    /* Body names, declaration order, which is the order the body-state
+     * getter returns and the order the body-name tags index. */
+    if (m->n_bodies > 0) {
+        fputs("static const char *const kflrl_body_names_"
+              "[KFLRL_N_BODIES] = {\n", out);
+        for (int i = 0; i < m->n_bodies; i++) {
+            fprintf(out, "    \"%s\",\n",
+                    m->bodies[i].body->name ? m->bodies[i].body->name : "?");
         }
         fputs("};\n\n", out);
     }
@@ -2243,6 +2286,23 @@ static void rl_emit_env_core_(FILE *out)
 "        kflrl_put_u16_(v + 4, K26RL_OBS_KIND_VECTOR);\n"
 "        total += kflrl_tlv_(&p, K26RL_TAG_OBS_CHANNEL_KIND, 6, v);\n"
 "    }\n"
+"    for (uint32_t i = 0; i < KFLRL_OBS_TOTAL; i++) {\n"
+"        kflrl_put_u32_(v, i);\n"
+"        kflrl_put_u16_(v + 4, kflrl_obs_modes_[i]);\n"
+"        total += kflrl_tlv_(&p, K26RL_TAG_OBS_CHANNEL_MODE, 6, v);\n"
+"    }\n"
+"#endif\n"
+"", out);
+    fputs(
+"#if KFLRL_N_BODIES > 0\n"
+"    for (uint32_t i = 0; i < (uint32_t)KFLRL_N_BODIES; i++) {\n"
+"        uint8_t nv[4 + 64];\n"
+"        uint32_t nl = (uint32_t)strlen(kflrl_body_names_[i]);\n"
+"        if (nl > 64) nl = 64;\n"
+"        kflrl_put_u32_(nv, i);\n"
+"        memcpy(nv + 4, kflrl_body_names_[i], nl);\n"
+"        total += kflrl_tlv_(&p, K26RL_TAG_BODY_NAME, 4 + nl, nv);\n"
+"    }\n"
 "#endif\n"
 "    kflrl_put_u32_(v, 1u);   /* bit 0: auto-reset, always on */\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_EPISODE_FLAGS, 4, v);\n"
@@ -2832,6 +2892,58 @@ static void rl_emit_env_core_(FILE *out)
 "        memcpy(out, h->spec, h->spec_len);\n"
 "    }\n"
 "    return (int32_t)h->spec_len;\n"
+"}\n"
+"\n"
+"/* Body states: positions relative to the reference body, computed\n"
+" * with the runtime's exact position subtraction rather than by\n"
+" * flattening two absolute coordinates, and the bodies' own\n"
+" * velocities. Sized like the spec getter, env-major like every\n"
+" * other buffer, and a pure read that allocates nothing. */\n"
+"extern \"C\" int32_t k26rl_env_bodies(const K26RlEnv *h, uint32_t reference,\n"
+"                                     double *out, uint32_t capacity)\n"
+"{\n"
+"    if (!h) return -(int32_t)K26RL_E_NULL;\n"
+"    if (!kflrl_live_(h)) return -(int32_t)K26RL_E_USE_AFTER_DESTROY;\n"
+"#if KFLRL_N_BODIES <= 0\n"
+"    (void)reference; (void)out; (void)capacity;\n"
+"    return 0;\n"
+"#else\n"
+"    if (reference != K26RL_BODY_REF_ORIGIN &&\n"
+"        reference >= (uint32_t)KFLRL_N_BODIES) {\n"
+"        return -(int32_t)K26RL_E_GEOMETRY;\n"
+"    }\n"
+"    uint64_t need = (uint64_t)h->n_envs * (uint32_t)KFLRL_N_BODIES * 6u;\n"
+"    if (need > 0x7FFFFFFFu) return -(int32_t)K26RL_E_GEOMETRY;\n"
+"    if (capacity < need) return (int32_t)need;\n"
+"    if (!out) return -(int32_t)K26RL_E_NULL;\n"
+"    for (uint32_t e = 0; e < h->n_envs; e++) {\n"
+"        K26AstroWorld *w = h->worlds[e];\n"
+"        const K26AstroBody *rb = NULL;\n"
+"        if (reference != K26RL_BODY_REF_ORIGIN) {\n"
+"            rb = k26astro_world_body_at(w, kflrl_body_idx_[reference]);\n"
+"        }\n"
+"        for (uint32_t b = 0; b < (uint32_t)KFLRL_N_BODIES; b++) {\n"
+"            const K26AstroBody *bd =\n"
+"                k26astro_world_body_at(w, kflrl_body_idx_[b]);\n"
+"            double *o = out + ((size_t)e * (uint32_t)KFLRL_N_BODIES + b) * 6;\n"
+"            K26V3 r;\n"
+"            if (!bd) {\n"
+"                o[0] = o[1] = o[2] = o[3] = o[4] = o[5] = 0.0;\n"
+"                continue;\n"
+"            }\n"
+"            if (rb) {\n"
+"                r = k26astro_pos_sub(&bd->pos, &rb->pos);\n"
+"            } else {\n"
+"                K26AstroPos origin;\n"
+"                memset(&origin, 0, sizeof origin);\n"
+"                r = k26astro_pos_sub(&bd->pos, &origin);\n"
+"            }\n"
+"            o[0] = r.x; o[1] = r.y; o[2] = r.z;\n"
+"            o[3] = bd->vel.x; o[4] = bd->vel.y; o[5] = bd->vel.z;\n"
+"        }\n"
+"    }\n"
+"    return (int32_t)need;\n"
+"#endif\n"
 "}\n"
 "\n"
 "extern \"C\" void k26rl_env_destroy(K26RlEnv *h)\n"

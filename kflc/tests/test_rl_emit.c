@@ -89,6 +89,7 @@ static const char *const LINK_LIBS[] = {
  * below produces it. */
 static const char *const FROZEN_EXPORTS =
     "k26rl_abi_version\n"
+    "k26rl_env_bodies\n"
     "k26rl_env_create\n"
     "k26rl_env_destroy\n"
     "k26rl_env_fault_codes\n"

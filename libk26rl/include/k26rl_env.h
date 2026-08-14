@@ -9,7 +9,7 @@
  * every environment in a handle through flat, fixed-width,
  * spec-described buffers.
  *
- * Version 1.1. This surface is frozen: any change to an existing
+ * Version 1.2. This surface is frozen: any change to an existing
  * symbol's signature or semantics, or to an existing spec tag's
  * payload, increments the major version; additions land as new
  * symbols, new tags, and new status codes under a minor increment,
@@ -17,7 +17,8 @@
  * Minor 1 is the first such addition: k26rl_env_tap and the three
  * tap status codes joined the surface, nothing was renumbered, and a
  * consumer written against minor 0 is unaffected because it never
- * calls the new symbol.
+ * calls the new symbol. Minor 2 is the second: k26rl_env_bodies and
+ * two spec tags, on the same terms.
  *
  * Determinism contract: given the same artifact, the same seed, and
  * the same action stream, the observation, reward, and flag streams
@@ -49,9 +50,9 @@ extern "C" {
 #endif
 
 /* Major in the high 16 bits, minor in the low 16. Minor 1 adds
- * k26rl_env_tap; a consumer checks major equality and minor
- * at-least. */
-#define K26RL_ABI_VERSION ((uint32_t)0x00010001u)
+ * k26rl_env_tap, minor 2 adds k26rl_env_bodies; a consumer checks
+ * major equality and minor at-least. */
+#define K26RL_ABI_VERSION ((uint32_t)0x00010002u)
 
 /* One handle owns n_envs worlds; layout is private to the artifact. */
 typedef struct K26RlEnv K26RlEnv;
@@ -121,6 +122,9 @@ typedef enum {
 #define K26RL_TAG_OBS_CHANNEL_KIND  ((uint16_t)0x000E) /* channel u32, kind u16 */
 #define K26RL_TAG_EPISODE_FLAGS     ((uint16_t)0x000F) /* uint32; bit 0 auto-reset */
 #define K26RL_TAG_REWARD_COMPONENTS ((uint16_t)0x0010) /* reserved */
+/* Added at minor 2. */
+#define K26RL_TAG_OBS_CHANNEL_MODE  ((uint16_t)0x0011) /* channel u32, mode u16 */
+#define K26RL_TAG_BODY_NAME         ((uint16_t)0x0012) /* body u32, UTF-8 name */
 
 /* Action kinds for K26RL_TAG_ACT_KIND. */
 #define K26RL_ACT_KIND_BOX      ((uint16_t)0)
@@ -129,6 +133,15 @@ typedef enum {
 /* Observation channel kinds for K26RL_TAG_OBS_CHANNEL_KIND. */
 #define K26RL_OBS_KIND_VECTOR ((uint16_t)0)
 /* kind 1 is reserved for image channels. */
+
+/* Observer modes for K26RL_TAG_OBS_CHANNEL_MODE, mirroring the
+ * runtime's own set. One as-bound observe's channels all carry its
+ * mode; the value is published per channel so a consumer need not
+ * reconstruct observe grouping to read it. */
+#define K26RL_OBS_MODE_GEOMETRIC   ((uint16_t)0)
+#define K26RL_OBS_MODE_ASTROMETRIC ((uint16_t)1)
+#define K26RL_OBS_MODE_APPARENT    ((uint16_t)2)
+#define K26RL_OBS_MODE_TOPOCENTRIC ((uint16_t)3)
 
 /* The surface. All integers are stdint.h fixed-width; all reals are
  * IEEE-754 binary64. Callable before any create: k26rl_abi_version
@@ -273,6 +286,54 @@ void         k26rl_env_destroy(K26RlEnv *env);
  * handle, mark the ring closed and remove its name; consumers already
  * attached keep valid mappings and see the closed mark. */
 K26RlStatus  k26rl_env_tap(K26RlEnv *env, const char *name);
+
+/* Added at minor 2. Ask k26rl_env_bodies for the world origin rather
+ * than for a body's frame. */
+#define K26RL_BODY_REF_ORIGIN ((uint32_t)0xFFFFFFFFu)
+
+/* Body states, for a consumer that wants the world the observation
+ * channels are views of: positions and velocities for every body of
+ * every environment.
+ *
+ * Sizing follows k26rl_env_spec rather than the plain getters,
+ * because the element count is not derivable from a total the spec
+ * publishes: the return is the required count of doubles as a
+ * positive value; when capacity is at least that the buffer is
+ * written, when capacity is smaller nothing is written and the
+ * requirement is still returned, so capacity 0 sizes it. On error it
+ * returns the negated K26RlStatus.
+ *
+ * Layout is env-major like every other buffer here: for each
+ * environment, for each body in declaration order, six doubles, the
+ * three position components then the three velocity components,
+ * metres and metres per second. The required count is
+ * n_envs * body_count * 6, so a capacity-0 call divided by
+ * n_envs * 6 is the body count and no separate query is needed.
+ * Bodies are named by the K26RL_TAG_BODY_NAME spec tags, in the same
+ * order.
+ *
+ * Positions are relative to the body whose index is `reference`, and
+ * are computed with the runtime's exact position subtraction rather
+ * than by flattening two absolute coordinates. This matters: a
+ * position in this runtime is an exact integer sector index plus a
+ * bounded offset per axis, so that binary64 does not run out of
+ * usable precision at solar-system scale, and a flattened difference
+ * loses what the sector grid exists to keep. A reference of
+ * K26RL_BODY_REF_ORIGIN asks for the world origin instead, whose
+ * result is the flattened coordinate and carries that precision
+ * limit; a reference naming no body is refused with
+ * K26RL_E_GEOMETRY. Velocities are the bodies' own and are
+ * unaffected by the choice.
+ *
+ * A pure read, callable wherever the other getters are and as often,
+ * copying from the state the latest step or reset established. It
+ * allocates nothing, performs no I/O, and never frees or retains a
+ * caller buffer. Its values are bitwise deterministic under this
+ * surface's standing contract, and on a faulted step it delivers the
+ * pre-step values, as the other getters do and for the same reason:
+ * no transition completed. */
+int32_t      k26rl_env_bodies(const K26RlEnv *env, uint32_t reference,
+                              double *out, uint32_t capacity);
 
 #ifdef __cplusplus
 }

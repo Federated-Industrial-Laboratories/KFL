@@ -145,6 +145,8 @@ typedef struct {
     K26RlStatus (*flags)(const K26RlEnv *, uint32_t *);
     K26RlStatus (*fault_codes)(const K26RlEnv *, uint16_t *);
     int32_t     (*spec)(const K26RlEnv *, uint8_t *, uint32_t);
+    int32_t     (*bodies)(const K26RlEnv *, uint32_t, double *,
+                          uint32_t);
     const char *(*status_str)(K26RlStatus);
     void        (*destroy)(K26RlEnv *);
 } RlSurface;
@@ -170,6 +172,7 @@ static inline void rl_resolve_surface_(void *so, RlSurface *s)
     RL_RESOLVE_(flags,        "k26rl_env_flags");
     RL_RESOLVE_(fault_codes,  "k26rl_env_fault_codes");
     RL_RESOLVE_(spec,         "k26rl_env_spec");
+    RL_RESOLVE_(bodies,       "k26rl_env_bodies");
     RL_RESOLVE_(status_str,   "k26rl_status_str");
     RL_RESOLVE_(destroy,      "k26rl_env_destroy");
 #undef RL_RESOLVE_
@@ -200,6 +203,10 @@ typedef struct {
     int      saw_bounds;
     int      saw_kind;
     int      saw_names;
+    uint16_t modes[64];        /* per channel, K26RL_TAG_OBS_CHANNEL_MODE */
+    int      n_modes;
+    char     body_names[16][64];
+    int      n_body_names;
 } RlSpecView;
 
 static inline uint32_t rl_get_u32_(const uint8_t *p)
@@ -249,6 +256,25 @@ static inline void rl_parse_spec_(const uint8_t *blob, uint32_t len,
         case K26RL_TAG_ACT_KIND:     v->saw_kind     = 1; break;
         case K26RL_TAG_OBS_CHANNEL_NAME: v->saw_names = 1; break;
         case K26RL_TAG_EPISODE_FLAGS: v->episode_flags = rl_get_u32_(val); break;
+        case K26RL_TAG_OBS_CHANNEL_MODE: {
+            uint32_t ch = rl_get_u32_(val);
+            if (ch < 64) {
+                v->modes[ch] = rl_get_u16_(val + 4);
+                if ((int)ch + 1 > v->n_modes) v->n_modes = (int)ch + 1;
+            }
+            break;
+        }
+        case K26RL_TAG_BODY_NAME: {
+            uint32_t bi = rl_get_u32_(val);
+            if (bi < 16 && l >= 4) {
+                uint32_t nl = l - 4;
+                if (nl > 63) nl = 63;
+                memcpy(v->body_names[bi], val + 4, nl);
+                v->body_names[bi][nl] = '\0';
+                if ((int)bi + 1 > v->n_body_names) v->n_body_names = (int)bi + 1;
+            }
+            break;
+        }
         default: break;   /* unknown tags skipped by length */
         }
         off += 6 + l;

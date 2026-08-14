@@ -537,7 +537,10 @@ static void gate_enable_(const RlSurface *s)
     int before, after;
 
     ASSERT(s->abi_version() == K26RL_ABI_VERSION);
-    ASSERT((s->abi_version() >> 16) == 1 && (s->abi_version() & 0xFFFF) == 1);
+    /* Major equality and minor at-least, which is the check every
+     * consumer makes: the tap arrived at minor 1, and a later minor
+     * still carries it. */
+    ASSERT((s->abi_version() >> 16) == 1 && (s->abi_version() & 0xFFFF) >= 1);
 
     /* A run that never asks for a tap creates nothing. */
     before = shm_objects_();

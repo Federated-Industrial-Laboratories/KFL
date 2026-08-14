@@ -178,6 +178,17 @@ $(RL_STATE_TEST): tests/test_rl_state.c tests/rl_gate_util.h \
 # mid-write, channel names outside the drawable convention, and the
 # re-simulation comparison's verdict. Skips (77) when the sibling
 # stack archives or the viewer binary are not built.
+# Body-state getter gates: sizing and refusals, determinism and
+# vector independence, the bitwise pin between the getter's vector and
+# the recorded geometric observation channels, and the two spec tags.
+# Skips (77) when the sibling stack archives are not built.
+RL_BODIES_TEST = tests/test_rl_bodies
+$(RL_BODIES_TEST): tests/test_rl_bodies.c tests/rl_gate_util.h \
+                   ../libk26rl/include/k26rl_env.h \
+                   ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_VIEW_TEST = tests/test_rl_view
 $(RL_VIEW_TEST): tests/test_rl_view.c tests/rl_gate_util.h \
                  ../libk26rl/include/k26rl_env.h \
@@ -225,7 +236,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -242,7 +253,8 @@ test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMOR
 	./$(RL_GRAMMAR_TEST)
 	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
-	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST); do \
+	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
+	          $(RL_BODIES_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -313,6 +325,6 @@ clean:
 	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
 	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
 	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \
-	      $(RL_VIEW_TEST) \
+	      $(RL_VIEW_TEST) $(RL_BODIES_TEST) \
 	      tests/bench_parse
 	rm -rf bin
