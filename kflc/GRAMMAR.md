@@ -479,7 +479,41 @@ declared action names are in scope as read-only scalars. The body admits
 ordinary statements only: world construction (`astro_body`), stepping
 (`step`, `propagate`), `observe`, nested reinforcement learning
 constructs, and `print` are all rejected; the stepping path performs no
-I/O.
+I/O. A `print` inside a `fn` the body calls is rejected too, for the
+same reason.
+
+**Body state.** Inside `on_step`, and nowhere else, a body's state is
+read and written by dotted name:
+
+```
+<body>.<key>
+```
+
+`<body>` names an `astro_body` declared in the same world and `<key>` is
+one of the six state keys (below). The name reads as an ordinary double
+and is assigned with the ordinary assignment statement, so an action
+reaches the dynamics:
+
+```
+on_step
+    craft.vel_x = craft.vel_x + thrust
+end
+```
+
+A write lands on the state the following step integrates, since the
+block runs before the world advances. Statements run in order, so a
+later write to a key overrides an earlier one and a read sees the writes
+before it. The block does not run on the boundary step that starts an
+episode, so an episode's first observation is its reset state alone. A
+position key means metres from the world origin, the same meaning it
+carries as an `astro_body` attribute and as a `reset` target; the
+velocity keys are metres per second.
+
+The assigned expression must be side-effect free: it may call the scalar
+maths built-ins, and a call to a library built-in, directly or through a
+`fn`, is rejected. Outside `on_step` the dotted form is not a name at
+all, and an objective or termination expression that names body state is
+told to read it through an `observe ... as` channel instead.
 
 ### Observation channels
 
@@ -490,18 +524,28 @@ observe <target> from <observer> [key=value ...] as <name>
 The `observe` statement of the simulation surface takes a trailing
 `as <name>` clause, which must be the last clause on the line. Instead of
 printing, the observation becomes a named channel recomputed after every
-step. Each channel contributes four components, readable by name in the
+step. Each channel contributes five components, readable by name in the
 objective and termination expressions:
 
 | Component                                       | Value                                                        |
 |-------------------------------------------------|--------------------------------------------------------------|
 | `<name>_dir_x`, `<name>_dir_y`, `<name>_dir_z`  | Unit direction from observer to target, after the observation mode's corrections. |
 | `<name>_range`                                  | Distance from the observer to the corrected target position, in metres. |
+| `<name>_range_rate`                             | Rate of change of the geometric range, in metres per second, positive when the pair separates. |
 
-Channel names must be unique within the world and at most 58 bytes
+The range rate is the dot product of the relative position and the
+relative velocity over the separation, taken from the two bodies' state
+as it stands. It is the rate of the geometric range rather than the
+derivative of the corrected range beside it, because an observation mode
+corrects a position and has no corrected velocity to differentiate;
+under `mode=geometric` the two are the same thing. At exactly zero
+separation it reads 0.0.
+
+Channel names must be unique within the world and at most 53 bytes
 long (the compiled artifact's spec carries each derived component name
-in a 64-byte entry). Every name readable in the objective and
-termination expressions lives in one scope, so a derived component may
+in a 64-byte entry, and the longest suffix is `_range_rate`). Every name
+readable in the objective and termination expressions lives in one
+scope, so a derived component may
 not collide with an action, a top-level world binding, or a form
 argument, and an action may not collide with any of those either; the
 compiler rejects the program rather than letting one silently shadow
@@ -684,6 +728,13 @@ KFLC_LDLIBS="-lk26rl -lk26rng -lk26astro_rt -lk26astro_vehicle \
 The first command writes `pointing` and `pointing.rlenv.so`; the second
 records eight environments for four episodes each into
 `pointing.k26epi`.
+
+Two worked control problems sit beside it,
+`integration_tests/orbit_transfer.kfl` and
+`integration_tests/stationkeeping.kfl`: each drives the craft's velocity
+from its action in `on_step`, reads the range and range-rate channels
+for its endings, and draws its initial state per episode from the run's
+seed.
 
 ---
 
