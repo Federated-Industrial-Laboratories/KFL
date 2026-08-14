@@ -8,6 +8,7 @@
 #ifndef K26RL_INTERNAL_H
 #define K26RL_INTERNAL_H
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -84,6 +85,53 @@ static inline void k26rl_frame_header_write_(uint8_t *out, uint16_t kind,
     k26rl_put_u64_(out + K26RL_FH_OFF_SEQUENCE, sequence);
     k26rl_put_u32_(out + K26RL_FH_OFF_CRC, 0);
     k26rl_put_u32_(out + K26RL_FH_OFF_RESERVED, 0);
+}
+
+/* Shared-memory publication word access, used by the telemetry tap's
+ * producer and its readers.
+ *
+ * Two disciplines meet in these four helpers. The bytes in shared
+ * memory are little-endian whatever the host is, as everywhere else
+ * in this format, so the value is assembled into a local word first
+ * and that word's memory image is what crosses. The store and the
+ * load are also the publication protocol's ordering points, so they
+ * are atomic with release and acquire ordering: a reader that
+ * observes a published sequence also observes the frame bytes written
+ * before it. The addresses these are used on are naturally aligned by
+ * the ring's layout, every slot and the cursor sitting on a cache
+ * line boundary. */
+static inline void k26rl_pub_store_u64_(uint8_t *p, uint64_t v)
+{
+    uint64_t word;
+
+    k26rl_put_u64_((uint8_t *)&word, v);
+    atomic_store_explicit((_Atomic uint64_t *)(void *)p, word,
+                          memory_order_release);
+}
+
+static inline uint64_t k26rl_pub_load_u64_(const uint8_t *p)
+{
+    uint64_t word = atomic_load_explicit(
+        (const _Atomic uint64_t *)(const void *)p, memory_order_acquire);
+
+    return k26rl_get_u64_((const uint8_t *)&word);
+}
+
+static inline void k26rl_pub_store_u32_(uint8_t *p, uint32_t v)
+{
+    uint32_t word;
+
+    k26rl_put_u32_((uint8_t *)&word, v);
+    atomic_store_explicit((_Atomic uint32_t *)(void *)p, word,
+                          memory_order_release);
+}
+
+static inline uint32_t k26rl_pub_load_u32_(const uint8_t *p)
+{
+    uint32_t word = atomic_load_explicit(
+        (const _Atomic uint32_t *)(const void *)p, memory_order_acquire);
+
+    return k26rl_get_u32_((const uint8_t *)&word);
 }
 
 #endif /* K26RL_INTERNAL_H */

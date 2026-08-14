@@ -6,6 +6,11 @@
  * older consumer must still print something definite. */
 #include "k26rl_env.h"
 
+/* The name refusal names its own bound, and takes it from the header
+ * constant the check uses, so message and rule cannot drift apart. */
+#define K26RL_STR_(x) #x
+#define K26RL_XSTR_(x) K26RL_STR_(x)
+
 const char *k26rl_status_str(K26RlStatus status)
 {
     switch (status) {
@@ -21,6 +26,12 @@ const char *k26rl_status_str(K26RlStatus status)
     case K26RL_E_INTERNAL:          return "handle-level internal failure";
     case K26RL_E_DIVERGED:          return "integrator divergence";
     case K26RL_E_ENV_INTERNAL:      return "internal error confined to one environment";
+    case K26RL_E_TAP_NAME:          return "tap name must be 1 to "
+                                           K26RL_XSTR_(K26RL_TAP_NAME_MAX)
+                                           " bytes of letters, digits, dot, "
+                                           "underscore, or hyphen";
+    case K26RL_E_TAP_EXISTS:        return "tap name already in use";
+    case K26RL_E_TAP_UNAVAILABLE:   return "shared memory unavailable for the tap";
     }
     return "unknown status";
 }

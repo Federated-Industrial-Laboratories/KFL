@@ -9,11 +9,15 @@
  * every environment in a handle through flat, fixed-width,
  * spec-described buffers.
  *
- * Version 1.0. This surface is frozen: any change to an existing
+ * Version 1.1. This surface is frozen: any change to an existing
  * symbol's signature or semantics, or to an existing spec tag's
  * payload, increments the major version; additions land as new
  * symbols, new tags, and new status codes under a minor increment,
  * and consumers probe symbols with dlsym and skip unknown tags.
+ * Minor 1 is the first such addition: k26rl_env_tap and the three
+ * tap status codes joined the surface, nothing was renumbered, and a
+ * consumer written against minor 0 is unaffected because it never
+ * calls the new symbol.
  *
  * Determinism contract: given the same artifact, the same seed, and
  * the same action stream, the observation, reward, and flag streams
@@ -29,7 +33,12 @@
  * per-step path touches preallocated memory only, and when episode
  * output is enabled a bounded buffered flush occurs once per chunk
  * boundary and at episode ends. With output disabled the step path
- * performs no I/O of any kind. */
+ * performs no I/O of any kind. The telemetry tap does not change
+ * that: its per-step publication is a bounded copy into a shared
+ * memory mapping established when the tap was enabled, so it
+ * allocates nothing and performs no system call, and simulation
+ * behaviour is identical whether the tap is enabled or not and
+ * whether or not a consumer is attached. */
 #ifndef K26RL_ENV_H
 #define K26RL_ENV_H
 
@@ -39,8 +48,10 @@
 extern "C" {
 #endif
 
-/* Major in the high 16 bits, minor in the low 16. */
-#define K26RL_ABI_VERSION ((uint32_t)0x00010000u)
+/* Major in the high 16 bits, minor in the low 16. Minor 1 adds
+ * k26rl_env_tap; a consumer checks major equality and minor
+ * at-least. */
+#define K26RL_ABI_VERSION ((uint32_t)0x00010001u)
 
 /* One handle owns n_envs worlds; layout is private to the artifact. */
 typedef struct K26RlEnv K26RlEnv;
@@ -70,8 +81,13 @@ typedef enum {
     K26RL_E_USE_AFTER_DESTROY = 8,  /* handle already destroyed */
     K26RL_E_INTERNAL         = 9,   /* handle-level internal failure */
     K26RL_E_DIVERGED         = 10,  /* fault reason: integrator divergence */
-    K26RL_E_ENV_INTERNAL     = 11   /* fault reason: internal error confined
+    K26RL_E_ENV_INTERNAL     = 11,  /* fault reason: internal error confined
                                      * to one environment's step */
+    K26RL_E_TAP_NAME         = 12,  /* tap name empty, over-long, or carrying
+                                     * a character the name rule excludes */
+    K26RL_E_TAP_EXISTS       = 13,  /* a tap of that name already exists */
+    K26RL_E_TAP_UNAVAILABLE  = 14   /* the platform refused to create, size,
+                                     * or map the tap's shared memory */
 } K26RlStatus;
 
 /* Flag word bits, shared with the episode file's recorded flag words.
@@ -215,6 +231,48 @@ int32_t      k26rl_env_spec(const K26RlEnv *env, uint8_t *out,
                             uint32_t capacity);
 const char  *k26rl_status_str(K26RlStatus status);
 void         k26rl_env_destroy(K26RlEnv *env);
+
+/* Added at minor 1. Longest tap name accepted, excluding the
+ * terminator. */
+#define K26RL_TAP_NAME_MAX 63
+
+/* Enable the read-only telemetry tap, publishing the record format's
+ * frames into a shared memory ring named `name`, or disable it when
+ * `name` is null. The tap is a second transport for the frames
+ * k26rl_env_output writes to a file: the same kinds with the same
+ * payloads, published at the same points, each transport carrying its
+ * own frame sequence numbering.
+ *
+ * Timing follows k26rl_env_output: callable only when every
+ * environment sits at an episode boundary, which is after create,
+ * immediately after a reset call, and before the first step that
+ * follows; any other timing is refused with K26RL_E_OUTPUT_TIMING.
+ * Enabling publishes the file header and one episode-start frame per
+ * environment, so a consumer attached from the start sees complete
+ * first episodes.
+ *
+ * The name is 1 to K26RL_TAP_NAME_MAX bytes of ASCII letters,
+ * digits, dot, underscore, or hyphen, with no separator character;
+ * anything else is refused with K26RL_E_TAP_NAME. Creation is
+ * exclusive: an existing tap of that name is refused with
+ * K26RL_E_TAP_EXISTS, and clearing a name a dead producer left behind
+ * is the caller's, as path management is the caller's for
+ * k26rl_env_output. A geometry whose ring cannot be built inside the
+ * library's size ceiling is refused with K26RL_E_GEOMETRY, and a
+ * platform refusal to create, size, or map the object surfaces as
+ * K26RL_E_TAP_UNAVAILABLE.
+ *
+ * Publication is best-effort and lossy by design. The ring overwrites
+ * its oldest frames, so a consumer that falls behind loses whole
+ * frames and detects the loss through the frame sequence numbers; a
+ * slow, absent, or dead consumer never blocks a step and never
+ * changes what a step computes. No consumer can write to the ring:
+ * the mapping a consumer holds is read-only and the ring carries no
+ * consumer-writable field, so no control path runs from a consumer
+ * into a running simulation. Disabling the tap, and destroying the
+ * handle, mark the ring closed and remove its name; consumers already
+ * attached keep valid mappings and see the closed mark. */
+K26RlStatus  k26rl_env_tap(K26RlEnv *env, const char *name);
 
 #ifdef __cplusplus
 }
