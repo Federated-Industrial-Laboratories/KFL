@@ -33,7 +33,7 @@ ASTRO_CORE  = libk26astro_core
 # grav after body; fit standalone (pure-C, no deps).
 ASTRO_TIER1 = libk26astro_ephem libk26astro_body libk26astro_conics \
               libk26astro_grav libk26astro_fit libk26astro_vehicle \
-              libk26astro_att
+              libk26astro_att libk26astro_coll
 
 # Fortran-backed libs — atmos goes last (links to astro_core).
 ASTRO_FORTRAN = libk26astro_quad libk26astro_ode libk26astro_geomag \
@@ -195,6 +195,7 @@ test-units: bedrock aux $(ASTRO_CORE)
 	@for l in libk26astro_core libk26astro_body libk26astro_ephem \
 	          libk26astro_conics libk26astro_grav libk26astro_rt \
 	          libk26astro_fit libk26astro_vehicle libk26astro_att \
+	          libk26astro_coll \
 	          $(ASTRO_DEFENSE); do \
 	    if [ -f $$l/Makefile ] && grep -q '^test:' $$l/Makefile; then \
 	        echo "==> $$l test"; \
