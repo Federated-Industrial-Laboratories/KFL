@@ -16,9 +16,9 @@
 # the first step, with a bonus paid once on arrival.
 #
 # Seeds drive the initial radius and speed through the episode's reset
-# draws. The drawn speeds keep the starting orbit's high point below
-# 7060 km, so no episode can reach the target by coasting: the action
-# has to do it.
+# draws. Across the drawn range the starting orbit's high point stays
+# below 7120 km, so no episode can reach the target by coasting: the
+# action has to do it.
 
 form ORBIT_TRANSFER
 title "Orbit transfer to a target radius"

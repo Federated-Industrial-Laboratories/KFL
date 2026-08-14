@@ -14,8 +14,9 @@
 #
 # Seeds drive the initial tangential and radial speeds through the
 # episode's reset draws. The draws are wide enough that an uncorrected
-# orbit swings outside the box within about a quarter of an orbit, so
-# doing nothing loses.
+# orbit's radius swings by more than the box half-width on most of them,
+# so doing nothing leaves the box on most episodes and drifts to the
+# wall, where the reward is zero, on the rest.
 
 form STATIONKEEPING
 title "Station box hold at a reference radius"
