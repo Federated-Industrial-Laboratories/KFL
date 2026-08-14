@@ -56,7 +56,7 @@ $(MANIFEST_TEST): tests/test_manifest_loader.c $(LIB) $(RL_LIB)
 # declarations + idx-deref uses, and the absence of runtime
 # `find_body` calls for known names.
 BODY_BINDING_TEST = tests/test_body_binding_emit
-$(BODY_BINDING_TEST): tests/test_body_binding_emit.c $(LIB) $(RL_LIB)
+$(BODY_BINDING_TEST): tests/test_body_binding_emit.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Emit-side test for the KFL memory model. Verifies form-level
@@ -64,7 +64,7 @@ $(BODY_BINDING_TEST): tests/test_body_binding_emit.c $(LIB) $(RL_LIB)
 # conditional kflc_runtime.h include + slim include surface for
 # forms that do not use the memory keywords.
 W8_ARENA_TEST = tests/test_w8_arena_emit
-$(W8_ARENA_TEST): tests/test_w8_arena_emit.c $(LIB) $(RL_LIB)
+$(W8_ARENA_TEST): tests/test_w8_arena_emit.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Gate for compile-time enforcement of own / borrow / ptr / arena
@@ -72,21 +72,21 @@ $(W8_ARENA_TEST): tests/test_w8_arena_emit.c $(LIB) $(RL_LIB)
 # kflc binary against them, asserts that positive cases emit the
 # expected C++ shape and negative cases trigger the right diag error.
 MEMORY_QUAL_TEST = tests/test_memory_qualifiers
-$(MEMORY_QUAL_TEST): tests/test_memory_qualifiers.c $(LIB) $(RL_LIB)
+$(MEMORY_QUAL_TEST): tests/test_memory_qualifiers.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Gate for the reserved-keyword warning list: identifiers that will
 # become keywords in a future grammar version warn today, so authors
 # rename before the keyword lands and binds.
 RESERVED_KW_TEST = tests/test_reserved_keywords
-$(RESERVED_KW_TEST): tests/test_reserved_keywords.c $(LIB) $(RL_LIB)
+$(RESERVED_KW_TEST): tests/test_reserved_keywords.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
 
 # Vehicle assemblies: the format, the mass-property derivation, the
 # identity digest, and the provenance rules. Links libkflc.a for the
 # reader and libk26rl.a for the digest.
 ASSEMBLY_TEST = tests/test_assembly
-$(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB)
+$(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) -lm
 
 # Gate for the Grammar 3.2 reinforcement learning front end: episode /
@@ -96,6 +96,17 @@ $(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB)
 # $(BIN) is a prerequisite because the actuator cases below drive the
 # emitter, so a compiler left behind by an edit would have this gate
 # measuring the previous one.
+# Every gate below drives the built compiler: what each of them
+# measures is an emitted artifact, so a compiler left behind by an edit
+# would have the gate measuring the previous one and reporting green
+# for code that is no longer there. `make test` is safe on its own
+# because its target names $(BIN), but a gate built or run alone -
+# which is what a review or a bisect does - was not. tests/rl_gate_util.h
+# is what pulls the compiler into the gates that include it, so the two
+# are named together and the gates that reach it directly name $(BIN)
+# beside their own sources.
+RL_GATE_DEPS = tests/rl_gate_util.h $(BIN)
+
 RL_GRAMMAR_TEST = tests/test_rl_grammar
 $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
@@ -110,7 +121,7 @@ $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)
 RL_EMIT_TEST = tests/test_rl_emit
 $(RL_EMIT_TEST): tests/test_rl_emit.c ../libk26rl/include/k26rl_env.h \
                  ../libk26rl/include/k26rl_episode.h \
-                 ../libk26rl/libk26rl.a
+                 ../libk26rl/libk26rl.a $(BIN)
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
@@ -120,7 +131,7 @@ $(RL_EMIT_TEST): tests/test_rl_emit.c ../libk26rl/include/k26rl_env.h \
 # unknown-tag injection, and batch/serve whole-file equivalence.
 # Skips (77) when the sibling stack archives are not built.
 RL_DET_TEST = tests/test_rl_determinism
-$(RL_DET_TEST): tests/test_rl_determinism.c tests/rl_gate_util.h \
+$(RL_DET_TEST): tests/test_rl_determinism.c $(RL_GATE_DEPS) \
                 ../libk26rl/include/k26rl_env.h \
                 ../libk26rl/include/k26rl_episode.h \
                 ../libk26rl/libk26rl.a
@@ -133,7 +144,7 @@ $(RL_DET_TEST): tests/test_rl_determinism.c tests/rl_gate_util.h \
 # episode endings, and episode index monotonicity. Skips (77) when
 # the sibling stack archives are not built.
 RL_FAULT_TEST = tests/test_rl_fault
-$(RL_FAULT_TEST): tests/test_rl_fault.c tests/rl_gate_util.h \
+$(RL_FAULT_TEST): tests/test_rl_fault.c $(RL_GATE_DEPS) \
                   ../libk26rl/include/k26rl_env.h \
                   ../libk26rl/include/k26rl_episode.h \
                   ../libk26rl/libk26rl.a
@@ -146,7 +157,7 @@ $(RL_FAULT_TEST): tests/test_rl_fault.c tests/rl_gate_util.h \
 # bitwise, terminated, truncated, faulted, and post-rekey episodes
 # included. Skips (77) when the sibling stack archives are not built.
 RL_RESIM_TEST = tests/test_rl_resim
-$(RL_RESIM_TEST): tests/test_rl_resim.c tests/rl_gate_util.h \
+$(RL_RESIM_TEST): tests/test_rl_resim.c $(RL_GATE_DEPS) \
                   ../libk26rl/include/k26rl_env.h \
                   ../libk26rl/include/k26rl_episode.h \
                   ../libk26rl/libk26rl.a
@@ -159,7 +170,7 @@ $(RL_RESIM_TEST): tests/test_rl_resim.c tests/rl_gate_util.h \
 # coordinates and compared bitwise, tags included. Skips (77) when
 # the sibling stack archives are not built.
 RL_DRAWS_TEST = tests/test_rl_draws
-$(RL_DRAWS_TEST): tests/test_rl_draws.c tests/rl_gate_util.h \
+$(RL_DRAWS_TEST): tests/test_rl_draws.c $(RL_GATE_DEPS) \
                   ../libk26rl/include/k26rl_env.h \
                   ../libk26rl/include/k26rl_episode.h \
                   ../libk26rng/include/k26rng.h \
@@ -177,7 +188,7 @@ $(RL_DRAWS_TEST): tests/test_rl_draws.c tests/rl_gate_util.h \
 # divergence, and the endings their sources claim). Skips (77) when
 # the sibling stack archives are not built.
 RL_STATE_TEST = tests/test_rl_state
-$(RL_STATE_TEST): tests/test_rl_state.c tests/rl_gate_util.h \
+$(RL_STATE_TEST): tests/test_rl_state.c $(RL_GATE_DEPS) \
                   ../libk26rl/include/k26rl_env.h \
                   ../libk26rl/include/k26rl_episode.h \
                   ../libk26rl/libk26rl.a
@@ -209,7 +220,7 @@ $(RL_STATE_TEST): tests/test_rl_state.c tests/rl_gate_util.h \
 # the recorded geometric observation channels, and the two spec tags.
 # Skips (77) when the sibling stack archives are not built.
 RL_BODIES_TEST = tests/test_rl_bodies
-$(RL_BODIES_TEST): tests/test_rl_bodies.c tests/rl_gate_util.h \
+$(RL_BODIES_TEST): tests/test_rl_bodies.c $(RL_GATE_DEPS) \
                    ../libk26rl/include/k26rl_env.h \
                    ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
@@ -227,21 +238,21 @@ RL_ACTUATOR_TEST = tests/test_rl_actuators
 # it measures is the emitted artifact, so a compiler left behind by an
 # edit would have it measuring the previous emitter and reporting
 # green for code that is no longer there.
-$(RL_ACTUATOR_TEST): tests/test_rl_actuators.c tests/rl_gate_util.h \
+$(RL_ACTUATOR_TEST): tests/test_rl_actuators.c $(RL_GATE_DEPS) \
                      ../libk26rl/include/k26rl_env.h \
-                     ../libk26rl/libk26rl.a $(BIN)
+                     ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
 RL_ATT_TEST = tests/test_rl_attitude
-$(RL_ATT_TEST): tests/test_rl_attitude.c tests/rl_gate_util.h \
+$(RL_ATT_TEST): tests/test_rl_attitude.c $(RL_GATE_DEPS) \
                 ../libk26rl/include/k26rl_env.h \
                 ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
 RL_VIEW_TEST = tests/test_rl_view
-$(RL_VIEW_TEST): tests/test_rl_view.c tests/rl_gate_util.h \
+$(RL_VIEW_TEST): tests/test_rl_view.c $(RL_GATE_DEPS) \
                  ../libk26rl/include/k26rl_env.h \
                  ../libk26rl/include/k26rl_episode.h \
                  ../libk26rl/libk26rl.a
@@ -249,7 +260,7 @@ $(RL_VIEW_TEST): tests/test_rl_view.c tests/rl_gate_util.h \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
 RL_TAP_TEST = tests/test_rl_tap
-$(RL_TAP_TEST): tests/test_rl_tap.c tests/rl_gate_util.h \
+$(RL_TAP_TEST): tests/test_rl_tap.c $(RL_GATE_DEPS) \
                 ../libk26rl/include/k26rl_env.h \
                 ../libk26rl/include/k26rl_episode.h \
                 ../libk26rl/include/k26rl_tap.h \
@@ -258,7 +269,7 @@ $(RL_TAP_TEST): tests/test_rl_tap.c tests/rl_gate_util.h \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
 RL_HOTPATH_TEST = tests/test_rl_hotpath
-$(RL_HOTPATH_TEST): tests/test_rl_hotpath.c tests/rl_gate_util.h \
+$(RL_HOTPATH_TEST): tests/test_rl_hotpath.c $(RL_GATE_DEPS) \
                     ../libk26rl/include/k26rl_env.h \
                     ../libk26rl/include/k26rl_tap.h \
                     ../libk26rl/libk26rl.a
@@ -271,14 +282,14 @@ $(RL_HOTPATH_TEST): tests/test_rl_hotpath.c tests/rl_gate_util.h \
 # its constructs emits as a plain 3.1 program. Needs only the built
 # kflc; always runs.
 RL_31_PIN_TEST = tests/test_rl_31_pin
-$(RL_31_PIN_TEST): tests/test_rl_31_pin.c
+$(RL_31_PIN_TEST): tests/test_rl_31_pin.c $(BIN)
 	$(CC) $(CFLAGS) -o $@ $<
 
 # Grammar 3.1 baseline byte-identity against the pre-RL base commit.
 # Its own binary so that "history unavailable" is the harness's skip
 # code (77), never a silent pass beside the always-runnable pins.
 RL_31_BASE_TEST = tests/test_rl_31_baseline
-$(RL_31_BASE_TEST): tests/test_rl_31_baseline.c
+$(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 	$(CC) $(CFLAGS) -o $@ $<
 
 # The drive gates link the sibling stack archives at build time, so
