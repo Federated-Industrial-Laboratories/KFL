@@ -29,7 +29,9 @@ kflc/tests/bench_parse
 !*/tests/test_*.h
 */tests/*.log
 
-# Host tool binaries
+# Host tool binaries. Built by `make tools`, never tracked: the tests
+# that use them skip when they are absent.
+tools/k26astro_replay/k26astro_replay
 tools/k26rl_view/k26rl_view
 
 # pkg-config generated files
