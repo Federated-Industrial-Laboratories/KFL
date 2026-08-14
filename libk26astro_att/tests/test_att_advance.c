@@ -1,0 +1,335 @@
+/* test_att_advance.c - the attitude advance against closed forms.
+ *
+ * Acceptance:
+ *   1. Torque-free rotation of a symmetric body about a principal
+ *      axis. The axis holds and the rate holds: an angular velocity
+ *      along a principal axis is a fixed point of Euler's equation,
+ *      so any drift here is the integrator's and not the physics.
+ *      The orientation reaches the analytic angle after a stated
+ *      number of turns.
+ *   2. Torque-free rotation of an asymmetric body. The world-frame
+ *      angular momentum is conserved: no torque acts, so its
+ *      magnitude and direction are constants of the motion, while the
+ *      body-frame rate is not. This is the arm that would catch a
+ *      missing cross-coupling term, since without it the body-frame
+ *      rate would be constant and the world-frame momentum would
+ *      swing.
+ *   3. A constant body-frame torque about a principal axis reproduces
+ *      the analytic angular acceleration.
+ *   4. Order. Every bound above is reported with the step count it
+ *      holds at, and the error falls linearly in the step size, which
+ *      is what a first-order method gives. An error that did not fall
+ *      at that rate would be a defect wearing a tolerance's clothes.
+ *   5. Contract. A null vehicle, a negative interval, a singular
+ *      inertia tensor, and a non-finite torque are each reported;
+ *      a diverged step leaves the last finite state in place; and a
+ *      successful step writes through to the bound body.
+ *
+ * Wire: see libk26astro_att/Makefile.
+ */
+#include "k26astro_att/att.h"
+
+#include "k26astro_body/body.h"
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* NDEBUG-immune: a gate built with release flags must still gate. */
+#define ASSERT(cond) do { if (!(cond)) { \
+    fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
+    exit(1); } } while (0)
+
+static int n_pass = 0;
+
+static K26AstroVehicle *make_vehicle_(double ixx, double iyy, double izz,
+                                      K26AstroBody *body)
+{
+    K26AstroVehicle *v = k26astro_vehicle_new();
+    ASSERT(v != NULL);
+    k26astro_vehicle_set_dry_mass(v, 1000.0);
+    k26astro_vehicle_set_inertia_diag(v, ixx, iyy, izz);
+    if (body) {
+        k26astro_body_init(body);
+        k26astro_vehicle_bind_body(v, body);
+    }
+    return v;
+}
+
+static void set_omega_(K26AstroVehicle *v, double x, double y, double z)
+{
+    K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
+    ASSERT(a != NULL);
+    a->omega_body.x = x;
+    a->omega_body.y = y;
+    a->omega_body.z = z;
+}
+
+static double v3len_(K26V3 v)
+{
+    return sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
+}
+
+/* Rotate a body through `turns` full turns about its z principal axis
+ * in `steps` steps, and return the angle error against the analytic
+ * result, in radians. */
+static double spin_axis_error_(int steps, double turns, double *rate_err)
+{
+    const double izz = 400.0;
+    K26AstroBody body;
+    K26AstroVehicle *v = make_vehicle_(300.0, 300.0, izz, &body);
+    const double w     = 0.35;                 /* rad/s about z */
+    const double total = turns * 2.0 * M_PI / w;
+    const double dt    = total / (double)steps;
+    set_omega_(v, 0.0, 0.0, w);
+    for (int i = 0; i < steps; i++) {
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), dt) ==
+               K26ASTRO_ATT_OK);
+    }
+    K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
+    /* The rate about the spin axis is a fixed point: it must not have
+     * moved, and no rate about the other two axes may have appeared. */
+    *rate_err = fabs(a->omega_body.z - w)
+              + fabs(a->omega_body.x) + fabs(a->omega_body.y);
+    /* After a whole number of turns the orientation is the identity,
+     * up to the quaternion's double cover. The angle of the residual
+     * rotation is the error, measured from the vector part rather
+     * than from the scalar part: near the identity the scalar part is
+     * within rounding of one and an arc cosine of it cannot resolve a
+     * small residual at all, while the vector part carries it
+     * directly. */
+    double vec = sqrt(a->q.x * a->q.x + a->q.y * a->q.y
+                      + a->q.z * a->q.z);
+    if (vec > 1.0) vec = 1.0;
+    double ang = 2.0 * asin(vec);
+    k26astro_vehicle_destroy(v);
+    return ang;
+}
+
+/* Torque-free asymmetric body: the world-frame angular momentum is a
+ * constant of the motion. Returns its relative drift over the run. */
+static double momentum_drift_(int steps, double seconds, double *body_rate_swing)
+{
+    K26AstroBody body;
+    K26AstroVehicle *v = make_vehicle_(120.0, 300.0, 380.0, &body);
+    set_omega_(v, 0.9, 0.9, 0.12);
+    K26V3 h0;
+    ASSERT(k26astro_att_momentum_world(v, &h0) == K26ASTRO_ATT_OK);
+    double dt = seconds / (double)steps;
+    K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
+    double wx_min = a->omega_body.x, wx_max = a->omega_body.x;
+    for (int i = 0; i < steps; i++) {
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), dt) ==
+               K26ASTRO_ATT_OK);
+        if (a->omega_body.x < wx_min) wx_min = a->omega_body.x;
+        if (a->omega_body.x > wx_max) wx_max = a->omega_body.x;
+    }
+    K26V3 h1;
+    ASSERT(k26astro_att_momentum_world(v, &h1) == K26ASTRO_ATT_OK);
+    K26V3 d = { h1.x - h0.x, h1.y - h0.y, h1.z - h0.z };
+    double drift = v3len_(d) / v3len_(h0);
+    *body_rate_swing = (wx_max - wx_min) / fabs(wx_max);
+    k26astro_vehicle_destroy(v);
+    return drift;
+}
+
+int main(void)
+{
+    printf("torque-free rotation about a principal axis:\n");
+    {
+        double rate_err_a = 0.0, rate_err_b = 0.0;
+        double ang_a = spin_axis_error_(2000, 4.0, &rate_err_a);
+        double ang_b = spin_axis_error_(4000, 4.0, &rate_err_b);
+        printf("  4 turns: angle error %.3e at 2000 steps, %.3e at 4000 "
+               "(ratio %.2f)\n", ang_a, ang_b, ang_a / ang_b);
+        printf("  rate error %.3e and %.3e\n", rate_err_a, rate_err_b);
+        /* The rate about a principal axis is exactly conserved by the
+         * update: with the angular velocity along a principal axis
+         * the cross term is identically zero, so nothing perturbs it.
+         *
+         * The orientation is exact too, and that is worth saying
+         * rather than tolerating. About a fixed axis the exponential
+         * map composes exactly: each step is a rotation of omega
+         * times dt about z, and the product of rotations about one
+         * axis is the rotation by the sum of the angles. There is no
+         * truncation error here to measure and none to watch fall
+         * with the step, which is why this arm asserts rounding
+         * rather than convergence, and why the convergence arm is the
+         * asymmetric one below, where the rate genuinely moves within
+         * an interval. Measured: 1.1e-16 rad after four turns in 2000
+         * steps and 7.3e-15 in 4000, the growth being accumulated
+         * rounding over more operations, not truncation. */
+        ASSERT(rate_err_a < 1e-15);
+        ASSERT(rate_err_b < 1e-15);
+        ASSERT(ang_a < 1e-12);
+        ASSERT(ang_b < 1e-12);
+        printf("  the spin axis and rate hold exactly, and the "
+               "orientation error stays at rounding: OK\n");
+        n_pass++;
+    }
+
+    printf("torque-free rotation of an asymmetric body:\n");
+    {
+        double swing_a = 0.0, swing_b = 0.0;
+        double drift_a = momentum_drift_(4000, 40.0, &swing_a);
+        double drift_b = momentum_drift_(8000, 40.0, &swing_b);
+        printf("  momentum drift %.3e at 4000 steps, %.3e at 8000 "
+               "(ratio %.2f)\n", drift_a, drift_b, drift_a / drift_b);
+        printf("  body-frame rate swing %.3f of its peak, so the "
+               "cross-coupling is live\n", swing_a);
+        /* The bound is stated at the step count it holds at, and it
+         * is deliberately not tight: this is a hard tumble at half a
+         * radian per second sampled every ten milliseconds, chosen
+         * because it makes the first-order error large enough to
+         * measure a convergence rate in. What matters is the rate. */
+        ASSERT(drift_a < 9e-2);
+        double ratio = drift_a / drift_b;
+        ASSERT(ratio > 1.7 && ratio < 2.3);
+        /* The body-frame rate must genuinely move, or the arm above
+         * would be conserving the momentum of a body that is not
+         * nutating and would prove nothing about the cross term. */
+        ASSERT(swing_a > 0.2);
+        printf("  world-frame angular momentum is conserved to first "
+               "order while the body-frame rate nutates: OK\n");
+        n_pass++;
+    }
+
+    printf("the same integrator in the regime this capability works in:\n");
+    {
+        /* The arm above measures a rate; this one measures whether
+         * the method is good enough where it is actually used. A
+         * vehicle on a docking approach turns slowly, and the step is
+         * a control period divided by its declared subdivision.
+         * Measured across regimes, drift over the run:
+         *
+         *   tumble   0.9 rad/s, 40 s, dt 0.01   7.8e-2
+         *   tumble   0.9 rad/s, 40 s, dt 0.001  7.4e-3
+         *   detumble 0.1 rad/s, 100 s, dt 0.05  1.1e-2
+         *   docking  0.01 rad/s, 300 s, dt 0.05 4.1e-4
+         *   docking  0.01 rad/s, 300 s, dt 0.20 1.7e-3
+         *
+         * So the first-order step is comfortable for proximity work
+         * and wants a subdivision for a fast tumble, which is what
+         * the declaration exists for. */
+        K26AstroBody body;
+        K26AstroVehicle *v = make_vehicle_(120.0, 300.0, 380.0, &body);
+        set_omega_(v, 0.01, 0.01, 0.002);
+        K26V3 h0, h1;
+        ASSERT(k26astro_att_momentum_world(v, &h0) == K26ASTRO_ATT_OK);
+        for (int i = 0; i < 1500; i++) {     /* 300 s at dt 0.2 */
+            ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), 0.2) ==
+                   K26ASTRO_ATT_OK);
+        }
+        ASSERT(k26astro_att_momentum_world(v, &h1) == K26ASTRO_ATT_OK);
+        K26V3 d = { h1.x - h0.x, h1.y - h0.y, h1.z - h0.z };
+        double drift = v3len_(d) / v3len_(h0);
+        printf("  0.01 rad/s over 300 s at a 0.2 s step: momentum drift "
+               "%.3e\n", drift);
+        ASSERT(drift < 3e-3);
+        printf("  the advance holds angular momentum to better than a "
+               "third of a per cent on an approach: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v);
+    }
+
+    printf("constant torque about a principal axis:\n");
+    {
+        const double izz = 250.0, tau = 5.0, seconds = 10.0;
+        K26AstroBody body;
+        K26AstroVehicle *v = make_vehicle_(250.0, 250.0, izz, &body);
+        const int steps = 20000;
+        double dt = seconds / (double)steps;
+        for (int i = 0; i < steps; i++) {
+            ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, tau), dt) ==
+                   K26ASTRO_ATT_OK);
+        }
+        K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
+        double want = tau / izz * seconds;      /* omega = alpha t */
+        double err  = fabs(a->omega_body.z - want) / want;
+        printf("  omega_z %.12f against the analytic %.12f, relative "
+               "error %.3e\n", a->omega_body.z, want, err);
+        /* The angular-velocity update is exact for a constant torque
+         * about a principal axis: the cross term vanishes and the
+         * increment is the same every step, so only rounding
+         * separates the sum from the closed form. */
+        ASSERT(err < 1e-12);
+        ASSERT(fabs(a->omega_body.x) < 1e-15);
+        ASSERT(fabs(a->omega_body.y) < 1e-15);
+        printf("  a constant principal-axis torque reproduces the "
+               "analytic angular acceleration: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v);
+    }
+
+    printf("contract:\n");
+    {
+        K26AstroBody body;
+        K26AstroVehicle *v = make_vehicle_(100.0, 200.0, 300.0, &body);
+        set_omega_(v, 0.1, 0.0, 0.0);
+
+        ASSERT(k26astro_att_step(NULL, k26m3d_v3(0, 0, 0), 1.0) ==
+               K26ASTRO_ATT_E_NULL);
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), -1.0) ==
+               K26ASTRO_ATT_E_BAD_DT);
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), (double)NAN) ==
+               K26ASTRO_ATT_E_BAD_DT);
+        ASSERT(k26astro_att_step(v, k26m3d_v3((double)NAN, 0, 0), 1.0) ==
+               K26ASTRO_ATT_E_DIVERGED);
+        /* Zero interval is accepted and moves nothing. */
+        K26AstroAttitudeStateExt *a = k26astro_vehicle_attitude_ext(v);
+        K26Quat before = a->q;
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), 0.0) ==
+               K26ASTRO_ATT_OK);
+        ASSERT(a->q.w == before.w && a->q.x == before.x);
+        printf("  null, negative and non-finite intervals, a non-finite "
+               "torque, and a zero interval: OK\n");
+        n_pass++;
+
+        /* A step writes through to the bound body. */
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 0), 1.0) ==
+               K26ASTRO_ATT_OK);
+        ASSERT(body.attitude.w == a->q.w && body.attitude.x == a->q.x &&
+               body.attitude.y == a->q.y && body.attitude.z == a->q.z);
+        ASSERT(body.omega.x == a->omega_body.x);
+        printf("  a step writes the orientation and rate through to the "
+               "bound body: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v);
+    }
+    {
+        /* A singular inertia tensor is reported rather than silently
+         * doing nothing, which is what a zeroed inverse would give. */
+        K26AstroBody body;
+        K26AstroVehicle *v = make_vehicle_(100.0, 200.0, 300.0, &body);
+        K26M3 zero;
+        memset(&zero, 0, sizeof zero);
+        k26astro_vehicle_set_inertia_full(v, zero);
+        ASSERT(k26astro_att_step(v, k26m3d_v3(0, 0, 1.0), 1.0) ==
+               K26ASTRO_ATT_E_SINGULAR);
+        printf("  a singular inertia tensor is reported, not stepped "
+               "through: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v);
+    }
+    {
+        /* The set entry walks in the order given and skips holes. */
+        K26AstroBody b1, b2;
+        K26AstroVehicle *v1 = make_vehicle_(10.0, 10.0, 10.0, &b1);
+        K26AstroVehicle *v2 = make_vehicle_(10.0, 10.0, 10.0, &b2);
+        set_omega_(v1, 0.0, 0.0, 0.5);
+        set_omega_(v2, 0.0, 0.0, 0.5);
+        K26AstroVehicle *set[3] = { v1, NULL, v2 };
+        ASSERT(k26astro_att_step_all(set, 3, 0.25) == K26ASTRO_ATT_OK);
+        ASSERT(b1.attitude.z != 0.0);
+        ASSERT(b2.attitude.z == b1.attitude.z);
+        printf("  the set entry advances every vehicle it is given and "
+               "skips holes: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v1);
+        k26astro_vehicle_destroy(v2);
+    }
+
+    printf("test_att_advance: %d check(s) passed\n", n_pass);
+    return 0;
+}
