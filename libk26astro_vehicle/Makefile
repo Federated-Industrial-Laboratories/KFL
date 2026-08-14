@@ -64,14 +64,21 @@ install: $(LIB) $(SHLIB_FULL)
 	install -m644 kfl/k26astro_vehicle.kflbi \
 	    $(DESTDIR)$(PREFIX)/share/kflc/builtins/k26astro_vehicle.kflbi
 
-TEST_LINK = $(LIB) \
-            ../libk26astro_grav/libk26astro_grav.a \
-            ../libk26astro_conics/libk26astro_conics.a \
-            ../libk26astro_body/libk26astro_body.a \
-            ../libk26astro_ephem/libk26astro_ephem.a \
-            ../libk26astro_core/libk26astro_core.a \
-            ../libk26compute/libk26compute.a \
-            ../libk26m3d/libk26m3d.a -lm
+# The archives a gate links, listed once and used both as the link
+# line and as prerequisites. Naming them as prerequisites is not
+# tidiness: without it a change in a library this one links leaves a
+# stale gate binary in place, so a defect introduced there passes this
+# library's gates. The pattern rule below therefore depends on the
+# archives, not only on the test's own source.
+TEST_ARCHIVES = $(LIB) \
+                ../libk26astro_grav/libk26astro_grav.a \
+                ../libk26astro_conics/libk26astro_conics.a \
+                ../libk26astro_body/libk26astro_body.a \
+                ../libk26astro_ephem/libk26astro_ephem.a \
+                ../libk26astro_core/libk26astro_core.a \
+                ../libk26compute/libk26compute.a \
+                ../libk26m3d/libk26m3d.a
+TEST_LINK = $(TEST_ARCHIVES) -lm
 
 TEST_SRC = $(wildcard tests/test_*.c)
 TEST_BIN = $(TEST_SRC:.c=)
@@ -79,7 +86,7 @@ TEST_BIN = $(TEST_SRC:.c=)
 test: $(LIB) $(TEST_BIN)
 	@for t in $(TEST_BIN); do echo "==> $$t"; ./$$t || exit 1; done
 
-tests/test_%: tests/test_%.c $(LIB)
+tests/test_%: tests/test_%.c $(TEST_ARCHIVES)
 	$(CC) $(CFLAGS) -o $@ $< $(TEST_LINK)
 
 clean:
