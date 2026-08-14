@@ -4,7 +4,21 @@ DESTDIR ?=
 
 CFLAGS  ?= -O2 -g
 override CFLAGS += -std=c11 -Wall -Wextra -Wpedantic \
-                   -Iinclude -Isrc
+                   -Iinclude -Isrc -I../libk26rl/include
+# The float-control flags every library in this tree carries, on the
+# compiler itself. They are appended with `override` rather than left
+# to the caller because they are not a tuning choice: the compiler now
+# does floating-point arithmetic of its own, deriving a vehicle's mass
+# properties from its assembly and writing the results into the
+# emitted source as constants. A contracted multiply-add here would
+# make those constants a function of which compiler built this one,
+# and the asset digest that pins the inputs would be pinning bytes
+# whose derived numbers still moved. tests/test_assembly.c asserts the
+# outcome, comparing constants from two optimisation levels, rather
+# than asserting the presence of a flag.
+override CFLAGS += -ffp-contract=off -fexcess-precision=standard
+
+RL_LIB   = ../libk26rl/libk26rl.a
 
 BIN      = bin/kflc
 LIB      = libkflc.a
@@ -13,6 +27,7 @@ LIB      = libkflc.a
 # load .kfl files.
 LIB_OBJS = src/util.o src/lexer.o src/parser.o src/dump.o src/serialize.o \
            src/expr.o src/stmt.o src/check.o src/opaque.o \
+           src/assembly.o \
            src/builtin_register_astro.o \
            src/builtin_loader.o src/runtime.o
 # Driver objects: emitters + CLI driver. Only the kflc binary needs these.
@@ -65,6 +80,13 @@ $(MEMORY_QUAL_TEST): tests/test_memory_qualifiers.c $(LIB)
 RESERVED_KW_TEST = tests/test_reserved_keywords
 $(RESERVED_KW_TEST): tests/test_reserved_keywords.c $(LIB)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(LDFLAGS)
+
+# Vehicle assemblies: the format, the mass-property derivation, the
+# identity digest, and the provenance rules. Links libkflc.a for the
+# reader and libk26rl.a for the digest.
+ASSEMBLY_TEST = tests/test_assembly
+$(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) -lm
 
 # Gate for the Grammar 3.2 reinforcement learning front end: episode /
 # action / on_step / objective / observe-as parse + check, with the
@@ -241,7 +263,7 @@ else
 RL_DRIVE_GATES =
 endif
 
-test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_DRIVE_GATES) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
+test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_DRIVE_GATES) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
@@ -250,6 +272,7 @@ test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMOR
 	./$(W8_ARENA_TEST)
 	./$(MEMORY_QUAL_TEST)
 	./$(RESERVED_KW_TEST)
+	./$(ASSEMBLY_TEST)
 	./$(RL_GRAMMAR_TEST)
 	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
@@ -288,9 +311,16 @@ test: $(TEST_BIN) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMOR
 $(LIB): $(LIB_OBJS)
 	$(AR) rcs $@ $^
 
-$(BIN): $(DRV_OBJS) $(LIB)
+# The asset identity digest lives beside the record format's checksum
+# in libk26rl, so the compiler that stamps a digest into a program and
+# any consumer that verifies one share a single implementation. Static
+# linkage pulls in that object and nothing else.
+$(RL_LIB):
+	$(MAKE) -C ../libk26rl
+
+$(BIN): $(DRV_OBJS) $(LIB) $(RL_LIB)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) -o $@ $(DRV_OBJS) $(LIB) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $(DRV_OBJS) $(LIB) $(RL_LIB) $(LDFLAGS)
 
 src/%.o: src/%.c include/kflc.h src/internal.h
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -322,6 +352,7 @@ clean:
 	rm -f src/*.o $(BIN) $(LIB) $(TEST_BIN) $(MANIFEST_TEST) \
 	      $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) \
 	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) \
+	      $(ASSEMBLY_TEST) \
 	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
 	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
 	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \

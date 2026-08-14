@@ -1,0 +1,166 @@
+/* assembly.h - vehicle assemblies and their derived mass properties.
+ *
+ * An assembly is the data-driven description of a vehicle: components
+ * with placements and masses, collision primitives, docking ports,
+ * thrusters, and momentum devices. The compiler reads it, derives the
+ * vehicle's mass, centre of mass, and inertia tensor from it, and
+ * writes those numbers into the emitted source as constants, so a
+ * running simulation never opens an asset file.
+ *
+ * Two properties this interface exists to keep:
+ *
+ * Identity. The bytes of the assembly and of every mesh it references
+ * are hashed into one digest that travels in the compiled program, so
+ * a changed asset is a changed program and a recorded run can be
+ * traced back to the exact geometry that produced it.
+ *
+ * Determinism. The derivation walks components in source order and
+ * triangles in file order, and its arithmetic is addition,
+ * subtraction, multiplication, and division only: no library call, no
+ * square root, and nothing whose result depends on evaluation order.
+ * Under the float-control flags in this directory's Makefile the
+ * derived constants are therefore a function of the asset bytes
+ * alone.
+ */
+#ifndef KFLC_ASSEMBLY_H
+#define KFLC_ASSEMBLY_H
+
+#include "kflc.h"
+
+#include <stdint.h>
+
+#define KFLC_ASM_NAME_MAX   64
+#define KFLC_ASM_PATH_MAX   512
+#define KFLC_ASM_SRC_MAX    256
+#define KFLC_ASM_MAX_COMP   64
+#define KFLC_ASM_MAX_COLL   128
+#define KFLC_ASM_MAX_FEAT   128
+#define KFLC_ASM_MAX_PROV   64
+#define KFLC_ASM_DIGEST     32
+
+/* Collision primitive kinds. Declared, never inferred from a mesh:
+ * an author who wants a collider says so, which keeps the collision
+ * cost visible in the source. */
+typedef enum {
+    KFLC_SHAPE_SPHERE  = 1,
+    KFLC_SHAPE_CAPSULE = 2,
+    KFLC_SHAPE_BOX     = 3
+} KflcShapeKind;
+
+typedef struct {
+    KflcShapeKind kind;
+    double        a[3];      /* sphere centre, capsule end A, box half extents */
+    double        b[3];      /* capsule end B; unused otherwise */
+    double        r;         /* sphere and capsule radius; unused for a box */
+    int           component; /* owning component index */
+    int           line;
+} KflcAsmCollider;
+
+/* Features carry no mass of their own: a thruster's or a wheel's mass
+ * belongs to the component that holds it, which is where an author
+ * declares it. Refusing a mass key on a feature keeps one place per
+ * quantity. */
+typedef enum {
+    KFLC_FEAT_PORT     = 1,
+    KFLC_FEAT_THRUSTER = 2,
+    KFLC_FEAT_WHEEL    = 3,
+    KFLC_FEAT_TORQUER  = 4
+} KflcAsmFeatureKind;
+
+typedef struct {
+    KflcAsmFeatureKind kind;
+    char   name[KFLC_ASM_NAME_MAX];
+    double at[3];            /* port, thruster */
+    double axis[3];          /* port, wheel, magnetorquer */
+    double roll_ref[3];      /* port */
+    double dir[3];           /* thruster */
+    char   capture[KFLC_ASM_NAME_MAX];   /* port capture envelope name */
+    double thrust;           /* thruster, N */
+    double spin_inertia;     /* wheel, kg m^2 */
+    double max_momentum;     /* wheel, N m s */
+    double max_torque;       /* wheel, N m */
+    double viscous;          /* wheel, N m per rad/s */
+    double coulomb;          /* wheel, N m */
+    double dead_rate;        /* wheel, rad/s */
+    double max_dipole;       /* magnetorquer, A m^2 */
+    int    line;
+} KflcAsmFeature;
+
+typedef struct {
+    char   name[KFLC_ASM_NAME_MAX];
+    double mass;             /* kg, declared */
+    double at[3];            /* placement in the body frame, m */
+    double rot[4];           /* w, x, y, z; identity when absent */
+    int    has_rot;
+    char   mesh[KFLC_ASM_PATH_MAX];
+    int    has_mesh;
+    int    line;
+    /* Derived, in the component's own frame. */
+    double volume;           /* m^3 */
+    double com[3];           /* m, from the component origin */
+    double inertia[6];       /* about the component centre of mass:
+                                xx, yy, zz, xy, xz, yz, the tensor
+                                form with products already negated */
+} KflcAsmComponent;
+
+/* Provenance status words. The set is closed: an asset says where a
+ * number came from in one of three ways or is refused. */
+typedef enum {
+    KFLC_PROV_CITED      = 1,
+    KFLC_PROV_COMPUTED   = 2,
+    KFLC_PROV_UNVERIFIED = 3
+} KflcAsmProvStatus;
+
+typedef struct {
+    char              property[KFLC_ASM_NAME_MAX];
+    char              source[KFLC_ASM_SRC_MAX];
+    KflcAsmProvStatus status;
+    int               line;
+} KflcAsmProvenance;
+
+typedef struct {
+    char    name[KFLC_ASM_NAME_MAX];
+    char    path[KFLC_ASM_PATH_MAX];    /* as resolved and read */
+    /* Derived totals, body frame. */
+    double  mass;                       /* kg */
+    double  com[3];                     /* m */
+    double  inertia[6];                 /* about the assembly centre of
+                                           mass: xx, yy, zz, xy, xz, yz */
+    uint8_t digest[KFLC_ASM_DIGEST];
+    int     n_components;
+    int     n_colliders;
+    int     n_features;
+    int     n_provenance;
+    int     n_unverified;
+    KflcAsmComponent  components[KFLC_ASM_MAX_COMP];
+    KflcAsmCollider   colliders[KFLC_ASM_MAX_COLL];
+    KflcAsmFeature    features[KFLC_ASM_MAX_FEAT];
+    KflcAsmProvenance provenance[KFLC_ASM_MAX_PROV];
+} KflcAssembly;
+
+/**
+ * @brief Read an assembly, derive its mass properties, and digest it.
+ * @param path     Assembly path as written in the program.
+ * @param src_path Path of the source file that named it; the assembly
+ *                 path resolves relative to its directory.
+ * @param line     Source line, for diagnostics.
+ * @param arena    Arena the result is allocated from.
+ * @param diag     Diagnostics; every refusal names a file and a line.
+ * @return The derived assembly, or NULL when it was refused.
+ * @note  Warns once per property whose provenance status is
+ *        unverified; the count is left in n_unverified so a caller
+ *        can apply a stricter rule.
+ */
+KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
+                                 int line, KflcArena *arena,
+                                 KflcDiag *diag);
+
+/**
+ * @brief Render a digest as lowercase hexadecimal.
+ * @param d   The digest bytes.
+ * @param out Receives 64 hex digits and a terminator.
+ */
+void kflc_assembly_digest_hex(const uint8_t d[KFLC_ASM_DIGEST],
+                              char out[2 * KFLC_ASM_DIGEST + 1]);
+
+#endif /* KFLC_ASSEMBLY_H */
