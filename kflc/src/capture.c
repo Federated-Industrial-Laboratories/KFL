@@ -36,7 +36,8 @@ static const KflcCaptureEnvelope kflc_envelopes_[] = {
     }
 };
 
-#define KFLC_N_ENVELOPES ((int)(sizeof kflc_envelopes_ / sizeof kflc_envelopes_[0]))
+#define KFLC_N_ENVELOPES \
+    ((int)(sizeof kflc_envelopes_ / sizeof kflc_envelopes_[0]))
 
 const KflcCaptureEnvelope *kflc_capture_envelope(const char *name)
 {
