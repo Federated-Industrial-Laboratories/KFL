@@ -652,6 +652,17 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
         break;
     }
 
+    case KFLN_STMT_AGENT: {
+        indent(out, level);
+        fprintf(out, "agent %s\n", n->name ? n->name : "?");
+        for (const KflcNode *c = n->children; c; c = c->next) {
+            emit_node(out, c, level + 1);
+        }
+        indent(out, level);
+        fputs("end\n", out);
+        break;
+    }
+
     case KFLN_STMT_SENSOR: {
         indent(out, level);
         fprintf(out, "sensor %s\n", n->name ? n->name : "?");

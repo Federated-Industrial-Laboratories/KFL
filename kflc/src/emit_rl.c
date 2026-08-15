@@ -62,6 +62,26 @@
 #define RL_MAX_DR       256
 #define RL_MAX_WSCAL    256
 #define RL_MAX_BS       128
+#define RL_MAX_AGENTS   64
+
+/* The longest an agent name may be, in bytes, and the arithmetic it
+ * comes out of. A published channel name entry holds KFLC_OBS_NAME_MAX
+ * bytes; a declared `as` base name may be KFLC_OBS_AS_MAX of them; the
+ * longest component suffix is `_range_rate` at 11; and a qualified
+ * name spends one more byte on the separating dot. What is left is the
+ * agent name's, and neither declarable bound moves, because a name
+ * that compiles today must keep compiling.
+ *
+ * This is a bound on the name alone and not on the combination. A
+ * paired channel inserts `_truth` before its component suffix, so a
+ * `with truth` observe can derive 17 suffix bytes rather than 11, and
+ * a name at this bound beside a base name at its own can still
+ * overflow the entry. Every published name is therefore measured
+ * where it is written as well, and the refusal there names both parts
+ * rather than only the sum. */
+#define RL_AGENT_SUFFIX_MAX 11
+#define RL_AGENT_NAME_MAX \
+    (KFLC_OBS_NAME_MAX - KFLC_OBS_AS_MAX - RL_AGENT_SUFFIX_MAX - 1)
 
 /* The published observer-mode value of an as-bound observe. The
  * grammar's default when no mode= attribute is given is the runtime's
@@ -415,11 +435,46 @@ typedef struct {
     int written;   /* 1 when an assignment targets it */
 } RlStateRef;
 
+/* One agent: the block that declares it, and the ranges of the flat
+ * declaration arrays it owns. Blocks are collected in source order and
+ * each block's declarations in source order within it, so an agent's
+ * ranges are contiguous and the concatenation over agents is the whole
+ * of each vector. That is what keeps `obs_total` and `act_total`
+ * meaning what they mean, and it is what makes each published slice a
+ * partition rather than a lookup.
+ *
+ * A world with no `agent` block is agent count 1 with one implicit
+ * agent owning everything and publishing unqualified names, which is
+ * the shape every program had before the block existed. */
+typedef struct {
+    const KflcNode *node;       /* the block, or NULL when implicit */
+    const char     *name;       /* NULL for the implicit agent */
+    int             obs_first, n_obs;   /* range in the model's observes */
+    int             act_first, n_act;   /* range in the model's actions */
+    int             obs_off, obs_count; /* observation vector slice */
+    int             act_off, act_count; /* action vector slice */
+    const KflcNode *objective;  /* or NULL: an all-zero reward stream */
+    const KflcAttr *reward;
+    const KflcAttr *terminal;
+} RlAgent;
+
 typedef struct {
     const KflcNode *world;
     const KflcNode *episode;
     const KflcNode *on_step;    /* or NULL */
-    const KflcNode *objective;  /* or NULL */
+    const KflcNode *objective;  /* world level, or NULL */
+
+    /* Agent count is n_agents when any `agent` block is declared and 1
+     * otherwise, the implicit agent occupying slot 0 either way. */
+    RlAgent         agents[RL_MAX_AGENTS];
+    int             n_agents;      /* declared blocks; 0 when implicit */
+    int             agent_count;   /* published count, never below 1 */
+
+    /* Which block owns each declaration, by index into agents[], or -1
+     * for one written at world level. Mixing the two is refused, so
+     * after collection these are all -1 or all non-negative. */
+    int             act_owner[RL_MAX_ACTIONS];
+    int             obs_owner[RL_MAX_OBSERVES];
 
     RlBody          bodies[RL_MAX_BODIES];
     int             n_bodies;
@@ -1132,6 +1187,314 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
     return 0;
 }
 
+/* ---- Agents ---------------------------------------------------------- */
+
+static int rl_body_index_of_(const RlModel *m, const char *name);
+
+/* Record one action or one `as`-bound observe against the agent that
+ * owns it, -1 meaning it was written at world level. Declarations are
+ * appended in the order they are read, which is source order, so each
+ * agent's range in these arrays is contiguous. */
+static int rl_add_action_(RlModel *m, const KflcNode *s, int owner,
+                          KflcDiag *diag)
+{
+    if (m->n_actions == RL_MAX_ACTIONS) {
+        kflc_diag_errorf(diag, s->line,
+            "too many action declarations (limit %d)", RL_MAX_ACTIONS);
+        return 1;
+    }
+    m->act_owner[m->n_actions] = owner;
+    m->actions[m->n_actions++] = s;
+    return 0;
+}
+
+static int rl_add_observe_(RlModel *m, const KflcNode *s, int owner,
+                           KflcDiag *diag)
+{
+    if (m->n_observes == RL_MAX_OBSERVES) {
+        kflc_diag_errorf(diag, s->line,
+            "too many observation channels (limit %d)", RL_MAX_OBSERVES);
+        return 1;
+    }
+    m->obs_owner[m->n_observes] = owner;
+    m->observes[m->n_observes++] = s;
+    return 0;
+}
+
+/* One `agent <name> ... end` block. The block is a scope over the
+ * three constructs and holds nothing else: any other declaration
+ * inside it would have an ownership the grammar does not define, and
+ * inventing one here is how an ambiguity a reader has to look up gets
+ * built in. */
+static int rl_collect_agent_(RlModel *m, const KflcNode *s, KflcDiag *diag)
+{
+    if (m->n_agents == RL_MAX_AGENTS) {
+        kflc_diag_errorf(diag, s->line,
+            "too many agent blocks (limit %d)", RL_MAX_AGENTS);
+        return 1;
+    }
+    int idx  = m->n_agents++;
+    RlAgent *a = &m->agents[idx];
+    memset(a, 0, sizeof *a);
+    a->node      = s;
+    a->name      = s->name ? s->name : "?";
+    a->act_first = m->n_actions;
+    a->obs_first = m->n_observes;
+
+    int err = 0;
+    for (const KflcNode *c = s->children; c; c = c->next) {
+        switch (c->kind) {
+        case KFLN_STMT_ACTION:
+            if (rl_add_action_(m, c, idx, diag)) return 1;
+            break;
+        case KFLN_STMT_OBSERVE:
+            if (!rl_observe_as_(c)) {
+                kflc_diag_errorf(diag, c->line,
+                    "agent `%s`: an `observe` inside an agent block "
+                    "declares one of that agent's observation channels "
+                    "and needs an `as <name>` clause; an observe that "
+                    "only prints belongs at world level", a->name);
+                err = 1;
+                break;
+            }
+            if (rl_add_observe_(m, c, idx, diag)) return 1;
+            break;
+        case KFLN_STMT_OBJECTIVE:
+            if (a->objective) {
+                kflc_diag_errorf(diag, c->line,
+                    "agent `%s`: duplicate `objective` block; an agent "
+                    "declares at most one, and the first is at line %d",
+                    a->name, a->objective->line);
+                err = 1;
+                break;
+            }
+            a->objective = c;
+            break;
+        default:
+            kflc_diag_errorf(diag, c->line,
+                "agent `%s`: an agent block holds `action`, "
+                "`observe ... as` and `objective` declarations and "
+                "nothing else", a->name);
+            err = 1;
+            break;
+        }
+    }
+    a->n_act = m->n_actions  - a->act_first;
+    a->n_obs = m->n_observes - a->obs_first;
+    if (a->objective) {
+        a->reward   = rl_attr_(a->objective, "reward");
+        a->terminal = rl_attr_(a->objective, "terminal");
+    }
+    /* An agent with no actions is an observation-only agent, which is
+     * legal for the same reason an action total of zero is. An agent
+     * with no actions and no objective declares nothing that has an
+     * effect, and is more likely a mistake than an intention. */
+    if (!err && a->n_act == 0 && !a->objective) {
+        kflc_diag_errorf(diag, s->line,
+            "agent `%s`: this block declares neither an `action` nor an "
+            "`objective`, so it publishes no action channel and no "
+            "reward and has no effect on the program", a->name);
+        err = 1;
+    }
+    return err;
+}
+
+/* Everything about the agent set that can only be judged once all of
+ * it has been read: that world level and block level are not mixed,
+ * that the names are usable, and what each agent's slices are. */
+static int rl_finish_agents_(RlModel *m, KflcDiag *diag)
+{
+    int err = 0;
+    m->agent_count = m->n_agents > 0 ? m->n_agents : 1;
+
+    /* Mixing. A world-level declaration beside a block has two
+     * possible readings, that it belongs to every agent or that it
+     * belongs to agent 0, and both would be inventions. */
+    if (m->n_agents > 0) {
+        const KflcNode *blk = m->agents[0].node;
+        const char     *bn  = m->agents[0].name;
+        for (int i = 0; i < m->n_actions; i++) {
+            if (m->act_owner[i] >= 0) continue;
+            kflc_diag_errorf(diag, m->actions[i]->line,
+                "action `%s` is declared at world level, and this world "
+                "declares `agent %s` at line %d; once any agent block is "
+                "present every action, objective and `observe ... as` "
+                "belongs to one of them, so move this into the block that "
+                "owns it",
+                m->actions[i]->name ? m->actions[i]->name : "?",
+                bn, blk->line);
+            err = 1;
+        }
+        for (int i = 0; i < m->n_observes; i++) {
+            if (m->obs_owner[i] >= 0) continue;
+            kflc_diag_errorf(diag, m->observes[i]->line,
+                "observe ... as `%s` is declared at world level, and this "
+                "world declares `agent %s` at line %d; once any agent "
+                "block is present every action, objective and "
+                "`observe ... as` belongs to one of them, so move this "
+                "into the block that owns it",
+                rl_observe_as_(m->observes[i]), bn, blk->line);
+            err = 1;
+        }
+        if (m->objective) {
+            kflc_diag_errorf(diag, m->objective->line,
+                "this `objective` block is declared at world level, and "
+                "this world declares `agent %s` at line %d; once any "
+                "agent block is present every action, objective and "
+                "`observe ... as` belongs to one of them, so move this "
+                "into the block that owns it", bn, blk->line);
+            err = 1;
+        }
+        if (err) return 1;
+    }
+
+    if (m->n_agents == 0) {
+        /* The implicit agent: one agent owning every declaration and
+         * publishing unqualified names, which is what a program with
+         * no block has always been. */
+        RlAgent *a = &m->agents[0];
+        memset(a, 0, sizeof *a);
+        a->n_act     = m->n_actions;
+        a->n_obs     = m->n_observes;
+        a->objective = m->objective;
+        a->reward    = m->reward;
+        a->terminal  = m->terminal;
+    }
+
+    for (int i = 0; i < m->n_agents; i++) {
+        const RlAgent *a = &m->agents[i];
+        size_t len = strlen(a->name);
+        if (len > (size_t)RL_AGENT_NAME_MAX) {
+            kflc_diag_errorf(diag, a->node->line,
+                "agent `%s`: the name is %zu bytes and an agent name may "
+                "be at most %d; a published channel name entry holds %d "
+                "bytes, a declared channel name may be %d of them, the "
+                "longest component suffix is %d, and the qualifying dot "
+                "takes one more",
+                a->name, len, RL_AGENT_NAME_MAX, KFLC_OBS_NAME_MAX,
+                KFLC_OBS_AS_MAX, RL_AGENT_SUFFIX_MAX);
+            err = 1;
+        }
+        for (int j = 0; j < i; j++) {
+            if (strcmp(m->agents[j].name, a->name) != 0) continue;
+            kflc_diag_errorf(diag, a->node->line,
+                "agent `%s`: an agent of that name is already declared at "
+                "line %d; agent names are what qualified channel names "
+                "are built from and must tell the agents apart",
+                a->name, m->agents[j].node->line);
+            err = 1;
+            break;
+        }
+        /* An agent name and a body name share the read space inside
+         * `on_step`, where `<body>.<key>` is already a dotted shape,
+         * so one name cannot stand for both. */
+        int bi = rl_body_index_of_(m, a->name);
+        if (bi >= 0) {
+            kflc_diag_errorf(diag, a->node->line,
+                "agent `%s`: `astro_body %s` at line %d already claims "
+                "that name; both are read by dotted name in this "
+                "program's expression scope, so `%s.x` would have two "
+                "meanings; rename one",
+                a->name, a->name, m->bodies[bi].body->line, a->name);
+            err = 1;
+        }
+        if (strcmp(a->name, "episode") == 0) {
+            kflc_diag_errorf(diag, a->node->line,
+                "agent `episode`: the name is taken by `episode.steps` in "
+                "this program's expression scope; rename the agent");
+            err = 1;
+        }
+    }
+    if (err) return 1;
+
+    /* Slices. Channels allocate in source order within a block and
+     * blocks in source order, so each agent's slice is contiguous and
+     * the concatenation over agents is the whole vector. */
+    for (int i = 0; i < m->agent_count; i++) {
+        RlAgent *a = &m->agents[i];
+        a->obs_off   = rl_obs_offset_(m->observes, a->obs_first);
+        a->obs_count = rl_obs_offset_(m->observes, a->obs_first + a->n_obs)
+                       - a->obs_off;
+        a->act_off   = a->act_first;
+        a->act_count = a->n_act;
+    }
+    return 0;
+}
+
+/* The agent that owns observe `i`, or action `i`. With no block
+ * declared the implicit agent owns everything. */
+static int rl_obs_agent_(const RlModel *m, int i)
+{
+    return m->n_agents > 0 ? m->obs_owner[i] : 0;
+}
+
+static int rl_act_agent_(const RlModel *m, int i)
+{
+    return m->n_agents > 0 ? m->act_owner[i] : 0;
+}
+
+/* The published name of channel `c` of observe `i`, written into
+ * `out`. With one agent a channel publishes the name it was declared
+ * with, which is what makes a single-agent program's spec identical to
+ * the one it had before agents existed. With more than one it
+ * publishes `<agent>.<channel>`, because two agents may each declare a
+ * channel called `rel` and the published name must still tell them
+ * apart.
+ *
+ * A combination the entry cannot hold is refused here rather than
+ * truncated in the artifact, and the diagnostic names both parts and
+ * the arithmetic: a reader given only the total has to go back to the
+ * source and do the subtraction themselves. */
+static int rl_obs_pub_name_(const RlModel *m, int i, int c,
+                            char *out, size_t cap, KflcDiag *diag)
+{
+    const KflcNode *n    = m->observes[i];
+    const char     *base = rl_observe_as_(n);
+    char            cb[RL_COMP_MAX];
+    const char     *cmp  = rl_observe_comp_(n, c, cb, sizeof cb);
+    const char     *qual = NULL;
+    size_t          qlen = 0;
+
+    if (m->agent_count > 1) {
+        qual = m->agents[rl_obs_agent_(m, i)].name;
+        qlen = strlen(qual) + 1;
+    }
+    size_t need = qlen + strlen(base) + strlen(cmp) + 1;
+    if (need > cap || need > (size_t)KFLC_OBS_NAME_MAX) {
+        if (qual) {
+            kflc_diag_errorf(diag, n->line,
+                "agent `%s` and `observe ... as %s`: the published "
+                "channel name `%s.%s%s` needs %zu bytes and the spec "
+                "entry holds %d; the agent name is %zu, the dot is 1, the "
+                "channel name is %zu, the suffix `%s` is %zu, and the "
+                "terminator is 1",
+                qual, base, qual, base, cmp, need, KFLC_OBS_NAME_MAX,
+                strlen(qual), strlen(base), cmp, strlen(cmp));
+        } else {
+            kflc_diag_errorf(diag, n->line,
+                "observe ... as `%s`: the derived channel name `%s%s` "
+                "needs %zu bytes and the spec entry holds %d",
+                base, base, cmp, need, KFLC_OBS_NAME_MAX);
+        }
+        return 1;
+    }
+    /* Assembled by copy rather than by format, because the lengths
+     * are the ones the test above accepted: a format that could
+     * truncate would put a shortened name in the artifact after a
+     * check that said it fitted. */
+    char *w = out;
+    if (qual) {
+        size_t ql = strlen(qual);
+        memcpy(w, qual, ql); w += ql;
+        *w++ = '.';
+    }
+    size_t bl = strlen(base), cl = strlen(cmp);
+    memcpy(w, base, bl); w += bl;
+    memcpy(w, cmp, cl);  w += cl;
+    *w = '\0';
+    return 0;
+}
+
 static int rl_collect_(RlModel *m, const KflcNode *form,
                        KflcArena *arena, KflcDiag *diag)
 {
@@ -1204,13 +1567,7 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
             }
             break;
         case KFLN_STMT_ACTION:
-            if (m->n_actions == RL_MAX_ACTIONS) {
-                kflc_diag_errorf(diag, s->line,
-                    "too many action declarations (limit %d)",
-                    RL_MAX_ACTIONS);
-                return 1;
-            }
-            m->actions[m->n_actions++] = s;
+            if (rl_add_action_(m, s, -1, diag)) return 1;
             break;
         case KFLN_STMT_ON_STEP:
             m->on_step = s;
@@ -1218,18 +1575,15 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
         case KFLN_STMT_OBJECTIVE:
             m->objective = s;
             break;
+        case KFLN_STMT_AGENT:
+            if (rl_collect_agent_(m, s, diag)) err = 1;
+            break;
         case KFLN_STMT_SENSOR:
             if (rl_collect_sensor_(m, s, diag)) err = 1;
             break;
         case KFLN_STMT_OBSERVE:
             if (rl_observe_as_(s)) {
-                if (m->n_observes == RL_MAX_OBSERVES) {
-                    kflc_diag_errorf(diag, s->line,
-                        "too many observation channels (limit %d)",
-                        RL_MAX_OBSERVES);
-                    return 1;
-                }
-                m->observes[m->n_observes++] = s;
+                if (rl_add_observe_(m, s, -1, diag)) return 1;
             }
             break;
         default:
@@ -1253,6 +1607,16 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
                         "astro_body declarations in a reinforcement "
                         "learning world must be top level: the body set "
                         "is part of the compiled program's identity");
+                    err = 1;
+                }
+                /* Agent index is source order, and the slices it
+                 * decides are published in the artifact's spec, so the
+                 * agent set cannot be conditional either. */
+                if (c->kind == KFLN_STMT_AGENT) {
+                    kflc_diag_errorf(diag, c->line,
+                        "agent blocks in a reinforcement learning world "
+                        "must be top level: agent index is source order "
+                        "and is part of the compiled program's identity");
                     err = 1;
                 }
             }
@@ -1284,6 +1648,7 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
             "episode: missing required `control_dt <expr>`");
         return 1;
     }
+    if (rl_finish_agents_(m, diag)) return 1;
 
     /* Domain-randomisation parameters: distribution-valued astro_body
      * attributes, channels in source order within class 0x0002. */
@@ -1567,25 +1932,153 @@ static void rl_rewrite_steps_(KflcExpr *e, KflcArena *arena)
  * world scalar so the expression emitter resolves the KFL names as
  * ordinary scalar bindings. */
 
-static void rl_emit_scope_prelude_(FILE *out, const RlModel *m, int indent)
+/* ---- Qualified channel names ---------------------------------------- */
+
+static int rl_dotted_split_(const char *name, char *lhs, size_t lcap,
+                            char *rhs, size_t rcap);
+
+/* The identifier the emitted scope binds a qualified read to. The
+ * agent's index rather than its name: two agent names differ, but a
+ * name joined to a channel name need not, and a mangled identifier
+ * that could collide would silently read the wrong agent. */
+static void rl_qual_ident_(int agent, const char *chan, char *out,
+                           size_t cap)
 {
+    snprintf(out, cap, "_kfl_q%d_%s", agent, chan);
+}
+
+/* The channel name each `as`-bound observe component is written as in
+ * source, which is the declared base name with the component suffix,
+ * unqualified. */
+static const char *rl_obs_chan_name_(const RlModel *m, int i, int c,
+                                     char *buf, size_t cap)
+{
+    const char *base = rl_observe_as_(m->observes[i]);
+    char        cb[RL_COMP_MAX];
+    const char *cmp  = rl_observe_comp_(m->observes[i], c, cb, sizeof cb);
+    snprintf(buf, cap, "%s%s", base ? base : "?", cmp);
+    return buf;
+}
+
+static int rl_agent_index_of_(const RlModel *m, const char *name)
+{
+    if (!name) return -1;
+    for (int i = 0; i < m->n_agents; i++) {
+        if (strcmp(m->agents[i].name, name) == 0) return i;
+    }
+    return -1;
+}
+
+/* Whether agent `ag` declares a channel called `name`: one of its
+ * actions, or one component of one of its observation channels. */
+static int rl_agent_has_channel_(const RlModel *m, int ag, const char *name)
+{
+    if (!name) return 0;
     for (int i = 0; i < m->n_actions; i++) {
+        if (rl_act_agent_(m, i) != ag) continue;
+        const char *an = m->actions[i]->name;
+        if (an && strcmp(an, name) == 0) return 1;
+    }
+    for (int i = 0; i < m->n_observes; i++) {
+        if (rl_obs_agent_(m, i) != ag) continue;
+        for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
+            char nb[KFLC_OBS_NAME_MAX];
+            if (strcmp(rl_obs_chan_name_(m, i, c, nb, sizeof nb),
+                       name) == 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* The agent that owns the only channel called `name`, or -1 when no
+ * agent declares it. `*n_owners` reports how many do, which is what
+ * tells an unambiguous unqualified read from one that would be a
+ * guess. */
+static int rl_channel_owner_(const RlModel *m, const char *name,
+                             int *n_owners)
+{
+    int owner = -1, n = 0;
+    for (int a = 0; a < m->agent_count; a++) {
+        if (!rl_agent_has_channel_(m, a, name)) continue;
+        if (n == 0) owner = a;
+        n++;
+    }
+    if (n_owners) *n_owners = n;
+    return owner;
+}
+
+/* The two declaration sites of an action name two blocks share, for
+ * the diagnostic that refuses an unqualified read of it. */
+static void rl_action_sites_(const RlModel *m, const char *name,
+                             int *a0, int *l0, int *a1, int *l1)
+{
+    int seen = 0;
+    for (int i = 0; i < m->n_actions; i++) {
+        const char *an = m->actions[i]->name;
+        if (!an || strcmp(an, name) != 0) continue;
+        if (seen == 0) { *a0 = rl_act_agent_(m, i); *l0 = m->actions[i]->line; }
+        else if (seen == 1) {
+            *a1 = rl_act_agent_(m, i); *l1 = m->actions[i]->line;
+        }
+        seen++;
+    }
+}
+
+/* The scope one reward, terminal or termination expression reads.
+ * `ag` is the agent whose objective is being emitted, or -1 for the
+ * episode's own `terminated when`, which sits in no block and so has
+ * no agent to default to.
+ *
+ * A channel is bound unqualified when the reading expression owns it,
+ * and when the program declares at most one agent, in which case there
+ * is nothing for a qualifier to disambiguate. Every channel of every
+ * agent is bound under its qualified identifier as well, which is what
+ * lets a zero-sum reward be written once as the negation of the other
+ * agent's rather than twice as two expressions a later edit can pull
+ * apart. */
+static void rl_emit_scope_prelude_(FILE *out, const RlModel *m, int ag,
+                                   int indent)
+{
+    int have_q   = (m->n_agents > 0);
+    int bare_all = (m->agent_count <= 1);
+    for (int i = 0; i < m->n_actions; i++) {
+        const char *nm = m->actions[i]->name;
+        int owner = rl_act_agent_(m, i);
+        if (bare_all || owner == ag) {
+            rl_emit_indent_(out, indent);
+            fprintf(out,
+                "const double %s = _kfl_act_v ? _kfl_act_v[%d] : 0.0; "
+                "(void)%s;\n", nm, i, nm);
+        }
+        if (!have_q) continue;
+        char q[KFLC_OBS_NAME_MAX + 32];
+        rl_qual_ident_(owner, nm, q, sizeof q);
         rl_emit_indent_(out, indent);
         fprintf(out,
             "const double %s = _kfl_act_v ? _kfl_act_v[%d] : 0.0; "
-            "(void)%s;\n",
-            m->actions[i]->name, i, m->actions[i]->name);
+            "(void)%s;\n", q, i, q);
     }
     for (int i = 0; i < m->n_observes; i++) {
-        const char *base = rl_observe_as_(m->observes[i]);
+        int owner = rl_obs_agent_(m, i);
         for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
-            char cb[RL_COMP_MAX];
-            const char *cmp = rl_observe_comp_(m->observes[i], c, cb,
-                                               sizeof cb);
+            char nb[KFLC_OBS_NAME_MAX];
+            const char *nm = rl_obs_chan_name_(m, i, c, nb, sizeof nb);
+            int off = rl_obs_offset_(m->observes, i) + c;
+            if (bare_all || owner == ag) {
+                rl_emit_indent_(out, indent);
+                fprintf(out,
+                    "const double %s = _kfl_obs_v[%d]; (void)%s;\n",
+                    nm, off, nm);
+            }
+            if (!have_q) continue;
+            char q[KFLC_OBS_NAME_MAX + 32];
+            rl_qual_ident_(owner, nm, q, sizeof q);
             rl_emit_indent_(out, indent);
             fprintf(out,
-                "const double %s%s = _kfl_obs_v[%d]; (void)%s%s;\n",
-                base, cmp, rl_obs_offset_(m->observes, i) + c, base, cmp);
+                "const double %s = _kfl_obs_v[%d]; (void)%s;\n",
+                q, off, q);
         }
     }
     for (int i = 0; i < m->n_wscal; i++) {
@@ -1600,28 +2093,41 @@ static void rl_emit_scope_prelude_(FILE *out, const RlModel *m, int indent)
 }
 
 /* Bindings matching rl_emit_scope_prelude_ plus form arguments. */
-static void rl_scope_bindings_(const RlModel *m, const KflcNode *form,
+static void rl_scope_bindings_(const RlModel *m, int ag,
+                               const KflcNode *form,
                                KflcArena *arena, KflcExprBinding **live,
                                int *live_n, int *live_cap)
 {
+    int have_q   = (m->n_agents > 0);
+    int bare_all = (m->agent_count <= 1);
     rl_collect_form_args_(form, arena, live, live_n, live_cap);
     for (int i = 0; i < m->n_actions; i++) {
+        int owner = rl_act_agent_(m, i);
+        if (bare_all || owner == ag) {
+            rl_push_binding_(arena, live, live_n, live_cap,
+                             m->actions[i]->name, KFLT_DOUBLE);
+        }
+        if (!have_q) continue;
+        char q[KFLC_OBS_NAME_MAX + 32];
+        rl_qual_ident_(owner, m->actions[i]->name, q, sizeof q);
         rl_push_binding_(arena, live, live_n, live_cap,
-                         m->actions[i]->name, KFLT_DOUBLE);
+                         kflc_arena_strdup(arena, q), KFLT_DOUBLE);
     }
     for (int i = 0; i < m->n_observes; i++) {
-        const char *base = rl_observe_as_(m->observes[i]);
-        if (!base) continue;
+        if (!rl_observe_as_(m->observes[i])) continue;
+        int owner = rl_obs_agent_(m, i);
         for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
-            char cb[RL_COMP_MAX];
-            const char *cmp = rl_observe_comp_(m->observes[i], c, cb,
-                                               sizeof cb);
-            size_t bl = strlen(base), sl = strlen(cmp);
-            char *nm = (char *)kflc_arena_alloc(arena, bl + sl + 1);
-            memcpy(nm, base, bl);
-            memcpy(nm + bl, cmp, sl + 1);
-            rl_push_binding_(arena, live, live_n, live_cap, nm,
-                             KFLT_DOUBLE);
+            char nb[KFLC_OBS_NAME_MAX];
+            const char *nm = rl_obs_chan_name_(m, i, c, nb, sizeof nb);
+            if (bare_all || owner == ag) {
+                rl_push_binding_(arena, live, live_n, live_cap,
+                                 kflc_arena_strdup(arena, nm), KFLT_DOUBLE);
+            }
+            if (!have_q) continue;
+            char q[KFLC_OBS_NAME_MAX + 32];
+            rl_qual_ident_(owner, nm, q, sizeof q);
+            rl_push_binding_(arena, live, live_n, live_cap,
+                             kflc_arena_strdup(arena, q), KFLT_DOUBLE);
         }
     }
     for (int i = 0; i < m->n_wscal; i++) {
@@ -1630,6 +2136,53 @@ static void rl_scope_bindings_(const RlModel *m, const KflcNode *form,
     }
     rl_push_binding_(arena, live, live_n, live_cap,
                      "_kfl_episode_steps", KFLT_DOUBLE);
+}
+
+/* Rewrite `<agent>.<channel>` reads into the identifiers the prelude
+ * binds. It runs after the names have been checked and before every
+ * other resolution, so a qualified read never reaches the body-state
+ * resolver, which would report it as an unknown body. */
+static void rl_qual_rewrite_expr_(const RlModel *m, KflcExpr *e,
+                                  KflcArena *arena)
+{
+    if (!e) return;
+    switch (e->kind) {
+    case KFLE_IDENT: {
+        char an[KFLC_OBS_NAME_MAX], cn[KFLC_OBS_NAME_MAX];
+        if (!rl_dotted_split_(e->u.ident, an, sizeof an, cn, sizeof cn)) {
+            return;
+        }
+        int ag = rl_agent_index_of_(m, an);
+        if (ag < 0 || !rl_agent_has_channel_(m, ag, cn)) return;
+        char q[KFLC_OBS_NAME_MAX + 32];
+        rl_qual_ident_(ag, cn, q, sizeof q);
+        e->u.ident = kflc_arena_strdup(arena, q);
+        return;
+    }
+    case KFLE_UNARY:
+        rl_qual_rewrite_expr_(m, e->u.un.operand, arena);
+        return;
+    case KFLE_BINARY:
+        rl_qual_rewrite_expr_(m, e->u.bin.lhs, arena);
+        rl_qual_rewrite_expr_(m, e->u.bin.rhs, arena);
+        return;
+    case KFLE_INDEX:
+        rl_qual_rewrite_expr_(m, e->u.index.base, arena);
+        rl_qual_rewrite_expr_(m, e->u.index.idx, arena);
+        return;
+    case KFLE_VEC_LIT:
+        for (int i = 0; i < e->u.vec.n_elems; i++) {
+            rl_qual_rewrite_expr_(m, e->u.vec.elems[i], arena);
+        }
+        return;
+    case KFLE_CALL:
+        for (int i = 0; i < e->u.call.n_args; i++) {
+            rl_qual_rewrite_expr_(m, e->u.call.args[i], arena);
+        }
+        return;
+    default:
+        return;
+    }
 }
 
 /* ---- Draw and state-write emission ----------------------------------- */
@@ -2153,13 +2706,28 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         "#define KFLRL_N_WSCAL %d\n"
         "#define KFLRL_HAS_TERMINATED %d\n"
         "#define KFLRL_N_VEHICLES %d\n"
+        "#define KFLRL_N_AGENTS %d\n"
         "#define KFLRL_MAGIC 0x4b524c45u\n"
         "\n",
         m->n_bodies, rl_obs_total_(m->observes, m->n_observes),
         m->n_actions,
         m->n_resets, m->n_dr, m->n_resets + m->n_dr,
         m->n_wscal, m->terminated_when ? 1 : 0,
-        rl_n_vehicles_(m));
+        rl_n_vehicles_(m), m->agent_count);
+
+    /* Per agent, in agent-index order: the observation and action
+     * slice it owns. Contiguous by construction, since channels
+     * allocate in source order within a block and blocks in source
+     * order, so the concatenation over agents is the whole vector. */
+    fputs("static const uint32_t kflrl_agent_slices_[KFLRL_N_AGENTS][4] = {\n",
+          out);
+    for (int i = 0; i < m->agent_count; i++) {
+        const RlAgent *a = &m->agents[i];
+        fprintf(out, "    { %du, %du, %du, %du },\n",
+                (unsigned)a->obs_off, (unsigned)a->obs_count,
+                (unsigned)a->act_off, (unsigned)a->act_count);
+    }
+    fputs("};\n\n", out);
 
     /* Domain-randomisation record tags, ascending (class, channel):
      * reset-state entries (class 0x0001) then domain-randomisation
@@ -2182,26 +2750,18 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         fputs("static const char *const kflrl_obs_names_"
               "[KFLRL_OBS_TOTAL] = {\n", out);
         for (int i = 0; i < m->n_observes; i++) {
-            const char *base = rl_observe_as_(m->observes[i]);
             for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
-                char cb[RL_COMP_MAX];
-                const char *cmp = rl_observe_comp_(m->observes[i], c, cb,
-                                                   sizeof cb);
-                /* A derived name that would not fit the entry is
+                /* A published name that would not fit the entry is
                  * refused here rather than truncated in the artifact.
-                 * The declarable bound and the entry are sized so this
-                 * cannot fire (internal.h states the arithmetic); it
-                 * exists so that a suffix added later moves the entry
-                 * instead of silently shortening a channel's name. */
-                if (strlen(base) + strlen(cmp) >= KFLC_OBS_NAME_MAX) {
-                    kflc_diag_errorf(diag, m->observes[i]->line,
-                        "observe ... as `%s`: the derived channel name "
-                        "`%s%s` is %zu bytes and the spec entry holds "
-                        "%d", base, base, cmp,
-                        strlen(base) + strlen(cmp), KFLC_OBS_NAME_MAX);
+                 * With one agent the declarable bound and the entry
+                 * are sized so this cannot fire (internal.h states
+                 * that arithmetic); with more than one the qualifier
+                 * is what can overflow it. */
+                char pub[KFLC_OBS_NAME_MAX + 1];
+                if (rl_obs_pub_name_(m, i, c, pub, sizeof pub, diag)) {
                     return 1;
                 }
-                fprintf(out, "    \"%s%s\",\n", base, cmp);
+                fprintf(out, "    \"%s\",\n", pub);
             }
         }
         fputs("};\n\n", out);
@@ -2843,7 +3403,8 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
     rl_collect_form_args_(form, arena, &live, &live_n, &live_cap);
     for (const KflcNode *s = m->world->children; s; s = s->next) {
         if (s->kind == KFLN_STMT_EPISODE || s->kind == KFLN_STMT_ACTION ||
-            s->kind == KFLN_STMT_ON_STEP || s->kind == KFLN_STMT_OBJECTIVE) {
+            s->kind == KFLN_STMT_ON_STEP || s->kind == KFLN_STMT_OBJECTIVE ||
+            s->kind == KFLN_STMT_AGENT) {
             continue;
         }
         rl_collect_lets_(s, arena, &live, &live_n, &live_cap);
@@ -2886,6 +3447,7 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
         case KFLN_STMT_ON_STEP:
         case KFLN_STMT_OBJECTIVE:
         case KFLN_STMT_SENSOR:
+        case KFLN_STMT_AGENT:
             continue;
         case KFLN_STMT_OBSERVE:
             if (rl_observe_as_(s)) continue;   /* channel, not a print */
@@ -3688,6 +4250,7 @@ static const char *rl_step_stmt_why_(const KflcNode *s, const char **what)
     case KFLN_STMT_OBJECTIVE:
     case KFLN_STMT_SENSOR:
     case KFLN_STMT_SENSOR_TERM:
+    case KFLN_STMT_AGENT:
         *what = "a reinforcement learning construct";
         return "these are declarations of the environment, not acts of "
                "a step";
@@ -4247,6 +4810,16 @@ static int rl_bs_resolve_(RlModel *m, const char *name, int write,
             "`<body>.<key>`)", name);
         return -2;
     }
+    /* A qualified read was rewritten before this point, so a
+     * qualified name reaching here is an assignment to one. */
+    int qa = rl_agent_index_of_(m, b);
+    if (qa >= 0 && rl_agent_has_channel_(m, qa, k)) {
+        kflc_diag_errorf(diag, line,
+            "on_step: `%s`: `%s` is a channel of agent `%s` and is read "
+            "only; an action reaches the dynamics through a body state "
+            "assignment", name, k, b);
+        return -2;
+    }
     int bi = rl_body_index_of_(m, b);
     if (bi < 0) {
         kflc_diag_errorf(diag, line,
@@ -4435,6 +5008,124 @@ static void rl_emit_state_accessors_(FILE *out, const RlModel *m)
     }
 }
 
+/* ---- Agent names inside on_step -------------------------------------- */
+
+static int rl_agent_has_action_(const RlModel *m, int ag, const char *name)
+{
+    if (!name) return 0;
+    for (int i = 0; i < m->n_actions; i++) {
+        if (rl_act_agent_(m, i) != ag) continue;
+        const char *an = m->actions[i]->name;
+        if (an && strcmp(an, name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* How many blocks declare an action of this name. */
+static int rl_action_declarers_(const RlModel *m, const char *name)
+{
+    int n = 0;
+    for (int a = 0; a < m->agent_count; a++) {
+        if (rl_agent_has_action_(m, a, name)) n++;
+    }
+    return n;
+}
+
+/* Resolve the agent names an `on_step` body reads. Every agent's
+ * action channels are in scope there: an unqualified name resolves
+ * when it is unique across every block, and `<agent>.<action>` always
+ * resolves. The refusal fires exactly where the resolution would
+ * otherwise be a guess, and it names both declaration sites and the
+ * qualified form that separates them.
+ *
+ * Runs before the body-state rewrite, so a qualified action name never
+ * reaches the body-state resolver, which would report it as a body
+ * that does not exist. */
+static int rl_agent_scan_expr_(const RlModel *m, KflcExpr *e, int line,
+                               KflcArena *arena, KflcDiag *diag)
+{
+    if (!e) return 0;
+    switch (e->kind) {
+    case KFLE_IDENT: {
+        const char *id = e->u.ident;
+        if (!id) return 0;
+        char an[KFLC_OBS_NAME_MAX], cn[KFLC_OBS_NAME_MAX];
+        if (rl_dotted_split_(id, an, sizeof an, cn, sizeof cn)) {
+            int ag = rl_agent_index_of_(m, an);
+            if (ag < 0) return 0;   /* somebody else's dotted shape */
+            if (rl_agent_has_action_(m, ag, cn)) {
+                char q[KFLC_OBS_NAME_MAX + 32];
+                rl_qual_ident_(ag, cn, q, sizeof q);
+                e->u.ident = kflc_arena_strdup(arena, q);
+                return 0;
+            }
+            if (rl_agent_has_channel_(m, ag, cn)) {
+                kflc_diag_errorf(diag, line,
+                    "on_step: `%s`: `%s` is an observation channel of "
+                    "agent `%s`, and observation channels are readable "
+                    "in the objective and termination expressions, not "
+                    "in on_step", id, cn, an);
+                return 1;
+            }
+            kflc_diag_errorf(diag, line,
+                "on_step: `%s`: agent `%s` declares no action called "
+                "`%s`", id, an, cn);
+            return 1;
+        }
+        if (m->agent_count > 1 && rl_action_declarers_(m, id) > 1) {
+            int a0 = -1, l0 = 0, a1 = -1, l1 = 0;
+            rl_action_sites_(m, id, &a0, &l0, &a1, &l1);
+            kflc_diag_errorf(diag, line,
+                "on_step: `%s` is ambiguous: agent `%s` declares it at "
+                "line %d and agent `%s` declares it at line %d; write "
+                "`%s.%s` or `%s.%s`",
+                id, m->agents[a0].name, l0, m->agents[a1].name, l1,
+                m->agents[a0].name, id, m->agents[a1].name, id);
+            return 1;
+        }
+        return 0;
+    }
+    case KFLE_UNARY:
+        return rl_agent_scan_expr_(m, e->u.un.operand, line, arena, diag);
+    case KFLE_BINARY:
+        return rl_agent_scan_expr_(m, e->u.bin.lhs, line, arena, diag) ||
+               rl_agent_scan_expr_(m, e->u.bin.rhs, line, arena, diag);
+    case KFLE_INDEX:
+        return rl_agent_scan_expr_(m, e->u.index.base, line, arena, diag) ||
+               rl_agent_scan_expr_(m, e->u.index.idx, line, arena, diag);
+    case KFLE_VEC_LIT:
+        for (int i = 0; i < e->u.vec.n_elems; i++) {
+            if (rl_agent_scan_expr_(m, e->u.vec.elems[i], line, arena,
+                                    diag)) return 1;
+        }
+        return 0;
+    case KFLE_CALL:
+        for (int i = 0; i < e->u.call.n_args; i++) {
+            if (rl_agent_scan_expr_(m, e->u.call.args[i], line, arena,
+                                    diag)) return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int rl_agent_scan_stmts_(const RlModel *m, KflcNode *stmts,
+                                KflcArena *arena, KflcDiag *diag)
+{
+    for (KflcNode *s = stmts; s; s = s->next) {
+        if (rl_agent_scan_expr_(m, s->expr, s->line, arena, diag))  return 1;
+        if (rl_agent_scan_expr_(m, s->expr2, s->line, arena, diag)) return 1;
+        for (KflcAttr *a = s->attrs; a; a = a->next) {
+            if (rl_agent_scan_expr_(m, a->expr, a->line ? a->line : s->line,
+                                    arena, diag)) return 1;
+        }
+        if (rl_agent_scan_stmts_(m, s->children, arena, diag))      return 1;
+        if (rl_agent_scan_stmts_(m, s->else_children, arena, diag)) return 1;
+    }
+    return 0;
+}
+
 /* The on_step body: action names in scope as read-only scalars, body
  * state readable and assignable by dotted name, run once per external
  * step before the world advances, identically in both modes. */
@@ -4454,6 +5145,12 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
          * and the diagnostic would name that instead of the source. */
         if (rl_reject_impure_block_(form, m->on_step->children, NULL,
                                     diag)) {
+            return 1;
+        }
+        /* Before the body-state rewrite too, and for the same reason:
+         * a qualified action name is a dotted shape, and the
+         * body-state resolver would report it as an unknown body. */
+        if (rl_agent_scan_stmts_(m, m->on_step->children, arena, diag)) {
             return 1;
         }
         if (rl_bs_rewrite_stmts_(m, m->on_step->children, arena, diag)) {
@@ -4517,19 +5214,40 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
           "{\n"
           "    (void)world; (void)_kfl_act_v; (void)_kfl_a;\n", out);
     if (m->on_step) {
+        /* Every agent's action channels are in scope. A name unique
+         * across the blocks is bound unqualified as well as
+         * qualified; a name two blocks share is bound qualified only,
+         * and an unqualified use of it was refused above rather than
+         * resolved to one of the two. */
         for (int i = 0; i < m->n_actions; i++) {
+            const char *nm = m->actions[i]->name;
+            if (rl_action_declarers_(m, nm) <= 1) {
+                fprintf(out,
+                    "    const double %s = _kfl_act_v ? _kfl_act_v[%d] : "
+                    "0.0; (void)%s;\n", nm, i, nm);
+            }
+            if (m->n_agents == 0) continue;
+            char q[KFLC_OBS_NAME_MAX + 32];
+            rl_qual_ident_(rl_act_agent_(m, i), nm, q, sizeof q);
             fprintf(out,
                 "    const double %s = _kfl_act_v ? _kfl_act_v[%d] : 0.0;"
-                " (void)%s;\n",
-                m->actions[i]->name, i, m->actions[i]->name);
+                " (void)%s;\n", q, i, q);
         }
 
         KflcExprBinding *live = NULL;
         int live_n = 0, live_cap = 0;
         rl_collect_form_args_(form, arena, &live, &live_n, &live_cap);
         for (int i = 0; i < m->n_actions; i++) {
+            const char *nm = m->actions[i]->name;
+            if (rl_action_declarers_(m, nm) <= 1) {
+                rl_push_binding_(arena, &live, &live_n, &live_cap, nm,
+                                 KFLT_DOUBLE);
+            }
+            if (m->n_agents == 0) continue;
+            char q[KFLC_OBS_NAME_MAX + 32];
+            rl_qual_ident_(rl_act_agent_(m, i), nm, q, sizeof q);
             rl_push_binding_(arena, &live, &live_n, &live_cap,
-                             m->actions[i]->name, KFLT_DOUBLE);
+                             kflc_arena_strdup(arena, q), KFLT_DOUBLE);
         }
         for (const KflcNode *s = m->on_step->children; s; s = s->next) {
             rl_collect_lets_(s, arena, &live, &live_n, &live_cap);
@@ -4588,7 +5306,7 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
  * instead of an unknown-identifier failure downstream. Every other
  * unknown name is left to the expression emitter's own resolution
  * (builtins, user fns). */
-static void rl_check_objective_names_(const RlModel *m,
+static void rl_check_objective_names_(const RlModel *m, int ag,
                                       const KflcNode *form,
                                       const KflcExpr *e,
                                       const char *ctx_word, int line,
@@ -4604,6 +5322,19 @@ static void rl_check_objective_names_(const RlModel *m,
             return;
         }
         if (strchr(id, '.')) {
+            char an[KFLC_OBS_NAME_MAX], cn[KFLC_OBS_NAME_MAX];
+            if (rl_dotted_split_(id, an, sizeof an, cn, sizeof cn)) {
+                int qa = rl_agent_index_of_(m, an);
+                if (qa >= 0 && rl_agent_has_channel_(m, qa, cn)) return;
+                if (qa >= 0) {
+                    kflc_diag_errorf(diag, line,
+                        "%s: `%s`: agent `%s` declares no channel called "
+                        "`%s`; a qualified name names one of that "
+                        "agent's own actions or observation components",
+                        ctx_word, id, an, cn);
+                    return;
+                }
+            }
             /* Body state is addressed by dotted name inside on_step
              * and nowhere else; state reaches an objective through
              * observation channels. */
@@ -4613,7 +5344,24 @@ static void rl_check_objective_names_(const RlModel *m,
                 "through `observe ... as` channels", ctx_word, id);
             return;
         }
-        if (rl_scope_name_taken_(m, id)) return;   /* action / channel */
+        if (m->agent_count > 1) {
+            if (ag >= 0 && rl_agent_has_channel_(m, ag, id)) return;
+            int n_owners = 0;
+            int owner = rl_channel_owner_(m, id, &n_owners);
+            if (owner >= 0) {
+                kflc_diag_errorf(diag, line,
+                    "%s: `%s` is a channel of agent `%s` and this "
+                    "expression is %s, so it names the agent it reads: "
+                    "write `%s.%s`",
+                    ctx_word, id, m->agents[owner].name,
+                    ag >= 0 ? "another agent's" : "the episode's, which "
+                              "belongs to no agent",
+                    m->agents[owner].name, id);
+                return;
+            }
+        } else if (rl_scope_name_taken_(m, id)) {
+            return;   /* action / channel */
+        }
         for (int i = 0; i < m->n_wscal; i++) {
             const char *wn = m->wscal[i]->name;
             if (wn && strcmp(wn, id) == 0) return;
@@ -4641,30 +5389,30 @@ static void rl_check_objective_names_(const RlModel *m,
     }
     case KFLE_CALL:
         for (int i = 0; i < e->u.call.n_args; i++) {
-            rl_check_objective_names_(m, form, e->u.call.args[i],
+            rl_check_objective_names_(m, ag, form, e->u.call.args[i],
                                       ctx_word, line, diag);
         }
         return;
     case KFLE_UNARY:
-        rl_check_objective_names_(m, form, e->u.un.operand, ctx_word,
+        rl_check_objective_names_(m, ag, form, e->u.un.operand, ctx_word,
                                   line, diag);
         return;
     case KFLE_BINARY:
-        rl_check_objective_names_(m, form, e->u.bin.lhs, ctx_word,
+        rl_check_objective_names_(m, ag, form, e->u.bin.lhs, ctx_word,
                                   line, diag);
-        rl_check_objective_names_(m, form, e->u.bin.rhs, ctx_word,
+        rl_check_objective_names_(m, ag, form, e->u.bin.rhs, ctx_word,
                                   line, diag);
         return;
     case KFLE_VEC_LIT:
         for (int i = 0; i < e->u.vec.n_elems; i++) {
-            rl_check_objective_names_(m, form, e->u.vec.elems[i],
+            rl_check_objective_names_(m, ag, form, e->u.vec.elems[i],
                                       ctx_word, line, diag);
         }
         return;
     case KFLE_INDEX:
-        rl_check_objective_names_(m, form, e->u.index.base, ctx_word,
+        rl_check_objective_names_(m, ag, form, e->u.index.base, ctx_word,
                                   line, diag);
-        rl_check_objective_names_(m, form, e->u.index.idx, ctx_word,
+        rl_check_objective_names_(m, ag, form, e->u.index.idx, ctx_word,
                                   line, diag);
         return;
     default:
@@ -4675,14 +5423,17 @@ static void rl_check_objective_names_(const RlModel *m,
 /* Reward, terminal adjustment, and termination predicate. Absent
  * blocks give the documented defaults: an all-zero reward stream, no
  * terminal adjustment, no predicate termination. */
-static int rl_emit_objective_(FILE *out, const RlModel *m,
-                              const KflcNode *form, KflcArena *arena,
-                              KflcExprFn *user_fn_arr, int n_user_fns,
-                              KflcDiag *diag)
+static int rl_emit_objective_one_(FILE *out, const RlModel *m, int ag,
+                                  const KflcNode *form, KflcArena *arena,
+                                  const char *name, const char *ret,
+                                  const KflcAttr *attr, const char *absent,
+                                  const char *word,
+                                  KflcExprFn *user_fn_arr, int n_user_fns,
+                                  KflcDiag *diag)
 {
     KflcExprBinding *live = NULL;
     int live_n = 0, live_cap = 0;
-    rl_scope_bindings_(m, form, arena, &live, &live_n, &live_cap);
+    rl_scope_bindings_(m, ag, form, arena, &live, &live_n, &live_cap);
     KflcExprCtx ctx;
     memset(&ctx, 0, sizeof ctx);
     ctx.bindings   = live;
@@ -4691,61 +5442,96 @@ static int rl_emit_objective_(FILE *out, const RlModel *m,
     ctx.n_fns      = n_user_fns;
     ctx.form       = form;
 
-    struct {
-        const char *name;
-        const char *ret;
-        const KflcAttr *attr;
-        const char *absent;
-        const char *word;
-    } fns[3] = {
-        { "kflrl_reward_",     "double", m->reward,          "0.0",
-          "reward" },
-        { "kflrl_terminal_",   "double", m->terminal,        "0.0",
-          "terminal" },
-        { "kflrl_terminated_", "int",    m->terminated_when, "0",
-          "terminated when" },
-    };
-    for (int i = 0; i < 3; i++) {
-        fprintf(out,
-            "static %s %s(const double *_kfl_obs_v,\n"
-            "        const double *_kfl_act_v, uint32_t _kfl_nsteps,\n"
-            "        const double *_kfl_world_v)\n"
-            "{\n"
-            "    (void)_kfl_obs_v; (void)_kfl_act_v; (void)_kfl_nsteps; "
-            "(void)_kfl_world_v;\n",
-            fns[i].ret, fns[i].name);
-        if (fns[i].attr && fns[i].attr->expr) {
-            rl_check_objective_names_(m, form, fns[i].attr->expr,
-                                      fns[i].word, fns[i].attr->line,
-                                      diag);
-            if (diag->errors) return 1;
-            char what[80];
-            snprintf(what, sizeof what, "the `%s` expression",
-                     fns[i].word);
-            if (rl_reject_impure_(form, fns[i].attr->expr, what,
-                                  fns[i].attr->line, diag)) {
-                return 1;
-            }
-            rl_emit_scope_prelude_(out, m, 4);
-            rl_rewrite_steps_(fns[i].attr->expr, arena);
-            if (strcmp(fns[i].ret, "int") == 0) {
-                fputs("    return (", out);
-                if (kflc_emit_expr(out, fns[i].attr->expr, &ctx, diag)) {
-                    return 1;
-                }
-                fputs(") ? 1 : 0;\n", out);
-            } else {
-                fputs("    return (double)(", out);
-                if (kflc_emit_expr(out, fns[i].attr->expr, &ctx, diag)) {
-                    return 1;
-                }
-                fputs(");\n", out);
-            }
-        } else {
-            fprintf(out, "    return %s;\n", fns[i].absent);
+    fprintf(out,
+        "static %s %s(const double *_kfl_obs_v,\n"
+        "        const double *_kfl_act_v, uint32_t _kfl_nsteps,\n"
+        "        const double *_kfl_world_v)\n"
+        "{\n"
+        "    (void)_kfl_obs_v; (void)_kfl_act_v; (void)_kfl_nsteps; "
+        "(void)_kfl_world_v;\n",
+        ret, name);
+    if (attr && attr->expr) {
+        rl_check_objective_names_(m, ag, form, attr->expr, word,
+                                  attr->line, diag);
+        if (diag->errors) return 1;
+        char what[80];
+        snprintf(what, sizeof what, "the `%s` expression", word);
+        if (rl_reject_impure_(form, attr->expr, what, attr->line, diag)) {
+            return 1;
         }
-        fputs("}\n\n", out);
+        rl_emit_scope_prelude_(out, m, ag, 4);
+        rl_qual_rewrite_expr_(m, attr->expr, arena);
+        rl_rewrite_steps_(attr->expr, arena);
+        if (strcmp(ret, "int") == 0) {
+            fputs("    return (", out);
+            if (kflc_emit_expr(out, attr->expr, &ctx, diag)) return 1;
+            fputs(") ? 1 : 0;\n", out);
+        } else {
+            fputs("    return (double)(", out);
+            if (kflc_emit_expr(out, attr->expr, &ctx, diag)) return 1;
+            fputs(");\n", out);
+        }
+    } else {
+        fprintf(out, "    return %s;\n", absent);
     }
+    fputs("}\n\n", out);
+    return 0;
+}
+
+static int rl_emit_objective_(FILE *out, const RlModel *m,
+                              const KflcNode *form, KflcArena *arena,
+                              KflcExprFn *user_fn_arr, int n_user_fns,
+                              KflcDiag *diag)
+{
+    /* One reward and one terminal adjustment per agent. Termination is
+     * per environment and there is one of it: the episode ends for
+     * every agent at once, on `terminated when`, on horizon
+     * truncation, or on fault. */
+    for (int a = 0; a < m->agent_count; a++) {
+        char rn[64], tn[64];
+        snprintf(rn, sizeof rn, "kflrl_reward_%d_", a);
+        snprintf(tn, sizeof tn, "kflrl_terminal_%d_", a);
+        if (rl_emit_objective_one_(out, m, a, form, arena, rn, "double",
+                                   m->agents[a].reward, "0.0", "reward",
+                                   user_fn_arr, n_user_fns, diag)) {
+            return 1;
+        }
+        if (rl_emit_objective_one_(out, m, a, form, arena, tn, "double",
+                                   m->agents[a].terminal, "0.0", "terminal",
+                                   user_fn_arr, n_user_fns, diag)) {
+            return 1;
+        }
+    }
+    if (rl_emit_objective_one_(out, m, -1, form, arena, "kflrl_terminated_",
+                               "int", m->terminated_when, "0",
+                               "terminated when",
+                               user_fn_arr, n_user_fns, diag)) {
+        return 1;
+    }
+
+    /* The two per-agent streams, gathered in agent-index order. The
+     * calls are written out rather than reached through a table of
+     * pointers, so the step path carries no indirect call. */
+    fputs("static void kflrl_rewards_(const double *_kfl_obs_v,\n"
+          "        const double *_kfl_act_v, uint32_t _kfl_nsteps,\n"
+          "        const double *_kfl_world_v, double *out)\n"
+          "{\n", out);
+    for (int a = 0; a < m->agent_count; a++) {
+        fprintf(out,
+            "    out[%d] = kflrl_reward_%d_(_kfl_obs_v, _kfl_act_v, "
+            "_kfl_nsteps, _kfl_world_v);\n", a, a);
+    }
+    fputs("}\n\n", out);
+    fputs("static void kflrl_terminals_(const double *_kfl_obs_v,\n"
+          "        const double *_kfl_act_v, uint32_t _kfl_nsteps,\n"
+          "        const double *_kfl_world_v, double *out)\n"
+          "{\n", out);
+    for (int a = 0; a < m->agent_count; a++) {
+        fprintf(out,
+            "    out[%d] = kflrl_terminal_%d_(_kfl_obs_v, _kfl_act_v, "
+            "_kfl_nsteps, _kfl_world_v);\n", a, a);
+    }
+    fputs("}\n\n", out);
     return 0;
 }
 
@@ -5188,7 +5974,9 @@ static void rl_emit_env_core_(FILE *out)
 "    h->episode[e] = ep;\n"
 "    h->steps[e]   = 0;\n"
 "    h->ended[e]   = 0;\n"
-"    h->rew[e]     = 0.0;\n"
+"    for (int a = 0; a < KFLRL_N_AGENTS; a++) {\n"
+"        h->rew[(size_t)e * KFLRL_N_AGENTS + a] = 0.0;\n"
+"    }\n"
 "    h->fault[e]   = 0;\n"
 "    kflrl_observe_(w, h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
 "                   &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
@@ -5250,7 +6038,7 @@ static void rl_emit_env_core_(FILE *out)
 "    total += kflrl_tlv_(&p, K26RL_TAG_ABI_VERSION, 4, v);\n"
 "    kflrl_put_u32_(v, 0x01020304u);\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_ENDIAN_PROBE, 4, v);\n"
-"    kflrl_put_u32_(v, 1u);\n"
+"    kflrl_put_u32_(v, (uint32_t)KFLRL_N_AGENTS);\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_AGENT_COUNT, 4, v);\n"
 "    kflrl_put_u32_(v, h->n_envs);\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_N_ENVS, 4, v);\n"
@@ -5260,16 +6048,21 @@ static void rl_emit_env_core_(FILE *out)
 "    total += kflrl_tlv_(&p, K26RL_TAG_SUBSTEPS, 4, v);\n"
 "    kflrl_put_u32_(v, h->horizon);\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_HORIZON, 4, v);\n"
+"", out);
+    fputs(
 "    kflrl_put_u32_(v, KFLRL_OBS_TOTAL);\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_OBS_TOTAL, 4, v);\n"
 "    kflrl_put_u32_(v, KFLRL_ACT_TOTAL);\n"
 "    total += kflrl_tlv_(&p, K26RL_TAG_ACT_TOTAL, 4, v);\n"
-"    kflrl_put_u32_(v, 0u);\n"
-"    kflrl_put_u32_(v + 4, 0u);\n"
-"    kflrl_put_u32_(v + 8, KFLRL_OBS_TOTAL);\n"
-"    total += kflrl_tlv_(&p, K26RL_TAG_AGENT_OBS_SLICE, 12, v);\n"
-"    kflrl_put_u32_(v + 8, KFLRL_ACT_TOTAL);\n"
-"    total += kflrl_tlv_(&p, K26RL_TAG_AGENT_ACT_SLICE, 12, v);\n"
+"    for (uint32_t a = 0; a < (uint32_t)KFLRL_N_AGENTS; a++) {\n"
+"        kflrl_put_u32_(v, a);\n"
+"        kflrl_put_u32_(v + 4, kflrl_agent_slices_[a][0]);\n"
+"        kflrl_put_u32_(v + 8, kflrl_agent_slices_[a][1]);\n"
+"        total += kflrl_tlv_(&p, K26RL_TAG_AGENT_OBS_SLICE, 12, v);\n"
+"        kflrl_put_u32_(v + 4, kflrl_agent_slices_[a][2]);\n"
+"        kflrl_put_u32_(v + 8, kflrl_agent_slices_[a][3]);\n"
+"        total += kflrl_tlv_(&p, K26RL_TAG_AGENT_ACT_SLICE, 12, v);\n"
+"    }\n"
 "    for (uint32_t i = 0; i < KFLRL_ACT_TOTAL; i++) {\n"
 "        kflrl_put_u32_(v, i);\n"
 "        kflrl_put_u64_(v + 4, kflrl_f64_bits_(h->act_lo[i]));\n"
@@ -5512,7 +6305,8 @@ static void rl_emit_env_core_(FILE *out)
 "    h->obs = (double *)calloc(\n"
 "        (size_t)n_envs * (KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1),\n"
 "        sizeof(double));\n"
-"    h->rew = (double *)calloc(n_envs, sizeof(double));\n"
+"    h->rew = (double *)calloc((size_t)n_envs * KFLRL_N_AGENTS,\n"
+"                              sizeof(double));\n"
 "    h->flags = (uint32_t *)calloc(n_envs, sizeof(uint32_t));\n"
 "    h->fault = (uint16_t *)calloc(n_envs, sizeof(uint16_t));\n"
 "    h->dr_vals = (double *)calloc(\n"
@@ -5703,7 +6497,7 @@ static void rl_emit_env_core_(FILE *out)
 "\n"
 "    K26RlEpisodeGeom geom;\n"
 "    geom.n_envs = h->n_envs;\n"
-"    geom.agent_count = 1;\n"
+"    geom.agent_count = KFLRL_N_AGENTS;\n"
 "    geom.obs_total = KFLRL_OBS_TOTAL;\n"
 "    geom.act_total = KFLRL_ACT_TOTAL;\n"
 "    geom.steps_per_chunk = 1024;\n"
@@ -5754,7 +6548,7 @@ static void rl_emit_env_core_(FILE *out)
 "\n"
 "    K26RlEpisodeGeom geom;\n"
 "    geom.n_envs = h->n_envs;\n"
-"    geom.agent_count = 1;\n"
+"    geom.agent_count = KFLRL_N_AGENTS;\n"
 "    geom.obs_total = KFLRL_OBS_TOTAL;\n"
 "    geom.act_total = KFLRL_ACT_TOTAL;\n"
 "    geom.steps_per_chunk = 1024;\n"
@@ -5785,27 +6579,32 @@ static void rl_emit_env_core_(FILE *out)
 "static K26RlStatus kflrl_fault_(K26RlEnv *h, uint32_t e,\n"
 "                                const double *aslice, uint16_t reason)\n"
 "{\n"
-"    h->rew[e] = 0.0;\n"
+"    /* Termination is per environment, so a fault ends the episode\n"
+"     * for every agent at once and every agent's reward stream\n"
+"     * carries the zero the surface documents for a faulted step. */\n"
+"    double zero_reward[KFLRL_N_AGENTS];\n"
+"    double zero_adj[KFLRL_N_AGENTS];\n"
+"    for (int a = 0; a < KFLRL_N_AGENTS; a++) {\n"
+"        h->rew[(size_t)e * KFLRL_N_AGENTS + a] = 0.0;\n"
+"        zero_reward[a] = 0.0;\n"
+"        zero_adj[a] = 0.0;\n"
+"    }\n"
 "    h->flags[e] = K26RL_FLAG_FAULT;\n"
 "    h->fault[e] = reason;\n"
 "    h->ended[e] = 1;\n"
 "    if (h->writer) {\n"
-"        double zero_reward = 0.0;\n"
-"        double zero_adj = 0.0;\n"
 "        K26RlStatus st = k26rl_episode_writer_step(\n"
 "            h->writer, e, h->obs + (size_t)e * KFLRL_OBS_TOTAL, aslice,\n"
-"            &zero_reward, K26RL_FLAG_FAULT, 0.0);\n"
+"            zero_reward, K26RL_FLAG_FAULT, 0.0);\n"
 "        if (st != K26RL_OK) return K26RL_E_INTERNAL;\n"
 "        st = k26rl_episode_writer_end(h->writer, e, K26RL_END_FAULT,\n"
-"                                      reason, &zero_adj);\n"
+"                                      reason, zero_adj);\n"
 "        if (st != K26RL_OK) return K26RL_E_INTERNAL;\n"
 "    }\n"
 "    if (h->tap) {\n"
-"        double zero_reward = 0.0;\n"
-"        double zero_adj = 0.0;\n"
 "        k26rl_tap_step(h->tap, e, h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
-"                       aslice, &zero_reward, K26RL_FLAG_FAULT, 0.0);\n"
-"        k26rl_tap_end(h->tap, e, K26RL_END_FAULT, reason, &zero_adj);\n"
+"                       aslice, zero_reward, K26RL_FLAG_FAULT, 0.0);\n"
+"        k26rl_tap_end(h->tap, e, K26RL_END_FAULT, reason, zero_adj);\n"
 "    }\n"
 "    return K26RL_OK;\n"
 "}\n"
@@ -6231,6 +7030,8 @@ static void rl_emit_env_core_(FILE *out)
 "            int code = rc < 0 ? -rc : rc;\n"
 "            if (code == K26ASTRO_RT_E_FPU_RACE) return K26RL_E_FPU_RACE;\n"
 "            if (code == K26ASTRO_RT_E_OOM) return K26RL_E_INTERNAL;\n"
+"", out);
+    fputs(
 "            uint16_t reason = (code == K26ASTRO_RT_E_INTEGRATOR)\n"
 "                ? (uint16_t)K26RL_E_DIVERGED\n"
 "                : (uint16_t)K26RL_E_ENV_INTERNAL;\n"
@@ -6260,8 +7061,17 @@ static void rl_emit_env_core_(FILE *out)
 "        }\n"
 "\n"
 "        uint32_t ns = h->steps[e] + 1u;\n"
-"        double r = kflrl_reward_(h->scratch, aslice, ns, wslice);\n"
-"        if (!std::isfinite(r)) {\n"
+"        /* One reward per agent, in agent-index order. A single\n"
+"         * non-finite value faults the whole environment, because\n"
+"         * termination is per environment: there is no state in which\n"
+"         * one agent's episode has ended and another's has not. */\n"
+"        double r[KFLRL_N_AGENTS];\n"
+"        int r_finite = 1;\n"
+"        kflrl_rewards_(h->scratch, aslice, ns, wslice, r);\n"
+"        for (int a = 0; a < KFLRL_N_AGENTS; a++) {\n"
+"            if (!std::isfinite(r[a])) r_finite = 0;\n"
+"        }\n"
+"        if (!r_finite) {\n"
 "            K26RlStatus fst = kflrl_fault_(\n"
 "                h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);\n"
 "            if (fst != K26RL_OK) return fst;\n"
@@ -6273,11 +7083,15 @@ static void rl_emit_env_core_(FILE *out)
 "         * a non-finite adjusted reward faults like a non-finite\n"
 "         * reward, never reaching the recorded stream. */\n"
 "        int term = kflrl_terminated_(h->scratch, aslice, ns, wslice);\n"
-"        double tadj = 0.0;\n"
+"        double tadj[KFLRL_N_AGENTS];\n"
+"        for (int a = 0; a < KFLRL_N_AGENTS; a++) tadj[a] = 0.0;\n"
 "        if (term) {\n"
-"            tadj = kflrl_terminal_(h->scratch, aslice, ns, wslice);\n"
-"            r += tadj;\n"
-"            if (!std::isfinite(r)) {\n"
+"            kflrl_terminals_(h->scratch, aslice, ns, wslice, tadj);\n"
+"            for (int a = 0; a < KFLRL_N_AGENTS; a++) {\n"
+"                r[a] += tadj[a];\n"
+"                if (!std::isfinite(r[a])) r_finite = 0;\n"
+"            }\n"
+"            if (!r_finite) {\n"
 "                K26RlStatus fst = kflrl_fault_(\n"
 "                    h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);\n"
 "                if (fst != K26RL_OK) return fst;\n"
@@ -6300,7 +7114,9 @@ static void rl_emit_env_core_(FILE *out)
 "        } else if (h->horizon != 0 && ns >= h->horizon) {\n"
 "            f |= K26RL_FLAG_TRUNCATED;\n"
 "        }\n"
-"        h->rew[e] = r;\n"
+"        for (int a = 0; a < KFLRL_N_AGENTS; a++) {\n"
+"            h->rew[(size_t)e * KFLRL_N_AGENTS + a] = r[a];\n"
+"        }\n"
 "        h->flags[e] = f;\n"
 "        h->fault[e] = 0;\n"
 "        if (f & (K26RL_FLAG_TERMINATED | K26RL_FLAG_TRUNCATED)) {\n"
@@ -6309,25 +7125,28 @@ static void rl_emit_env_core_(FILE *out)
 "        if (h->writer) {\n"
 "            K26RlStatus st = k26rl_episode_writer_step(\n"
 "                h->writer, e, h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
-"                aslice, &h->rew[e], f, h->control_dt);\n"
+"                aslice, h->rew + (size_t)e * KFLRL_N_AGENTS, f,\n"
+"                h->control_dt);\n"
 "            if (st != K26RL_OK) return K26RL_E_INTERNAL;\n"
 "            if (h->ended[e]) {\n"
 "                st = k26rl_episode_writer_end(\n"
 "                    h->writer, e,\n"
 "                    term ? K26RL_END_TERMINATED : K26RL_END_TRUNCATED,\n"
-"                    0, &tadj);\n"
+"                    0, tadj);\n"
 "                if (st != K26RL_OK) return K26RL_E_INTERNAL;\n"
 "            }\n"
 "        }\n"
 "        if (h->tap) {\n"
 "            k26rl_tap_step(h->tap, e,\n"
 "                           h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
-"                           aslice, &h->rew[e], f, h->control_dt);\n"
+"                           aslice,\n"
+"                           h->rew + (size_t)e * KFLRL_N_AGENTS, f,\n"
+"                           h->control_dt);\n"
 "            if (h->ended[e]) {\n"
 "                k26rl_tap_end(\n"
 "                    h->tap, e,\n"
 "                    term ? K26RL_END_TERMINATED : K26RL_END_TRUNCATED,\n"
-"                    0, &tadj);\n"
+"                    0, tadj);\n"
 "            }\n"
 "        }\n"
 "    }\n"
@@ -6350,20 +7169,20 @@ static void rl_emit_env_core_(FILE *out)
 "            }\n"
 "        }\n"
 "    }\n"
+"    double zero_adj[KFLRL_N_AGENTS];\n"
+"    for (int a = 0; a < KFLRL_N_AGENTS; a++) zero_adj[a] = 0.0;\n"
 "    if (h->writer) {\n"
-"        double zero_adj = 0.0;\n"
 "        for (uint32_t e = 0; e < h->n_envs; e++) {\n"
 "            if (h->ended[e]) continue;   /* end frame already written */\n"
 "            K26RlStatus st = k26rl_episode_writer_end(\n"
-"                h->writer, e, K26RL_END_TRUNCATED, 0, &zero_adj);\n"
+"                h->writer, e, K26RL_END_TRUNCATED, 0, zero_adj);\n"
 "            if (st != K26RL_OK) return K26RL_E_INTERNAL;\n"
 "        }\n"
 "    }\n"
 "    if (h->tap) {\n"
-"        double zero_adj = 0.0;\n"
 "        for (uint32_t e = 0; e < h->n_envs; e++) {\n"
 "            if (h->ended[e]) continue;   /* end frame already published */\n"
-"            k26rl_tap_end(h->tap, e, K26RL_END_TRUNCATED, 0, &zero_adj);\n"
+"            k26rl_tap_end(h->tap, e, K26RL_END_TRUNCATED, 0, zero_adj);\n"
 "        }\n"
 "    }\n"
 "    if (rekey) {\n"
@@ -6456,7 +7275,8 @@ static void rl_emit_env_core_(FILE *out)
 "{\n"
 "    if (!h || !out) return K26RL_E_NULL;\n"
 "    if (!kflrl_live_(h)) return K26RL_E_USE_AFTER_DESTROY;\n"
-"    memcpy(out, h->rew, sizeof(double) * h->n_envs);\n"
+"    memcpy(out, h->rew,\n"
+"           sizeof(double) * (size_t)h->n_envs * KFLRL_N_AGENTS);\n"
 "    return K26RL_OK;\n"
 "}\n"
 "\n"

@@ -107,6 +107,7 @@ static int stmts_have_rl_(const KflcNode *stmts, const KflcNode *form)
         case KFLN_STMT_ACTION:
         case KFLN_STMT_ON_STEP:
         case KFLN_STMT_OBJECTIVE:
+        case KFLN_STMT_AGENT:
             return 1;
         case KFLN_STMT_OBSERVE:
             if (observe_as_name_(s)) return 1;
@@ -180,31 +181,54 @@ static int namelist_has_(const NameList *l, const char *name)
     return 0;
 }
 
+/* Declarations, and the `agent` block each was written in, or NULL for
+ * one written at world level. Names are unique within an owner and may
+ * repeat across owners, which is the whole point of the block: two
+ * agents may each declare a channel called `rel`. The owner lists run
+ * in step with the declaration lists they qualify. */
 typedef struct {
     NodeList episodes;
     NodeList on_steps;
     NodeList objectives;
+    NodeList obj_owner;
     NodeList actions;
+    NodeList act_owner;
     NodeList observes_as;   /* observe statements carrying `as` */
+    NodeList obs_owner;
+    NodeList agents;
 } RlStats;
 
 static void collect_stats_(const KflcNode *stmts, RlStats *st,
-                           KflcArena *arena)
+                           const KflcNode *owner, KflcArena *arena)
 {
     for (const KflcNode *s = stmts; s; s = s->next) {
+        const KflcNode *inner = owner;
         switch (s->kind) {
         case KFLN_STMT_EPISODE:   nodelist_push_(&st->episodes,   s, arena); break;
         case KFLN_STMT_ON_STEP:   nodelist_push_(&st->on_steps,   s, arena); break;
-        case KFLN_STMT_OBJECTIVE: nodelist_push_(&st->objectives, s, arena); break;
-        case KFLN_STMT_ACTION:    nodelist_push_(&st->actions,    s, arena); break;
+        case KFLN_STMT_OBJECTIVE:
+            nodelist_push_(&st->objectives, s, arena);
+            nodelist_push_(&st->obj_owner, owner, arena);
+            break;
+        case KFLN_STMT_ACTION:
+            nodelist_push_(&st->actions, s, arena);
+            nodelist_push_(&st->act_owner, owner, arena);
+            break;
+        case KFLN_STMT_AGENT:
+            nodelist_push_(&st->agents, s, arena);
+            inner = s;
+            break;
         case KFLN_STMT_OBSERVE:
-            if (observe_as_name_(s)) nodelist_push_(&st->observes_as, s, arena);
+            if (observe_as_name_(s)) {
+                nodelist_push_(&st->observes_as, s, arena);
+                nodelist_push_(&st->obs_owner, owner, arena);
+            }
             break;
         default:
             break;
         }
-        collect_stats_(s->children, st, arena);
-        collect_stats_(s->else_children, st, arena);
+        collect_stats_(s->children, st, inner, arena);
+        collect_stats_(s->else_children, st, inner, arena);
     }
 }
 
@@ -355,6 +379,18 @@ static void resolve_expr_names_(const KflcExpr *e, const NameList *allowed,
     default:
         return;
     }
+}
+
+/* `<agent>.<channel>`, the qualified form of a channel name. */
+static const char *qualified_(KflcArena *arena, const char *agent,
+                              const char *chan)
+{
+    size_t al = strlen(agent), cl = strlen(chan);
+    char *out = (char *)kflc_arena_alloc(arena, al + 1 + cl + 1);
+    memcpy(out, agent, al);
+    out[al] = '.';
+    memcpy(out + al + 1, chan, cl + 1);
+    return out;
 }
 
 static const char *suffixed_(KflcArena *arena, const char *base,
@@ -515,7 +551,7 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
     const char *wname = world->name ? world->name : "?";
     RlStats st;
     memset(&st, 0, sizeof st);
-    collect_stats_(world->children, &st, arena);
+    collect_stats_(world->children, &st, NULL, arena);
 
     if (st.episodes.n == 0) {
         kflc_diag_errorf(diag, world->line,
@@ -533,14 +569,27 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
             "fn world %s: duplicate `on_step` block (allowed at most "
             "once per world)", wname);
     }
-    for (int i = 1; i < st.objectives.n; i++) {
-        kflc_diag_errorf(diag, st.objectives.items[i]->line,
-            "fn world %s: duplicate `objective` block (allowed at most "
-            "once per world)", wname);
+    /* At most one objective at world level. Two agents each declaring
+     * their own is the ordinary multi-agent shape and is not a
+     * duplicate; how many an `agent` block may hold is that block's
+     * rule and is enforced where the rest of the block's contents
+     * are, so that one rule has one place. */
+    for (int i = 0; i < st.objectives.n; i++) {
+        if (st.obj_owner.items[i] != NULL) continue;
+        for (int j = 0; j < i; j++) {
+            if (st.obj_owner.items[j] != NULL) continue;
+            kflc_diag_errorf(diag, st.objectives.items[i]->line,
+                "fn world %s: duplicate `objective` block (allowed at "
+                "most once per world)", wname);
+            break;
+        }
     }
 
+    /* Channel names are unique within their owner. Across owners they
+     * may repeat, and the qualified form is what tells them apart. */
     for (int i = 0; i < st.actions.n; i++) {
         for (int j = 0; j < i; j++) {
+            if (st.act_owner.items[i] != st.act_owner.items[j]) continue;
             const char *ni = st.actions.items[i]->name;
             const char *nj = st.actions.items[j]->name;
             if (ni && nj && strcmp(ni, nj) == 0) {
@@ -552,6 +601,7 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
     }
     for (int i = 0; i < st.observes_as.n; i++) {
         for (int j = 0; j < i; j++) {
+            if (st.obs_owner.items[i] != st.obs_owner.items[j]) continue;
             const char *ni = observe_as_name_(st.observes_as.items[i]);
             const char *nj = observe_as_name_(st.observes_as.items[j]);
             if (ni && nj && strcmp(ni, nj) == 0) {
@@ -608,15 +658,25 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
         if (!base) continue;
         observe_push_names_(&comps, st.observes_as.items[j], base, arena);
     }
+    /* An action and an observation component share a scope only when
+     * one owner declares both, since it is the owner's own names that
+     * an expression reads unqualified. */
     for (int i = 0; i < st.actions.n; i++) {
         const char *an = st.actions.items[i]->name;
         if (!an) continue;
-        for (int j = 0; j < comps.n; j++) {
-            if (strcmp(an, comps.names[j]) == 0) {
+        for (int j = 0; j < st.observes_as.n; j++) {
+            if (st.act_owner.items[i] != st.obs_owner.items[j]) continue;
+            const char *base = observe_as_name_(st.observes_as.items[j]);
+            if (!base) continue;
+            NameList own;
+            memset(&own, 0, sizeof own);
+            observe_push_names_(&own, st.observes_as.items[j], base, arena);
+            for (int k = 0; k < own.n; k++) {
+                if (strcmp(an, own.names[k]) != 0) continue;
                 kflc_diag_errorf(diag, st.actions.items[i]->line,
                     "action `%s`: name collides with the `%s` component "
                     "of an observation channel; rename one",
-                    an, comps.names[j]);
+                    an, own.names[k]);
             }
         }
     }
@@ -706,6 +766,32 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
         const char *base = observe_as_name_(st.observes_as.items[i]);
         if (!base) continue;
         observe_push_names_(&allowed, st.observes_as.items[i], base, arena);
+    }
+    /* The qualified forms, `<agent>.<channel>`, which are dotted names
+     * that are not body state. Which of the two forms an expression in
+     * a given position may use is decided where the agent set is
+     * known; what this list settles is that a qualified name is a name
+     * at all, so that one is not reported here as body state. */
+    for (int i = 0; i < st.actions.n; i++) {
+        const KflcNode *own = st.act_owner.items[i];
+        if (!own || !own->name || !st.actions.items[i]->name) continue;
+        namelist_push_(&allowed,
+                       qualified_(arena, own->name,
+                                  st.actions.items[i]->name), arena);
+    }
+    for (int i = 0; i < st.observes_as.n; i++) {
+        const KflcNode *own  = st.obs_owner.items[i];
+        const char     *base = observe_as_name_(st.observes_as.items[i]);
+        if (!own || !own->name || !base) continue;
+        NameList own_comps;
+        memset(&own_comps, 0, sizeof own_comps);
+        observe_push_names_(&own_comps, st.observes_as.items[i], base,
+                            arena);
+        for (int k = 0; k < own_comps.n; k++) {
+            namelist_push_(&allowed,
+                           qualified_(arena, own->name, own_comps.names[k]),
+                           arena);
+        }
     }
 
     for (int i = 0; i < st.episodes.n; i++) {

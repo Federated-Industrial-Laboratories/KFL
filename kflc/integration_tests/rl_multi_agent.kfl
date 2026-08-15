@@ -1,0 +1,64 @@
+# rl_multi_agent.kfl: the multi-agent surface, round-trip fixture.
+#
+# Two agents share one world. Each owns its own action channels, its
+# own observation channels, and its own objective; the agent index is
+# source order, so `leader` is agent 0 and `follower` is agent 1.
+#
+# The two agents deliberately declare different numbers of channels,
+# which is what makes the published slices tell a correct partition
+# from one that has swapped them: leader owns two actions and one
+# observation channel, follower one action and two.
+#
+# Both declare an action called `push`. Inside `on_step` that name is
+# ambiguous and must be written `leader.push` or `follower.push`;
+# `bank`, which only one of them declares, needs no qualifier.
+#
+# The reward is zero sum, written once as the negation of the other
+# agent's expression through the qualified read an objective admits,
+# so the two are the same quantity by construction rather than two
+# expressions a later edit could pull apart.
+#
+# Exercised by the round-trip harness and by tests/test_rl_agent.
+
+form RL_MULTI_AGENT
+title "Multi-agent grammar round-trip fixture"
+
+fn world pair_world
+    astro_body earth gm=3.986004418e14 mass=5.972e24
+    astro_body leader_craft gm=1.0 parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0
+    astro_body follower_craft gm=1.0 parent=earth pos_x=7.4e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7340.0 vel_z=0.0
+
+    episode
+        control_dt 5.0
+        horizon 200
+        terminated when follower.rel_range < 100.0
+        reset leader_craft.vel_y uniform(7526.0, 7566.0)
+        reset follower_craft.vel_y normal(7340.0, 8.0)
+    end
+
+    agent leader
+        action push box -1.0 1.0 default 0.0
+        action bank box -1.0 1.0 default 0.0
+        observe leader_craft from earth mode=geometric as trk
+        objective
+            reward follower.rel_range
+        end
+    end
+
+    agent follower
+        action push box -1.0 1.0 default 0.0
+        observe follower_craft from earth mode=geometric as trk
+        observe follower_craft from leader_craft mode=geometric as rel
+        objective
+            reward 0.0 - follower.rel_range
+        end
+    end
+
+    on_step
+        leader_craft.vel_x = leader_craft.vel_x + leader.push
+        leader_craft.vel_z = leader_craft.vel_z + bank
+        follower_craft.vel_x = follower_craft.vel_x + follower.push
+    end
+end
+
+end

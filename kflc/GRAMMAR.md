@@ -387,7 +387,7 @@ caller sets each step, what that caller observes, and what the reward is.
 The compiler then produces an artifact an outside training loop can drive
 step by step (see *The compiled artifact* below).
 
-Five constructs carry the surface, all of them statements inside a
+Six constructs carry the surface, all of them statements inside a
 `fn world` body:
 
 | Construct                     | Purpose                                                    |
@@ -397,6 +397,7 @@ Five constructs carry the surface, all of them statements inside a
 | `on_step` ... `end`           | A statement block run once per control step.                |
 | `observe ... as <name>`       | A named observation channel, recomputed each step.          |
 | `objective` ... `end`         | The reward, and an optional terminal adjustment.            |
+| `agent <name>` ... `end`      | A scope owning actions, observation channels, and an objective. |
 
 These words bind as keywords only at statement position inside a
 `fn world` body. Everywhere else they stay ordinary identifiers, so
@@ -471,7 +472,8 @@ given bounds; `discrete` declares an integer-valued channel with
 `<count>` choices. The bounds, count, and default are
 whitespace-separated expressions (balanced parentheses and brackets keep
 a spaced expression together). Action names must be unique within the
-world. The `default` value, 0 when omitted, is what the batch executable
+world, or, in a world that declares `agent` blocks, within each block.
+The `default` value, 0 when omitted, is what the batch executable
 drives at every step; the declared bounds and kinds are published in the
 compiled artifact's spec.
 
@@ -479,7 +481,8 @@ compiled artifact's spec.
 
 The `on_step` body runs once per control step, before the world advances,
 identically in batch mode and through the environment library. The
-declared action names are in scope as read-only scalars. The body admits
+declared action names are in scope as read-only scalars, every agent's
+included (see *The `agent` block*). The body admits
 ordinary statements only: world construction (`astro_body`), stepping
 (`step`, `propagate`), `observe`, nested reinforcement learning
 constructs, and `print` are all rejected; the stepping path performs no
@@ -899,7 +902,8 @@ the episode, and at an episode boundary no transition has been taken.
 What the boundary does do is take the per-episode draws, fill any delay
 with the true value, and prime the dropout hold.
 
-Channel names must be unique within the world and at most 53 bytes
+Channel names must be unique within the world, or, in a world that
+declares `agent` blocks, within each block, and at most 53 bytes
 long. The compiled artifact's spec carries each derived component name
 in a 96-byte entry, which holds a 53-byte name plus the longest suffix
 any form derives: `_truth_range_rate`, seventeen bytes, being the
@@ -926,7 +930,73 @@ At most one `objective` block per world; `reward` is required and
 step, after the world advances; a step whose reward is not finite ends
 the episode as faulted. `terminal` is a terminal adjustment: when the
 `terminated when` condition fires, its value is added to that final
-step's reward. A truncated episode carries no terminal adjustment.
+step's reward. A truncated episode carries no terminal adjustment. A
+world that declares `agent` blocks puts one `objective` in each block
+instead; see *The `agent` block*.
+
+### The `agent` block
+
+```
+agent <name>
+    action <name> box <low> <high> [default <expr>]
+    action <name> discrete <count> [default <expr>]
+    observe <target> from <observer> [key=value ...] as <name>
+    objective
+        reward <expr>
+        [terminal <expr>]
+    end
+end
+```
+
+An `agent` block is a scope, not a new declaration language: the three
+constructs inside it are the `action`, `observe ... as`, and `objective`
+above, unchanged in syntax and meaning. What the block changes is
+ownership. Blocks are statements of the `fn world` body and must be top
+level, not inside an `if`, `while`, or `for_each`; the agent index is
+source order, starting at 0; the block's name is the agent's published
+name.
+
+**A world with no `agent` block is agent count 1.** Its declarations
+belong to an implicit agent 0, its slices are the whole vectors, and its
+published spec is the same bytes it was before this construct existed.
+
+**World level and block level do not mix.** Once any `agent` block is
+present, an `action`, an `objective`, or an `as`-bound `observe` at
+world level is an error naming both sites. The alternative readings are
+that a world-level channel belongs to every agent or to agent 0, and
+both would be inventions. An `observe` without `as` is unaffected: it
+prints, declares no channel, and stays at world level.
+
+A block holds those three constructs and nothing else. It may declare at
+most one `objective`; without one it publishes an all-zero reward stream,
+which is the rule a program without an `objective` already follows. A
+block with no `action` declares an observation-only agent, which is legal
+for the same reason an action total of 0 is. A block with neither an
+action nor an objective is an error: it publishes no action channel and
+no reward and has no effect on the program.
+
+Agent names are unique within a world, are at most 31 bytes, and may not
+equal an `astro_body` name in the same world or the name `episode`, both
+of which are already read by dotted name in a program's expression scope.
+
+**Channel names.** With one agent, channel names publish exactly as they
+are declared. With more than one, two agents may reasonably both declare
+a channel called `rel`, so names publish qualified, as `<agent>.<channel>`,
+in the spec's channel-name entries. That entry holds 96 bytes: a
+qualified name is the agent name, a dot, the declared channel name, and
+the derived component suffix, and a combination that does not fit is an
+error naming each part rather than only the total.
+
+**Termination is per environment.** The episode ends for every agent at
+once, on `terminated when`, on the horizon, or on a fault. There is no
+per-agent termination.
+
+**Batch mode** is unchanged in kind: every action channel of every agent
+holds its `default` for the whole run, so a multi-agent program is batch
+runnable and its episode file carries one reward stream per agent.
+
+An example of the whole surface is
+`integration_tests/rl_multi_agent.kfl`.
 
 ### Expression scope
 
@@ -944,6 +1014,28 @@ machinery, outside the world prefix, and read a fixed scope:
 - `arg` globals, and the literals `true` / `false`.
 
 Any other name is an error.
+
+**With more than one agent** the first two entries need a rule about
+whose channels are meant, and it is different in each of the three
+positions a name can be written:
+
+- Inside `on_step`, every agent's action channels are in scope. An
+  unqualified name resolves when exactly one block declares it; when two
+  blocks declare it, the unqualified use is an error naming both
+  declaration sites and the qualified form, and `<agent>.<action>`
+  resolves. Observation channels are not readable in `on_step` at all,
+  qualified or not.
+- Inside an `agent` block's `objective`, that agent's own action and
+  observation channels resolve unqualified, and any agent's channels
+  resolve qualified, including another agent's. That last part is
+  deliberate: it lets a zero-sum reward be written once as the negation
+  of the other agent's expression rather than twice. It does not widen
+  what an agent observes; an agent's observation slice is exactly its own
+  declarations, and a reward is computed by the environment rather than
+  observed by an agent.
+- Inside `episode`, `terminated when` reads any agent's channels and
+  names the agent it reads, since there is one `episode` per program and
+  it sits in no block.
 
 ### Distribution expressions
 
@@ -1018,6 +1110,13 @@ environment's geometry (channel counts and names, action bounds and
 kinds, `control_dt`, `horizon`) from the `k26rl_env_spec` blob, and steps
 every environment in the handle through flat arrays of doubles. The
 header carries the full contract.
+
+The same blob carries the agent count and, per agent in index order, the
+offset and length of that agent's observation slice and action slice.
+The slices are contiguous and their concatenation is the whole vector, so
+a consumer splits one flat array rather than reading a second one. The
+reward buffer is one double per agent per environment, environment major,
+so agent `a` of environment `e` reads index `e * agent_count + a`.
 
 **Determinism.** Given the same compiled artifact, the same seed, and the
 same action stream, the observation, reward, and flag streams are

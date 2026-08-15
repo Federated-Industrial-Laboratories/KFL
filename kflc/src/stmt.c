@@ -467,7 +467,7 @@ static int is_rl_keyword_(const char *s)
 {
     return strcmp(s, "episode")   == 0 || strcmp(s, "action") == 0 ||
            strcmp(s, "on_step")   == 0 || strcmp(s, "objective") == 0 ||
-           strcmp(s, "sensor")    == 0;
+           strcmp(s, "sensor")    == 0 || strcmp(s, "agent") == 0;
 }
 
 /* Statements the `on_step` body rejects: world construction and
@@ -1176,6 +1176,53 @@ static KflcNode *parse_objective_(Lexer *L, Token *cur,
     return n;
 }
 
+/* `agent <name> ... end`. The block is a scope over constructs that
+ * already exist, so its body is parsed by the ordinary block parser
+ * and the `action`, `observe ... as` and `objective` statements inside
+ * it come out as the same nodes they are at world level. Which
+ * statements an agent block may hold is decided where the rest of the
+ * environment model is built, so the admissible set lives in one place
+ * rather than in the parser and again in the emitter. `cur` is the
+ * `agent` keyword. */
+static KflcNode *parse_agent_(Lexer *L, Token *cur,
+                              KflcArena *arena, KflcDiag *diag,
+                              int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (cur->kind != T_IDENT) {
+        kflc_diag_errorf(diag, line0, "agent: expected a name");
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+        return NULL;
+    }
+    KflcNode *n = new_node(arena, KFLN_STMT_AGENT, line0);
+    n->name = cur->str;
+    advance(L, cur, had_error);
+    if (!at_nl(cur) && !at_eof2(cur)) {
+        kflc_diag_errorf(diag, line0,
+            "agent `%s`: expected end of line after the name", n->name);
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+    } else if (at_nl(cur)) {
+        advance(L, cur, had_error);
+    }
+
+    const char *brk[] = { "end", NULL };
+    KflcNode *blk = kfl_parse_stmt_block(L, cur, arena, diag, had_error,
+                                         "end", brk);
+    n->children = blk ? blk->children : NULL;
+    if (is_ident_named(cur, "end")) {
+        advance(L, cur, had_error);
+        if (at_nl(cur)) advance(L, cur, had_error);
+    } else {
+        kflc_diag_errorf(diag, line0,
+            "agent `%s`: unexpected EOF (missing `end`)", n->name);
+        *had_error = 1;
+    }
+    return n;
+}
+
 /* Parse a single statement on the current line. Consumes the trailing
  * newline. Returns NULL on parse error.
  *
@@ -1218,6 +1265,8 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             return parse_objective_(L, cur, arena, diag, had_error);
         if (strcmp(cur->str, "sensor") == 0)
             return parse_sensor_(L, cur, arena, diag, had_error);
+        if (strcmp(cur->str, "agent") == 0)
+            return parse_agent_(L, cur, arena, diag, had_error);
     }
 
     /* `return [<expr>]` */
@@ -3205,6 +3254,7 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
     case KFLN_STMT_ACTION:
     case KFLN_STMT_ON_STEP:
     case KFLN_STMT_OBJECTIVE:
+    case KFLN_STMT_AGENT:
         /* The reinforcement learning constructs are emitted by the
          * environment emitter (emit_rl.c), which a form using them is
          * routed to before this dispatch can see them. Reaching this

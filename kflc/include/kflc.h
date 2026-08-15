@@ -197,7 +197,16 @@ typedef enum {
      * whose attrs carry that term's numeric operands. Order is
      * load-bearing: a chain applies its terms in the order declared. */
     KFLN_STMT_SENSOR,
-    KFLN_STMT_SENSOR_TERM
+    KFLN_STMT_SENSOR_TERM,
+    /* `agent <name> ... end`. `name` is the agent's published name;
+     * children are the constructs the block owns, which are the
+     * ordinary KFLN_STMT_ACTION, KFLN_STMT_OBSERVE (with an `as`
+     * clause) and KFLN_STMT_OBJECTIVE nodes, unchanged in shape. The
+     * block is a scope rather than a new declaration language: agent
+     * index is source order from 0, and a world with no such block is
+     * agent count 1 with every declaration owned by the implicit
+     * agent 0. */
+    KFLN_STMT_AGENT
 } KflcNodeKind;
 
 /* Type system. The base scalar kinds are joined by KFLT_VECTOR /
