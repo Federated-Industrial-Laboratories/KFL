@@ -344,19 +344,33 @@ bool Model::open(const std::string &path, std::string *err)
     return true;
 }
 
+/* The pairing predicate: a channel is overlaid when the file says it
+ * carries a measurement and names the channel holding the truth that
+ * measurement was applied to. Only the measured side answers, so a
+ * pair asked from both ends is drawn once. */
+uint32_t Model::truth_pair_of(uint32_t channel) const
+{
+    for (size_t i = 0; i < spec_.channels.size(); i++) {
+        const Channel &c = spec_.channels[i];
+        if (c.index != channel)
+            continue;
+        if (!c.has_source || c.source != K26RL_OBS_SOURCE_MEASURED)
+            return K26RL_OBS_PAIR_NONE;
+        return c.pair;
+    }
+    return K26RL_OBS_PAIR_NONE;
+}
+
 /* The measured half of every pair the file declares, in channel
- * order. Only the measured side is listed: a pair listed from both
- * ends would draw every overlay twice. */
+ * order, built from that one predicate. */
 std::vector<std::pair<uint32_t, uint32_t> > Model::overlay_pairs() const
 {
     std::vector<std::pair<uint32_t, uint32_t> > out;
     for (size_t i = 0; i < spec_.channels.size(); i++) {
-        const Channel &c = spec_.channels[i];
-        if (!c.has_source || c.source != K26RL_OBS_SOURCE_MEASURED)
+        uint32_t t = truth_pair_of(spec_.channels[i].index);
+        if (t == K26RL_OBS_PAIR_NONE)
             continue;
-        if (c.pair == K26RL_OBS_PAIR_NONE)
-            continue;
-        out.push_back(std::make_pair(c.index, c.pair));
+        out.push_back(std::make_pair(spec_.channels[i].index, t));
     }
     return out;
 }

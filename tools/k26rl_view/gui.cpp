@@ -225,13 +225,13 @@ void panel_obs_(Ui &ui, const Episode &ep)
                 ImPlot::PlotLine(sp.channels[c].name.c_str(), &xs[0], &ys[0],
                                  (int)ep.step_count);
             /* A measured channel is drawn with the truth beside it
-             * when the file says it has one. The pairing is the
-             * file's own statement rather than a name this viewer
-             * matched, which is what the source tag exists for. */
-            if (sp.channels[c].has_source &&
-                sp.channels[c].source == K26RL_OBS_SOURCE_MEASURED &&
-                sp.channels[c].pair != K26RL_OBS_PAIR_NONE) {
-                uint32_t t = sp.channels[c].pair;
+             * when the file says it has one. Which channels those are
+             * is the model's own answer, the same one the headless
+             * dump gets, rather than a predicate written again here:
+             * a window overlaying a different pair from the one the
+             * gate checks is a window nothing checks. */
+            uint32_t t = ui.model->truth_pair_of(sp.channels[c].index);
+            if (t != K26RL_OBS_PAIR_NONE) {
                 const char *tname = "truth";
                 for (size_t d = 0; d < sp.channels.size(); d++) {
                     if (sp.channels[d].index == t)
@@ -520,25 +520,26 @@ void panel_wireframe_(Ui &ui, const Episode &ep)
         return;
     }
     {
+        /* The same verdict function the headless dump calls, so the
+         * window cannot draw a craft the dump would refuse. This
+         * panel's one safety property is that a craft whose bytes are
+         * not the recorded bytes is never drawn, and a property with
+         * two implementations holds in whichever was last looked at. */
         const AssemblyRef *match = 0;
-        for (size_t i = 0; i < sp.assemblies.size(); i++) {
-            if (sp.assemblies[i].name == ui.asset.name)
-                match = &sp.assemblies[i];
-        }
-        if (!match) {
+        AssetVerdict v = asset_verdict(sp, ui.asset, &match);
+        if (v == ASSET_NO_BODY) {
             ImGui::TextWrapped("no body in this recording binds an assembly "
                                "named %s", ui.asset.name.c_str());
             ImGui::End();
             return;
         }
-        if (!match->has_digest ||
-            memcmp(match->digest, ui.asset.digest, K26RL_SHA256_BYTES) != 0) {
+        if (v != ASSET_DRAWABLE) {
             ImGui::TextWrapped("this asset is not the one that flew: the "
                                "recording carries digest %s and the file on "
                                "disk digests to %s",
-                               match->has_digest
-                                   ? digest_hex(match->digest).c_str()
-                                   : "none",
+                               v == ASSET_NO_DIGEST
+                                   ? "none"
+                                   : digest_hex(match->digest).c_str(),
                                digest_hex(ui.asset.digest).c_str());
             ImGui::End();
             return;

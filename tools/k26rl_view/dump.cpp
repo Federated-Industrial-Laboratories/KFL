@@ -353,6 +353,32 @@ static void dump_scrub(FILE *f, Model &m, const DumpOptions &o)
     fprintf(f, "scrub_episode_reads %" PRIu64 "\n", m.episode_reads());
 }
 
+/* One rebuild per episode, shared by the panels that need one.
+ *
+ * The world frame, the attitude panel and the re-simulation verdict
+ * are three views of one rebuild, and `--dump all` asked for it three
+ * times over: the same artifact loaded, the same episode driven, the
+ * same numbers produced, three times. The cache is one deep because
+ * the panels walk the episodes in the same order, and it is keyed on
+ * the episode so a second panel asking for a different one still gets
+ * its own rebuild rather than the previous panel's. */
+static ResimResult rebuild_(Model &m, const Episode &e, uint32_t k,
+                            const DumpOptions &o)
+{
+    static ResimResult cached;
+    static uint32_t cached_k = UINT32_MAX;
+    static std::string cached_artifact;
+    static bool have = false;
+
+    if (have && cached_k == k && cached_artifact == o.artifact)
+        return cached;
+    cached = resimulate(m, e, o.artifact);
+    cached_k = k;
+    cached_artifact = o.artifact;
+    have = true;
+    return cached;
+}
+
 /* The world frame, which only re-simulation can produce: the file
  * records observation channels, and the bodies come from the
  * artifact's body getter as the rebuild runs. */
@@ -375,7 +401,7 @@ static void dump_world(FILE *f, Model &m, const DumpOptions &o)
         if (!e)
             continue;
         dump_episode_header(f, k, *e);
-        ResimResult r = resimulate(m, *e, o.artifact);
+        ResimResult r = rebuild_(m, *e, k, o);
         if (!r.ran || !r.has_bodies) {
             fprintf(f, "world_unavailable %u %s\n", k,
                     r.ran ? "artifact publishes no body getter"
@@ -423,7 +449,7 @@ static void dump_attitude(FILE *f, Model &m, const DumpOptions &o)
         if (!e)
             continue;
         dump_episode_header(f, k, *e);
-        ResimResult r = resimulate(m, *e, o.artifact);
+        ResimResult r = rebuild_(m, *e, k, o);
         if (!r.ran || !r.has_attitudes) {
             fprintf(f, "attitude_unavailable %u %s\n", k,
                     r.ran ? "artifact publishes no attitude getter"
@@ -529,15 +555,12 @@ static void dump_wireframe(FILE *f, Model &m, const DumpOptions &o)
             digest_hex(as.digest).c_str());
     fprintf(f, "wireframe_meshes %u\n", (unsigned)as.meshes.size());
 
-    /* Which body this asset belongs to is the asset's own name
-     * against the names the file publishes, not the order the user
-     * happened to pass paths in. */
+    /* Which body this asset belongs to, and whether its bytes are the
+     * recorded bytes, are one question asked in one place, so the
+     * window and this dump cannot answer it differently. */
     const AssemblyRef *match = 0;
-    for (size_t i = 0; i < sp.assemblies.size(); i++) {
-        if (sp.assemblies[i].name == as.name)
-            match = &sp.assemblies[i];
-    }
-    if (!match) {
+    AssetVerdict v = asset_verdict(sp, as, &match);
+    if (v == ASSET_NO_BODY) {
         fprintf(f, "wireframe_digest unmatched no body binds an assembly "
                    "named %s\n", as.name.c_str());
         return;
@@ -545,12 +568,12 @@ static void dump_wireframe(FILE *f, Model &m, const DumpOptions &o)
     fprintf(f, "wireframe_body %u %s\n", match->body,
             match->body < sp.body_names.size()
                 ? sp.body_names[match->body].c_str() : "?");
-    if (!match->has_digest) {
+    if (v == ASSET_NO_DIGEST) {
         fprintf(f, "wireframe_digest absent the file carries no digest for "
                    "this assembly\n");
         return;
     }
-    if (memcmp(match->digest, as.digest, K26RL_SHA256_BYTES) != 0) {
+    if (v == ASSET_MISMATCH) {
         /* Reported, and not drawn. The bytes on disk are not the
          * bytes that flew, and a picture of them would be a picture
          * of a different craft. */
@@ -595,7 +618,7 @@ static void dump_resim(FILE *f, Model &m, const DumpOptions &o)
         if (!e)
             continue;
         dump_episode_header(f, k, *e);
-        ResimResult r = resimulate(m, *e, o.artifact);
+        ResimResult r = rebuild_(m, *e, k, o);
         fprintf(f, "resim_abi %u %08x\n", k, r.abi_version);
         fprintf(f, "resim_ran %u %d\n", k, r.ran ? 1 : 0);
         fprintf(f, "resim_verdict %u %s\n", k,

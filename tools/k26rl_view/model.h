@@ -195,6 +195,16 @@ public:
      * step i, in metres. */
     static void point(const Episode &ep, const Spec &sp, const Trajectory &t,
                       uint32_t step, double *xyz);
+    /* The ground-truth channel paired with a measured one, or
+     * K26RL_OBS_PAIR_NONE when it has none.
+     *
+     * This is the pairing predicate, and it is one function because
+     * both presenters ask it: the headless dump through the list
+     * below, which is built from it, and the window channel by
+     * channel. A predicate written twice is a window overlaying a
+     * different pair from the one the gate checks. */
+    uint32_t truth_pair_of(uint32_t channel) const;
+
     /* The measured channels that carry a ground-truth pair, in
      * channel order. A file whose program declared no sensor has
      * none, which is not a failure: it is a file with nothing to
