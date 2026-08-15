@@ -2380,6 +2380,28 @@ int main(void)
         "end\n",
         0, NULL, "error");
 
+    /* A body genuinely called `port`, written in the line-of-sight
+     * form with a key before `from`. The port form takes the branch
+     * and cannot know better, so its diagnostic names the other
+     * reading too rather than insisting on its own. */
+    expect_("port_named_body_with_key",
+        "form RL_PORTK\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body port gm=1.0 parent=earth pos_x=7.0e6"
+        " vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe port mode=geometric from earth as trk\n"
+        "    objective\n"
+        "        reward trk_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "if `port` is a body here", NULL);
+
     /* The asset-side refusals. Each is the working asset above with
      * one port line changed or missing, so what is refused is that
      * line and nothing else. */

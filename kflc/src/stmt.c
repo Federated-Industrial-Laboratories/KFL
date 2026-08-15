@@ -1764,9 +1764,16 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             port_ident = cur->str;
             advance(L, cur, had_error);
             if (!is_ident_named(cur, "of")) {
+                /* A body genuinely called `port` reaches here when
+                 * the line-of-sight form is written with a trailing
+                 * key rather than `from` first, so the diagnostic
+                 * names both readings rather than assuming this one. */
                 kflc_diag_errorf(diag, line0,
                     "observe port %s: expected `of` and the name of the "
-                    "body that carries the port", port_ident);
+                    "body that carries the port; if `port` is a body "
+                    "here, its line-of-sight form is `observe port from "
+                    "<observer>` with `from` before any key",
+                    port_ident);
                 *had_error = 1;
                 while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
                 if (at_nl(cur)) advance(L, cur, had_error);
