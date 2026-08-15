@@ -22,37 +22,36 @@
  * coordinates.
  *
  * Arithmetic and determinism, per model rather than as a blanket
- * claim. Additive noise, scale-factor noise, latency, quantisation,
- * dropout, deadband and dispersion use addition, subtraction,
- * multiplication, division and comparison only, all exact or correctly
- * rounded under IEEE-754, so they are reproducible across platforms as
- * well as across runs, given a generator that is. The bias walk's step
- * is the same five operations; its two coefficients are not, because
- * they come from an exponential. They are computed once, outside the
- * stepping path, by k26sense_bias_walk_coeffs, which is the one
- * function here that calls the platform's exponential and the one
- * place this library carries the per-binary claim rather than the
- * cross-platform one. Nothing on the step path calls a library
- * function at all.
+ * claim. Additive noise, scale-factor noise, latency, dropout,
+ * deadband and dispersion use addition, subtraction, multiplication,
+ * division and comparison only, all exact or correctly rounded under
+ * IEEE-754, so they are reproducible across platforms as well as
+ * across runs, given a generator that is. Quantisation adds one more
+ * operation, a conversion from double to a signed 64-bit integer,
+ * which is exact where it is defined and undefined outside that
+ * type's range; the model saturates rather than converting there, so
+ * it is total and portable at every input rather than only inside a
+ * range a caller has to know about. The bias walk's step is the same
+ * five operations; its two coefficients are not, because they come
+ * from an exponential. They are computed once, outside the stepping
+ * path, by k26sense_bias_walk_coeffs, which is the one function here
+ * that calls the platform's exponential and the one place this library
+ * carries the per-binary claim rather than the cross-platform one.
+ * Nothing on the step path calls the platform's mathematics library:
+ * the only calls it makes are into the counter-based generator, which
+ * carries the same no-libm rule.
  *
- * Provenance. The bias walk is the first-order Gauss-Markov error
- * model standard in inertial and navigation sensor specification: a
- * turn-on bias drawn once per episode, and an in-run bias that decays
- * towards zero with a declared correlation time while being driven by
- * white noise, so that its stationary standard deviation is the
- * declared one. Its exact discrete-time form is derived in
- * src/models.c from the continuous process rather than transcribed,
- * and tests/test_sense_models.c measures the stationary standard
- * deviation and recovers the correlation time from the realised
- * autocorrelation. The reference for the model and its two-parameter
- * specification is Brown and Hwang, "Introduction to Random Signals
- * and Applied Kalman Filtering", and the IEEE specification-format
- * standards for inertial sensors that carry the same turn-on and
- * in-run split; those texts are not read here, the implementation does
- * not rest on them, and the citation is marked for verification at
- * intake. The other models are definitions rather than results: what
- * additive noise, a scale factor, a delay, a quantiser, a dropout and
- * a deadband do is stated in this header and measured directly.
+ * Provenance. Nothing here is taken on authority. The bias walk is the
+ * first-order Gauss-Markov process, a turn-on bias drawn once per
+ * episode and an in-run bias decaying towards zero with a declared
+ * correlation time while driven by white noise; its exact
+ * discrete-time form is derived in src/models.c from the continuous
+ * process, and tests/test_sense_models.c measures the stationary
+ * standard deviation it produces and recovers the correlation time
+ * from the realised autocorrelation. The other models are definitions
+ * rather than results: what additive noise, a scale factor, a delay, a
+ * quantiser, a dropout and a deadband do is stated in this header and
+ * measured directly.
  */
 #ifndef K26SENSE_H
 #define K26SENSE_H
@@ -77,6 +76,13 @@ extern "C" {
 
 /* A term that draws nothing carries this in place of a channel. */
 #define K26SENSE_NO_CHANNEL ((uint16_t)0xFFFE)
+
+/* Two to the sixty-third, exactly, as a double: the first magnitude a
+ * signed 64-bit conversion cannot take. A quantiser saturates here
+ * rather than converting, and a caller sizing a declared range against
+ * a step uses it to know what the step can reach: a step of `lsb`
+ * spans at most this many multiples either side of zero. */
+#define K26SENSE_I64_SPAN 9223372036854775808.0
 
 typedef enum {
     K26SENSE_OK             = 0,
@@ -299,9 +305,16 @@ double k26sense_bias_walk_step(double bias, double phi, double q,
 /**
  * @brief Round to a multiple of `lsb` after clamping to [lo, hi].
  * @note  Half away from zero, so that a tie at a negative value rounds
- *        the same distance as its positive mirror. The clamp is
- *        declared rather than implied so the integer conversion cannot
- *        overflow. An lsb of zero is the identity.
+ *        the same distance as its positive mirror. An lsb of zero, or
+ *        a value that is not finite, is the identity.
+ * @note  A grid position beyond what a signed 64-bit integer holds
+ *        saturates at K26SENSE_I64_SPAN multiples of the step. The
+ *        conversion is undefined outside that range, so saturating is
+ *        what makes this model total: no declared step and no value
+ *        can reach undefined behaviour through it. A declared range
+ *        should keep the saturation unreachable, and a caller that
+ *        wants that guaranteed checks `hi / lsb < K26SENSE_I64_SPAN`
+ *        before declaring one.
  */
 double k26sense_quantise(double v, double lsb, double lo, double hi);
 

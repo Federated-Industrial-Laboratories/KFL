@@ -220,6 +220,37 @@ int main(void)
         ASSERT(k26sense_quantise(-5.0, lsb, -1.0, 1.0) == -1.0);
         /* A step of zero is the identity rather than a division. */
         ASSERT(k26sense_quantise(0.1234, 0.0, -1.0, 1.0) == 0.1234);
+
+        /* Saturation, which is what makes this model total. A fine
+         * step puts an ordinary value past what a signed 64-bit
+         * integer holds, where the conversion is undefined; a real
+         * platform produced the most negative integer, so a true range
+         * of seven million metres came back as minus ninety-two
+         * thousand with the sign flipped and nothing said. The value
+         * must instead saturate on the grid, keep its sign, and stay
+         * finite. */
+        {
+            double fine = 1.0e-14;
+            double wide = 1.0e300;   /* a range that cannot protect it */
+            double pos = k26sense_quantise(7.0e6, fine, -wide, wide);
+            double neg = k26sense_quantise(-7.0e6, fine, -wide, wide);
+            double cap = K26SENSE_I64_SPAN * fine;
+            printf("gate 4: at a step of %g, +7.0e6 gives %+.6f and"
+                   " -7.0e6 gives %+.6f; the grid reaches %+.6f\n",
+                   fine, pos, neg, cap);
+            ASSERT(pos == cap);
+            ASSERT(neg == -cap);
+            ASSERT(pos > 0.0);          /* the sign is not flipped */
+            ASSERT(neg < 0.0);
+            /* Both are exact multiples of the step, so saturation
+             * lands on the grid rather than beside it. */
+            ASSERT(pos / fine == K26SENSE_I64_SPAN);
+            /* And a value that is not finite passes through rather
+             * than reaching the conversion at all. */
+            double nan_ = 0.0 / 0.0;
+            double q = k26sense_quantise(nan_, fine, -wide, wide);
+            ASSERT(q != q);
+        }
         n_pass++;
         printf("gate 4: quantisation lands on multiples of the step and"
                " rounds ties away from zero on both signs: OK\n");
@@ -267,7 +298,7 @@ int main(void)
     {
         /* The fixture is chosen so the estimate is tight: the run
          * covers 20000 correlation times, so the recovered time has a
-         * relative standard error near 1/sqrt(20000), under one per
+         * relative standard error near 1/sqrt(20000), which is 0.7 per
          * cent. A correlation time of ten seconds at a tenth of a
          * second per step is 100 steps of memory. */
         const double tau = 10.0, dt = 0.1, sigma = 0.004, sigma0 = 0.02;
@@ -289,8 +320,7 @@ int main(void)
         printf("  the turn-on bias drawn at reset is %+.6f against a"
                " declared %.3f\n", st.bias, sigma0);
 
-        double s1 = 0.0, s2 = 0.0, lag1 = 0.0, lag_far = 0.0;
-        double prev = 0.0;
+        double lag_far = 0.0;
         double *hist = (double *)malloc((size_t)n * sizeof(double));
         ASSERT(hist != NULL);
         for (uint32_t k = 0; k < (uint32_t)n; k++) {
@@ -299,12 +329,11 @@ int main(void)
                                         K26SENSE_CLASS_SENSOR, 0, 0, k,
                                         0.0, &v) == K26SENSE_OK);
             hist[k] = v;
-            s1 += v; s2 += v * v;
-            if (k > 0) lag1 += v * prev;
-            prev = v;
         }
-        /* Discard the first ten correlation times, where the turn-on
-         * bias has not yet decayed into the stationary distribution. */
+        /* Discard the first hundred correlation times, where the
+         * turn-on bias has not yet decayed into the stationary
+         * distribution: a hundred steps of memory, a hundred times
+         * over. */
         const int burn = 100 * 100;
         double m = 0.0, var = 0.0;
         for (int k = burn; k < n; k++) m += hist[k];

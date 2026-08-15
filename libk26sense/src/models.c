@@ -100,6 +100,7 @@ double k26sense_bias_walk_step(double bias, double phi, double q,
 double k26sense_quantise(double v, double lsb, double lo, double hi)
 {
     if (!(lsb > 0.0) || !sense_finite_(lsb)) return v;
+    if (!sense_finite_(v)) return v;
     if (v < lo) v = lo;
     if (v > hi) v = hi;
     /* Half away from zero: a tie at a negative value moves the same
@@ -108,7 +109,22 @@ double k26sense_quantise(double v, double lsb, double lo, double hi)
      * no rounding mode can move the answer. */
     double scaled = v / lsb;
     double half   = scaled < 0.0 ? -0.5 : 0.5;
-    return (double)(int64_t)(scaled + half) * lsb;
+    double t      = scaled + half;
+    /* The conversion to a 64-bit integer is defined only while the
+     * value is inside that type's range. Outside it the C standard
+     * leaves the result undefined, and what a real platform produced
+     * was the most negative integer: a true range of seven million
+     * metres was published as minus ninety-two thousand, with no fault
+     * and no diagnostic, because a step of 1e-14 puts seven million
+     * past 2^63 steps. A caller must not be able to reach undefined
+     * behaviour by declaring a fine step, so the value saturates on
+     * the grid instead of converting. The declared range should keep
+     * this unreachable, and the compiler refuses a range that does
+     * not; this is what makes the model total rather than what is
+     * expected to fire. */
+    if (t >= K26SENSE_I64_SPAN)  return  K26SENSE_I64_SPAN * lsb;
+    if (t <= -K26SENSE_I64_SPAN) return -K26SENSE_I64_SPAN * lsb;
+    return (double)(int64_t)t * lsb;
 }
 
 double k26sense_deadband(double v, double threshold, int rescale)
