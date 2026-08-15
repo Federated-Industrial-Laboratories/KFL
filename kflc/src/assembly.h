@@ -93,6 +93,14 @@ typedef struct {
     double coulomb;          /* wheel, N m */
     double dead_rate;        /* wheel, rad/s */
     double max_dipole;       /* magnetorquer, A m^2 */
+    /* The mating plane collider a port with a named capture envelope
+     * is given, as an index into the assembly's collider array, or -1
+     * for every other feature and for a port that names none. The
+     * plate is synthesised from the envelope's published mating plane
+     * rather than declared, so an author cannot get the geometry the
+     * capture test is judged at wrong, and it is appended after the
+     * mass-property derivation has run so that it adds no mass. */
+    int    collider;
     int    line;
 } KflcAsmFeature;
 

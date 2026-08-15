@@ -1575,9 +1575,31 @@ int main(void)
         KflcAssembly *a = load_(WORK "/feat.k26asm", &arena, &diag, stderr);
         ASSERT(a != NULL && diag.errors == 0);
         ASSERT(a->n_features == 4);
-        ASSERT(a->n_colliders == 1);
         ASSERT(a->features[0].kind == KFLC_FEAT_PORT);
         ASSERT(strcmp(a->features[0].capture, "idss_e") == 0);
+        /* The port names an envelope, so the reader gives it the
+         * mating plane that envelope publishes: one collider more
+         * than the component declared, square across the published
+         * 1200 mm circle, thin along the port axis, and placed wholly
+         * behind the mating plane so the plane itself is the face
+         * another craft meets. */
+        ASSERT(a->n_colliders == 2);
+        ASSERT(a->features[0].collider == 1);
+        {
+            const KflcAsmCollider *pl = &a->colliders[1];
+            ASSERT(pl->kind == KFLC_SHAPE_BOX);
+            ASSERT(pl->component == -1);
+            ASSERT(pl->a[1] == 0.6 && pl->a[2] == 0.6);
+            ASSERT(pl->a[0] == 0.6 * 0.01);
+            ASSERT(pl->centre[0] == 2.60 - 0.6 * 0.01);
+            ASSERT(pl->centre[1] == 0.0 && pl->centre[2] == 0.0);
+            ASSERT(pl->rot[0][0] == 1.0);
+        }
+        /* The plate carries no mass: the mass properties are the
+         * component's alone, and a port is an interface rather than a
+         * part. The capsule's own analytic mass is what the
+         * derivation returns. */
+        ASSERT(a->mass == 1000.0);
         ASSERT(a->features[1].kind == KFLC_FEAT_THRUSTER);
         ASSERT(a->features[1].thrust == 400.0);
         ASSERT(a->features[2].kind == KFLC_FEAT_WHEEL);
@@ -1586,6 +1608,64 @@ int main(void)
         ASSERT(a->features[3].max_dipole == 30.0);
         printf("  ports, thrusters, wheels, and magnetorquers parse and "
                "are carried: OK\n");
+        n_pass++;
+        kflc_arena_release(arena);
+    }
+
+    /* A port whose frame is not axis aligned. The arm above cannot
+     * see a transposed basis, because the basis it builds is the
+     * identity and the identity is its own transpose; here no two
+     * columns are alike, so the plate's axes are pinned rather than
+     * assumed. */
+    {
+        write_file_(WORK "/skew.k26asm",
+            "assembly skew\n"
+            "    frame x_to_port\n"
+            "    component hull\n"
+            "        mass 1000.0\n"
+            "        collider capsule 0 0 0 2.4 0 0 1.85\n"
+            "    end\n"
+            "    port oblique\n"
+            "        at 0.7 -0.2 0.5\n"
+            "        axis 0.48 0.6 0.64\n"
+            "        roll_ref 0.0 1.0 0.0\n"
+            "        capture idss_e\n"
+            "    end\n"
+            "end\n");
+        KflcArena *arena = NULL;
+        KflcDiag   diag;
+        KflcAssembly *a = load_(WORK "/skew.k26asm", &arena, &diag, stderr);
+        ASSERT(a != NULL && diag.errors == 0);
+        ASSERT(a->n_colliders == 2);
+        const KflcAsmCollider *pl = &a->colliders[a->features[0].collider];
+        /* The declared axis, the roll reference with its component
+         * along that axis removed and normalised, and the third
+         * completing the set: computed here from the declaration. */
+        double bx[3] = { 0.48, 0.6, 0.64 };
+        double rr[3] = { 0.0, 1.0, 0.0 };
+        double d = rr[0]*bx[0] + rr[1]*bx[1] + rr[2]*bx[2];
+        double by[3], bz[3], n = 0.0;
+        for (int q = 0; q < 3; q++) by[q] = rr[q] - d * bx[q];
+        for (int q = 0; q < 3; q++) n += by[q] * by[q];
+        n = sqrt(n);
+        for (int q = 0; q < 3; q++) by[q] /= n;
+        bz[0] = bx[1]*by[2] - bx[2]*by[1];
+        bz[1] = bx[2]*by[0] - bx[0]*by[2];
+        bz[2] = bx[0]*by[1] - bx[1]*by[0];
+        /* The plate's columns are the port's axes: a transposed
+         * matrix has different columns and fails here. */
+        for (int q = 0; q < 3; q++) {
+            ASSERT(fabs(pl->rot[q][0] - bx[q]) < 1e-15);
+            ASSERT(fabs(pl->rot[q][1] - by[q]) < 1e-15);
+            ASSERT(fabs(pl->rot[q][2] - bz[q]) < 1e-15);
+            /* And the plate sits behind the mating plane along the
+             * port axis, not beside it. */
+            ASSERT(fabs(pl->centre[q]
+                        - (a->features[0].at[q] - 0.6 * 0.01 * bx[q]))
+                   < 1e-15);
+        }
+        printf("  a port whose frame is not axis aligned gets its own "
+               "axes on the mating plane: OK\n");
         n_pass++;
         kflc_arena_release(arena);
     }

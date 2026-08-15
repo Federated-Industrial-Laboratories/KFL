@@ -44,6 +44,7 @@
  * and which no rearrangement removes.
  */
 #include "assembly.h"
+#include "capture.h"
 #include "internal.h"
 
 #include "k26rl_digest.h"
@@ -773,7 +774,8 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
                         ASM_ERR("%s: %s name is longer than %d bytes",
                                 resolved, kw, (int)sizeof feat->name - 1);
                     }
-                    feat->line = s.line;
+                    feat->line     = s.line;
+                    feat->collider = -1;
                 }
                 continue;
             }
@@ -951,7 +953,56 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
      * not a wheel this model can represent. */
     for (int i = 0; i < a->n_features; i++) {
         const KflcAsmFeature *f = &a->features[i];
-        if (f->kind == KFLC_FEAT_PORT) continue;
+        if (f->kind == KFLC_FEAT_PORT) {
+            /* A port's axis and roll reference define the frame every
+             * capture residual is measured in, so both are checked
+             * here rather than repaired downstream. A port declared
+             * with neither carries a zero axis, which names no
+             * direction at all and would publish residuals about an
+             * arbitrary one. */
+            double nn = f->axis[0] * f->axis[0] + f->axis[1] * f->axis[1]
+                      + f->axis[2] * f->axis[2];
+            double dev = nn - 1.0;
+            if (dev < 0.0) dev = -dev;
+            if (dev > ASM_AXIS_TOL) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: port `%s`: `axis` is not a unit vector (its "
+                    "squared norm is %.17g); it is the outward normal of "
+                    "the mating plane and every capture residual is "
+                    "measured against it", resolved, f->name, nn);
+                return NULL;
+            }
+            double cx = f->axis[1] * f->roll_ref[2] - f->axis[2] * f->roll_ref[1];
+            double cy = f->axis[2] * f->roll_ref[0] - f->axis[0] * f->roll_ref[2];
+            double cz = f->axis[0] * f->roll_ref[1] - f->axis[1] * f->roll_ref[0];
+            if (!(cx * cx + cy * cy + cz * cz > ASM_AXIS_TOL)) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: port `%s`: `roll_ref` names no direction in the "
+                    "mating plane, being parallel to `axis` or zero; roll "
+                    "misalignment is measured from it",
+                    resolved, f->name);
+                return NULL;
+            }
+            if (f->capture[0] != '\0' && !kflc_capture_envelope(f->capture)) {
+                char known[128];
+                size_t used = 0;
+                known[0] = '\0';
+                for (int k = 0; kflc_capture_name_at(k); k++) {
+                    int wrote = snprintf(known + used, sizeof known - used,
+                                         "%s`%s`", k ? ", " : "",
+                                         kflc_capture_name_at(k));
+                    if (wrote < 0 || (size_t)wrote >= sizeof known - used) break;
+                    used += (size_t)wrote;
+                }
+                kflc_diag_errorf(diag, f->line,
+                    "%s: port `%s`: `capture %s` names no defined envelope; "
+                    "this version defines %s, and an envelope declared in a "
+                    "program is not a surface this version carries",
+                    resolved, f->name, f->capture, known);
+                return NULL;
+            }
+            continue;
+        }
 
         if (f->kind == KFLC_FEAT_THRUSTER) {
             double nn = f->dir[0] * f->dir[0] + f->dir[1] * f->dir[1]
@@ -1190,6 +1241,78 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
         }
         double cx = cl->centre[0], cy = cl->centre[1], cz = cl->centre[2];
         double far = sqrt(cx * cx + cy * cy + cz * cz) + reach;
+        if (far > a->bound_radius) a->bound_radius = far;
+    }
+
+    /* ---- The mating plane a port with an envelope presents -------- *
+     *
+     * A port named an envelope, and an envelope publishes the
+     * diameter its contact conditions are stated at. The collider
+     * that meets the other craft is therefore the envelope's, not the
+     * author's: it is built here from the published diameter and from
+     * the port's own frame, so an assembly cannot declare a docking
+     * interface of the wrong size.
+     *
+     * It is appended after the derivation and after the bake, which
+     * is what keeps it out of the mass properties: a mating plane is
+     * an interface, and the mass that carries it was already declared
+     * by the component the port sits on.
+     *
+     * The plate is square where the published outline is round. It
+     * circumscribes the published circle, so it can report a contact
+     * a round plate would miss and never miss one a round plate would
+     * report, and the difference lies outside the lateral
+     * misalignment any envelope here admits. A round primitive is not
+     * in this version's collider set, and adding one is a kernel, not
+     * a shape.
+     */
+    for (int i = 0; i < a->n_features; i++) {
+        KflcAsmFeature *f = &a->features[i];
+        if (f->kind != KFLC_FEAT_PORT || f->capture[0] == '\0') continue;
+        const KflcCaptureEnvelope *env = kflc_capture_envelope(f->capture);
+        if (!env) continue;                 /* refused above */
+        if (a->n_colliders >= KFLC_ASM_MAX_COLL) {
+            kflc_diag_errorf(diag, f->line,
+                "%s: port `%s` needs a mating plane collider and the "
+                "assembly already declares the maximum of %d",
+                resolved, f->name, KFLC_ASM_MAX_COLL);
+            return NULL;
+        }
+        double radius = 0.5 * kflc_capture_mm_to_m(env->mating_diameter_mm);
+        double half   = kflc_capture_plate_half(
+                            kflc_capture_mm_to_m(env->mating_diameter_mm));
+
+        double bx[3], by[3], bz[3], nrm;
+        nrm = sqrt(f->axis[0] * f->axis[0] + f->axis[1] * f->axis[1]
+                   + f->axis[2] * f->axis[2]);
+        for (int q = 0; q < 3; q++) bx[q] = f->axis[q] / nrm;
+        double d = f->roll_ref[0] * bx[0] + f->roll_ref[1] * bx[1]
+                 + f->roll_ref[2] * bx[2];
+        for (int q = 0; q < 3; q++) by[q] = f->roll_ref[q] - d * bx[q];
+        nrm = sqrt(by[0] * by[0] + by[1] * by[1] + by[2] * by[2]);
+        for (int q = 0; q < 3; q++) by[q] /= nrm;
+        bz[0] = bx[1] * by[2] - bx[2] * by[1];
+        bz[1] = bx[2] * by[0] - bx[0] * by[2];
+        bz[2] = bx[0] * by[1] - bx[1] * by[0];
+
+        KflcAsmCollider *cl = &a->colliders[a->n_colliders];
+        f->collider = a->n_colliders++;
+        memset(cl, 0, sizeof *cl);
+        cl->kind      = KFLC_SHAPE_BOX;
+        cl->component = -1;
+        cl->line      = f->line;
+        cl->a[0] = half; cl->a[1] = radius; cl->a[2] = radius;
+        for (int q = 0; q < 3; q++) {
+            /* The plate sits wholly behind the mating plane, so the
+             * plane itself is the face that meets the other craft. */
+            cl->centre[q] = f->at[q] - half * bx[q];
+            cl->rot[q][0] = bx[q];
+            cl->rot[q][1] = by[q];
+            cl->rot[q][2] = bz[q];
+        }
+        double cx = cl->centre[0], cy = cl->centre[1], cz = cl->centre[2];
+        double far = sqrt(cx * cx + cy * cy + cz * cz)
+                   + sqrt(half * half + 2.0 * radius * radius);
         if (far > a->bound_radius) a->bound_radius = far;
     }
 
