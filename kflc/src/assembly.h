@@ -47,11 +47,21 @@ typedef enum {
     KFLC_SHAPE_BOX     = 3
 } KflcShapeKind;
 
+/* A collider is declared in its component's frame and is left there
+ * for the mass-property derivation, which walks components one at a
+ * time. After that derivation the component placement is baked in and
+ * every collider is in the assembly's body frame, which is the frame
+ * a collision pass wants and the only one in which two components'
+ * colliders can be compared. `rot` carries the component's
+ * orientation, since a box needs its axes and not only its centre;
+ * it is the identity for a component that declares no rotation. */
 typedef struct {
     KflcShapeKind kind;
     double        a[3];      /* sphere centre, capsule end A, box half extents */
     double        b[3];      /* capsule end B; unused otherwise */
     double        r;         /* sphere and capsule radius; unused for a box */
+    double        rot[3][3]; /* body frame from component frame */
+    double        centre[3]; /* body frame, after baking */
     int           component; /* owning component index */
     int           line;
 } KflcAsmCollider;
@@ -127,6 +137,11 @@ typedef struct {
     double  inertia[6];                 /* about the assembly centre of
                                            mass: xx, yy, zz, xy, xz, yz */
     uint8_t digest[KFLC_ASM_DIGEST];
+    /* One sphere about the body-frame origin covering every collider,
+     * which is what a broadphase tests before it tests primitives.
+     * Derived here because this is where the collider geometry and
+     * the component placements are both in hand. */
+    double  bound_radius;               /* m */
     int     n_components;
     int     n_colliders;
     int     n_features;

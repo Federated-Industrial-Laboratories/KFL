@@ -1132,6 +1132,67 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
         for (int q = 0; q < 3; q++) d[q] = wcom[i][q] - a->com[q];
         asm_shift_(c->mass, d, a->inertia);
     }
+    /* ---- Colliders into the body frame, and the bound ------------ *
+     *
+     * The derivation above walked components one at a time and each
+     * collider stayed in its own component's frame, which is where it
+     * was declared and where its closed form is simplest. A collision
+     * pass compares colliders across components, so it needs one
+     * frame; the placement is baked in here, once, after the last
+     * consumer of the component-frame form has run.
+     *
+     * The bound is one sphere about the body-frame origin covering
+     * every collider. It is not the tightest such sphere, since the
+     * tightest needs an optimisation and this needs a maximum: each
+     * collider contributes the distance to its farthest point, and
+     * the largest of those is the radius. A broadphase wants a bound
+     * it can trust, and a loose one costs a narrowphase test it would
+     * otherwise skip, while a tight one computed wrongly costs a
+     * contact.
+     */
+    a->bound_radius = 0.0;
+    for (int k = 0; k < a->n_colliders; k++) {
+        KflcAsmCollider *cl = &a->colliders[k];
+        const KflcAsmComponent *c = &a->components[cl->component];
+        double R[3][3];
+        asm_quat_matrix_(c->rot, R);
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) cl->rot[i][j] = R[i][j];
+        }
+        double reach = 0.0;
+        if (cl->kind == KFLC_SHAPE_BOX) {
+            /* The box's own centre is its component's origin; its
+             * half extents are along the component's axes. */
+            for (int q = 0; q < 3; q++) cl->centre[q] = c->at[q];
+            reach = sqrt(cl->a[0] * cl->a[0] + cl->a[1] * cl->a[1] +
+                         cl->a[2] * cl->a[2]);
+        } else if (cl->kind == KFLC_SHAPE_SPHERE) {
+            double w[3];
+            asm_rot_vec_(R, cl->a, w);
+            for (int q = 0; q < 3; q++) cl->centre[q] = c->at[q] + w[q];
+            reach = cl->r;
+        } else {
+            double wa[3], wb[3];
+            asm_rot_vec_(R, cl->a, wa);
+            asm_rot_vec_(R, cl->b, wb);
+            for (int q = 0; q < 3; q++) {
+                wa[q] += c->at[q];
+                wb[q] += c->at[q];
+                cl->centre[q] = 0.5 * (wa[q] + wb[q]);
+            }
+            /* The capsule keeps its endpoints in the body frame, so a
+             * consumer needs no second transform to find them. */
+            for (int q = 0; q < 3; q++) { cl->a[q] = wa[q]; cl->b[q] = wb[q]; }
+            double hx = wa[0] - cl->centre[0];
+            double hy = wa[1] - cl->centre[1];
+            double hz = wa[2] - cl->centre[2];
+            reach = sqrt(hx * hx + hy * hy + hz * hz) + cl->r;
+        }
+        double cx = cl->centre[0], cy = cl->centre[1], cz = cl->centre[2];
+        double far = sqrt(cx * cx + cy * cy + cz * cz) + reach;
+        if (far > a->bound_radius) a->bound_radius = far;
+    }
+
     k26rl_digest_final(&dig, a->digest);
 
     /* The compiler reports what an asset says it has not checked. The

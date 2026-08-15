@@ -1169,6 +1169,63 @@ int main(void)
     expect_refused_("prov_status", WORK "/prov_bad.k26asm",
                     "is not a provenance status");
 
+    /* ---- Colliders in the body frame, and the bound -------------- *
+     *
+     * The bound is what a broadphase tests, so a wrong one costs
+     * contacts. The fixture places two components apart so that a
+     * bound computed from the collider geometry alone, without the
+     * component placement, would be far too small: that is the defect
+     * this arm exists to catch, and a single-component fixture at the
+     * origin could not see it. */
+    {
+        write_file_(WORK "/bound.k26asm",
+            "assembly bound_check\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"calibration shape\" computed\n"
+            "    component hull\n"
+            "        mass 1000.0\n"
+            "        at 0 0 0\n"
+            "        collider box 1.0 0.5 0.5\n"
+            "    end\n"
+            "    component pod\n"
+            "        mass 100.0\n"
+            "        at 2.0 0 0\n"
+            "        collider sphere 0 0 0 0.5\n"
+            "    end\n"
+            "end\n");
+        KflcArena *arena = NULL;
+        KflcDiag   diag;
+        KflcAssembly *a = load_(WORK "/bound.k26asm", &arena, &diag, stderr);
+        ASSERT(a != NULL);
+        ASSERT(diag.errors == 0);
+        ASSERT(a->n_colliders == 2);
+
+        /* The sphere is declared at its component's own origin and
+         * must come back at the component's placement, which is the
+         * whole of the baking. */
+        int sph = a->colliders[0].kind == KFLC_SHAPE_SPHERE ? 0 : 1;
+        int box = 1 - sph;
+        printf("  sphere collider centre (%.6f, %.6f, %.6f)\n",
+               a->colliders[sph].centre[0], a->colliders[sph].centre[1],
+               a->colliders[sph].centre[2]);
+        check_close_("baked sphere centre x", a->colliders[sph].centre[0], 2.0,
+              1e-12);
+        check_close_("baked box centre x", a->colliders[box].centre[0], 0.0, 1e-12);
+
+        /* The bound covers both: the box reaches
+         * sqrt(1 + 0.25 + 0.25) = 1.2247 from the origin, and the pod
+         * reaches 2 + 0.5 = 2.5, so the bound is 2.5. A bound that
+         * ignored the placement would be 1.2247 and would skip every
+         * pair the pod alone would meet. */
+        printf("  bound radius %.12f\n", a->bound_radius);
+        check_close_("bound radius", a->bound_radius, 2.5, 1e-12);
+        ASSERT(a->bound_radius > sqrt(1.5));
+        kflc_arena_release(arena);
+        printf("  colliders are baked into the body frame and the bound "
+               "covers the placed geometry: OK\n");
+        n_pass++;
+    }
+
     /* ---- Actuator declarations ---------------------------------- *
      *
      * Each of these was a plausible number downstream before it was a
