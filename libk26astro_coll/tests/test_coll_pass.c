@@ -217,8 +217,60 @@ int main(void)
                    K26ASTRO_COLL_OK);
             ASSERT(memcmp(&again, &c, sizeof c) == 0);
         }
+        /* The whole tuple, not just the primitive: the rule breaks a
+         * tie on the first body index, then the second, then the two
+         * primitive indices, and an arm that checked only the last of
+         * those would pass for a rule that reversed any of the
+         * others. */
+        ASSERT(c.body_a == 0 && c.body_b == 1);
+        ASSERT(c.shape_a == 0 && c.shape_b == 0);
         printf("  a simultaneous pair is broken by the declared order "
                "and reports the same primitive every run: OK\n");
+        n_pass++;
+    }
+    {
+        /* A tie between two different PAIRS, which the fixture above
+         * cannot produce: two identical spheres approach one plate
+         * from opposite sides at the same speed, so pair (0,1) and
+         * pair (0,2) touch at the same instant to the last bit and
+         * only the body-index level of the rule decides. */
+        K26AstroCollShape plate = box_at_(k26m3d_v3(0, 0, 0), 0.5, 5.0, 5.0);
+        K26AstroCollShape s1 = sphere_(0.25), s2 = sphere_(0.25);
+        K26AstroCollBody bodies[3];
+        bodies[0] = body_(k26m3d_v3(0, 0, 0), k26m3d_v3(0, 0, 0),
+                          &plate, 1, 7.09, 0.0);
+        bodies[1] = body_(k26m3d_v3(-4.0, 0, 0), k26m3d_v3(4.0, 0, 0),
+                          &s1, 1, 0.25, 1.0);
+        bodies[2] = body_(k26m3d_v3( 4.0, 0, 0), k26m3d_v3(-4.0, 0, 0),
+                          &s2, 1, 0.25, 1.0);
+        bodies[1].vel0 = bodies[1].vel1 = k26m3d_v3( 8.0, 0, 0);
+        bodies[2].vel0 = bodies[2].vel1 = k26m3d_v3(-8.0, 0, 0);
+
+        /* The two candidate times, measured rather than assumed
+         * equal: with different times any rule preferring the earlier
+         * would pass and the arm would say nothing about ties. */
+        K26AstroCollHit h1, h2;
+        ASSERT(k26astro_coll_sweep_pair(&plate, &s1, k26m3d_v3(-4.0, 0, 0),
+                                        k26m3d_v3(8.0, 0, 0), &h1));
+        ASSERT(k26astro_coll_sweep_pair(&plate, &s2, k26m3d_v3(4.0, 0, 0),
+                                        k26m3d_v3(-8.0, 0, 0), &h2));
+        printf("  the two pairs meet at %.17g and %.17g\n",
+               h1.time, h2.time);
+        ASSERT(h1.time == h2.time);
+
+        K26AstroCollContact c;
+        ASSERT(k26astro_coll_pass(bodies, 3, 1.0, &c) == K26ASTRO_COLL_OK);
+        ASSERT(c.hit);
+        printf("  the pass reports the pair (%d, %d)\n", c.body_a, c.body_b);
+        ASSERT(c.body_a == 0 && c.body_b == 1);
+        for (int k = 0; k < 8; k++) {
+            K26AstroCollContact again;
+            ASSERT(k26astro_coll_pass(bodies, 3, 1.0, &again) ==
+                   K26ASTRO_COLL_OK);
+            ASSERT(memcmp(&again, &c, sizeof c) == 0);
+        }
+        printf("  a tie between two pairs is broken on the body index "
+               "and reports the same pair every run: OK\n");
         n_pass++;
     }
 
@@ -602,6 +654,138 @@ int main(void)
                    k26m3d_v3(disp.x * 0.55, disp.y * 0.55, disp.z * 0.55),
                    &h));
         printf("  the same approach stopped short reports none: OK\n");
+        n_pass++;
+    }
+
+    /* ---- The claims the header makes that no fixture defended ---- */
+
+    printf("the curvature margin:\n");
+    {
+        /* Gated at its value because it cannot be gated through the
+         * pass: with bounds that honestly cover their primitives, a
+         * pair the narrowphase reports is one whose bounds already
+         * overlap, so inflating them changes no reportable outcome.
+         * A gate driving the pass therefore cannot tell a correct
+         * margin from a margin of zero, which is why setting it to
+         * zero survived every fixture until this arm. */
+        K26V3 dv = k26m3d_v3(3.0, 4.0, 0.0);     /* magnitude 5 */
+        double m = k26astro_coll_curvature_margin(dv, 0.25);
+        near_("margin for |dv| 5 over 0.25 s", m, 0.5 * 5.0 * 0.25, 0.0);
+        ASSERT(m > 0.0);
+        /* Linear in both arguments, so a term dropped or an exponent
+         * mistaken shows up here rather than as a missed contact
+         * years later. */
+        near_("doubling the interval doubles it",
+              k26astro_coll_curvature_margin(dv, 0.5), 2.0 * m, 0.0);
+        near_("doubling the change doubles it",
+              k26astro_coll_curvature_margin(k26m3d_v3(6.0, 8.0, 0.0), 0.25),
+              2.0 * m, 0.0);
+        near_("no change in relative velocity, no margin",
+              k26astro_coll_curvature_margin(k26m3d_v3(0, 0, 0), 0.25),
+              0.0, 0.0);
+        printf("  the curvature margin is half the change in relative "
+               "speed times the interval: OK\n");
+        n_pass++;
+    }
+
+    printf("the quadratic root, on grazing geometry:\n");
+    {
+        /* The root is taken in the form that does not cancel. The
+         * textbook form loses its significant digits exactly where a
+         * docking task lives: a pair already almost touching and
+         * closing, where the discriminant approaches the square of
+         * the linear term and the subtraction annihilates.
+         *
+         * The reference is computed here in long double by the same
+         * stable identity, so this compares the library against a
+         * higher-precision evaluation rather than against itself. */
+        /* Values chosen so that no step of the evaluation is
+         * exactly representable: an earlier version of this arm used
+         * a radius of 2 and an axis-aligned approach, where the
+         * subtraction happens to be exact and the textbook form
+         * looked fine. The geometry has to be awkward for the
+         * cancellation to bite, which is the geometry docking is. */
+        K26V3 off  = k26m3d_v3(1.9, 1.3, 0.7);
+        double len = sqrt(k26m3d_v3_dot(off, off));
+        double R   = len - 1.0e-12;          /* a hair from touching */
+        double sp  = 3.0 / len;
+        K26V3 disp = k26m3d_v3(-off.x * sp, -off.y * sp, -off.z * sp);
+
+        /* The same coefficients the kernel forms, so what is compared
+         * is the root formula and nothing else. */
+        double da = k26m3d_v3_dot(disp, disp);
+        double db = k26m3d_v3_dot(off, disp);
+        double dc = k26m3d_v3_dot(off, off) - R * R;
+
+        long double a = (long double)da, b = (long double)db;
+        long double c = (long double)dc;
+        long double want = c / (-b + sqrtl(b * b - a * c));
+
+        K26AstroCollHit h;
+        ASSERT(k26astro_coll_sweep_sphere_sphere(R, 0.0, off, disp, &h));
+        double rel = (double)((h.time - want) / want);
+        if (rel < 0.0) rel = -rel;
+        printf("  impact fraction %.17g, long double reference %.17Lg, "
+               "relative error %.3e\n", h.time, want, rel);
+        ASSERT(rel < 1.0e-9);
+
+        double textbook = (-db - sqrt(db * db - da * dc)) / da;
+        double trel = (double)((textbook - want) / want);
+        if (trel < 0.0) trel = -trel;
+        printf("  the cancelling form gives %.17g, relative error "
+               "%.3e\n", textbook, trel);
+        ASSERT(trel > 1.0e-6);
+        ASSERT(trel > rel * 1.0e3);
+        printf("  the non-cancelling root holds its digits where the "
+               "textbook form loses them: OK\n");
+        n_pass++;
+    }
+
+    printf("the closing speed, under changing velocity:\n");
+    {
+        /* Every earlier fixture held velocity constant across the
+         * interval, so the speed taken at its start and the speed
+         * interpolated to the impact agreed exactly and either could
+         * have shipped. This one changes velocity across the
+         * interval, which is the only configuration in which the two
+         * differ, and asserts the approach value against a normal
+         * component computed here from the declared numbers. */
+        K26AstroCollShape sa = sphere_(1.0), sb = sphere_(1.0);
+        K26AstroCollBody bodies[2];
+        bodies[0] = body_(k26m3d_v3(0, 0, 0), k26m3d_v3(0, 0, 0),
+                          &sa, 1, 1.0, 1.0);
+        bodies[1] = body_(k26m3d_v3(6.0, 0, 0), k26m3d_v3(-2.0, 0, 0),
+                          &sb, 1, 1.0, 1.0);
+        /* Approaching at 8 m/s at the start and only 2 m/s by the
+         * end: a factor of four between them. */
+        bodies[1].vel0 = k26m3d_v3(-8.0, 0, 0);
+        bodies[1].vel1 = k26m3d_v3(-2.0, 0, 0);
+
+        K26AstroCollContact c;
+        ASSERT(k26astro_coll_pass(bodies, 2, 1.0, &c) == K26ASTRO_COLL_OK);
+        ASSERT(c.hit);
+        /* Contact at a centre separation of 2 from 6, closing 8 over
+         * the interval: t = 4/8 = 0.5. */
+        near_("impact fraction", c.time, 0.5, 0.0);
+
+        /* The normal points from the first body to the second, which
+         * is +x here, and the second approaches, so the closing speed
+         * is the start-of-interval relative speed along it. */
+        near_("contact normal x", c.normal.x, 1.0, 0.0);
+        double want_speed = -(bodies[1].vel0.x - bodies[0].vel0.x);
+        near_("closing speed", c.speed, want_speed, 0.0);
+
+        /* The interpolated value the earlier implementation reported
+         * is a different number on this fixture, so the arm
+         * distinguishes them rather than passing for both. */
+        double interp = -((bodies[1].vel0.x
+                           + c.time * (bodies[1].vel1.x - bodies[1].vel0.x))
+                          - bodies[0].vel0.x);
+        printf("  approach value %.12f, interpolated value %.12f\n",
+               c.speed, interp);
+        ASSERT(interp != c.speed);
+        printf("  the closing speed is taken on the approach and not "
+               "interpolated through the contact: OK\n");
         n_pass++;
     }
 

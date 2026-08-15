@@ -38,6 +38,11 @@ static K26AstroCollShape pass_world_shape_(const K26AstroCollShape *s,
     return w;
 }
 
+double k26astro_coll_curvature_margin(K26V3 dv, double dt)
+{
+    return 0.5 * sqrt(k26m3d_v3_dot(dv, dv)) * dt;
+}
+
 K26AstroCollStatus k26astro_coll_pass(const K26AstroCollBody *bodies,
                                       int n_bodies, double dt,
                                       K26AstroCollContact *out)
@@ -78,7 +83,7 @@ K26AstroCollStatus k26astro_coll_pass(const K26AstroCollBody *bodies,
             K26V3 dv = { (B->vel1.x - B->vel0.x) - (A->vel1.x - A->vel0.x),
                          (B->vel1.y - B->vel0.y) - (A->vel1.y - A->vel0.y),
                          (B->vel1.z - B->vel0.z) - (A->vel1.z - A->vel0.z) };
-            double margin = 0.5 * sqrt(k26m3d_v3_dot(dv, dv)) * dt;
+            double margin = k26astro_coll_curvature_margin(dv, dt);
 
             K26AstroCollHit broad;
             if (!k26astro_coll_sweep_sphere_sphere(A->bound_radius + margin,

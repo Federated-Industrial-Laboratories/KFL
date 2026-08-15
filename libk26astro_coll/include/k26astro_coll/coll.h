@@ -225,6 +225,23 @@ K26AstroCollStatus k26astro_coll_pass(const K26AstroCollBody *bodies,
                                       int n_bodies, double dt,
                                       K26AstroCollContact *out);
 
+/* The curvature margin the broadphase inflates each bounding sphere
+ * by: half the magnitude of the relative acceleration over the
+ * interval times the interval squared, with the acceleration taken as
+ * the change in relative velocity across the interval divided by it,
+ * which reduces to half the change in relative speed times the
+ * interval. That is the bound on how far the true curved path can
+ * depart from the straight one the sweep assumes.
+ *
+ * It is exposed because it cannot be measured through the pass. With
+ * bounds that honestly cover their primitives, any pair the
+ * narrowphase reports is a pair whose bounds already overlap, so
+ * inflating them changes no outcome the pass can report and a gate
+ * driving the pass cannot tell a correct margin from none at all.
+ * The value is therefore gated here directly, at the one place it is
+ * computed. */
+double k26astro_coll_curvature_margin(K26V3 dv, double dt);
+
 /* ---- Resolution -------------------------------------------------- */
 
 /* Arrest: place the pair at the impact configuration the sweep itself
