@@ -533,6 +533,14 @@ the source file that names it, and the asset's bytes are hashed into
 the compiled program's identity, so a changed asset is a changed
 program.
 
+Every property an assembly declares carries a `provenance` line
+saying where its number came from: `cited` read from a named source,
+`computed` derived here from cited inputs, `modelled` an arrangement
+chosen and disclosed rather than found, or `unverified` a working
+figure whose source has not been checked. The compiler reports the
+modelled and the unverified ones by name. Those lines are inside the
+bytes the digest covers, so a changed citation is a changed program.
+
 A body that binds one gains mass properties, colliders, attitude, and
 whatever actuators and ports the assembly declares. Declaring `mass=`
 or `gm=` beside `assembly=` is refused naming both lines, because the
@@ -671,6 +679,30 @@ A contact ends an episode only if the program says so, through an
 ordinary `terminated when` predicate over these channels. It is not a
 fault.
 
+**What a contact does to the craft** is declared once per episode:
+
+```
+episode
+    contact arrest
+    contact bounce restitution <expr> friction <expr>
+end
+```
+
+At most one such line. Absent, the environment arrests: the pair is
+placed at the configuration the sweep computed for the contact, their
+relative velocity is removed by a momentum-conserving merge, and the
+rest of the control period advances with the two moving together.
+
+`bounce` applies one impulse at the contact point instead, with a
+restitution coefficient in the closed interval from 0 to 1 and a
+non-negative Coulomb friction coefficient. Both are compile-time
+scalars and neither is optional: a restitution nobody declared would
+be a number the compiler invented. The impulse uses the effective
+mass at the contact point, so an off-centre hit spins the craft by
+the amount its geometry gives.
+
+Neither runs on a contact that captures at a docking port; see below.
+
 #### Docking ports
 
 ```
@@ -712,17 +744,37 @@ be declared on some other body: that is the port this one is measured
 against, and a world with none or with several is refused rather than
 paired by declaration order.
 
-A port stands proud of the hull it is mounted on if it is to be the
-first thing the other craft meets. Its mating plane is an ordinary
-collider, and a hull that reaches the same plane contacts at the same
-instant; the contact reported is then the hull's, the capture channel
-stays clear, and the approach reads as an impact.
+A port must stand proud of the hull it is mounted on. Its mating
+plane is an ordinary collider, so a hull that reaches past the plane
+is what the other craft meets first: the contact reported is the
+hull's, the capture channel stays clear, and the approach reads as an
+impact. A hull that reaches exactly the same plane is worse than
+either, because both pairs then touch at the same instant and which
+one the sweep reports is decided by arithmetic at the last bit rather
+than by anything an author can read off the geometry.
 
 Capture is not a resolution the program declares. It is a consequence
 of the geometry: when a contact between two ports meets every
 condition, the capture channel is set for that step, and a program
 ends the episode on it through an ordinary `terminated when`
 predicate.
+
+A capture takes precedence over whichever resolution the episode
+declared. Neither the arrest nor the bounce runs on a captured
+contact: the pair becomes one body instead, and stays one for the
+rest of the episode. Mass is summed, and the two inertia tensors are
+summed about the joint centre of mass, so the mated pair turns as the
+pair and not as either craft. Both craft keep their own thrusters and
+their own wheels, and either one accelerates the pair, which is what
+a task that continues past docking needs. A program that ends its
+episode on the capture channel never sees any of this; one that does
+not, does.
+
+The condition is judged from both ports and a capture needs both to
+accept. Either port can be read as the arriving one and the two
+readings differ slightly, so requiring both is the conservative
+reading and the one that leaves the two ports' capture channels
+agreeing about a fact of the pair.
 
 #### Sensors, and the truth beside the measurement
 

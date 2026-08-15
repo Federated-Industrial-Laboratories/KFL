@@ -52,6 +52,7 @@ fn world docking_world
         terminated when touch_hit > 0.5
         reset chaser.pos_x uniform(6770999.5, 6771000.5)
         reset chaser.pos_z uniform(-0.5, 0.5)
+        reset chaser.vel_z uniform(-0.002, 0.002)
         reset chaser.quat_z uniform(-0.52, -0.48)
         reset chaser.omega_z uniform(-0.002, 0.002)
     end
