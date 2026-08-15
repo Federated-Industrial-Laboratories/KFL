@@ -321,6 +321,83 @@ int main(void)
     }
     printf("gate 4: the measured stream replays bitwise: OK\n");
 
+    /* ---- 5. The longest name a program can declare survives ----- */
+    rl_stage_("compiling the long-name artifact", 900u);
+    {
+        /* A declarable `as` name is bounded at 53 bytes and a paired
+         * channel adds `_truth_range_rate`, 17 more. The spec's name
+         * entry holds 96, so the 70-byte derived name must come back
+         * whole; at the 64 the entry used to hold it would have come
+         * back cut to 64 with no diagnostic, which is the silent
+         * truncation this arm exists to keep out. */
+        char base[54];
+        memset(base, 'a', 53);
+        base[53] = '\0';
+        char *src = (char *)malloc(4096);
+        ASSERT(src);
+        snprintf(src, 4096,
+            "form RL_LONGNAME\n"
+            "fn world ln_world\n"
+            "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+            "    astro_body craft mass=1.0 parent=earth"
+            " pos_x=7.0e6 vel_y=7546.0\n"
+            "    sensor s\n        noise normal 0.0 1.0\n    end\n"
+            "    episode\n        control_dt 1.0\n        horizon 8\n"
+            "    end\n"
+            "    action a box -1.0 1.0 default 0.0\n"
+            "    observe craft from earth mode=geometric"
+            " through s with truth as %s\n"
+            "    objective\n        reward %s_range + a * 0.0\n"
+            "    end\nend\nend\n", base, base);
+        rl_write_file_(WORK_DIR "/ln.kfl", src);
+        rl_compile_(WORK_DIR "/ln.kfl", WORK_DIR "/ln", WORK_DIR);
+        free(src);
+        rl_stage_done_();
+
+        void *lso = rl_dlopen_(WORK_DIR "/ln.rlenv.so");
+        RlSurface ls;
+        rl_resolve_surface_(lso, &ls);
+        K26RlEnv *env = NULL;
+        ASSERT(ls.create(seed, 1u, &env) == K26RL_OK);
+        int32_t need = ls.spec(env, NULL, 0);
+        ASSERT(need > 0);
+        uint8_t *blob = (uint8_t *)malloc((size_t)need);
+        ASSERT(blob);
+        ASSERT(ls.spec(env, blob, (uint32_t)need) == need);
+
+        char want[128];
+        snprintf(want, sizeof want, "%s_truth_range_rate", base);
+        int found = 0;
+        size_t longest = 0;
+        uint32_t off = 0;
+        while (off + 6 <= (uint32_t)need) {
+            uint16_t tag = rl_get_u16_(blob + off);
+            uint32_t l   = rl_get_u32_(blob + off + 2);
+            if (tag == K26RL_TAG_OBS_CHANNEL_NAME && l >= 4) {
+                size_t nl = l - 4;
+                if (nl > longest) longest = nl;
+                if (nl == strlen(want) &&
+                    memcmp(blob + off + 10, want, nl) == 0) {
+                    found = 1;
+                }
+            }
+            off += 6 + l;
+        }
+        printf("gate 5: a %zu-byte declared name with a paired truth"
+               " channel; the longest published name is %zu bytes and"
+               " the %zu-byte derived name came back whole: %s\n",
+               strlen(base), longest, strlen(want),
+               found ? "yes" : "NO");
+        ASSERT(longest == strlen(want));
+        ASSERT(found);
+        free(blob);
+        ls.destroy(env);
+        dlclose(lso);
+        n_pass++;
+    }
+    printf("gate 5: the longest name a program can declare survives"
+           " the spec entry whole: OK\n");
+
     dlclose(so);
     printf("test_rl_sensor: %d gates passed\n", n_pass);
     return 0;

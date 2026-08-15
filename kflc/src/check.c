@@ -17,6 +17,7 @@
  */
 
 #include "kflc.h"
+#include "internal.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -438,17 +439,30 @@ static void observe_push_names_(NameList *dst, const KflcNode *n,
  * quietly invalidate. */
 static size_t observe_as_bound_(void)
 {
+    /* The bound is a compatibility promise and does not follow from
+     * the tables: it is fixed at 53, and the emitter's name entry is
+     * sized to hold it plus the longest suffix any form derives, with
+     * headroom. internal.h states that arithmetic. What is checked
+     * here is the direction that could bite, that no suffix has
+     * outgrown the entry. */
+    size_t longest = 0;
     const char *const *lists[] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
                                    OBS_SFX_CON_, OBS_SFX_REL_ };
-    const size_t n_lists = sizeof lists / sizeof lists[0];
-    size_t longest = 0;
-    for (size_t i = 0; i < n_lists; i++) {
+    for (size_t i = 0; i < sizeof lists / sizeof lists[0]; i++) {
         for (int k = 0; lists[i][k]; k++) {
-            size_t n = strlen(lists[i][k]);
+            /* `_truth` is what a paired channel inserts, so the
+             * longest name any form can derive is a suffix plus it. */
+            size_t n = strlen(lists[i][k]) + 6;
             if (n > longest) longest = n;
         }
     }
-    return 64 - longest;
+    if (KFLC_OBS_AS_MAX + longest + 1 > KFLC_OBS_NAME_MAX) {
+        /* Unreachable while the arithmetic in internal.h holds; it is
+         * here so that a new suffix moves the entry rather than
+         * truncating a name in silence. */
+        return KFLC_OBS_NAME_MAX - longest - 1;
+    }
+    return KFLC_OBS_AS_MAX;
 }
 
 static int horizon_const_eval_(const KflcExpr *e, double *out)

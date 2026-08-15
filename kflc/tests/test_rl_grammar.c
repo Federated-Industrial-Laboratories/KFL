@@ -443,6 +443,195 @@ static void actuator_cases_(void)
         "end\n",
         0, NULL, "error");
 
+    /* The sensor block and its two observe clauses.
+     *
+     * The positive case runs first, for the reason the contact and
+     * relative ones do: without it every refusal below would be
+     * satisfied by a build that rejected the whole surface. It also
+     * reads a truth channel by name, which is the only route by
+     * which the paired half reaches an objective. */
+    expect_both_("sensor_chain_readable",
+        "form RL_SNABLE\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        noise normal 0.0 0.05\n"
+        "        latency 2\n"
+        "        quantise 0.01\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf with truth as look\n"
+        "    objective\n"
+        "        reward look_range + look_truth_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    expect_both_("sensor_unknown_name",
+        "form RL_SNNAME\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        noise normal 0.0 0.05\n"
+        "        latency 2\n"
+        "        quantise 0.01\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through ghost as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "no sensor of that name is declared", NULL);
+
+    expect_both_("sensor_truth_without_sensor",
+        "form RL_SNNSOR\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        noise normal 0.0 0.05\n"
+        "        latency 2\n"
+        "        quantise 0.01\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric with truth as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "declares no `through <sensor>`", NULL);
+
+    expect_both_("sensor_unknown_term",
+        "form RL_SNTERM\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        wobble 1.0\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf with truth as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "unknown model term `wobble`", NULL);
+
+    expect_both_("sensor_operand_not_a_number",
+        "form RL_SNMBER\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        noise normal 0.0 0.05m\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf with truth as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "is not a number", NULL);
+
+    expect_both_("sensor_dropout_out_of_range",
+        "form RL_SNANGE\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        dropout 1.5\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf with truth as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "takes a probability from 0", NULL);
+
+    expect_both_("sensor_two_bias_walks",
+        "form RL_SNALKS\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        bias_walk 0.02 600.0 0.001\n"
+        "        bias_walk 0.01 300.0 0.002\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf with truth as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "one bias walk and one latency per sensor", NULL);
+
+    expect_both_("sensor_declares_nothing",
+        "form RL_SNHING\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf with truth as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "declares no model terms", NULL);
+
     /* The relative observe form. Six channels carrying a position and
      * a velocity in the chief's own local-vertical local-horizontal
      * frame. The positive case runs first for the reason the contact

@@ -159,4 +159,27 @@ void        kflc_emit_body_state_write(FILE *out, int indent, const char *lv,
 void        kflc_emit_body_state_read(FILE *out, const char *lv,
                                       const char *key);
 
+/* Derived observation channel names: the declarable bound, and the
+ * entry the emitter writes.
+ *
+ * The entry is a kflc-side size and not a format limit. The spec's
+ * channel-name tag carries an explicit length and every consumer reads
+ * by it: the Python shim slices the name by the tag's length, the
+ * viewer assigns it by length into a string, and the episode reader
+ * embeds the blob without parsing names at all. Growing the entry
+ * therefore moves nothing a consumer sees.
+ *
+ * The arithmetic. A declarable `as` name stays bounded at 53 bytes,
+ * which is what it has always been and what every program compiling
+ * today was written against; lowering it would refuse those programs
+ * and raising it would change a refusal for no gain. The longest
+ * suffix a channel can carry is `_truth_range_rate` at 17 bytes: the
+ * longest component suffix, `_range_rate`, with the `_truth` that a
+ * paired channel inserts before it. 53 + 17 + 1 for the terminator is
+ * 71, and the entry is 96, so a suffix may grow by another 26 bytes
+ * before this constant has to move again. The point of a bound is that
+ * the next suffix does not force a change. */
+#define KFLC_OBS_AS_MAX   53
+#define KFLC_OBS_NAME_MAX 96
+
 #endif /* KFLC_INTERNAL_H */

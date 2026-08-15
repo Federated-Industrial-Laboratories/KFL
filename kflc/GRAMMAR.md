@@ -625,9 +625,76 @@ A contact ends an episode only if the program says so, through an
 ordinary `terminated when` predicate over these channels. It is not a
 fault.
 
+#### Sensors, and the truth beside the measurement
+
+```
+sensor rangefinder
+    noise normal 0.0 0.05
+    bias_walk 0.02 600.0 0.001
+    latency 2
+    quantise 0.01
+    dropout 0.005
+end
+```
+
+A `sensor` block declares a chain of imperfection models. One term per
+line, and the order is load-bearing: the chain applies its terms in the
+order written, so a quantiser after a noise term quantises the noisy
+value and one before it does not.
+
+| Term | Operands | What it does |
+|---|---|---|
+| `noise normal` | mean (must be zero), standard deviation | Adds a normal draw of that standard deviation. One draw per step. |
+| `scale` | relative standard deviation | Multiplies by `1 + s * n`, so a true value of zero stays zero. One draw per step. |
+| `bias_walk` | turn-on standard deviation, correlation time in seconds, in-run standard deviation | A bias drawn once per episode, evolving as a first-order Gauss-Markov process. One draw per step, one per episode. |
+| `latency` | whole control periods | Delays by exactly that many steps. No draws. |
+| `quantise` | step, and optionally both ends of a range | Rounds to a multiple of the step, ties away from zero, after clamping to the range. No draws. |
+| `dropout` | probability from 0 up to but not including 1 | Holds the previously delivered value instead of the current one. One draw per step. |
+
+The third operand of `bias_walk` is the process's steady-state
+standard deviation, not the size of the per-step kick: the driving term
+is scaled so the steady state is what was declared whatever the control
+period is. The first operand is the turn-on bias, drawn once per
+episode, and is usually the larger of the two.
+
+One `bias_walk` and one `latency` per sensor, because one carries one
+state of each. A sensor that declares no terms at all is refused, since
+it would leave every channel it touches unchanged.
+
+```
+observe target from chaser mode=geometric through rangefinder with truth as look
+```
+
+`through <sensor>` routes each numeric component of the observe through
+that chain; each component gets its own draws, so the components of one
+observe are not corrupted identically. `with truth` additionally
+publishes the uncorrupted components as a paired set, named with
+`_truth` before the component: `look_truth_range` beside `look_range`.
+Both clauses come before `as`, which stays the last clause on the line.
+`with truth` without a `through` is refused, since the two halves would
+be the same numbers.
+
+Every channel carries a spec tag saying whether it is a measured or a
+ground-truth channel and which channel it is paired with, so a consumer
+can build a policy's observation space from the measured channels while
+a privileged critic reads everything, without parsing names. A program
+that declares no sensor publishes every channel as measured and
+unpaired.
+
+The first observation of an episode is the uncorrupted value. That
+follows from how draws are addressed rather than being a separate
+choice: a per-step model's draw index is the transition index within
+the episode, and at an episode boundary no transition has been taken.
+What the boundary does do is take the per-episode draws, fill any delay
+with the true value, and prime the dropout hold.
+
 Channel names must be unique within the world and at most 53 bytes
-long (the compiled artifact's spec carries each derived component name
-in a 64-byte entry, and the longest suffix is `_range_rate`). Every name
+long. The compiled artifact's spec carries each derived component name
+in a 96-byte entry, which holds a 53-byte name plus the longest suffix
+any form derives: `_truth_range_rate`, seventeen bytes, being the
+longest component suffix with the `_truth` a paired channel inserts.
+The bound stays at 53 whatever the entry grows to, so a program that
+compiles today keeps compiling. Every name
 readable in the objective and termination expressions lives in one
 scope, so a derived component may
 not collide with an action, a top-level world binding, or a form

@@ -2035,9 +2035,23 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
             const char *base = rl_observe_as_(m->observes[i]);
             for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
                 char cb[RL_COMP_MAX];
-                fprintf(out, "    \"%s%s\",\n", base,
-                        rl_observe_comp_(m->observes[i], c, cb,
-                                         sizeof cb));
+                const char *cmp = rl_observe_comp_(m->observes[i], c, cb,
+                                                   sizeof cb);
+                /* A derived name that would not fit the entry is
+                 * refused here rather than truncated in the artifact.
+                 * The declarable bound and the entry are sized so this
+                 * cannot fire (internal.h states the arithmetic); it
+                 * exists so that a suffix added later moves the entry
+                 * instead of silently shortening a channel's name. */
+                if (strlen(base) + strlen(cmp) >= KFLC_OBS_NAME_MAX) {
+                    kflc_diag_errorf(diag, m->observes[i]->line,
+                        "observe ... as `%s`: the derived channel name "
+                        "`%s%s` is %zu bytes and the spec entry holds "
+                        "%d", base, base, cmp,
+                        strlen(base) + strlen(cmp), KFLC_OBS_NAME_MAX);
+                    return 1;
+                }
+                fprintf(out, "    \"%s%s\",\n", base, cmp);
             }
         }
         fputs("};\n\n", out);
@@ -2132,6 +2146,7 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
     /* The contact block is one entry per collidable body, and at
      * least one, so that a program with no vehicles still allocates
      * something a pointer check can be made against. */
+    fprintf(out, "#define KFLRL_OBS_NAME_MAX %d\n", KFLC_OBS_NAME_MAX);
     rl_emit_sensors_(out, m);
     fprintf(out, "#define KFLRL_N_CONTACT %d\n\n",
             m->n_veh > 0 ? m->n_veh : 1);
@@ -4305,9 +4320,11 @@ static void rl_emit_env_core_(FILE *out)
 "    }\n"
 "#if KFLRL_OBS_TOTAL > 0\n"
 "    for (uint32_t i = 0; i < KFLRL_OBS_TOTAL; i++) {\n"
-"        uint8_t nv[4 + 64];\n"
+"        uint8_t nv[4 + KFLRL_OBS_NAME_MAX];\n"
 "        uint32_t nl = (uint32_t)strlen(kflrl_obs_names_[i]);\n"
-"        if (nl > 64) nl = 64;\n"
+"        /* The compiler refuses a name that would not fit, so this\n"
+"         * cannot truncate; it is the belt on the braces. */\n"
+"        if (nl > KFLRL_OBS_NAME_MAX) nl = KFLRL_OBS_NAME_MAX;\n"
 "        kflrl_put_u32_(nv, i);\n"
 "        memcpy(nv + 4, kflrl_obs_names_[i], nl);\n"
 "        total += kflrl_tlv_(&p, K26RL_TAG_OBS_CHANNEL_NAME, 4 + nl, nv);\n"
