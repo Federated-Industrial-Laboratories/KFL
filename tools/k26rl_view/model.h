@@ -19,9 +19,11 @@
 #include <stdint.h>
 
 #include <string>
+#include <utility>
 #include <vector>
 
 extern "C" {
+#include "k26rl_digest.h"
 #include "k26rl_env.h"
 #include "k26rl_episode.h"
 }
@@ -34,7 +36,27 @@ struct Channel {
     uint16_t kind;
     uint16_t mode;      /* K26RL_TAG_OBS_CHANNEL_MODE, added at ABI 1.2 */
     bool has_mode;      /* false for a file written before the tag existed */
+    /* K26RL_TAG_OBS_CHANNEL_SOURCE, added at ABI 1.5: whether this
+     * channel carries what a sensor measured or the truth beside it,
+     * and which channel is its pair. A viewer draws the two as one
+     * overlaid pair, which is the whole reason the tag exists: the
+     * pairing is a fact the file states, not a naming convention the
+     * viewer guesses at. */
+    uint16_t source;
+    uint32_t pair;
+    bool has_source;
     std::string name;
+};
+
+/* One assembly a body binds, as the spec publishes it: the name the
+ * asset declared and the digest of the bytes the artifact was built
+ * from. A wireframe drawn from an asset on disk is only the craft
+ * that flew if the asset's own digest equals this one. */
+struct AssemblyRef {
+    uint32_t body;
+    std::string name;
+    uint8_t digest[32];
+    bool has_digest;
 };
 
 /* One action channel's declared bounds and kind. */
@@ -70,6 +92,7 @@ struct Spec {
     std::vector<Slice> obs_slices;
     std::vector<Slice> act_slices;
     std::vector<std::string> body_names;   /* declaration order */
+    std::vector<AssemblyRef> assemblies;   /* bodies binding one */
     std::vector<uint8_t> raw;
     /* Tags this build does not know, kept so the metadata panel can
      * say the file carried them rather than pretending it did not. */
@@ -172,6 +195,11 @@ public:
      * step i, in metres. */
     static void point(const Episode &ep, const Spec &sp, const Trajectory &t,
                       uint32_t step, double *xyz);
+    /* The measured channels that carry a ground-truth pair, in
+     * channel order. A file whose program declared no sensor has
+     * none, which is not a failure: it is a file with nothing to
+     * overlay. */
+    std::vector<std::pair<uint32_t, uint32_t> > overlay_pairs() const;
 
 private:
     K26RlEpisodeReader *reader_;

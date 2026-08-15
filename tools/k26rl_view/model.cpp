@@ -109,6 +109,22 @@ static ActionDecl *find_action_(std::vector<ActionDecl> &v,
     return &v.back();
 }
 
+/* The assembly record for a body, created on first mention: the two
+ * tags arrive in either order and each carries only its own half. */
+static AssemblyRef *find_assembly_(std::vector<AssemblyRef> &v, uint32_t body)
+{
+    for (size_t i = 0; i < v.size(); i++) {
+        if (v[i].body == body)
+            return &v[i];
+    }
+    AssemblyRef r;
+    r.body = body;
+    r.has_digest = false;
+    memset(r.digest, 0, sizeof r.digest);
+    v.push_back(r);
+    return &v.back();
+}
+
 void Model::parse_spec_(const uint8_t *blob, uint32_t len)
 {
     uint32_t off = 0;
@@ -172,6 +188,9 @@ void Model::parse_spec_(const uint8_t *blob, uint32_t len)
                 c.kind = K26RL_OBS_KIND_VECTOR;
                 c.mode = 0;
                 c.has_mode = false;
+                c.source = K26RL_OBS_SOURCE_MEASURED;
+                c.pair = K26RL_OBS_PAIR_NONE;
+                c.has_source = false;
                 c.name.assign((const char *)v + 4, l - 4);
                 spec_.channels.push_back(c);
             }
@@ -186,6 +205,33 @@ void Model::parse_spec_(const uint8_t *blob, uint32_t len)
                         spec_.channels[i].has_mode = true;
                     }
                 }
+            }
+            break;
+        case K26RL_TAG_OBS_CHANNEL_SOURCE:
+            if (l >= 10) {
+                uint32_t idx = get_u32_(v);
+                uint16_t src = get_u16_(v + 4);
+                uint32_t pr = get_u32_(v + 6);
+                for (size_t i = 0; i < spec_.channels.size(); i++) {
+                    if (spec_.channels[i].index == idx) {
+                        spec_.channels[i].source = src;
+                        spec_.channels[i].pair = pr;
+                        spec_.channels[i].has_source = true;
+                    }
+                }
+            }
+            break;
+        case K26RL_TAG_ASSEMBLY_NAME:
+            if (l >= 4) {
+                AssemblyRef *r = find_assembly_(spec_.assemblies, get_u32_(v));
+                r->name.assign((const char *)v + 4, l - 4);
+            }
+            break;
+        case K26RL_TAG_ASSEMBLY_DIGEST:
+            if (l >= 4 + K26RL_SHA256_BYTES) {
+                AssemblyRef *r = find_assembly_(spec_.assemblies, get_u32_(v));
+                memcpy(r->digest, v + 4, K26RL_SHA256_BYTES);
+                r->has_digest = true;
             }
             break;
         case K26RL_TAG_BODY_NAME:
@@ -296,6 +342,23 @@ bool Model::open(const std::string &path, std::string *err)
         parse_spec_(blob, blob_len);
     find_trajectories_();
     return true;
+}
+
+/* The measured half of every pair the file declares, in channel
+ * order. Only the measured side is listed: a pair listed from both
+ * ends would draw every overlay twice. */
+std::vector<std::pair<uint32_t, uint32_t> > Model::overlay_pairs() const
+{
+    std::vector<std::pair<uint32_t, uint32_t> > out;
+    for (size_t i = 0; i < spec_.channels.size(); i++) {
+        const Channel &c = spec_.channels[i];
+        if (!c.has_source || c.source != K26RL_OBS_SOURCE_MEASURED)
+            continue;
+        if (c.pair == K26RL_OBS_PAIR_NONE)
+            continue;
+        out.push_back(std::make_pair(c.index, c.pair));
+    }
+    return out;
 }
 
 bool Model::identity(uint32_t k, uint32_t *ordinal, uint32_t *env,

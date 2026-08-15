@@ -30,7 +30,7 @@ LIBS = ../../libk26rl/libk26rl.a \
 # The vendored plotting library is compiled here rather than kept as a
 # prebuilt object, so what ships is source and its provenance.
 UPSTREAM_SRC = upstream/implot/implot.cpp upstream/implot/implot_items.cpp
-OWN_SRC = main.cpp model.cpp dump.cpp resim.cpp gui.cpp
+OWN_SRC = main.cpp model.cpp asset.cpp dump.cpp resim.cpp gui.cpp
 OBJ = $(OWN_SRC:.cpp=.o) $(UPSTREAM_SRC:.cpp=.o)
 
 .PHONY: all clean
@@ -49,9 +49,10 @@ upstream/implot/%.o: upstream/implot/%.cpp
 
 main.o:  main.cpp dump.h gui.h model.h
 model.o: model.cpp model.h
-dump.o:  dump.cpp dump.h model.h resim.h
+asset.o: asset.cpp asset.h
+dump.o:  dump.cpp dump.h model.h resim.h asset.h
 resim.o: resim.cpp resim.h model.h
-gui.o:   gui.cpp gui.h dump.h model.h resim.h
+gui.o:   gui.cpp gui.h dump.h model.h resim.h asset.h
 
 clean:
 	rm -f k26rl_view $(OBJ)
