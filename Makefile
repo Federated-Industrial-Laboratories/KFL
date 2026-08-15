@@ -22,7 +22,8 @@ GIT_SHA         := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknow
 
 # ----- Build dependency ordering (topological) ---------------------
 
-BEDROCK     = libk26util libk26m3d libk26compute libk26tick libk26rng libk26rl
+BEDROCK     = libk26util libk26m3d libk26compute libk26tick libk26rng \
+              libk26sense libk26rl
 AUX_ALWAYS  = libk26plot libk26geo
 AUX_CURL    = libk26http   # needs libcurl4-openssl-dev; skipped if absent
 AUX         = $(AUX_ALWAYS) $(AUX_CURL)
@@ -187,6 +188,8 @@ test: test-tick test-rl test-compiler test-astro test-defense test-python
 test-rl: bedrock
 	@echo "==> libk26rng test"
 	@$(MAKE) -C libk26rng test $(EXPORTS)
+	@echo "==> libk26sense test"
+	@$(MAKE) -C libk26sense test $(EXPORTS)
 	@echo "==> libk26rl test"
 	@$(MAKE) -C libk26rl test $(EXPORTS)
 
