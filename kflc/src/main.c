@@ -173,8 +173,8 @@ int main(int argc, char **argv)
      * first. Without this the checker's refusals reach only `--check`,
      * so a program that `--check` rejects still compiles, and two of
      * those refusals guard published bytes: a channel name too long
-     * for the spec's 64-byte name entries is otherwise truncated in
-     * the emitted spec writer rather than refused, and a body named
+     * for the spec's name entries is otherwise truncated in the
+     * emitted spec writer rather than refused, and a body named
      * `episode` otherwise collides with `episode.steps` in the
      * expression scope. `--dump` deliberately stays out: it produces
      * no artifact, and refusing to print a parse tree is the wrong

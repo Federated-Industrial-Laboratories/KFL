@@ -203,7 +203,7 @@ static int rl_observe_has_truth_(const KflcNode *n)
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "truth") == 0) return 1;
     }
-    return 1 == 0;
+    return 0;
 }
 
 /* The components one form publishes, before any pairing. */
@@ -763,13 +763,38 @@ static int rl_collect_sensor_(RlModel *m, const KflcNode *n, KflcDiag *diag)
                     "end is below its high end", sn->name);
                 return 1;
             }
+            /* A range and a step together decide whether the
+             * quantiser's grid position stays inside a signed 64-bit
+             * integer. Beyond that the conversion is undefined, and a
+             * program must not be able to reach undefined behaviour by
+             * declaring a fine step, so the pair is checked here and
+             * the library saturates if anything ever slips past.
+             *
+             * The implied range is the narrower of a working ceiling
+             * and what the step itself can reach: a step of `lsb`
+             * spans at most 2^63 multiples either side of zero, so a
+             * step of 1e-14 reaches about 9.2e4 and not 1e15. Taking
+             * 1e15 unconditionally is what let a true value of seven
+             * million be published as minus ninety-two thousand. */
+            double span = v0 * K26SENSE_I64_SPAN;
+            double cap  = span < 1.0e15 ? span : 1.0e15;
+            if (h1) {
+                double reach = (v2 > -v1 ? v2 : -v1) / v0;
+                if (!(reach < K26SENSE_I64_SPAN)) {
+                    kflc_diag_errorf(diag, c->line,
+                        "sensor `%s`: `quantise` with a step of %g over "
+                        "a range reaching %g needs %g grid positions, "
+                        "and a 64-bit integer holds %g; widen the step "
+                        "or narrow the range", sn->name, v0,
+                        (v2 > -v1 ? v2 : -v1), reach,
+                        K26SENSE_I64_SPAN);
+                    return 1;
+                }
+            }
             t->kind = K26SENSE_QUANTISE;
             t->p0 = v0;
-            /* The declared clamp keeps the integer conversion in
-             * range; without one the widest range the conversion can
-             * take is used, which is stated rather than implied. */
-            t->p1 = h1 ? v1 : -1.0e15;
-            t->p2 = h1 ? v2 :  1.0e15;
+            t->p1 = h1 ? v1 : -cap;
+            t->p2 = h1 ? v2 :  cap;
         } else if (strcmp(kw, "dropout") == 0) {
             if (!h0 || !(v0 >= 0.0) || !(v0 < 1.0)) {
                 kflc_diag_errorf(diag, c->line,
@@ -1851,7 +1876,7 @@ static int rl_n_sensed_(const RlModel *m)
     return n;
 }
 
-static void rl_emit_sensors_(FILE *out, const RlModel *m)
+static int rl_emit_sensors_(FILE *out, const RlModel *m, KflcDiag *diag)
 {
     int n_sensed = rl_n_sensed_(m);
     int n_terms = 0, depth = 0;
@@ -1864,7 +1889,7 @@ static void rl_emit_sensors_(FILE *out, const RlModel *m)
     fprintf(out, "#define KFLRL_N_SENSED %d\n", n_sensed);
     fprintf(out, "#define KFLRL_N_STERMS %d\n", n_terms);
     fprintf(out, "#define KFLRL_SENSE_RING %d\n\n", depth);
-    if (n_sensed == 0) return;
+    if (n_sensed == 0) return 0;
 
     fputs("/* kind, per-step channel, per-episode channel, three\n"
           " * parameters. The parameters' meaning per kind is\n"
@@ -1881,14 +1906,38 @@ static void rl_emit_sensors_(FILE *out, const RlModel *m)
         const RlSensor *sn = &m->sensors[si];
         int w = rl_observe_base_width_(m->observes[i]);
         for (int c = 0; c < w; c++) {
+            /* The chain as the library will see it, assembled here so
+             * that the library's own precondition check is what passes
+             * it. Without a consumer that refusal measures nothing:
+             * the rule it enforces, that a term drawing at both
+             * cadences holds two channels, would otherwise rest on the
+             * two lines below and on nothing else. */
+            K26SenseTerm probe[RL_MAX_TERMS];
             for (int t = 0; t < sn->n_terms; t++) {
                 const RlSenseTerm *tm = &sn->terms[t];
                 int ch = tm->draws_step ? chan++ : K26SENSE_NO_CHANNEL;
                 int ce = tm->draws_ep   ? chan++ : K26SENSE_NO_CHANNEL;
+                memset(&probe[t], 0, sizeof probe[t]);
+                probe[t].kind       = (K26SenseKind)tm->kind;
+                probe[t].channel    = (uint16_t)ch;
+                probe[t].channel_ep = (uint16_t)ce;
+                if (tm->kind == K26SENSE_LATENCY) {
+                    probe[t].u.latency.depth = (uint32_t)tm->p0;
+                }
                 fprintf(out,
                     "    { %d, %uu, %uu, %.17g, %.17g, %.17g },\n",
                     tm->kind, (unsigned)ch, (unsigned)ce,
                     tm->p0, tm->p1, tm->p2);
+            }
+            uint32_t need = 0;
+            K26SenseStatus cst = k26sense_chain_check(
+                probe, (uint32_t)sn->n_terms, &need);
+            if (cst != K26SENSE_OK) {
+                kflc_diag_errorf(diag, sn->node->line,
+                    "sensor `%s`: the assembled chain is refused by the "
+                    "imperfection layer: %s", sn->name,
+                    k26sense_status_str(cst));
+                return 1;
             }
         }
     }
@@ -1927,6 +1976,7 @@ static void rl_emit_sensors_(FILE *out, const RlModel *m)
         for (int c = 0; c < w; c++) fprintf(out, "    %d,\n", off + c);
     }
     fputs("};\n\n", out);
+    return 0;
 }
 
 static int rl_emit_prologue_(FILE *out, const RlModel *m,
@@ -2147,7 +2197,7 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
      * least one, so that a program with no vehicles still allocates
      * something a pointer check can be made against. */
     fprintf(out, "#define KFLRL_OBS_NAME_MAX %d\n", KFLC_OBS_NAME_MAX);
-    rl_emit_sensors_(out, m);
+    if (rl_emit_sensors_(out, m, diag)) return 1;
     fprintf(out, "#define KFLRL_N_CONTACT %d\n\n",
             m->n_veh > 0 ? m->n_veh : 1);
     fputs(

@@ -19,6 +19,11 @@ override CFLAGS += -std=c11 -Wall -Wextra -Wpedantic \
 override CFLAGS += -ffp-contract=off -fexcess-precision=standard
 
 RL_LIB   = ../libk26rl/libk26rl.a
+# The compiler calls the imperfection layer's own precondition check on
+# every chain it assembles, so it links that library as it links the
+# episode one: the refusal is the library's, and a copy of it here
+# could drift from it.
+SENSE_LIB = ../libk26sense/libk26sense.a ../libk26rng/libk26rng.a
 
 BIN      = bin/kflc
 LIB      = libkflc.a
@@ -307,9 +312,9 @@ $(RL_SENSOR_TEST): tests/test_rl_sensor.c $(RL_GATE_DEPS) \
                    ../libk26sense/libk26sense.a \
                    ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -I../libk26sense/include \
-	    -I../libk26rng/include -o $@ $< \
+	    -I../libk26rng/include -I../libk26compute/include -o $@ $< \
 	    ../libk26rl/libk26rl.a ../libk26sense/libk26sense.a \
-	    ../libk26rng/libk26rng.a -ldl -lm
+	    ../libk26rng/libk26rng.a ../libk26compute/libk26compute.a -ldl -lm
 
 # The relative observe form through the stepping surface: the six
 # channels, the axes they are resolved onto, and the rotating-frame
@@ -419,9 +424,9 @@ $(RL_LIB):
 # -lm because the compiler now derives geometry of its own: a
 # capsule's declared endpoints become a centre, a direction, and a
 # half length once, here, rather than on every step of every run.
-$(BIN): $(DRV_OBJS) $(LIB) $(RL_LIB)
+$(BIN): $(DRV_OBJS) $(LIB) $(RL_LIB) $(SENSE_LIB)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) -o $@ $(DRV_OBJS) $(LIB) $(RL_LIB) $(LDFLAGS) -lm
+	$(CC) $(CFLAGS) -o $@ $(DRV_OBJS) $(LIB) $(RL_LIB) $(SENSE_LIB) $(LDFLAGS) -lm
 
 src/%.o: src/%.c include/kflc.h src/internal.h
 	$(CC) $(CFLAGS) -c -o $@ $<

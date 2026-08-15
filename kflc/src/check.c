@@ -433,10 +433,12 @@ static void observe_push_names_(NameList *dst, const KflcNode *n,
     }
 }
 
-/* The bound on an `as` name is the spec's 64-byte name entry less the
- * longest suffix any form contributes, so it is derived from the
- * tables above rather than written as a number that a new form could
- * quietly invalidate. */
+/* The bound on an `as` name. It is a fixed number rather than one
+ * derived from the tables above: a program that compiles today was
+ * written against it, so it does not move when a form adds a suffix.
+ * What moves instead is the emitter's name entry, which internal.h
+ * sizes to hold this bound plus the longest suffix any form derives,
+ * with headroom. */
 static size_t observe_as_bound_(void)
 {
     /* The bound is a compatibility promise and does not follow from
@@ -566,13 +568,11 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
         }
     }
 
-    /* Channel names are published in the artifact's spec, whose name
-     * entries carry at most 64 bytes, so the base name is bounded by
-     * 64 less the longest suffix any form contributes. The bound is
-     * computed from the suffix tables rather than written as a
-     * number, because a form whose natural suffix were longer would
-     * otherwise pass this check and be truncated in the spec with no
-     * diagnostic. It stands at 53 today, set by `_range_rate`. */
+    /* Channel names are published in the artifact's spec, and the
+     * entry that carries one is sized to hold this bound plus the
+     * longest suffix any form derives. The bound itself stays at 53,
+     * so a program that compiles today keeps compiling however the
+     * suffix set grows; internal.h states the arithmetic. */
     {
         size_t bound = observe_as_bound_();
         for (int i = 0; i < st.observes_as.n; i++) {
@@ -580,9 +580,8 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
             if (ni && strlen(ni) > bound) {
                 kflc_diag_errorf(diag, st.observes_as.items[i]->line,
                     "observe ... as `%s`: channel name is longer than %d "
-                    "bytes, so its derived component names would not fit "
-                    "the published spec's 64-byte name entries", ni,
-                    (int)bound);
+                    "bytes, which is the most a declared channel name "
+                    "may be", ni, (int)bound);
             }
         }
     }

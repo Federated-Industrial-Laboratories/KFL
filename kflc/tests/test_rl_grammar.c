@@ -632,6 +632,120 @@ static void actuator_cases_(void)
         "end\n",
         1, "declares no model terms", NULL);
 
+    /* The quantiser's two range refusals, and the pair that decides
+     * whether its grid position stays inside a signed 64-bit integer.
+     * Beyond that the conversion is undefined, and a program must not
+     * be able to reach undefined behaviour by declaring a fine step. */
+    expect_both_("sensor_quantise_step_not_positive",
+        "form RL_SNQ1\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        quantise 0.0\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "takes a positive step", NULL);
+
+    expect_both_("sensor_quantise_half_a_range",
+        "form RL_SNQ2\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        quantise 0.01 -1.0\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "a step alone, or a step with both ends", NULL);
+
+    expect_both_("sensor_quantise_inverted_range",
+        "form RL_SNQ3\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        quantise 0.01 1.0 -1.0\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "low end is below its high end", NULL);
+
+    expect_both_("sensor_quantise_range_exceeds_the_integer",
+        "form RL_SNQ4\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        quantise 1e-14 -1e6 1e6\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "and a 64-bit integer holds", NULL);
+
+    expect_both_("sensor_quantise_range_within_the_integer",
+        "form RL_SNQ5\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft mass=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    sensor rf\n"
+        "        quantise 0.01 -1e6 1e6\n"
+        "    end\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe craft from earth mode=geometric through rf as look\n"
+        "    objective\n"
+        "        reward look_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
     /* The relative observe form. Six channels carrying a position and
      * a velocity in the chief's own local-vertical local-horizontal
      * frame. The positive case runs first for the reason the contact

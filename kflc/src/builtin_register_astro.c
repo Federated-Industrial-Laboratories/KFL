@@ -15,6 +15,12 @@ void kflc_register_astro_builtins(void)
 {
     /* ---- Opaque types ------------------------------------------- */
     (void)kflc_opaque_register("world",     "K26AstroWorld *");
+    /* The world's own stateful generator. Its noise-taking models
+     * accept it, and the environment layer seeds it per environment
+     * and per episode, so a program that draws from it replays with
+     * everything else rather than sharing one sequence across a
+     * vectorised set. */
+    (void)kflc_opaque_register("rng",       "K26CRng *");
     (void)kflc_opaque_register("starfield", "K26AstroStarfield *");
     /* Body handle is a pointer into the world's body array.
      * Lifetime semantics: a body pointer is realloc-stable across
@@ -49,6 +55,10 @@ void kflc_register_astro_builtins(void)
                                 "k26astro_scheduler_set_spin_hz",     2);
     (void)kflc_register_builtin("astro_world_set_render_hz",
                                 "k26astro_scheduler_set_render_hz",   2);
+    (void)kflc_register_builtin("astro_world_rng",
+                                "k26astro_world_rng",                 1);
+    (void)kflc_register_builtin("rng_uniform",
+                                "k26c_rng_uniform",                   1);
     (void)kflc_register_builtin("astro_world_set_observer_mode",
                                 "k26astro_world_set_observer_mode",   2);
     (void)kflc_register_builtin("astro_world_set_mercurius",

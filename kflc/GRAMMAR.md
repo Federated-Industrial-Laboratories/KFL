@@ -649,6 +649,15 @@ value and one before it does not.
 | `bias_walk` | turn-on standard deviation, correlation time in seconds, in-run standard deviation | A bias drawn once per episode, evolving as a first-order Gauss-Markov process. One draw per step, one per episode. |
 | `latency` | whole control periods | Delays by exactly that many steps. No draws. |
 | `quantise` | step, and optionally both ends of a range | Rounds to a multiple of the step, ties away from zero, after clamping to the range. No draws. |
+
+A step and a range together decide how many grid positions the
+quantiser needs, and a signed 64-bit integer holds about 9.2e18 of
+them. A declared range that needs more is refused, naming both
+operands; without a declared range the implied one is the narrower of a
+working ceiling and what the step itself can reach, so a step of 1e-14
+implies about 9.2e4 and not 1e15. A value beyond the grid saturates on
+it with its sign intact rather than converting, which is what makes the
+model total.
 | `dropout` | probability from 0 up to but not including 1 | Holds the previously delivered value instead of the current one. One draw per step. |
 
 The third operand of `bias_walk` is the process's steady-state
@@ -694,10 +703,9 @@ in a 96-byte entry, which holds a 53-byte name plus the longest suffix
 any form derives: `_truth_range_rate`, seventeen bytes, being the
 longest component suffix with the `_truth` a paired channel inserts.
 The bound stays at 53 whatever the entry grows to, so a program that
-compiles today keeps compiling. Every name
-readable in the objective and termination expressions lives in one
-scope, so a derived component may
-not collide with an action, a top-level world binding, or a form
+compiles today keeps compiling. Every name readable in the objective
+and termination expressions lives in one scope, so a derived component
+may not collide with an action, a top-level world binding, or a form
 argument, and an action may not collide with any of those either; the
 compiler rejects the program rather than letting one silently shadow
 another.

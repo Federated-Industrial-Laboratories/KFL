@@ -9,6 +9,11 @@ library libk26astro_rt
 version 0.1.0
 
 opaque  world                          K26AstroWorld *
+# The world's own stateful generator, which its noise-taking models
+# accept. A program reaches it through the accessor below; the
+# environment layer seeds it per environment and per episode, so a
+# program that draws from it replays with everything else.
+opaque  rng                            K26CRng *
 
 builtin astro_world_open               k26astro_world_create               2
 builtin astro_world_close              k26astro_world_destroy              1
@@ -21,6 +26,8 @@ builtin astro_world_snapshot_save      k26astro_world_snapshot_save        2
 builtin astro_world_snapshot_load      k26astro_world_snapshot_load        1
 builtin astro_world_set_spin_hz        k26astro_scheduler_set_spin_hz      2
 builtin astro_world_set_render_hz      k26astro_scheduler_set_render_hz    2
+builtin astro_world_rng                k26astro_world_rng                  1
+builtin rng_uniform                    k26c_rng_uniform                    1
 builtin astro_world_set_observer_mode  k26astro_world_set_observer_mode    2
 builtin astro_world_set_mercurius      k26astro_world_set_mercurius_factors 3
 builtin astro_world_set_ephem          k26astro_world_set_ephem            2

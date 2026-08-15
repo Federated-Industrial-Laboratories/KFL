@@ -44,6 +44,7 @@
 
 #include "rl_gate_util.h"
 #include "k26sense.h"
+#include "k26compute.h"
 
 #define WORK_DIR "/tmp/kflc_rl_sensor_test"
 
@@ -91,6 +92,118 @@ static void rl_stage_done_(void) { alarm(0); }
     "    end\n" \
     "    observe craft from earth mode=geometric" \
     " through rangefinder with truth as look\n" \
+    "    objective\n" \
+    "        reward look_range + a * 0.0\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+
+/* A bias walk alone, so the published channel is the truth plus the
+ * bias and the bias trajectory can be read straight out of it. A term
+ * drawing at two cadences holds two channels; on one, an episode's
+ * turn-on bias and its first kick are the same draw. */
+#define BIAS_KFL \
+    "form RL_BIAS\n" \
+    "fn world b_world\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body craft mass=1.0 parent=earth" \
+    " pos_x=7.0e6 vel_y=7546.049108166324\n" \
+    "    sensor imu\n" \
+    "        bias_walk 500.0 20.0 100.0\n" \
+    "    end\n" \
+    "    episode\n" \
+    "        control_dt 1.0\n" \
+    "        horizon 400\n" \
+    "        substeps 1\n" \
+    "    end\n" \
+    "    action a box -1.0 1.0 default 0.0\n" \
+    "    on_step\n" \
+    "        craft.vel_x = craft.vel_x + a * 0.0\n" \
+    "    end\n" \
+    "    observe craft from earth mode=geometric" \
+    " through imu with truth as look\n" \
+    "    objective\n" \
+    "        reward look_range + a * 0.0\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+/* A program that draws from the world's own stateful generator, which
+ * the environment layer seeds per environment and per episode. The
+ * draw is taken in the world prefix, where an impure builtin is
+ * allowed; the per-step body admits only pure calls. */
+#define WRNG_KFL \
+    "form RL_WRNG\n" \
+    "fn world r_world\n" \
+    "    let g: rng = astro_world_rng(world)\n" \
+    "    let d: double = rng_uniform(g) * 100000.0\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body craft mass=1.0 parent=earth" \
+    " pos_x=7.0e6 pos_z=d vel_y=7546.049108166324\n" \
+    "    episode\n" \
+    "        control_dt 1.0\n" \
+    "        horizon 400\n" \
+    "        substeps 1\n" \
+    "    end\n" \
+    "    action a box -1.0 1.0 default 0.0\n" \
+    "    on_step\n" \
+    "        craft.vel_x = craft.vel_x + a * 0.0\n" \
+    "    end\n" \
+    "    observe craft from earth mode=geometric as trk\n" \
+    "    objective\n" \
+    "        reward trk_range + a * 0.0\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+/* No sensor at all: every channel must publish as measured and
+ * unpaired, which three places in the tree state and nothing gated. */
+#define PLAIN_KFL \
+    "form RL_PLAIN\n" \
+    "fn world p_world\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body craft mass=1.0 parent=earth" \
+    " pos_x=7.0e6 vel_y=7546.049108166324\n" \
+    "    episode\n" \
+    "        control_dt 1.0\n" \
+    "        horizon 400\n" \
+    "        substeps 1\n" \
+    "    end\n" \
+    "    action a box -1.0 1.0 default 0.0\n" \
+    "    on_step\n" \
+    "        craft.vel_x = craft.vel_x + a * 0.0\n" \
+    "    end\n" \
+    "    observe craft from earth mode=geometric as trk\n" \
+    "    objective\n" \
+    "        reward trk_range + a * 0.0\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+/* A step fine enough that an ordinary value is past what a signed
+ * 64-bit integer holds. Before this item that published a sign-flipped
+ * number with no fault and no diagnostic. */
+#define FINE_KFL \
+    "form RL_FINE\n" \
+    "fn world f_world\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body craft mass=1.0 parent=earth" \
+    " pos_x=7.0e6 vel_y=7546.049108166324\n" \
+    "    sensor fine\n" \
+    "        quantise 1e-14\n" \
+    "    end\n" \
+    "    episode\n" \
+    "        control_dt 1.0\n" \
+    "        horizon 400\n" \
+    "        substeps 1\n" \
+    "    end\n" \
+    "    action a box -1.0 1.0 default 0.0\n" \
+    "    on_step\n" \
+    "        craft.vel_x = craft.vel_x + a * 0.0\n" \
+    "    end\n" \
+    "    observe craft from earth mode=geometric" \
+    " through fine with truth as look\n" \
     "    objective\n" \
     "        reward look_range + a * 0.0\n" \
     "    end\n" \
@@ -397,6 +510,221 @@ int main(void)
     }
     printf("gate 5: the longest name a program can declare survives"
            " the spec entry whole: OK\n");
+
+    /* ---- 6. A term drawing at two cadences holds two channels --- */
+    rl_stage_("compiling the bias-walk artifact", 900u);
+    {
+        /* The rule this item exists to have got right, measured where
+         * it applies. A bias walk draws once per episode at index 0
+         * and once per step, whose first index is also 0. On one
+         * channel those are the same number and the turn-on bias is
+         * locked to the first kick, in every environment and every
+         * episode. The compiler's allocation is what decides it, and
+         * nothing here measured it: the published bias trajectory is
+         * rebuilt from the two channels the rule gives and required to
+         * match bitwise. */
+        rl_write_file_(WORK_DIR "/bias.kfl", BIAS_KFL);
+        rl_compile_(WORK_DIR "/bias.kfl", WORK_DIR "/bias", WORK_DIR);
+        rl_stage_("driving the bias-walk artifact", 300u);
+        void *bso = rl_dlopen_(WORK_DIR "/bias.rlenv.so");
+        RlSurface bs;
+        rl_resolve_surface_(bso, &bs);
+        K26RlEnv *env = NULL;
+        ASSERT(bs.create(seed, 1u, &env) == K26RL_OK);
+
+        /* The range component is the fourth of five, and the chain has
+         * one term drawing at both cadences, so the allocation gives
+         * that component the seventh and eighth channels. */
+        const uint16_t ch_step = (uint16_t)(2 * SN_RANGE);
+        const uint16_t ch_ep   = (uint16_t)(2 * SN_RANGE + 1);
+        double phi = 0.0, q = 0.0;
+        ASSERT(k26sense_bias_walk_coeffs(20.0, 1.0, 100.0, &phi, &q)
+               == K26SENSE_OK);
+
+        K26RngCoords c;
+        c.stream = K26SENSE_CLASS_SENSOR; c.environment = 0; c.episode = 0;
+        c.channel = ch_ep; c.draw = 0;
+        double bias = 500.0 * k26rng_normal(key, c);
+        double same_channel = 500.0 * k26rng_normal(key,
+            (K26RngCoords){ K26SENSE_CLASS_SENSOR, ch_step, 0, 0, 0 });
+        printf("gate 6: the turn-on bias from its own channel is"
+               " %+.9f; from the step channel it would be %+.9f\n",
+               bias, same_channel);
+        ASSERT(absd_(bias - same_channel) > 1.0);
+
+        double obs[SN_OBS], act[1] = { 0.0 };
+        int checked = 0;
+        for (int t = 0; t < 25; t++) {
+            ASSERT(bs.step(env, act) == K26RL_OK);
+            ASSERT(bs.obs(env, obs) == K26RL_OK);
+            c.channel = ch_step; c.draw = (uint32_t)t;
+            bias = phi * bias + q * k26rng_normal(key, c);
+            double want = obs[SN_TRUTH + SN_RANGE] + bias;
+            if (t < 3) {
+                printf("  step %d: published %.9f, rebuilt %.9f\n",
+                       t + 1, obs[SN_MEAS + SN_RANGE], want);
+            }
+            ASSERT(obs[SN_MEAS + SN_RANGE] == want);
+            checked++;
+        }
+        printf("  %d steps of the bias trajectory rebuilt from the two"
+               " channels and matched bitwise\n", checked);
+        ASSERT(checked == 25);
+        bs.destroy(env);
+        dlclose(bso);
+        n_pass++;
+    }
+    rl_stage_done_();
+    printf("gate 6: an episode's turn-on bias and its first kick are"
+           " different draws: OK\n");
+
+    /* ---- 7. A program that draws from the world's generator ------ */
+    rl_stage_("compiling the world-generator artifact", 900u);
+    {
+        /* The clause this item could not previously meet. The world's
+         * own stateful generator is seeded per environment and per
+         * episode from a counter draw, so a program drawing from it
+         * gets this environment's stream rather than one shared across
+         * the whole vectorised set, and replays with everything else.
+         *
+         * The arm also checks the seed itself: the published value is
+         * predicted here by seeding a generator with what the library
+         * says this environment's seed is. The emitter carries its own
+         * copy of that function, and this is what stops the two
+         * drifting. */
+        rl_write_file_(WORK_DIR "/wr.kfl", WRNG_KFL);
+        rl_compile_(WORK_DIR "/wr.kfl", WORK_DIR "/wr", WORK_DIR);
+        rl_stage_("driving the world-generator artifact", 300u);
+        void *wso = rl_dlopen_(WORK_DIR "/wr.rlenv.so");
+        RlSurface ws;
+        rl_resolve_surface_(wso, &ws);
+
+        enum { NE = 4, NB = 2 };
+        static double b0[NE * NB * 6], b1[NE * NB * 6];
+        for (int pass = 0; pass < 2; pass++) {
+            K26RlEnv *env = NULL;
+            ASSERT(ws.create(seed, (uint32_t)NE, &env) == K26RL_OK);
+            int32_t need = ws.bodies(env, 0, NULL, 0);
+            ASSERT(need == NE * NB * 6);
+            ASSERT(ws.bodies(env, 0, pass ? b1 : b0, (uint32_t)need)
+                   == need);
+            ws.destroy(env);
+        }
+        printf("gate 7: craft z from the world's own generator:");
+        for (int e = 0; e < NE; e++) {
+            printf(" %+.6f", b0[e * NB * 6 + 6 + 2]);
+        }
+        printf("\n");
+
+        /* Every environment differs, which one shared seed could not
+         * produce. */
+        for (int e = 0; e < NE; e++) {
+            for (int f = e + 1; f < NE; f++) {
+                ASSERT(b0[e * NB * 6 + 6 + 2] != b0[f * NB * 6 + 6 + 2]);
+            }
+        }
+        /* And two passes are bitwise identical. */
+        ASSERT(memcmp(b0, b1, sizeof b0) == 0);
+
+        /* The seed the emitter used is the one the library computes. */
+        for (int e = 0; e < NE; e++) {
+            K26CRng r;
+            k26c_rng_init(&r, k26sense_world_seed(key, (uint32_t)e, 0u));
+            double want = k26c_rng_uniform(&r) * 100000.0;
+            double got  = b0[e * NB * 6 + 6 + 2];
+            if (e == 0) {
+                printf("  environment 0 predicted %+.9f from the"
+                       " library's seed, published %+.9f\n", want, got);
+            }
+            ASSERT(got == want);
+        }
+        dlclose(wso);
+        n_pass++;
+    }
+    rl_stage_done_();
+    printf("gate 7: a program drawing from the world's generator gets"
+           " its own environment's stream, replays, and takes the seed"
+           " the library computes: OK\n");
+
+    /* ---- 8. A fine step saturates rather than flipping sign ------ */
+    rl_stage_("compiling the fine-step artifact", 900u);
+    {
+        rl_write_file_(WORK_DIR "/fine.kfl", FINE_KFL);
+        rl_compile_(WORK_DIR "/fine.kfl", WORK_DIR "/fine", WORK_DIR);
+        rl_stage_("driving the fine-step artifact", 300u);
+        void *fso = rl_dlopen_(WORK_DIR "/fine.rlenv.so");
+        RlSurface fs;
+        rl_resolve_surface_(fso, &fs);
+        K26RlEnv *env = NULL;
+        ASSERT(fs.create(seed, 1u, &env) == K26RL_OK);
+        double obs[SN_OBS], act[1] = { 0.0 };
+        for (int t = 0; t < 5; t++) {
+            ASSERT(fs.step(env, act) == K26RL_OK);
+            ASSERT(fs.obs(env, obs) == K26RL_OK);
+            double meas  = obs[SN_MEAS + SN_RANGE];
+            double truth = obs[SN_TRUTH + SN_RANGE];
+            if (t == 0) {
+                printf("gate 8: a step of 1e-14 on a range of %.6e:"
+                       " published %+.6e\n", truth, meas);
+            }
+            /* Signed the same way as the truth, finite, and on the
+             * grid: what it must not be is the sign-flipped number an
+             * undefined conversion produced. */
+            ASSERT(meas > 0.0);
+            ASSERT(meas == meas);
+            ASSERT(meas <= truth);
+        }
+        uint32_t fl = 0;
+        ASSERT(fs.flags(env, &fl) == K26RL_OK);
+        printf("  after five steps the flag word is 0x%08x\n", fl);
+        fs.destroy(env);
+        dlclose(fso);
+        n_pass++;
+    }
+    rl_stage_done_();
+    printf("gate 8: a step finer than the integer grid saturates with"
+           " its sign intact: OK\n");
+
+    /* ---- 9. A program with no sensor ----------------------------- */
+    rl_stage_("compiling the plain artifact", 900u);
+    {
+        rl_write_file_(WORK_DIR "/plain.kfl", PLAIN_KFL);
+        rl_compile_(WORK_DIR "/plain.kfl", WORK_DIR "/plain", WORK_DIR);
+        void *pso = rl_dlopen_(WORK_DIR "/plain.rlenv.so");
+        RlSurface ps;
+        rl_resolve_surface_(pso, &ps);
+        K26RlEnv *env = NULL;
+        ASSERT(ps.create(seed, 1u, &env) == K26RL_OK);
+        int32_t need = ps.spec(env, NULL, 0);
+        ASSERT(need > 0);
+        uint8_t *blob = (uint8_t *)malloc((size_t)need);
+        ASSERT(blob);
+        ASSERT(ps.spec(env, blob, (uint32_t)need) == need);
+        int seen = 0;
+        uint32_t off = 0;
+        while (off + 6 <= (uint32_t)need) {
+            uint16_t tag = rl_get_u16_(blob + off);
+            uint32_t l   = rl_get_u32_(blob + off + 2);
+            if (tag == K26RL_TAG_OBS_CHANNEL_SOURCE && l == 10) {
+                uint16_t src  = rl_get_u16_(blob + off + 10);
+                uint32_t pair = rl_get_u32_(blob + off + 12);
+                ASSERT(src == K26RL_OBS_SOURCE_MEASURED);
+                ASSERT(pair == K26RL_OBS_PAIR_NONE);
+                seen++;
+            }
+            off += 6 + l;
+        }
+        printf("gate 9: a program with no sensor: %d channels, every"
+               " one measured and unpaired\n", seen);
+        ASSERT(seen == 5);
+        free(blob);
+        ps.destroy(env);
+        dlclose(pso);
+        n_pass++;
+    }
+    rl_stage_done_();
+    printf("gate 9: no sensor means every channel is measured and"
+           " unpaired, which three places state: OK\n");
 
     dlclose(so);
     printf("test_rl_sensor: %d gates passed\n", n_pass);

@@ -466,7 +466,9 @@ static void compiler_gates_(void)
         char cmd[1024];
         snprintf(cmd, sizeof cmd,
                  "%s-march=native -o " WORK "/kflc_alt src/*.c "
-                 "../libk26rl/libk26rl.a -lm 2>" WORK "/alt.log", cc_base);
+                 "../libk26rl/libk26rl.a ../libk26sense/libk26sense.a "
+                 "../libk26rng/libk26rng.a -lm 2>" WORK "/alt.log",
+                 cc_base);
         int rc = system(cmd);
         if (WEXITSTATUS(rc) != 0) {
             /* A host whose compiler does not take -march=native still
@@ -475,7 +477,8 @@ static void compiler_gates_(void)
                     "at the baseline target\n");
             snprintf(cmd, sizeof cmd,
                      "%s-o " WORK "/kflc_alt src/*.c "
-                     "../libk26rl/libk26rl.a -lm 2>" WORK "/alt.log",
+                     "../libk26rl/libk26rl.a ../libk26sense/libk26sense.a "
+                     "../libk26rng/libk26rng.a -lm 2>" WORK "/alt.log",
                      cc_base);
             rc = system(cmd);
         }
