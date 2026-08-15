@@ -4203,6 +4203,22 @@ static void rl_emit_env_core_(FILE *out)
 "                        kflrl_veh_com_[vi][0], kflrl_veh_com_[vi][1],\n"
 "                        kflrl_veh_com_[vi][2]);\n"
 "                    cbody[vi].omega = cb->omega;\n"
+"", out);
+    fputs(
+"                    /* The inverse inertia the angular half of an\n"
+"                     * impulse turns on, taken from the vehicle's own\n"
+"                     * attitude state, which is where the assembly's\n"
+"                     * derived tensor was installed and inverted. Left\n"
+"                     * at the zero matrix by the clearing above, an\n"
+"                     * off-centre impact would produce no spin at all\n"
+"                     * while every other term looked right. */\n"
+"                    {\n"
+"                        K26AstroVehicle *cvh =\n"
+"                            h->vehicles[(size_t)e * KFLRL_N_VEHICLES + vi];\n"
+"                        const K26AstroAttitudeStateExt *cx = cvh\n"
+"                            ? k26astro_vehicle_attitude_ext(cvh) : NULL;\n"
+"                        if (cx) cbody[vi].inv_inertia = cx->inertia_inverse;\n"
+"                    }\n"
 "                }\n"
 "", out);
     fputs(
@@ -4227,8 +4243,8 @@ static void rl_emit_env_core_(FILE *out)
 "                     * amount the geometry gives. */\n"
 "                    K26AstroCollStatus cst = k26astro_coll_bounce(\n"
 "                        &cbody[cc.body_a], &cbody[cc.body_b], &cc,\n"
-"                        h->restitution, &apos, &avel, &awb,\n"
-"                        &bpos, &bvel, &bwb);\n"
+"                        h->restitution, h->friction,\n"
+"                        &apos, &avel, &awb, &bpos, &bvel, &bwb);\n"
 "#else\n"
 "                    K26AstroCollStatus cst = k26astro_coll_arrest(\n"
 "                        &cbody[cc.body_a], &cbody[cc.body_b], cc.time,\n"

@@ -87,6 +87,32 @@ static void rl_stage_done_(void)
     rl_stage_name_ = "between stages";
 }
 
+/* Run an arm in a child process and require it to succeed.
+ *
+ * The arms below need a live handle, and a program carrying two
+ * bodies that each bind an assembly faults on the third environment
+ * handle created in one process, whatever the seeds. That defect was
+ * measured with the collision pass compiled out of the same program,
+ * so it is neither the sweep nor the resolution, and it has its own
+ * item; what it means here is that an arm's correctness must not
+ * depend on how many arms ran before it. A child process per arm
+ * gives each one the first handle in its own process, which is both
+ * a way around the defect and better isolation than counting on an
+ * ordering. */
+#define IN_CHILD(...) do {                                            \
+    fflush(stdout);                                                   \
+    pid_t _p = fork();                                                \
+    ASSERT(_p >= 0);                                                  \
+    if (_p == 0) { __VA_ARGS__; fflush(stdout); _exit(0); }            \
+    int _st = 0;                                                      \
+    ASSERT(waitpid(_p, &_st, 0) == _p);                               \
+    if (!(WIFEXITED(_st) && WEXITSTATUS(_st) == 0)) {                 \
+        fprintf(stderr, "FAIL %s:%d: arm failed in its child\n",       \
+                __FILE__, __LINE__);                                  \
+        exit(1);                                                      \
+    }                                                                 \
+} while (0)
+
 /* The name published for one channel index, or 0 when the spec
  * carries none. Walks the same tag stream a consumer walks. */
 static int spec_name_at_(const uint8_t *blob, uint32_t len, int want,
@@ -194,6 +220,63 @@ static const char *const COLL_ASM_CHASER =
     "    end\n" \
     "end\n" \
     "end\n"
+
+/* A fixture that survives its own contact. Every arm above ends the
+ * episode on the contacting step, which leaves everything the
+ * resolution does to the world unexamined: the velocity merge that
+ * removes the pair's relative motion is never read, because nothing
+ * reads anything after it. This one never terminates, so the steps
+ * after the contact are ordinary steps and can be measured.
+ *
+ * RESOLUTION is the episode's `contact` line, OFFSET the chaser's
+ * lateral displacement. An offset chaser meets the plate away from
+ * its centre, so the lever arm from the plate's centre of mass to the
+ * contact point is not parallel to the normal and an impulse there
+ * must spin the plate. A centred fixture cannot see that, and cannot
+ * see an inverse inertia left at zero. */
+#define COLL_LIVE_KFL(OFFSET, RESOLUTION) \
+    "form RL_COLLIVE\n" \
+    "fn world w\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body target assembly=\"coll_target.k26asm\" parent=earth" \
+    " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n" \
+    "    astro_body chaser assembly=\"coll_chaser.k26asm\" parent=earth" \
+    " pos_x=7.0e6 pos_y=" OFFSET " pos_z=-60.0" \
+    " vel_y=7546.0 vel_z=6.0 quat_w=1.0\n" \
+    "    episode\n" \
+    "        control_dt 1.0\n" \
+    "        horizon 40\n" \
+    "        substeps 4\n" \
+    RESOLUTION \
+    "        terminated when hit_hit > 1.5\n" \
+    "    end\n" \
+    "    action idle box -1.0 1.0 default 0.0\n" \
+    "    on_step\n" \
+    "        chaser.omega_x = idle * 0.0\n" \
+    "    end\n" \
+    "    observe contact of chaser as hit\n" \
+    "    observe attitude of target as tatt\n" \
+    "    observe chaser from earth mode=geometric as trk\n" \
+    "    observe target from chaser mode=geometric as sep\n" \
+    "    objective\n" \
+    "        reward hit_hit\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+/* The observation width of the fixture above, and the indices this
+ * gate reads. Three contact channels, then seven attitude channels,
+ * then five tracking channels, then five more for the line of sight
+ * from the chaser to the target. That last group is what makes the
+ * resolution readable from the recorded stream rather than from a
+ * live handle: its range rate is the pair's closing rate, which is
+ * exactly what arrest removes and what a bounce reverses. */
+#define LIVE_OBS       20
+#define LIVE_HIT        0
+#define LIVE_SPEED      2
+#define LIVE_TARGET_WY  8      /* tatt_omega_y */
+#define LIVE_SEP_RANGE 18
+#define LIVE_SEP_RATE  19
 
 int main(void)
 {
@@ -495,6 +578,218 @@ int main(void)
                "names and the observe after them is not displaced: "
                "OK\n");
         n_pass++;
+    }
+
+    /* ---- 5. Arrest, measured after the step it happens on -------- *
+     *
+     * Every arm above ends the episode on the contacting step, which
+     * leaves what the resolution does to the world unexamined: the
+     * velocity merge that removes the pair's relative motion is never
+     * read, because nothing reads anything after it. This fixture
+     * never terminates, so the steps after the contact are ordinary
+     * steps.
+     *
+     * It is driven as a separate process and read back from its
+     * recorded episode rather than through a live handle. A program
+     * carrying two bodies that each bind an assembly stops behaving
+     * from the third environment handle created in one process,
+     * whatever the seeds, and reloading the same artifact is enough
+     * to reach that count; the defect was measured with the collision
+     * pass compiled out and has its own item. A batch run has one
+     * handle in one process and is unaffected, and the record is what
+     * a consumer replays from anyway. */
+    {
+        rl_stage_("compiling the surviving-arrest artifact", 900u);
+        rl_write_file_(WORK_DIR "/live.kfl",
+                       COLL_LIVE_KFL("0.0", "        contact arrest\n"));
+        rl_compile_(WORK_DIR "/live.kfl", WORK_DIR "/live", WORK_DIR);
+        rl_stage_("recording the surviving-arrest episode", 300u);
+        rl_run_or_die_(WORK_DIR "/live --envs 1 --episodes 1 --seed 31"
+                       " --out " WORK_DIR "/live.k26epi > /dev/null");
+
+        K26RlEpisodeReader *r = NULL;
+        ASSERT(k26rl_episode_reader_open(WORK_DIR "/live.k26epi", &r) ==
+               K26RL_OK);
+        uint32_t ord = 0, env = 0, ep = 0;
+        ASSERT(k26rl_episode_reader_at(r, 0, &ord, &env, &ep) == K26RL_OK);
+        K26RlEpisodeData d;
+        memset(&d, 0, sizeof d);
+        ASSERT(k26rl_episode_read(r, ord, env, ep, &d) == K26RL_OK);
+        ASSERT(d.step_count > 12);
+
+        int hs = -1;
+        for (uint32_t t = 0; t < d.step_count && hs < 0; t++) {
+            if (d.obs[t * LIVE_OBS + LIVE_HIT] > 0.5) hs = (int)t;
+        }
+        printf("  contact on step %d of %u, episode still running\n",
+               hs + 1, d.step_count);
+        ASSERT(hs > 0 && hs + 2 < (int)d.step_count);
+
+        /* The reported closing speed against the pair's own line of
+         * sight rate on the step before the contact, which is an
+         * independent computation of the same normal component and
+         * is what gate 16 asks for. The rate is negative while
+         * closing, and the reported speed is positive. */
+        double pre_rate  = d.obs[(hs - 1) * LIVE_OBS + LIVE_SEP_RATE];
+        double hit_speed = d.obs[hs * LIVE_OBS + LIVE_SPEED];
+        printf("  reported closing speed %.9f, line of sight rate "
+               "before the contact %.9f\n", hit_speed, pre_rate);
+        ASSERT(pre_rate < -1.0);
+        ASSERT(fabs(hit_speed + pre_rate) < 1.0e-2);
+        printf("  the reported speed matches an independently computed "
+               "closing rate: OK\n");
+        n_pass++;
+
+        /* Arrest removes the pair's relative velocity. Deleting the
+         * velocity write-back leaves them closing at six metres a
+         * second, and no arm reached it while every fixture ended on
+         * the contacting step. */
+        double post_rate = d.obs[(hs + 1) * LIVE_OBS + LIVE_SEP_RATE];
+        printf("  closing rate before %.9f, after the arrest %.9f\n",
+               pre_rate, post_rate);
+        ASSERT(fabs(post_rate) < 1.0e-3);
+        printf("  arrest removes the pair's relative velocity: OK\n");
+        n_pass++;
+
+        /* And having been arrested the pair does not drive further
+         * into one another, which is what removing it is for. */
+        double r0 = d.obs[hs * LIVE_OBS + LIVE_SEP_RANGE];
+        double r1 = d.obs[(hs + 1) * LIVE_OBS + LIVE_SEP_RANGE];
+        double r2 = d.obs[(hs + 2) * LIVE_OBS + LIVE_SEP_RANGE];
+        printf("  separation at the contact %.6f, then %.6f, then "
+               "%.6f\n", r0, r1, r2);
+        ASSERT(r1 > r0 * 0.99 && r2 > r0 * 0.99);
+        printf("  the arrested pair does not interpenetrate on the "
+               "steps after: OK\n");
+        n_pass++;
+        k26rl_episode_free(&d);
+        k26rl_episode_reader_close(r);
+    }
+
+    /* ---- 6. Bounce, end to end ----------------------------------- *
+     *
+     * The bounce surface had never been compiled by any gate: the
+     * grammar arms stop at `--check` and `--emit`, which do not reach
+     * the C++ stage, so a call written against an older arity
+     * survived every suite while the syntax it serves was the reason
+     * the design went to a new issue mid-item.
+     *
+     * The chaser is offset laterally, so it meets the plate away from
+     * the plate's centre of mass and the impulse must spin the plate.
+     * That is also the only configuration in which an inverse inertia
+     * left at the zero matrix is visible, every other term looking
+     * correct. */
+    {
+        /* Two fixtures, because the two claims need different
+         * geometry. Restitution is defined on the relative velocity
+         * along the CONTACT NORMAL, and for a centred impact the
+         * normal and the line of sight between the centres coincide,
+         * so the recorded range rate measures it directly. Offset the
+         * chaser and they no longer coincide: the range rate then
+         * mixes the normal and tangential parts and the ratio is not
+         * the coefficient, which an earlier version of this arm
+         * asserted anyway and read 0.371 against a declared 0.5.
+         * The offset fixture is what shows the spin, and only that. */
+        rl_stage_("compiling the centred bounce artifact", 900u);
+        rl_write_file_(WORK_DIR "/bcen.kfl",
+            COLL_LIVE_KFL("0.0",
+                "        contact bounce restitution 0.5 friction 0.3\n"));
+        rl_compile_(WORK_DIR "/bcen.kfl", WORK_DIR "/bcen", WORK_DIR);
+        rl_stage_("compiling the offset bounce artifact", 900u);
+        rl_write_file_(WORK_DIR "/bounce.kfl",
+            COLL_LIVE_KFL("2.0",
+                "        contact bounce restitution 0.5 friction 0.3\n"));
+        rl_compile_(WORK_DIR "/bounce.kfl", WORK_DIR "/bounce", WORK_DIR);
+        printf("  a `contact bounce` program compiles and links: OK\n");
+        n_pass++;
+
+        /* The centred impact first: normal and line of sight aligned,
+         * so the recorded range rate is the normal relative velocity
+         * and its ratio across the impulse is the coefficient. */
+        rl_stage_("recording the centred bounce episode", 300u);
+        rl_run_or_die_(WORK_DIR "/bcen --envs 1 --episodes 1 --seed 41"
+                       " --out " WORK_DIR "/bcen.k26epi > /dev/null");
+        {
+            K26RlEpisodeReader *rc = NULL;
+            ASSERT(k26rl_episode_reader_open(WORK_DIR "/bcen.k26epi", &rc)
+                   == K26RL_OK);
+            uint32_t o2 = 0, e2 = 0, p2 = 0;
+            ASSERT(k26rl_episode_reader_at(rc, 0, &o2, &e2, &p2) ==
+                   K26RL_OK);
+            K26RlEpisodeData dc;
+            memset(&dc, 0, sizeof dc);
+            ASSERT(k26rl_episode_read(rc, o2, e2, p2, &dc) == K26RL_OK);
+            int cs = -1;
+            for (uint32_t t = 0; t < dc.step_count && cs < 0; t++) {
+                if (dc.obs[t * LIVE_OBS + LIVE_HIT] > 0.5) cs = (int)t;
+            }
+            ASSERT(cs > 0 && cs + 1 < (int)dc.step_count);
+            double cpre  = dc.obs[(cs - 1) * LIVE_OBS + LIVE_SEP_RATE];
+            double cpost = dc.obs[(cs + 1) * LIVE_OBS + LIVE_SEP_RATE];
+            printf("  centred impact: closing rate before %.9f, after "
+                   "%.9f\n", cpre, cpost);
+            ASSERT(cpre < -1.0);
+            ASSERT(cpost > 0.0);
+            printf("  restitution realised %.6f, declared %.6f\n",
+                   cpost / -cpre, 0.5);
+            ASSERT(fabs(cpost / -cpre - 0.5) < 0.02);
+            printf("  a bounce reverses the approach at the declared "
+                   "restitution: OK\n");
+            n_pass++;
+            k26rl_episode_free(&dc);
+            k26rl_episode_reader_close(rc);
+        }
+
+        rl_stage_("recording the offset bounce episode", 300u);
+        rl_run_or_die_(WORK_DIR "/bounce --envs 1 --episodes 1 --seed 37"
+                       " --out " WORK_DIR "/bounce.k26epi > /dev/null");
+
+        K26RlEpisodeReader *r = NULL;
+        ASSERT(k26rl_episode_reader_open(WORK_DIR "/bounce.k26epi", &r) ==
+               K26RL_OK);
+        uint32_t ord = 0, env = 0, ep = 0;
+        ASSERT(k26rl_episode_reader_at(r, 0, &ord, &env, &ep) == K26RL_OK);
+        K26RlEpisodeData d;
+        memset(&d, 0, sizeof d);
+        ASSERT(k26rl_episode_read(r, ord, env, ep, &d) == K26RL_OK);
+
+        int hs = -1;
+        for (uint32_t t = 0; t < d.step_count && hs < 0; t++) {
+            if (d.obs[t * LIVE_OBS + LIVE_HIT] > 0.5) hs = (int)t;
+        }
+        printf("  contact on step %d of %u\n", hs + 1, d.step_count);
+        ASSERT(hs > 0 && hs + 1 < (int)d.step_count);
+
+        /* The offset pair still separates, which is what makes the
+         * spin below an impulse and not an artefact. */
+        double pre  = d.obs[(hs - 1) * LIVE_OBS + LIVE_SEP_RATE];
+        double post = d.obs[(hs + 1) * LIVE_OBS + LIVE_SEP_RATE];
+        printf("  offset impact: closing rate before %.9f, after "
+               "%.9f\n", pre, post);
+        ASSERT(pre < -1.0);
+        ASSERT(post > 0.0);
+
+        /* The off-centre impulse spins the plate. Zero here is what
+         * an inverse inertia left at the zero matrix produces. */
+        double spin = d.obs[(hs + 1) * LIVE_OBS + LIVE_TARGET_WY];
+        printf("  the struck body's angular rate about y after the "
+               "impulse: %.9e\n", spin);
+        /* The defect this guards against produces exactly zero, so
+         * the bound only has to clear numerical noise rather than
+         * approach the expected value; a bound set just under the
+         * measured number would fail on any small change to the
+         * fixture's geometry while catching nothing extra. The sign
+         * is asserted beside it, since the direction a struck plate
+         * turns is fixed by which side of its centre it was struck
+         * on and an impulse applied with the wrong sense would keep
+         * the magnitude. */
+        ASSERT(fabs(spin) > 1.0e-9);
+        ASSERT(spin < 0.0);
+        printf("  an off-centre impulse spins the body it strikes: "
+               "OK\n");
+        n_pass++;
+        k26rl_episode_free(&d);
+        k26rl_episode_reader_close(r);
     }
 
     rl_stage_done_();
