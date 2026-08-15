@@ -107,7 +107,7 @@ static const char *const VIEW_ASM_KFL =
     "form RL_VIEW_ASM\n"
     "fn world view_asm_world\n"
     "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
-    "    astro_body craft assembly=\"placed_box.k26asm\" parent=earth"
+    "    astro_body craft assembly=\"rich_box.k26asm\" parent=earth"
     " pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0"
     " quat_w=1.0 omega_x=0.01 omega_y=0.02 omega_z=0.03\n"
     /* A second body binding a DIFFERENT assembly. Without it the
@@ -945,16 +945,67 @@ int main(void)
          * a copy of its own to spoil. */
         rl_run_or_die_("cp examples/assets/calibration_box.k26mesh "
                        WORK_DIR "/");
-        rl_write_file_(WORK_DIR "/placed_box.k26asm",
-            "assembly placed_box\n"
+        /* The wireframe fixture, built to be one that a reader with
+         * any of four plausible defects gets wrong.
+         *
+         * TWO components with TWO meshes, because with one of each a
+         * reader that rebased the second mesh's vertex indices by the
+         * running total and one that did not agree, and so do one
+         * that applies each mesh's own placement and one that applies
+         * the first placement to everything.
+         *
+         * The first component names its mesh BEFORE its placement,
+         * because the compiler parses the whole block and derives
+         * afterwards, so key order inside a block is free for it; a
+         * reader that snapshotted the placement at the `mesh` line
+         * would lose it here and draw raw mesh coordinates while the
+         * digest, which is over bytes, still matched.
+         *
+         * Its path is QUOTED, because the compiler's tokenizer strips
+         * quotes and a reader that kept them would refuse a file the
+         * compiler compiled.
+         *
+         * And the second mesh writes its FACES before its VERTICES,
+         * because the compiler counts vertices over the whole file
+         * before bounding any index, and a reader bounding by what it
+         * has seen so far would refuse that file too. */
+        rl_write_file_(WORK_DIR "/faces_first.k26mesh",
+            "# the same box, with its faces written before its vertices\n"
+            "f 1 4 3\n"
+            "f 1 3 2\n"
+            "f 5 6 7\n"
+            "f 5 7 8\n"
+            "f 1 2 6\n"
+            "f 1 6 5\n"
+            "f 2 3 7\n"
+            "f 2 7 6\n"
+            "f 3 4 8\n"
+            "f 3 8 7\n"
+            "f 4 1 5\n"
+            "f 4 5 8\n"
+            "v -1.0 -0.5 -0.5\n"
+            "v 1.0 -0.5 -0.5\n"
+            "v 1.0 0.5 -0.5\n"
+            "v -1.0 0.5 -0.5\n"
+            "v -1.0 -0.5 0.5\n"
+            "v 1.0 -0.5 0.5\n"
+            "v 1.0 0.5 0.5\n"
+            "v -1.0 0.5 0.5\n");
+        rl_write_file_(WORK_DIR "/rich_box.k26asm",
+            "assembly rich_box\n"
             "    frame x_to_port\n"
             "    provenance mass \"gate fixture, not a craft\" computed\n"
-            "    component hull\n"
+            "    component first\n"
             "        mass 1000.0\n"
+            "        mesh \"calibration_box.k26mesh\"\n"
             "        at 0.25 -0.5 0.75\n"
             "        rotate 0.70710678118654752 0.0 0.70710678118654752"
             " 0.0\n"
-            "        mesh calibration_box.k26mesh\n"
+            "    end\n"
+            "    component second\n"
+            "        mass 400.0\n"
+            "        at -6.0 1.5 0.5\n"
+            "        mesh faces_first.k26mesh\n"
             "    end\n"
             "end\n");
         rl_write_file_(WORK_DIR "/other_box.k26asm",
@@ -1154,16 +1205,13 @@ int main(void)
         /* -- the wireframe, and the digest that licenses drawing it -- */
         {
             char *wf;
-            char *mesh;
-            uint32_t verts = 0, tris = 0;
-            const char *q;
 
             run_viewer_("--dump wireframe " WORK_DIR "/view_asm.k26epi",
                         WORK_DIR "/wf_none.txt");
             wf = slurp_(WORK_DIR "/wf_none.txt", NULL);
             /* Two assemblies in the recording, and the panel picks
              * the one the asset names. */
-            ASSERT(find_line_(wf, "assembly 1 placed_box ", found,
+            ASSERT(find_line_(wf, "assembly 1 rich_box ", found,
                               sizeof found));
             ASSERT(find_line_(wf, "assembly 2 other_box ", found,
                               sizeof found));
@@ -1172,93 +1220,89 @@ int main(void)
             ASSERT(strstr(wf, "\nwireframe_vertex ") == NULL);
             free(wf);
 
-            /* The expected counts come from the mesh file, not from
-             * the panel: a panel drawing nothing would fail here. */
-            mesh = slurp_(WORK_DIR "/calibration_box.k26mesh", NULL);
-            for (q = mesh; *q; q++) {
-                if ((q == mesh || q[-1] == '\n') && q[0] == 'v' && q[1] == ' ')
-                    verts++;
-                if ((q == mesh || q[-1] == '\n') && q[0] == 'f' && q[1] == ' ')
-                    tris++;
-            }
-            ASSERT(verts > 0 && tris > 0);
+            /* The expected geometry comes from the mesh files and
+             * the assembly's own placements, walked here in the same
+             * order the assembly declares its components. A panel
+             * drawing nothing fails on the counts; a panel drawing
+             * the second mesh at the first placement, or without
+             * rebasing its indices, fails on the values. */
+            struct { const char *mesh; double at[3]; double q[4]; } comp[2];
+            uint32_t verts = 0, tris = 0, edges = 0;
+            uint32_t vbase = 0;
+            char *wf2;
+
+            comp[0].mesh = WORK_DIR "/calibration_box.k26mesh";
+            comp[0].at[0] = 0.25; comp[0].at[1] = -0.5; comp[0].at[2] = 0.75;
+            comp[0].q[0] = 0.70710678118654752; comp[0].q[1] = 0.0;
+            comp[0].q[2] = 0.70710678118654752; comp[0].q[3] = 0.0;
+            comp[1].mesh = WORK_DIR "/faces_first.k26mesh";
+            comp[1].at[0] = -6.0; comp[1].at[1] = 1.5; comp[1].at[2] = 0.5;
+            comp[1].q[0] = 1.0; comp[1].q[1] = 0.0;
+            comp[1].q[2] = 0.0; comp[1].q[3] = 0.0;
 
             run_viewer_("--dump wireframe --asset "
-                        WORK_DIR "/placed_box.k26asm "
+                        WORK_DIR "/rich_box.k26asm "
                         WORK_DIR "/view_asm.k26epi", WORK_DIR "/wf.txt");
-            wf = slurp_(WORK_DIR "/wf.txt", NULL);
-            ASSERT(find_line_(wf, "wireframe_digest match ", found,
+            wf2 = slurp_(WORK_DIR "/wf.txt", NULL);
+            ASSERT(find_line_(wf2, "wireframe_digest match ", found,
                               sizeof found));
-            ASSERT(find_line_(wf, "wireframe_body ", found, sizeof found));
+            ASSERT(find_line_(wf2, "wireframe_body ", found, sizeof found));
             ASSERT(strcmp(found, "wireframe_body 1 craft") == 0);
-            ASSERT(find_line_(wf, "wireframe_counts ", found, sizeof found));
-            {
-                char want[128];
-                snprintf(want, sizeof want, "wireframe_counts %u %u %u",
-                         verts, tris + verts - 2u, tris);
-                ASSERT(strcmp(found, want) == 0);
-            }
-            /* And the geometry itself, against the mesh's own
-             * numbers carried by the component's own placement,
-             * computed here. The component is rotated a quarter turn
-             * about its second axis and moved off the origin, so a
-             * reader that dropped either step produces different
-             * numbers: at the origin unrotated it could drop both and
-             * still be right. */
-            {
-                const char *line = mesh;
-                uint32_t i = 0;
-                const double qw = 0.70710678118654752;
-                const double qy = 0.70710678118654752;
-                const double at[3] = { 0.25, -0.5, 0.75 };
-                while (*line) {
+            ASSERT(find_line_(wf2, "wireframe_meshes ", found,
+                              sizeof found));
+            ASSERT(strcmp(found, "wireframe_meshes 2") == 0);
+
+            for (int ci = 0; ci < 2; ci++) {
+                char *mesh = slurp_(comp[ci].mesh, NULL);
+                const char *line;
+                uint32_t local = 0, ltris = 0;
+                uint32_t ea[64], eb[64], ne = 0;
+
+                for (line = mesh; *line; ) {
                     if (line[0] == 'v' && line[1] == ' ') {
-                        double v[3], t[3], w[3];
+                        double v[3], t[3], w[3], qw, qx, qy, qz;
                         char key[64], got_line[256], want[256];
+
                         ASSERT(sscanf(line + 2, "%lf %lf %lf", &v[0], &v[1],
                                       &v[2]) == 3);
-                        /* v + 2w(u x v) + 2u x (u x v), with u the
-                         * quaternion's vector part, written out here
-                         * rather than taken from a library. */
-                        t[0] = 2.0 * (qy * v[2] - 0.0);
-                        t[1] = 2.0 * (0.0 - 0.0);
-                        t[2] = 2.0 * (0.0 - qy * v[0]);
-                        w[0] = v[0] + qw * t[0] + (qy * t[2] - 0.0);
-                        w[1] = v[1] + qw * t[1] + (0.0 - 0.0);
-                        w[2] = v[2] + qw * t[2] + (0.0 - qy * t[0]);
-                        snprintf(key, sizeof key, "wireframe_vertex %u ", i);
-                        ASSERT(find_line_(wf, key, got_line,
+                        qw = comp[ci].q[0]; qx = comp[ci].q[1];
+                        qy = comp[ci].q[2]; qz = comp[ci].q[3];
+                        /* v + 2w(u x v) + 2u x (u x v), written out
+                         * here rather than taken from a library. */
+                        t[0] = 2.0 * (qy * v[2] - qz * v[1]);
+                        t[1] = 2.0 * (qz * v[0] - qx * v[2]);
+                        t[2] = 2.0 * (qx * v[1] - qy * v[0]);
+                        w[0] = v[0] + qw * t[0] + (qy * t[2] - qz * t[1]);
+                        w[1] = v[1] + qw * t[1] + (qz * t[0] - qx * t[2]);
+                        w[2] = v[2] + qw * t[2] + (qx * t[1] - qy * t[0]);
+                        snprintf(key, sizeof key, "wireframe_vertex %u ",
+                                 vbase + local);
+                        ASSERT(find_line_(wf2, key, got_line,
                                           sizeof got_line));
                         snprintf(want, sizeof want, "wireframe_vertex %u "
                                  "%016" PRIx64 " %016" PRIx64
-                                 " %016" PRIx64, i, bits_(w[0] + at[0]),
-                                 bits_(w[1] + at[1]), bits_(w[2] + at[2]));
+                                 " %016" PRIx64, vbase + local,
+                                 bits_(w[0] + comp[ci].at[0]),
+                                 bits_(w[1] + comp[ci].at[1]),
+                                 bits_(w[2] + comp[ci].at[2]));
                         ASSERT(strcmp(got_line, want) == 0);
-                        i++;
+                        local++;
                     }
                     while (*line && *line != '\n') line++;
                     if (*line) line++;
                 }
-                ASSERT(i == verts);
-            }
-            /* The edge set, not only its count: a reader that
-             * dropped one edge of every triangle can still produce
-             * the right count on a closed surface, because each edge
-             * belongs to two triangles and usually survives in the
-             * other. The expected set is derived here from the mesh's
-             * own faces. */
-            {
-                uint32_t ea[64], eb[64], ne = 0;
-                const char *line = mesh;
-                uint32_t seen = 0;
-                while (*line) {
+                /* The edge set of this mesh, rebased by the vertices
+                 * the meshes before it contributed. */
+                for (line = mesh; *line; ) {
                     if (line[0] == 'f' && line[1] == ' ') {
-                        unsigned f[3];
-                        ASSERT(sscanf(line + 2, "%u %u %u", &f[0], &f[1],
-                                      &f[2]) == 3);
+                        unsigned fv[3];
+                        ASSERT(sscanf(line + 2, "%u %u %u", &fv[0], &fv[1],
+                                      &fv[2]) == 3);
                         for (int c = 0; c < 3; c++) {
-                            uint32_t x = f[c] - 1u, y = f[(c + 1) % 3] - 1u;
-                            uint32_t lo = x < y ? x : y, hi = x < y ? y : x;
+                            uint32_t x = vbase + fv[c] - 1u;
+                            uint32_t y = vbase + fv[(c + 1) % 3] - 1u;
+                            uint32_t lo = x < y ? x : y;
+                            uint32_t hi = x < y ? y : x;
                             uint32_t j;
                             for (j = 0; j < ne; j++) {
                                 if (ea[j] == lo && eb[j] == hi)
@@ -1271,38 +1315,52 @@ int main(void)
                                 ne++;
                             }
                         }
+                        ltris++;
                     }
                     while (*line && *line != '\n') line++;
                     if (*line) line++;
                 }
-                ASSERT(ne == tris + verts - 2u);
                 for (uint32_t j = 0; j < ne; j++) {
                     char key[64], line2[128], want[128];
-                    snprintf(key, sizeof key, "wireframe_edge %u ", j);
-                    ASSERT(find_line_(wf, key, line2, sizeof line2));
+                    snprintf(key, sizeof key, "wireframe_edge %u ",
+                             edges + j);
+                    ASSERT(find_line_(wf2, key, line2, sizeof line2));
                     snprintf(want, sizeof want, "wireframe_edge %u %u %u",
-                             j, ea[j], eb[j]);
+                             edges + j, ea[j], eb[j]);
                     ASSERT(strcmp(line2, want) == 0);
-                    seen++;
                 }
-                ASSERT(seen == ne);
+                ASSERT(local > 0 && ltris > 0);
+                verts += local;
+                tris += ltris;
+                edges += ne;
+                vbase += local;
+                free(mesh);
             }
-            printf("gate 9: the wireframe's %u vertices and %u edges are the"
-                   " asset's own, and its digest is the recording's: OK\n",
-                   verts, tris + verts - 2u);
+            ASSERT(find_line_(wf2, "wireframe_counts ", found,
+                              sizeof found));
+            {
+                char want[128];
+                snprintf(want, sizeof want, "wireframe_counts %u %u %u",
+                         verts, edges, tris);
+                ASSERT(strcmp(found, want) == 0);
+            }
+            wf = wf2;
+            printf("gate 9: %u vertices and %u edges over two components and"
+                   " two meshes are the asset's own, each carried by its own"
+                   " placement, and the digest is the recording's: OK\n",
+                   verts, edges);
             free(wf);
-            free(mesh);
 
             /* An asset whose bytes are not the bytes that flew is
              * reported and not drawn. One byte of the mesh moves,
              * which the digest covers because the mesh's bytes are
              * inside it. */
             rl_run_or_die_("sed 's/^v -1.0 -0.5 -0.5/v -1.0 -0.5 -0.4/' "
-                           WORK_DIR "/calibration_box.k26mesh > "
+                           WORK_DIR "/faces_first.k26mesh > "
                            WORK_DIR "/spoiled.k26mesh");
-            rl_run_or_die_("sed 's/mesh calibration_box.k26mesh/"
+            rl_run_or_die_("sed 's/mesh faces_first.k26mesh/"
                            "mesh spoiled.k26mesh/' "
-                           WORK_DIR "/placed_box.k26asm > "
+                           WORK_DIR "/rich_box.k26asm > "
                            WORK_DIR "/spoiled.k26asm");
             run_viewer_("--dump wireframe --asset "
                         WORK_DIR "/spoiled.k26asm "
