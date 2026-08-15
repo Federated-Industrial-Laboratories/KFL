@@ -297,6 +297,20 @@ $(RL_HOTPATH_TEST): tests/test_rl_hotpath.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The imperfection layer through the stepping surface: the chain on the
+# step path, the coordinates its draws take, the paired truth channels
+# and the tag that resolves them.
+RL_SENSOR_TEST = tests/test_rl_sensor
+$(RL_SENSOR_TEST): tests/test_rl_sensor.c $(RL_GATE_DEPS) \
+                   ../libk26rl/include/k26rl_env.h \
+                   ../libk26sense/include/k26sense.h \
+                   ../libk26sense/libk26sense.a \
+                   ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -I../libk26sense/include \
+	    -I../libk26rng/include -o $@ $< \
+	    ../libk26rl/libk26rl.a ../libk26sense/libk26sense.a \
+	    ../libk26rng/libk26rng.a -ldl -lm
+
 # The relative observe form through the stepping surface: the six
 # channels, the axes they are resolved onto, and the rotating-frame
 # velocity that an inertial difference would get wrong.
@@ -339,7 +353,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -360,7 +374,8 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
 	          $(RL_BODIES_TEST) $(RL_ATT_TEST) \
 	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) \
-	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST); do \
+	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
+	          $(RL_SENSOR_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
