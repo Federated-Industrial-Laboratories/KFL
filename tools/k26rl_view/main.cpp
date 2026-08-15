@@ -35,14 +35,18 @@ static int usage_(const char *prog)
     fprintf(stderr,
         "usage: %s FILE\n"
         "       %s --dump PANEL [--episode K] [--steps A:B]\n"
-        "               [--artifact PATH] FILE\n"
+        "               [--artifact PATH] [--asset PATH] FILE\n"
         "\n"
-        "panels: meta timeline reward obs action traj scrub world resim all\n"
+        "panels: meta timeline reward obs action traj scrub world\n"
+        "        attitude overlay wireframe resim all\n"
         "\n"
         "  --episode K     restrict to the K-th indexed episode\n"
         "  --steps A:B     restrict to steps [A, B) of each episode\n"
         "  --artifact PATH the compiled environment, enabling\n"
-        "                  re-simulation and its comparison verdict\n",
+        "                  re-simulation, the world frame and the\n"
+        "                  attitude panel\n"
+        "  --asset PATH    the vehicle assembly, enabling the wireframe\n"
+        "                  once its digest matches the one recorded\n",
         prog, prog);
     return 2;
 }
@@ -75,6 +79,10 @@ int main(int argc, char **argv)
             opt.step_lo = (uint32_t)strtoul(argv[i + 1], 0, 10);
             opt.step_hi = (uint32_t)strtoul(colon + 1, 0, 10);
             i++;
+        } else if (strcmp(a, "--asset") == 0) {
+            if (i + 1 >= argc)
+                return usage_(argv[0]);
+            opt.asset = argv[++i];
         } else if (strcmp(a, "--artifact") == 0) {
             if (i + 1 >= argc)
                 return usage_(argv[0]);
@@ -100,5 +108,5 @@ int main(int argc, char **argv)
 
     if (headless)
         return k26rl_view::dump(stdout, model, opt);
-    return k26rl_view::run_gui(model, opt.artifact);
+    return k26rl_view::run_gui(model, opt.artifact, opt.asset);
 }

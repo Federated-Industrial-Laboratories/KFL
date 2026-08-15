@@ -23,6 +23,8 @@
  */
 #include "gui.h"
 
+#include "asset.h"
+
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -48,6 +50,9 @@ namespace {
 struct Ui {
     Model *model;
     std::string artifact;
+    std::string asset_path;
+    Asset asset;
+    bool asset_tried;
     uint32_t episode_index;
     uint32_t step;
     std::vector<char> channel_on;   /* one flag per observation channel */
@@ -219,6 +224,27 @@ void panel_obs_(Ui &ui, const Episode &ep)
             if (ep.step_count)
                 ImPlot::PlotLine(sp.channels[c].name.c_str(), &xs[0], &ys[0],
                                  (int)ep.step_count);
+            /* A measured channel is drawn with the truth beside it
+             * when the file says it has one. The pairing is the
+             * file's own statement rather than a name this viewer
+             * matched, which is what the source tag exists for. */
+            if (sp.channels[c].has_source &&
+                sp.channels[c].source == K26RL_OBS_SOURCE_MEASURED &&
+                sp.channels[c].pair != K26RL_OBS_PAIR_NONE) {
+                uint32_t t = sp.channels[c].pair;
+                const char *tname = "truth";
+                for (size_t d = 0; d < sp.channels.size(); d++) {
+                    if (sp.channels[d].index == t)
+                        tname = sp.channels[d].name.c_str();
+                }
+                for (uint32_t i = 0; i < ep.step_count; i++) {
+                    size_t k = (size_t)i * sp.obs_total + t;
+                    ys[i] = k < ep.obs.size() ? ep.obs[k] : 0.0;
+                }
+                if (ep.step_count)
+                    ImPlot::PlotLine(tname, &xs[0], &ys[0],
+                                     (int)ep.step_count);
+            }
         }
         ImPlot::EndPlot();
     }
@@ -417,6 +443,131 @@ void panel_world_(Ui &ui, const Episode &ep)
     ImGui::End();
 }
 
+/* Orientation and body rate, which the file records only if the
+ * programme declared an attitude observe, and which the artifact's
+ * getter gives for every body whatever the programme declared. Like
+ * the world frame this panel exists once a rebuild has run. */
+void panel_attitude_(Ui &ui, const Episode &ep)
+{
+    (void)ep;
+    ImGui::Begin("Attitude");
+    if (ui.artifact.empty()) {
+        ImGui::TextWrapped("supply an artifact: a body's orientation is not "
+                           "an observation channel unless the programme "
+                           "declared one");
+        ImGui::End();
+        return;
+    }
+    if (!ui.resim_done || !ui.resim.ran || !ui.resim.has_attitudes) {
+        ImGui::TextWrapped("run the re-simulation panel's reconstruction to "
+                           "populate this view");
+        ImGui::End();
+        return;
+    }
+    {
+        const std::vector<std::string> &names = ui.model->spec().body_names;
+        uint32_t n = ui.resim.steps_compared;
+        std::vector<double> xs(n), ys(n);
+        static const char *const comp[7] = { "w", "x", "y", "z",
+                                             "wx", "wy", "wz" };
+        for (uint32_t i = 0; i < n; i++)
+            xs[i] = (double)i;
+        for (uint32_t b = 0; b < ui.resim.body_count; b++) {
+            char title[80];
+            snprintf(title, sizeof title, "%s: quaternion and body rate",
+                     b < names.size() ? names[b].c_str() : "body");
+            if (ImPlot::BeginPlot(title, ImVec2(-1, 200))) {
+                ImPlot::SetupAxes("step", "value");
+                for (int c = 0; c < 7; c++) {
+                    for (uint32_t i = 0; i < n; i++) {
+                        size_t base = ((size_t)i * ui.resim.body_count + b) * 7;
+                        ys[i] = base + 7 <= ui.resim.attitudes.size()
+                                ? ui.resim.attitudes[base + c] : 0.0;
+                    }
+                    if (n)
+                        ImPlot::PlotLine(comp[c], &xs[0], &ys[0], (int)n);
+                }
+                ImPlot::EndPlot();
+            }
+        }
+    }
+    ImGui::End();
+}
+
+/* The craft's own wireframe, drawn only when the asset on disk
+ * digests to what the recording says produced it. A mismatch is
+ * reported and nothing is drawn: a wireframe beside a recording is a
+ * claim about what flew. */
+void panel_wireframe_(Ui &ui, const Episode &ep)
+{
+    (void)ep;
+    const Spec &sp = ui.model->spec();
+
+    ImGui::Begin("Wireframe");
+    if (ui.asset_path.empty()) {
+        ImGui::TextWrapped("supply an assembly with --asset; the recording "
+                           "carries its digest but not its geometry");
+        ImGui::End();
+        return;
+    }
+    if (!ui.asset_tried) {
+        ui.asset = asset_load(ui.asset_path);
+        ui.asset_tried = true;
+    }
+    if (!ui.asset.loaded) {
+        ImGui::TextWrapped("%s", ui.asset.error.c_str());
+        ImGui::End();
+        return;
+    }
+    {
+        const AssemblyRef *match = 0;
+        for (size_t i = 0; i < sp.assemblies.size(); i++) {
+            if (sp.assemblies[i].name == ui.asset.name)
+                match = &sp.assemblies[i];
+        }
+        if (!match) {
+            ImGui::TextWrapped("no body in this recording binds an assembly "
+                               "named %s", ui.asset.name.c_str());
+            ImGui::End();
+            return;
+        }
+        if (!match->has_digest ||
+            memcmp(match->digest, ui.asset.digest, K26RL_SHA256_BYTES) != 0) {
+            ImGui::TextWrapped("this asset is not the one that flew: the "
+                               "recording carries digest %s and the file on "
+                               "disk digests to %s",
+                               match->has_digest
+                                   ? digest_hex(match->digest).c_str()
+                                   : "none",
+                               digest_hex(ui.asset.digest).c_str());
+            ImGui::End();
+            return;
+        }
+        ImGui::Text("%s, %u vertices and %u edges over %u triangles",
+                    ui.asset.name.c_str(), ui.asset.mesh_vertices,
+                    (unsigned)ui.asset.edges.size(), ui.asset.mesh_triangles);
+        if (ImPlot::BeginPlot("wireframe, body frame", ImVec2(-1, 320),
+                              ImPlotFlags_Equal)) {
+            ImPlot::SetupAxes("x (m)", "y (m)");
+            for (size_t e = 0; e < ui.asset.edges.size(); e++) {
+                double lx[2], ly[2];
+                size_t a = (size_t)ui.asset.edges[e].a * 3;
+                size_t b = (size_t)ui.asset.edges[e].b * 3;
+                if (a + 2 >= ui.asset.vertices.size() ||
+                    b + 2 >= ui.asset.vertices.size())
+                    continue;
+                lx[0] = ui.asset.vertices[a];
+                ly[0] = ui.asset.vertices[a + 1];
+                lx[1] = ui.asset.vertices[b];
+                ly[1] = ui.asset.vertices[b + 1];
+                ImPlot::PlotLine("##edge", lx, ly, 2);
+            }
+            ImPlot::EndPlot();
+        }
+    }
+    ImGui::End();
+}
+
 void panel_meta_(Ui &ui, const Episode &ep)
 {
     const FileInfo &fi = ui.model->info();
@@ -519,7 +670,8 @@ void panel_resim_(Ui &ui, const Episode &ep)
 
 }  /* namespace */
 
-int run_gui(Model &model, const std::string &artifact)
+int run_gui(Model &model, const std::string &artifact,
+            const std::string &asset)
 {
     Ui ui;
     GLFWwindow *win;
@@ -532,6 +684,8 @@ int run_gui(Model &model, const std::string &artifact)
 
     ui.model = &model;
     ui.artifact = artifact;
+    ui.asset_path = asset;
+    ui.asset_tried = false;
     ui.episode_index = 0;
     ui.step = 0;
     ui.traj_pick = 0;
@@ -585,6 +739,8 @@ int run_gui(Model &model, const std::string &artifact)
             panel_action_(ui, *ep);
             panel_traj_(ui, *ep);
             panel_world_(ui, *ep);
+            panel_attitude_(ui, *ep);
+            panel_wireframe_(ui, *ep);
             panel_meta_(ui, *ep);
             panel_resim_(ui, *ep);
         } else {

@@ -41,6 +41,9 @@ struct Surface {
     /* Added at ABI 1.2 and probed rather than required, so an older
      * artifact still re-simulates; only the world frame goes. */
     int32_t (*bodies)(const K26RlEnv *, uint32_t, double *, uint32_t);
+    /* Added at ABI 1.4, probed on the same terms: an artifact
+     * without it re-simulates and loses the attitude panel alone. */
+    int32_t (*attitudes)(const K26RlEnv *, double *, uint32_t);
 };
 
 bool resolve_(void *so, const char *name, void *slot, std::string *err)
@@ -96,6 +99,9 @@ ResimResult resimulate(const Model &model, const Episode &ep,
         void *p = dlsym(so, "k26rl_env_bodies");
         if (p)
             memcpy(&s.bodies, &p, sizeof p);
+        p = dlsym(so, "k26rl_env_attitudes");
+        if (p)
+            memcpy(&s.attitudes, &p, sizeof p);
     }
 
     r.abi_version = s.abi_version();
@@ -164,6 +170,21 @@ ResimResult resimulate(const Model &model, const Episode &ep,
             r.has_bodies = true;
         }
     }
+    /* The attitude getter sizes itself the same way, and its body
+     * count is the same body count: a capacity of zero returns the
+     * requirement rather than writing anything. */
+    std::vector<double> att_buf;
+    if (s.attitudes) {
+        int32_t need = s.attitudes(env, 0, 0);
+        if (need > 0 && n && (uint32_t)need % (n * 7u) == 0) {
+            att_buf.resize((size_t)need);
+            uint32_t count = (uint32_t)need / (n * 7u);
+            if (!r.has_bodies)
+                r.body_count = count;
+            if (count == r.body_count)
+                r.has_attitudes = true;
+        }
+    }
 
     r.ran = true;
     r.equal = true;
@@ -211,6 +232,15 @@ ResimResult resimulate(const Model &model, const Episode &ep,
             size_t base = (size_t)ep.env * r.body_count * 6;
             r.bodies.insert(r.bodies.end(), body_buf.begin() + base,
                             body_buf.begin() + base + r.body_count * 6);
+        }
+        /* The attitudes, at that same instant and for the same
+         * bodies, so a panel drawing an orientation beside a position
+         * is drawing one moment. */
+        if (r.has_attitudes &&
+            s.attitudes(env, &att_buf[0], (uint32_t)att_buf.size()) > 0) {
+            size_t base = (size_t)ep.env * r.body_count * 7;
+            r.attitudes.insert(r.attitudes.end(), att_buf.begin() + base,
+                               att_buf.begin() + base + r.body_count * 7);
         }
         r.steps_compared++;
 

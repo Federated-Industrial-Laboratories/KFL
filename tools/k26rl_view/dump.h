@@ -19,11 +19,14 @@ namespace k26rl_view {
 
 struct DumpOptions {
     std::string panel;                 /* meta, timeline, reward, obs,
-                                        * action, traj, scrub, resim, all */
+                                        * action, traj, world, attitude,
+                                        * overlay, wireframe, scrub,
+                                        * resim, all */
     uint32_t episode = UINT32_MAX;     /* all indexed episodes by default */
     uint32_t step_lo = 0;
     uint32_t step_hi = UINT32_MAX;     /* to the end of the episode */
     std::string artifact;              /* enables the re-simulation panel */
+    std::string asset;                 /* enables the wireframe panel */
 };
 
 /* The trajectory panel's standing label, shared with the interface so

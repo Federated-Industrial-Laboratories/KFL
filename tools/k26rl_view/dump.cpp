@@ -15,6 +15,8 @@
  */
 #include "dump.h"
 
+#include "asset.h"
+
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
@@ -397,6 +399,182 @@ static void dump_world(FILE *f, Model &m, const DumpOptions &o)
     }
 }
 
+/* The attitude panel. Like the world frame it exists only with an
+ * artifact: an episode file records observation channels, and a
+ * body's orientation is not one of them unless the programme happened
+ * to declare an attitude observe. The values here are the artifact's
+ * own getter, read as the rebuild runs. */
+static void dump_attitude(FILE *f, Model &m, const DumpOptions &o)
+{
+    if (o.artifact.empty()) {
+        fprintf(f, "attitude unavailable no artifact supplied\n");
+        return;
+    }
+    for (size_t k = 0; k < m.spec().body_names.size(); k++)
+        fprintf(f, "body %u %s\n", (unsigned)k,
+                m.spec().body_names[k].c_str());
+    for (uint32_t k = 0; k < m.info().episode_count; k++) {
+        std::string err;
+        const Episode *e;
+
+        if (o.episode != UINT32_MAX && k != o.episode)
+            continue;
+        e = m.load(k, &err);
+        if (!e)
+            continue;
+        dump_episode_header(f, k, *e);
+        ResimResult r = resimulate(m, *e, o.artifact);
+        if (!r.ran || !r.has_attitudes) {
+            fprintf(f, "attitude_unavailable %u %s\n", k,
+                    r.ran ? "artifact publishes no attitude getter"
+                          : r.message.c_str());
+            continue;
+        }
+        fprintf(f, "attitude_bodies %u %u\n", k, r.body_count);
+        for (uint32_t i = 0; i < r.steps_compared; i++) {
+            for (uint32_t b = 0; b < r.body_count; b++) {
+                size_t base = ((size_t)i * r.body_count + b) * 7;
+                if (base + 7 > r.attitudes.size())
+                    break;
+                fprintf(f, "attitude %u %u %u", k, i, b);
+                for (int c = 0; c < 7; c++) {
+                    fprintf(f, " ");
+                    hx(f, r.attitudes[base + c]);
+                }
+                fprintf(f, "\n");
+            }
+        }
+    }
+}
+
+/* The ground truth beside the measurement. The pairing is the file's
+ * own statement, read from the channel-source tag: which channels a
+ * sensor corrupted, and which channel holds what the corruption was
+ * applied to. Nothing here parses a name to find a pair. */
+static void dump_overlay(FILE *f, Model &m, const DumpOptions &o)
+{
+    const Spec &sp = m.spec();
+    std::vector<std::pair<uint32_t, uint32_t> > pairs = m.overlay_pairs();
+
+    if (pairs.empty()) {
+        fprintf(f, "overlay_none no paired channels in this file\n");
+        return;
+    }
+    for (size_t i = 0; i < pairs.size(); i++) {
+        const char *mn = "?", *tn = "?";
+        for (size_t c = 0; c < sp.channels.size(); c++) {
+            if (sp.channels[c].index == pairs[i].first)
+                mn = sp.channels[c].name.c_str();
+            if (sp.channels[c].index == pairs[i].second)
+                tn = sp.channels[c].name.c_str();
+        }
+        fprintf(f, "overlay_pair %u %u %s %s\n", pairs[i].first,
+                pairs[i].second, mn, tn);
+    }
+    for (uint32_t k = 0; k < m.info().episode_count; k++) {
+        std::string err;
+        const Episode *e;
+        uint32_t lo, hi;
+
+        if (o.episode != UINT32_MAX && k != o.episode)
+            continue;
+        e = m.load(k, &err);
+        if (!e)
+            continue;
+        dump_episode_header(f, k, *e);
+        range_for(*e, o, &lo, &hi);
+        for (uint32_t i = lo; i < hi; i++) {
+            for (size_t p = 0; p < pairs.size(); p++) {
+                size_t base = (size_t)i * sp.obs_total;
+                if (base + sp.obs_total > e->obs.size())
+                    break;
+                fprintf(f, "overlay %u %u %u ", k, i, (unsigned)p);
+                hx(f, e->obs[base + pairs[p].first]);
+                fprintf(f, " ");
+                hx(f, e->obs[base + pairs[p].second]);
+                fprintf(f, "\n");
+            }
+        }
+    }
+}
+
+/* The craft's own wireframe, and the check that makes drawing it
+ * honest. The artifact carries the digest of the asset bytes it was
+ * built from; this recomputes that digest over the asset on disk and
+ * refuses to draw a craft whose bytes differ, because a wireframe
+ * beside a recording is a claim about what flew. */
+static void dump_wireframe(FILE *f, Model &m, const DumpOptions &o)
+{
+    const Spec &sp = m.spec();
+
+    for (size_t i = 0; i < sp.assemblies.size(); i++) {
+        const AssemblyRef &a = sp.assemblies[i];
+        fprintf(f, "assembly %u %s %s\n", a.body,
+                a.name.empty() ? "?" : a.name.c_str(),
+                a.has_digest ? digest_hex(a.digest).c_str() : "nodigest");
+    }
+    if (sp.assemblies.empty())
+        fprintf(f, "assembly_none no body in this file binds an assembly\n");
+    if (o.asset.empty()) {
+        fprintf(f, "wireframe unavailable no asset supplied\n");
+        return;
+    }
+
+    Asset as = asset_load(o.asset);
+    if (!as.loaded) {
+        fprintf(f, "wireframe_error %s\n", as.error.c_str());
+        return;
+    }
+    fprintf(f, "wireframe_asset %s %s\n", as.name.c_str(),
+            digest_hex(as.digest).c_str());
+    fprintf(f, "wireframe_meshes %u\n", (unsigned)as.meshes.size());
+
+    /* Which body this asset belongs to is the asset's own name
+     * against the names the file publishes, not the order the user
+     * happened to pass paths in. */
+    const AssemblyRef *match = 0;
+    for (size_t i = 0; i < sp.assemblies.size(); i++) {
+        if (sp.assemblies[i].name == as.name)
+            match = &sp.assemblies[i];
+    }
+    if (!match) {
+        fprintf(f, "wireframe_digest unmatched no body binds an assembly "
+                   "named %s\n", as.name.c_str());
+        return;
+    }
+    fprintf(f, "wireframe_body %u %s\n", match->body,
+            match->body < sp.body_names.size()
+                ? sp.body_names[match->body].c_str() : "?");
+    if (!match->has_digest) {
+        fprintf(f, "wireframe_digest absent the file carries no digest for "
+                   "this assembly\n");
+        return;
+    }
+    if (memcmp(match->digest, as.digest, K26RL_SHA256_BYTES) != 0) {
+        /* Reported, and not drawn. The bytes on disk are not the
+         * bytes that flew, and a picture of them would be a picture
+         * of a different craft. */
+        fprintf(f, "wireframe_digest mismatch %s\n",
+                digest_hex(match->digest).c_str());
+        return;
+    }
+    fprintf(f, "wireframe_digest match %s\n",
+            digest_hex(match->digest).c_str());
+    fprintf(f, "wireframe_counts %u %u %u\n", as.mesh_vertices,
+            (unsigned)as.edges.size(), as.mesh_triangles);
+    for (size_t i = 0; i * 3 + 2 < as.vertices.size(); i++) {
+        fprintf(f, "wireframe_vertex %u", (unsigned)i);
+        for (int c = 0; c < 3; c++) {
+            fprintf(f, " ");
+            hx(f, as.vertices[i * 3 + c]);
+        }
+        fprintf(f, "\n");
+    }
+    for (size_t i = 0; i < as.edges.size(); i++)
+        fprintf(f, "wireframe_edge %u %u %u\n", (unsigned)i, as.edges[i].a,
+                as.edges[i].b);
+}
+
 static void dump_resim(FILE *f, Model &m, const DumpOptions &o)
 {
     const uint32_t obs_total = m.spec().obs_total;
@@ -476,11 +654,18 @@ int dump(FILE *f, Model &m, const DumpOptions &o)
         dump_scrub(f, m, o);
     if (p == "world" || p == "all")
         dump_world(f, m, o);
+    if (p == "attitude" || p == "all")
+        dump_attitude(f, m, o);
+    if (p == "overlay" || p == "all")
+        dump_overlay(f, m, o);
+    if (p == "wireframe" || p == "all")
+        dump_wireframe(f, m, o);
     if (p == "resim" || p == "all")
         dump_resim(f, m, o);
     if (p != "meta" && p != "timeline" && p != "reward" && p != "obs" &&
         p != "action" && p != "traj" && p != "scrub" && p != "resim" &&
-        p != "world" && p != "all") {
+        p != "world" && p != "attitude" && p != "overlay" &&
+        p != "wireframe" && p != "all") {
         fprintf(stderr, "k26rl_view: unknown panel `%s`\n", p.c_str());
         return 2;
     }

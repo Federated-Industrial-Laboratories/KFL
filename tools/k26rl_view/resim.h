@@ -49,6 +49,13 @@ struct ResimResult {
     std::vector<double> bodies;
     uint32_t body_count = 0;
     bool has_bodies = false;
+    /* Attitudes, steps_compared * body_count * 7, from the
+     * artifact's attitude getter: the body-to-world quaternion's w,
+     * x, y and z, then the body-frame angular velocity. Empty when
+     * the artifact predates that symbol, which a viewer reports
+     * rather than hides, exactly as it does for the bodies above. */
+    std::vector<double> attitudes;
+    bool has_attitudes = false;
 };
 
 /* Load an artifact and rebuild one episode of a model's file.
