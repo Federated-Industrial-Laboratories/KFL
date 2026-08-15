@@ -295,11 +295,25 @@ $(RL_ATT_TEST): tests/test_rl_attitude.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The viewer's own gate drives the viewer binary, so the binary is
+# built here before the gate runs rather than left to whatever a
+# previous build put there: a gate run against a stale viewer measures
+# the viewer that was, which is the shape of a green run that checked
+# nothing. The build is conditional on the interface development
+# packages exactly as the root target's is, and the gate skips on its
+# own when the binary is absent, so a tree without them still tests
+# green.
 RL_VIEW_TEST = tests/test_rl_view
+.PHONY: viewer
+viewer:
+	@if pkg-config --exists imgui glfw3 2>/dev/null; then \
+	    $(MAKE) -s -C ../tools/k26rl_view; \
+	fi
+
 $(RL_VIEW_TEST): tests/test_rl_view.c $(RL_GATE_DEPS) \
                  ../libk26rl/include/k26rl_env.h \
                  ../libk26rl/include/k26rl_episode.h \
-                 ../libk26rl/libk26rl.a
+                 ../libk26rl/libk26rl.a viewer
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 

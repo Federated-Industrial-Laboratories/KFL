@@ -87,6 +87,59 @@ static const char *const VIEW_KFL =
 
 enum { VIEW_OBS = 5, VIEW_ACT = 2 };
 
+/* The second fixture, for the panels that consume what the physics
+ * work added: a body binding an assembly, so it has an attitude and a
+ * wireframe to draw; a sensor with the truth published beside the
+ * measurement, so the overlay has pairs to draw; and an angular rate,
+ * so the attitude is not the identity forever.
+ *
+ * The noise is deliberately large against the observed range. A
+ * sensor that changed nothing would let an overlay panel plot the
+ * measured channel twice and pass, and the arm below asserts the two
+ * halves differ for exactly that reason.
+ *
+ * The assembly it binds is written by the gate rather than taken from
+ * the shipped assets, and its component is placed away from the body
+ * origin AND rotated. A component at the origin would let a reader
+ * that ignored the placement altogether produce the right wireframe,
+ * which is a fixture multiplying a wrong answer by zero. */
+static const char *const VIEW_ASM_KFL =
+    "form RL_VIEW_ASM\n"
+    "fn world view_asm_world\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft assembly=\"placed_box.k26asm\" parent=earth"
+    " pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0"
+    " quat_w=1.0 omega_x=0.01 omega_y=0.02 omega_z=0.03\n"
+    /* A second body binding a DIFFERENT assembly. Without it the
+     * wireframe arm cannot tell a viewer that matches the asset's
+     * name against the recording from one that takes whichever
+     * assembly it happens to reach last, there being only one. */
+    "    astro_body probe assembly=\"other_box.k26asm\" parent=earth"
+    " pos_x=7.2e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7440.0 vel_z=0.0"
+    " quat_w=1.0 omega_x=0.0 omega_y=0.0 omega_z=0.005\n"
+    "    episode\n"
+    "        control_dt 0.1\n"
+    "        horizon 6\n"
+    "        terminated when episode.steps > 5\n"
+    "        reset craft.pos_x uniform(6.9e6, 7.1e6)\n"
+    "    end\n"
+    "    action push box -1.0 1.0 default 0.25\n"
+    "    sensor nav\n"
+    "        noise normal 0.0 500.0\n"
+    "        latency 1\n"
+    "    end\n"
+    "    on_step\n"
+    "        craft.vel_x = craft.vel_x + push * 0.01\n"
+    "    end\n"
+    "    observe craft from earth mode=geometric through nav with truth"
+    " as trk\n"
+    "    observe attitude of craft as att\n"
+    "    objective\n"
+    "        reward trk_range / 7.0e6\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
 /* ---- Running the viewer -------------------------------------------- */
 
 static void run_viewer_(const char *args, const char *out_path)
@@ -847,7 +900,425 @@ int main(void)
                " spec: OK\n", lines);
     }
 
+    /* ---- Gate 9: the panels the physics work made possible --------- *
+     *
+     * Three panels, and for each the fixture that would make its arm
+     * vacuous, ruled out.
+     *
+     *   An attitude panel over bodies that never turn would pass while
+     *   printing the identity quaternion forever, so the fixture spins
+     *   its craft on all three axes and the arm asserts the values
+     *   move between steps and differ between the two bodies before it
+     *   compares any of them.
+     *
+     *   An overlay panel over a sensor that changed nothing would pass
+     *   while plotting the measured channel twice, so the fixture's
+     *   noise is large against the observed range and the arm asserts
+     *   the two halves of every pair differ.
+     *
+     *   A wireframe arm that compared the panel against the panel
+     *   would pass for any geometry, so the expected vertex count and
+     *   the expected vertex values are read here out of the mesh file
+     *   itself, and the digest the panel checks against is the one the
+     *   artifact recorded rather than the one the asset computes.
+     */
+    {
+        char *got;
+        char found[512];
+        void *so;
+        RlSurface vs;
+        K26RlEnv *env = NULL;
+        K26RlEpisodeReader *rd2 = NULL;
+        K26RlEpisodeInfo i2;
+        K26RlEpisodeData e0;
+        uint32_t ord, envi, epi;
+        uint64_t seed = 0;
+        int32_t await;
+        double *atts, *act;
+        uint32_t na, lines = 0, pick;
+        char epsel[256];
+        uint8_t blob[16384];
+        int32_t blen;
+
+        /* The assets travel to the work directory so the fixture can
+         * name them beside itself, and so the mismatch arm below has
+         * a copy of its own to spoil. */
+        rl_run_or_die_("cp examples/assets/calibration_box.k26mesh "
+                       WORK_DIR "/");
+        rl_write_file_(WORK_DIR "/placed_box.k26asm",
+            "assembly placed_box\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"gate fixture, not a craft\" computed\n"
+            "    component hull\n"
+            "        mass 1000.0\n"
+            "        at 0.25 -0.5 0.75\n"
+            "        rotate 0.70710678118654752 0.0 0.70710678118654752"
+            " 0.0\n"
+            "        mesh calibration_box.k26mesh\n"
+            "    end\n"
+            "end\n");
+        rl_write_file_(WORK_DIR "/other_box.k26asm",
+            "assembly other_box\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"gate fixture, not a craft\" computed\n"
+            "    component hull\n"
+            "        mass 500.0\n"
+            "        at -1.5 0.25 0.0\n"
+            "        mesh calibration_box.k26mesh\n"
+            "    end\n"
+            "end\n");
+        rl_write_file_(WORK_DIR "/view_asm.kfl", VIEW_ASM_KFL);
+        rl_compile_(WORK_DIR "/view_asm.kfl", WORK_DIR "/view_asm", WORK_DIR);
+        /* Three environments, so the episode this arm reads is not
+         * environment 0. A single-environment file would let a panel
+         * that read the wrong environment's slice pass, the two
+         * slices being the same one. */
+        rl_run_or_die_(WORK_DIR "/view_asm --envs 3 --episodes 2 --seed 9 "
+                       "--out " WORK_DIR "/view_asm.k26epi");
+
+        /* -- the attitude panel -- */
+        run_viewer_("--dump attitude " WORK_DIR "/view_asm.k26epi",
+                    WORK_DIR "/att_none.txt");
+        got = slurp_(WORK_DIR "/att_none.txt", NULL);
+        ASSERT(find_line_(got, "attitude unavailable ", found, sizeof found));
+        ASSERT(strstr(got, "\nattitude 0 ") == NULL);
+        free(got);
+
+        ASSERT(k26rl_episode_reader_open(WORK_DIR "/view_asm.k26epi", &rd2) ==
+               K26RL_OK);
+        ASSERT(k26rl_episode_reader_info(rd2, &i2) == K26RL_OK);
+        /* The first indexed episode that did not come from
+         * environment 0, and the arm asserts it found one rather than
+         * assuming: without that the environment slice below is
+         * untested. */
+        pick = UINT32_MAX;
+        for (uint32_t k = 0; k < i2.episode_count; k++) {
+            ASSERT(k26rl_episode_reader_at(rd2, k, &ord, &envi, &epi) ==
+                   K26RL_OK);
+            if (envi != 0) { pick = k; break; }
+        }
+        ASSERT(pick != UINT32_MAX);
+        ASSERT(envi != 0);
+        printf("gate 9: the attitude arm reads episode %u, which is"
+               " environment %u and not environment 0: OK\n", pick, envi);
+        ASSERT(k26rl_episode_reader_seed(rd2, ord, &seed) == K26RL_OK);
+        ASSERT(k26rl_episode_read(rd2, ord, envi, epi, &e0) == K26RL_OK);
+
+        snprintf(epsel, sizeof epsel, "--dump attitude --episode %u"
+                 " --artifact " WORK_DIR "/view_asm.rlenv.so "
+                 WORK_DIR "/view_asm.k26epi", pick);
+        run_viewer_(epsel, WORK_DIR "/att.txt");
+        got = slurp_(WORK_DIR "/att.txt", NULL);
+        ASSERT(find_line_(got, "body 1 ", found, sizeof found));
+        ASSERT(strcmp(found, "body 1 craft") == 0);
+
+        so = rl_dlopen_(WORK_DIR "/view_asm.rlenv.so");
+        rl_resolve_surface_(so, &vs);
+        ASSERT(vs.create(seed, i2.n_envs, &env) == K26RL_OK);
+        for (uint32_t k = 0; k < epi; k++)
+            ASSERT(vs.reset(env) == K26RL_OK);
+        await = vs.attitudes(env, NULL, 0);
+        ASSERT(await > 0);
+        na = (uint32_t)await / (i2.n_envs * 7u);
+        atts = malloc(sizeof(double) * (size_t)await);
+        act = malloc(sizeof(double) * (size_t)i2.n_envs * i2.act_total);
+        ASSERT(atts && act);
+
+        {
+            /* The fixture has to be one an identity panel would fail:
+             * two bodies whose attitudes differ, and a craft whose
+             * own attitude moves from step to step. */
+            double first[7], later[7], earth0[7];
+            for (uint32_t t = 0; t < 3; t++) {
+                for (uint32_t j = 0; j < i2.n_envs; j++) {
+                    memcpy(act + (size_t)j * i2.act_total,
+                           e0.act + (size_t)t * i2.act_total,
+                           sizeof(double) * i2.act_total);
+                }
+                ASSERT(vs.step(env, act) == K26RL_OK);
+                ASSERT(vs.attitudes(env, atts, (uint32_t)await) == await);
+                if (t == 0) {
+                    memcpy(first, atts + ((size_t)envi * na + 1) * 7,
+                           sizeof first);
+                    memcpy(earth0, atts + ((size_t)envi * na + 0) * 7,
+                           sizeof earth0);
+                }
+                if (t == 2)
+                    memcpy(later, atts + ((size_t)envi * na + 1) * 7,
+                           sizeof later);
+            }
+            ASSERT(memcmp(first, later, sizeof first) != 0);
+            ASSERT(memcmp(first, earth0, sizeof first) != 0);
+            printf("gate 9: the fixture's craft turns (quaternion moves "
+                   "between steps) and differs from its parent: OK\n");
+        }
+
+        /* Re-create and drive from the top, so the comparison below
+         * runs the same rebuild the viewer runs. */
+        vs.destroy(env);
+        ASSERT(vs.create(seed, i2.n_envs, &env) == K26RL_OK);
+        for (uint32_t k = 0; k < epi; k++)
+            ASSERT(vs.reset(env) == K26RL_OK);
+        for (uint32_t t = 0; t < e0.step_count; t++) {
+            for (uint32_t j = 0; j < i2.n_envs; j++) {
+                memcpy(act + (size_t)j * i2.act_total,
+                       e0.act + (size_t)t * i2.act_total,
+                       sizeof(double) * i2.act_total);
+            }
+            ASSERT(vs.step(env, act) == K26RL_OK);
+            ASSERT(vs.attitudes(env, atts, (uint32_t)await) == await);
+            for (uint32_t b = 0; b < na; b++) {
+                char key[64], line[512], want[512];
+                const double *src = atts + ((size_t)envi * na + b) * 7;
+                int off;
+                snprintf(key, sizeof key, "attitude %u %u %u ", pick,
+                         t, b);
+                ASSERT(find_line_(got, key, line, sizeof line));
+                off = snprintf(want, sizeof want, "attitude %u %u %u",
+                               pick, t, b);
+                for (int c = 0; c < 7; c++) {
+                    off += snprintf(want + off, sizeof want - (size_t)off,
+                                    " %016" PRIx64, bits_(src[c]));
+                }
+                ASSERT(strcmp(line, want) == 0);
+                lines++;
+            }
+        }
+        ASSERT(lines == e0.step_count * na);
+        printf("gate 9: %u attitude rows equal the artifact's own attitude"
+               " getter bitwise: OK\n", lines);
+
+        /* -- the overlay -- */
+        {
+            char *ov;
+            uint32_t pairs = 0, drawn = 0;
+            uint32_t off = 0;
+
+            ASSERT((blen = vs.spec(env, blob, sizeof blob)) > 0);
+            snprintf(epsel, sizeof epsel, "--dump overlay --episode %u "
+                     WORK_DIR "/view_asm.k26epi", pick);
+            run_viewer_(epsel, WORK_DIR "/ov.txt");
+            ov = slurp_(WORK_DIR "/ov.txt", NULL);
+            /* Every pair the source tag declares is a pair the panel
+             * draws, read out of the spec here rather than out of the
+             * panel's own output. */
+            while (off + 6 <= (uint32_t)blen) {
+                uint16_t tag = rl_get_u16_(blob + off);
+                uint32_t l = rl_get_u32_(blob + off + 2);
+                const uint8_t *v = blob + off + 6;
+                if (tag == K26RL_TAG_OBS_CHANNEL_SOURCE && l >= 10 &&
+                    rl_get_u16_(v + 4) == K26RL_OBS_SOURCE_MEASURED &&
+                    rl_get_u32_(v + 6) != K26RL_OBS_PAIR_NONE) {
+                    char key[64];
+                    snprintf(key, sizeof key, "overlay_pair %u %u ",
+                             rl_get_u32_(v), rl_get_u32_(v + 6));
+                    ASSERT(find_line_(ov, key, found, sizeof found));
+                    pairs++;
+                }
+                off += 6 + l;
+            }
+            ASSERT(pairs == VIEW_OBS);
+            /* And the values are the file's, at the channels the tag
+             * named. A pair whose halves agreed everywhere would make
+             * this arm vacuous, so the two are asserted to differ. */
+            for (uint32_t t = 0; t < e0.step_count; t++) {
+                for (uint32_t p = 0; p < pairs; p++) {
+                    char key[64], line[512], want[512];
+                    const double *o = e0.obs + (size_t)t * i2.obs_total;
+                    snprintf(key, sizeof key, "overlay %u %u %u ", pick,
+                             t, p);
+                    ASSERT(find_line_(ov, key, line, sizeof line));
+                    snprintf(want, sizeof want, "overlay %u %u %u %016"
+                             PRIx64 " %016" PRIx64, pick, t, p,
+                             bits_(o[p]), bits_(o[p + VIEW_OBS]));
+                    ASSERT(strcmp(line, want) == 0);
+                    if (o[p] != o[p + VIEW_OBS])
+                        drawn++;
+                }
+            }
+            ASSERT(drawn > 0);
+            printf("gate 9: %u paired channels, %u of %u overlaid values"
+                   " differ between the measurement and the truth: OK\n",
+                   pairs, drawn, e0.step_count * pairs);
+            free(ov);
+        }
+
+        free(atts);
+        free(act);
+        k26rl_episode_free(&e0);
+        vs.destroy(env);
+        dlclose(so);
+        k26rl_episode_reader_close(rd2);
+        free(got);
+
+        /* -- the wireframe, and the digest that licenses drawing it -- */
+        {
+            char *wf;
+            char *mesh;
+            uint32_t verts = 0, tris = 0;
+            const char *q;
+
+            run_viewer_("--dump wireframe " WORK_DIR "/view_asm.k26epi",
+                        WORK_DIR "/wf_none.txt");
+            wf = slurp_(WORK_DIR "/wf_none.txt", NULL);
+            /* Two assemblies in the recording, and the panel picks
+             * the one the asset names. */
+            ASSERT(find_line_(wf, "assembly 1 placed_box ", found,
+                              sizeof found));
+            ASSERT(find_line_(wf, "assembly 2 other_box ", found,
+                              sizeof found));
+            ASSERT(find_line_(wf, "wireframe unavailable ", found,
+                              sizeof found));
+            ASSERT(strstr(wf, "\nwireframe_vertex ") == NULL);
+            free(wf);
+
+            /* The expected counts come from the mesh file, not from
+             * the panel: a panel drawing nothing would fail here. */
+            mesh = slurp_(WORK_DIR "/calibration_box.k26mesh", NULL);
+            for (q = mesh; *q; q++) {
+                if ((q == mesh || q[-1] == '\n') && q[0] == 'v' && q[1] == ' ')
+                    verts++;
+                if ((q == mesh || q[-1] == '\n') && q[0] == 'f' && q[1] == ' ')
+                    tris++;
+            }
+            ASSERT(verts > 0 && tris > 0);
+
+            run_viewer_("--dump wireframe --asset "
+                        WORK_DIR "/placed_box.k26asm "
+                        WORK_DIR "/view_asm.k26epi", WORK_DIR "/wf.txt");
+            wf = slurp_(WORK_DIR "/wf.txt", NULL);
+            ASSERT(find_line_(wf, "wireframe_digest match ", found,
+                              sizeof found));
+            ASSERT(find_line_(wf, "wireframe_body ", found, sizeof found));
+            ASSERT(strcmp(found, "wireframe_body 1 craft") == 0);
+            ASSERT(find_line_(wf, "wireframe_counts ", found, sizeof found));
+            {
+                char want[128];
+                snprintf(want, sizeof want, "wireframe_counts %u %u %u",
+                         verts, tris + verts - 2u, tris);
+                ASSERT(strcmp(found, want) == 0);
+            }
+            /* And the geometry itself, against the mesh's own
+             * numbers carried by the component's own placement,
+             * computed here. The component is rotated a quarter turn
+             * about its second axis and moved off the origin, so a
+             * reader that dropped either step produces different
+             * numbers: at the origin unrotated it could drop both and
+             * still be right. */
+            {
+                const char *line = mesh;
+                uint32_t i = 0;
+                const double qw = 0.70710678118654752;
+                const double qy = 0.70710678118654752;
+                const double at[3] = { 0.25, -0.5, 0.75 };
+                while (*line) {
+                    if (line[0] == 'v' && line[1] == ' ') {
+                        double v[3], t[3], w[3];
+                        char key[64], got_line[256], want[256];
+                        ASSERT(sscanf(line + 2, "%lf %lf %lf", &v[0], &v[1],
+                                      &v[2]) == 3);
+                        /* v + 2w(u x v) + 2u x (u x v), with u the
+                         * quaternion's vector part, written out here
+                         * rather than taken from a library. */
+                        t[0] = 2.0 * (qy * v[2] - 0.0);
+                        t[1] = 2.0 * (0.0 - 0.0);
+                        t[2] = 2.0 * (0.0 - qy * v[0]);
+                        w[0] = v[0] + qw * t[0] + (qy * t[2] - 0.0);
+                        w[1] = v[1] + qw * t[1] + (0.0 - 0.0);
+                        w[2] = v[2] + qw * t[2] + (0.0 - qy * t[0]);
+                        snprintf(key, sizeof key, "wireframe_vertex %u ", i);
+                        ASSERT(find_line_(wf, key, got_line,
+                                          sizeof got_line));
+                        snprintf(want, sizeof want, "wireframe_vertex %u "
+                                 "%016" PRIx64 " %016" PRIx64
+                                 " %016" PRIx64, i, bits_(w[0] + at[0]),
+                                 bits_(w[1] + at[1]), bits_(w[2] + at[2]));
+                        ASSERT(strcmp(got_line, want) == 0);
+                        i++;
+                    }
+                    while (*line && *line != '\n') line++;
+                    if (*line) line++;
+                }
+                ASSERT(i == verts);
+            }
+            /* The edge set, not only its count: a reader that
+             * dropped one edge of every triangle can still produce
+             * the right count on a closed surface, because each edge
+             * belongs to two triangles and usually survives in the
+             * other. The expected set is derived here from the mesh's
+             * own faces. */
+            {
+                uint32_t ea[64], eb[64], ne = 0;
+                const char *line = mesh;
+                uint32_t seen = 0;
+                while (*line) {
+                    if (line[0] == 'f' && line[1] == ' ') {
+                        unsigned f[3];
+                        ASSERT(sscanf(line + 2, "%u %u %u", &f[0], &f[1],
+                                      &f[2]) == 3);
+                        for (int c = 0; c < 3; c++) {
+                            uint32_t x = f[c] - 1u, y = f[(c + 1) % 3] - 1u;
+                            uint32_t lo = x < y ? x : y, hi = x < y ? y : x;
+                            uint32_t j;
+                            for (j = 0; j < ne; j++) {
+                                if (ea[j] == lo && eb[j] == hi)
+                                    break;
+                            }
+                            if (j == ne) {
+                                ASSERT(ne < 64);
+                                ea[ne] = lo;
+                                eb[ne] = hi;
+                                ne++;
+                            }
+                        }
+                    }
+                    while (*line && *line != '\n') line++;
+                    if (*line) line++;
+                }
+                ASSERT(ne == tris + verts - 2u);
+                for (uint32_t j = 0; j < ne; j++) {
+                    char key[64], line2[128], want[128];
+                    snprintf(key, sizeof key, "wireframe_edge %u ", j);
+                    ASSERT(find_line_(wf, key, line2, sizeof line2));
+                    snprintf(want, sizeof want, "wireframe_edge %u %u %u",
+                             j, ea[j], eb[j]);
+                    ASSERT(strcmp(line2, want) == 0);
+                    seen++;
+                }
+                ASSERT(seen == ne);
+            }
+            printf("gate 9: the wireframe's %u vertices and %u edges are the"
+                   " asset's own, and its digest is the recording's: OK\n",
+                   verts, tris + verts - 2u);
+            free(wf);
+            free(mesh);
+
+            /* An asset whose bytes are not the bytes that flew is
+             * reported and not drawn. One byte of the mesh moves,
+             * which the digest covers because the mesh's bytes are
+             * inside it. */
+            rl_run_or_die_("sed 's/^v -1.0 -0.5 -0.5/v -1.0 -0.5 -0.4/' "
+                           WORK_DIR "/calibration_box.k26mesh > "
+                           WORK_DIR "/spoiled.k26mesh");
+            rl_run_or_die_("sed 's/mesh calibration_box.k26mesh/"
+                           "mesh spoiled.k26mesh/' "
+                           WORK_DIR "/placed_box.k26asm > "
+                           WORK_DIR "/spoiled.k26asm");
+            run_viewer_("--dump wireframe --asset "
+                        WORK_DIR "/spoiled.k26asm "
+                        WORK_DIR "/view_asm.k26epi", WORK_DIR "/wf_bad.txt");
+            wf = slurp_(WORK_DIR "/wf_bad.txt", NULL);
+            ASSERT(find_line_(wf, "wireframe_digest mismatch ", found,
+                              sizeof found));
+            ASSERT(strstr(wf, "\nwireframe_vertex ") == NULL);
+            ASSERT(strstr(wf, "\nwireframe_counts ") == NULL);
+            printf("gate 9: an asset whose bytes are not the recording's is"
+                   " reported and not drawn: OK\n");
+            free(wf);
+        }
+    }
+
     free(exp);
-    printf("test_rl_view: 8 gates passed\n");
+    printf("test_rl_view: 9 gates passed\n");
     return 0;
 }
