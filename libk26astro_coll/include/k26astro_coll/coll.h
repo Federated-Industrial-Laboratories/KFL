@@ -371,11 +371,15 @@ typedef struct {
  * second and first axes; `pitchyaw` is the vector sum of the first
  * two, which is the quantity a published envelope bounds.
  *
- * `v_lateral_cg` is the lateral rate at the vehicle centres of mass
- * rather than at the ports. Lateral rate at the port and pitch or yaw
- * rate combine into a lateral rate at the centre of mass that neither
- * alone describes, and an envelope that bounds the port rate without
- * bounding this one admits a contact that swings the vehicle. */
+ * `v_lateral_cg` is the lateral rate at the ACTIVE vehicle's centre
+ * of mass rather than at its port. Lateral rate at the port and pitch
+ * or yaw rate combine into a lateral rate at that centre which
+ * neither alone describes, and an envelope that bounds the port rate
+ * without bounding this one admits a contact that swings the vehicle.
+ * It is the interface's relative velocity carried along the arm from
+ * the interface to that centre, and not the difference of the two
+ * bodies' own velocities, which is a different quantity: see the
+ * note in port.c. */
 typedef struct {
     double axial;
     double lateral;

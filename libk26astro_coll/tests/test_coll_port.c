@@ -55,10 +55,13 @@ static void near_(const char *what, double got, double want, double tol)
 
 static K26V3 v3_(double x, double y, double z) { return k26m3d_v3(x, y, z); }
 
-static K26V3 add_(K26V3 a, K26V3 b) { return v3_(a.x + b.x, a.y + b.y, a.z + b.z); }
-static K26V3 sub_(K26V3 a, K26V3 b) { return v3_(a.x - b.x, a.y - b.y, a.z - b.z); }
+static K26V3 add_(K26V3 a, K26V3 b)
+{ return v3_(a.x + b.x, a.y + b.y, a.z + b.z); }
+static K26V3 sub_(K26V3 a, K26V3 b)
+{ return v3_(a.x - b.x, a.y - b.y, a.z - b.z); }
 static K26V3 mul_(K26V3 a, double s) { return v3_(a.x * s, a.y * s, a.z * s); }
-static double dot_(K26V3 a, K26V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static double dot_(K26V3 a, K26V3 b)
+{ return a.x * b.x + a.y * b.y + a.z * b.z; }
 static K26V3 cross_(K26V3 a, K26V3 b)
 {
     return v3_(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z,
@@ -195,7 +198,8 @@ int main(void)
         ASSERT(k26astro_coll_port_basis(v3_(1.0, 0.0, 0.0), v3_(2.0, 0.0, 0.0),
                                         v3_(0.0, 0.0, 0.0), &r) == 1);
         near_("fallback unit y", len_(r.axis[1]), 1.0, 1e-15);
-        near_("fallback y perpendicular", dot_(r.axis[0], r.axis[1]), 0.0, 1e-15);
+        near_("fallback y perpendicular",
+              dot_(r.axis[0], r.axis[1]), 0.0, 1e-15);
         n_pass++;
     }
 
@@ -307,7 +311,8 @@ int main(void)
 
     /* ---- 4. signs ------------------------------------------------ */
     {
-        printf("signs: apart is positive axial, approaching is positive rate\n");
+        printf("signs: apart is positive axial, approaching is a\n"
+               "       positive rate\n");
         K26AstroCollBody A2 = A, P2 = P;
         K26AstroCollPort ap2 = ap, pp2 = pp;
         memset(&A2, 0, sizeof A2);
@@ -368,7 +373,8 @@ int main(void)
         ASSERT(k26astro_coll_port_captured(&base, &e) == 1);
         printf("  the base state captures: OK\n");
 
-        struct { const char *name; size_t off; double lim; int upper; } arm[] = {
+        struct { const char *name; size_t off; double lim;
+                 int upper; } arm[] = {
             { "closing rate lower bound",
               offsetof(K26AstroCollPortState, v_axial), 0.05, 0 },
             { "closing rate upper bound",
@@ -409,7 +415,8 @@ int main(void)
         n_pass++;
 
         /* ---- 6. the derived condition earns its place ------------ */
-        printf("the centre-of-mass rate decides a case the port rate does not\n");
+        printf("the centre-of-mass rate decides a case the port\n"
+               "rate does not\n");
         K26AstroCollPortState swung = base;
         swung.v_lateral = 0.02;              /* inside the limit */
         swung.v_pitchyaw = 0.0030;           /* inside the limit */
@@ -429,7 +436,8 @@ int main(void)
             *p = arm[i].upper ? arm[i].lim * 2.0 + 1.0 : 0.0;
             ASSERT(k26astro_coll_port_captured(&bad, &e) == 0);
         }
-        printf("  each condition alone refuses a state inside all others: OK\n");
+        printf("  each condition alone refuses a state inside all\n"
+               "  others: OK\n");
         n_pass++;
     }
 
