@@ -21,6 +21,7 @@
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 /* ---- Small helpers ------------------------------------------------ */
 
@@ -721,10 +722,15 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
                 kflc_diag_errorf(diag, cr->line,
                     "episode: `contact bounce restitution` must be a "
                     "compile-time constant expression");
-            } else if (!(rv >= 0.0) || !(rv <= 1.0)) {
+            } else if (!isfinite(rv) || !(rv >= 0.0) || !(rv <= 1.0)) {
+                /* %.17g rather than %g: six significant digits reports
+                 * 1.0000001 as "is 1", so a diagnostic required to
+                 * name the offending value would name a legal one
+                 * instead. The requirement is met by a representation
+                 * that cannot round the offence away. */
                 kflc_diag_errorf(diag, cr->line,
-                    "episode: `contact bounce restitution` is %g; it is "
-                    "the fraction of the approach speed a surface "
+                    "episode: `contact bounce restitution` is %.17g; it "
+                    "is the fraction of the approach speed a surface "
                     "returns and lies in the closed interval 0 to 1",
                     rv);
             }
@@ -736,11 +742,17 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
                 kflc_diag_errorf(diag, cf->line,
                     "episode: `contact bounce friction` must be a "
                     "compile-time constant expression");
-            } else if (!(fv >= 0.0)) {
+            } else if (!isfinite(fv) || !(fv >= 0.0)) {
+                /* isfinite first: an infinity satisfies `>= 0.0` and
+                 * would otherwise be accepted, but the declared range
+                 * is the half-open interval from zero and does not
+                 * contain it. The restitution above was caught only
+                 * by its upper bound, which is luck rather than a
+                 * check. */
                 kflc_diag_errorf(diag, cf->line,
-                    "episode: `contact bounce friction` is %g; a "
-                    "friction coefficient opposes sliding and is never "
-                    "negative", fv);
+                    "episode: `contact bounce friction` is %.17g; a "
+                    "friction coefficient opposes sliding, is never "
+                    "negative, and is a finite number", fv);
             }
         }
 

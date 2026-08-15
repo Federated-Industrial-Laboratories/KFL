@@ -522,6 +522,80 @@ static void actuator_cases_(void)
     expect_both_("contact_restitution_one",
         CONTACT_WORLD("        contact bounce restitution 1.0"
                       " friction 0.0\n"), 0, NULL, "error");
+    /* Both coefficients must const-evaluate, and neither refusal had
+     * a test. `horizon` is a name the expression scope carries but
+     * the constant evaluator cannot fold. */
+    expect_both_("contact_restitution_not_const",
+        CONTACT_WORLD("        contact bounce restitution a"
+                      " friction 0.2\n"),
+        1, "must be a compile-time constant expression", NULL);
+    expect_both_("contact_friction_not_const",
+        CONTACT_WORLD("        contact bounce restitution 0.5"
+                      " friction a\n"),
+        1, "must be a compile-time constant expression", NULL);
+
+    /* An infinity satisfies `>= 0` and would otherwise be accepted as
+     * a friction coefficient; the declared range is the half-open
+     * interval from zero and does not contain it. The restitution
+     * beside it was caught only by its upper bound, which is luck
+     * rather than a check, so both are asserted. */
+    expect_both_("contact_friction_infinite",
+        CONTACT_WORLD("        contact bounce restitution 0.5"
+                      " friction 1e400\n"),
+        1, "finite number", NULL);
+    expect_both_("contact_restitution_infinite",
+        CONTACT_WORLD("        contact bounce restitution 1e400"
+                      " friction 0.2\n"),
+        1, "closed interval 0 to 1", NULL);
+
+    /* The refusal must name the offending value, and six significant
+     * digits reports 1.0000001 as "is 1", naming a legal one instead.
+     * The diagnostic carries enough digits to tell them apart. */
+    expect_both_("contact_restitution_just_over",
+        CONTACT_WORLD("        contact bounce restitution 1.0000001"
+                      " friction 0.2\n"),
+        1, "is 1.0000001", NULL);
+
+    /* The branch that refuses an empty expression after either
+     * keyword: reachable, and until now unreached. */
+    expect_both_("contact_friction_empty",
+        CONTACT_WORLD("        contact bounce restitution 0.5"
+                      " friction\n"),
+        1, "requires an expression for each of", NULL);
+
+    /* Absent means arrest. The cases above prove the line is
+     * optional and that `contact arrest` is accepted, but neither
+     * shows they mean the SAME thing, which is the property that
+     * keeps every program written before the line existed unchanged.
+     * The two emitted programs are compared byte for byte. */
+    {
+        write_fixture_("/tmp/kflc_rl_cabsent.kfl", CONTACT_WORLD(""));
+        write_fixture_("/tmp/kflc_rl_carrest.kfl",
+                       CONTACT_WORLD("        contact arrest\n"));
+        (void)!system("./bin/kflc --emit /tmp/kflc_rl_cabsent.kfl"
+                      " > /tmp/kflc_rl_cabsent.cc 2>/dev/null");
+        (void)!system("./bin/kflc --emit /tmp/kflc_rl_carrest.kfl"
+                      " > /tmp/kflc_rl_carrest.cc 2>/dev/null");
+        int same = system("cmp -s /tmp/kflc_rl_cabsent.cc"
+                          " /tmp/kflc_rl_carrest.cc") == 0;
+        printf("  no contact line against `contact arrest`: emitted "
+               "source %s\n", same ? "identical" : "DIFFERS");
+        ASSERT(same);
+        /* And that the comparison is not of two empty files. */
+        FILE *f = fopen("/tmp/kflc_rl_carrest.cc", "rb");
+        ASSERT(f != NULL);
+        fseek(f, 0, SEEK_END);
+        long sz = ftell(f);
+        fclose(f);
+        printf("  each is %ld bytes\n", sz);
+        ASSERT(sz > 10000);
+        unlink("/tmp/kflc_rl_cabsent.kfl");
+        unlink("/tmp/kflc_rl_carrest.kfl");
+        unlink("/tmp/kflc_rl_cabsent.cc");
+        unlink("/tmp/kflc_rl_carrest.cc");
+        n_pass++;
+    }
+
 #undef CONTACT_WORLD
 
     /* Outside on_step: the same name in the objective is refused,
