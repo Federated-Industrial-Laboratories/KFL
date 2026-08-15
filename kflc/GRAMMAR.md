@@ -576,10 +576,11 @@ circle, because the collider set has no round primitive. The square
 contains the circle, so it reports every contact a disc would report
 and some a disc would miss: an approach passing between the circle's
 edge and the square's corner, which for the defined envelope is
-between 0.60 m and 0.85 m off the axis, meets the plate where a disc
-would let it by. That band is far outside any capture, whose lateral
-misalignment limit is 0.10 m, so it changes which approaches count as
-an impact and never which count as a capture.
+between 0.60 m and 0.85 m off the axis, the second figure rounded up
+from 0.8485 m, meets the plate where a disc would let it by. That
+band is far outside any capture, whose lateral misalignment limit is
+0.10 m, so it changes which approaches count as an impact and never
+which count as a capture.
 
 ### Observation channels
 
