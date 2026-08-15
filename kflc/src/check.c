@@ -371,27 +371,50 @@ static const char *suffixed_(KflcArena *arena, const char *base,
  * with the value in *out, 0 when the expression is not constant. */
 /* The channel suffixes an observe contributes. A line-of-sight
  * observe publishes five; an attitude observe publishes its body's
- * own orientation and rate, which is seven. The two lists live here
- * and at the emitter, and the gates compare the published names
+ * own orientation and rate, which is seven; a contact observe
+ * publishes what the transition did, which is three. The lists live
+ * here and at the emitter, and the gates compare the published names
  * against both. */
 static const char *const OBS_SFX_LOS_[] =
     { "_dir_x", "_dir_y", "_dir_z", "_range", "_range_rate", NULL };
 static const char *const OBS_SFX_ATT_[] =
     { "_quat_w", "_quat_x", "_quat_y", "_quat_z",
       "_omega_x", "_omega_y", "_omega_z", NULL };
+static const char *const OBS_SFX_CON_[] =
+    { "_hit", "_fraction", "_speed", NULL };
 
-static int observe_is_attitude_(const KflcNode *n)
+static int observe_marker_(const KflcNode *n, const char *marker)
 {
     if (!n) return 0;
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
-        if (a->name && strcmp(a->name, "attitude") == 0) return 1;
+        if (a->name && strcmp(a->name, marker) == 0) return 1;
     }
     return 0;
 }
 
 static const char *const *observe_suffixes_(const KflcNode *n)
 {
-    return observe_is_attitude_(n) ? OBS_SFX_ATT_ : OBS_SFX_LOS_;
+    if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
+    if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;
+    return OBS_SFX_LOS_;
+}
+
+/* The bound on an `as` name is the spec's 64-byte name entry less the
+ * longest suffix any form contributes, so it is derived from the
+ * tables above rather than written as a number that a new form could
+ * quietly invalidate. */
+static size_t observe_as_bound_(void)
+{
+    const char *const *lists[3] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
+                                    OBS_SFX_CON_ };
+    size_t longest = 0;
+    for (int i = 0; i < 3; i++) {
+        for (int k = 0; lists[i][k]; k++) {
+            size_t n = strlen(lists[i][k]);
+            if (n > longest) longest = n;
+        }
+    }
+    return 64 - longest;
 }
 
 static int horizon_const_eval_(const KflcExpr *e, double *out)
@@ -496,17 +519,23 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
     }
 
     /* Channel names are published in the artifact's spec, whose name
-     * entries carry at most 64 bytes; the longest derived component
-     * suffix is `_range_rate` at 11 bytes, so the base name is
-     * bounded at 53. Refusing here keeps every published component
-     * name exact. */
-    for (int i = 0; i < st.observes_as.n; i++) {
-        const char *ni = observe_as_name_(st.observes_as.items[i]);
-        if (ni && strlen(ni) > 53) {
-            kflc_diag_errorf(diag, st.observes_as.items[i]->line,
-                "observe ... as `%s`: channel name is longer than 53 "
-                "bytes, so its derived component names would not fit "
-                "the published spec's 64-byte name entries", ni);
+     * entries carry at most 64 bytes, so the base name is bounded by
+     * 64 less the longest suffix any form contributes. The bound is
+     * computed from the suffix tables rather than written as a
+     * number, because a form whose natural suffix were longer would
+     * otherwise pass this check and be truncated in the spec with no
+     * diagnostic. It stands at 53 today, set by `_range_rate`. */
+    {
+        size_t bound = observe_as_bound_();
+        for (int i = 0; i < st.observes_as.n; i++) {
+            const char *ni = observe_as_name_(st.observes_as.items[i]);
+            if (ni && strlen(ni) > bound) {
+                kflc_diag_errorf(diag, st.observes_as.items[i]->line,
+                    "observe ... as `%s`: channel name is longer than %d "
+                    "bytes, so its derived component names would not fit "
+                    "the published spec's 64-byte name entries", ni,
+                    (int)bound);
+            }
         }
     }
 
@@ -678,6 +707,43 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
                     sv);
             }
         }
+        /* The contact resolution. Both coefficients are physical
+         * quantities with ranges, and a value outside one would not
+         * misbehave visibly: a restitution above one adds energy at
+         * every impact and a negative friction drives the surfaces
+         * apart, either of which reads as an unstable task rather
+         * than as a typed number out of range. They are therefore
+         * refused here, with the value named, rather than clamped. */
+        const KflcAttr *cr = node_attr_(ep, "restitution");
+        if (cr && cr->expr) {
+            double rv = 0.0;
+            if (!horizon_const_eval_(cr->expr, &rv)) {
+                kflc_diag_errorf(diag, cr->line,
+                    "episode: `contact bounce restitution` must be a "
+                    "compile-time constant expression");
+            } else if (!(rv >= 0.0) || !(rv <= 1.0)) {
+                kflc_diag_errorf(diag, cr->line,
+                    "episode: `contact bounce restitution` is %g; it is "
+                    "the fraction of the approach speed a surface "
+                    "returns and lies in the closed interval 0 to 1",
+                    rv);
+            }
+        }
+        const KflcAttr *cf = node_attr_(ep, "friction");
+        if (cf && cf->expr) {
+            double fv = 0.0;
+            if (!horizon_const_eval_(cf->expr, &fv)) {
+                kflc_diag_errorf(diag, cf->line,
+                    "episode: `contact bounce friction` must be a "
+                    "compile-time constant expression");
+            } else if (!(fv >= 0.0)) {
+                kflc_diag_errorf(diag, cf->line,
+                    "episode: `contact bounce friction` is %g; a "
+                    "friction coefficient opposes sliding and is never "
+                    "negative", fv);
+            }
+        }
+
         const KflcAttr *hz = node_attr_(ep, "horizon");
         const KflcAttr *tw = node_attr_(ep, "terminated_when");
         double hv = 0.0;

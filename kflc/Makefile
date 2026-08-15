@@ -244,6 +244,18 @@ $(RL_ACTUATOR_TEST): tests/test_rl_actuators.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The collision pass through the stepping surface: contact between the
+# sub-advances, termination through the declared predicate, the three
+# contact channels, the applied duration, and determinism over a
+# fixture whose episodes end in contact.
+RL_COLL_TEST = tests/test_rl_collision
+$(RL_COLL_TEST): tests/test_rl_collision.c $(RL_GATE_DEPS) \
+                 ../libk26rl/include/k26rl_env.h \
+                 ../libk26rl/include/k26rl_episode.h \
+                 ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_ATT_TEST = tests/test_rl_attitude
 $(RL_ATT_TEST): tests/test_rl_attitude.c $(RL_GATE_DEPS) \
                 ../libk26rl/include/k26rl_env.h \
@@ -298,7 +310,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -318,7 +330,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
 	          $(RL_BODIES_TEST) $(RL_ATT_TEST) \
-	          $(RL_ACTUATOR_TEST); do \
+	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -359,9 +371,12 @@ $(LIB): $(LIB_OBJS)
 $(RL_LIB):
 	$(MAKE) -C ../libk26rl
 
+# -lm because the compiler now derives geometry of its own: a
+# capsule's declared endpoints become a centre, a direction, and a
+# half length once, here, rather than on every step of every run.
 $(BIN): $(DRV_OBJS) $(LIB) $(RL_LIB)
 	@mkdir -p bin
-	$(CC) $(CFLAGS) -o $@ $(DRV_OBJS) $(LIB) $(RL_LIB) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $(DRV_OBJS) $(LIB) $(RL_LIB) $(LDFLAGS) -lm
 
 src/%.o: src/%.c include/kflc.h src/internal.h
 	$(CC) $(CFLAGS) -c -o $@ $<

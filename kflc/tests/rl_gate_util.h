@@ -32,6 +32,7 @@ static const char *const RL_INCLUDE_DIRS_[] = {
     "../libk26astro_vehicle/include", "../libk26astro_att/include",
     "../libk26astro_atmos/include",
     "../libk26astro_geomag/include",
+    "../libk26astro_coll/include",
     "../libk26tick/include",       "../libk26compute/include",
     "../libk26m3d/include",        "../libk26rl/include",
     "../libk26rng/include",        NULL
@@ -42,6 +43,7 @@ static const char *const RL_LINK_LIBS_[] = {
     "../libk26rng/libk26rng.a",
     "../libk26astro_rt/libk26astro_rt.a",
     "../libk26astro_att/libk26astro_att.a",
+    "../libk26astro_coll/libk26astro_coll.a",
     "../libk26astro_geomag/libk26astro_geomag.a",
     "../libk26astro_vehicle/libk26astro_vehicle.a",
     "../libk26astro_atmos/libk26astro_atmos.a",

@@ -89,7 +89,18 @@
  * rather than once per sub-advance. A fixture that omits them
  * measures a smaller program than the one this phase produces. Two
  * of each are declared, since a loop over one unit and a loop over
- * many are not the same loop. */
+ * many are not the same loop.
+ *
+ * The collision pass is NOT covered here, and the reason is recorded
+ * rather than left as an omission. Covering it needs a second
+ * collidable body, and a program carrying two bodies that each bind
+ * an assembly corrupts the heap on the third environment handle
+ * created in one process. That was measured with the collision pass
+ * compiled out of the same program, so it is neither the sweep nor
+ * the resolution, and this gate creates more handles than that limit
+ * allows. The obligation stands and is reported unmet; it is not
+ * satisfied by a fixture that quietly omits the code it is meant to
+ * measure. */
 static const char *const HP_ASM =
     "assembly hotpath_box\n"
     "    frame x_to_port\n"

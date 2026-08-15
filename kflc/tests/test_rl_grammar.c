@@ -350,6 +350,180 @@ static void actuator_cases_(void)
         "end\n",
         0, NULL, "error");
 
+    /* The contact observe form. Three channels rather than a flag
+     * bit, and a body that carries no assembly is refused rather than
+     * given three channels that could never be anything but zero.
+     * The positive case is `obs_contact_channels_readable` below,
+     * which a build that refused every contact form would fail while
+     * passing both refusals here. */
+    expect_both_("obs_contact_unknown_body",
+        "form RL_CONU\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft assembly=\"kflc_rl_wheelonly.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe contact of ghost as hit\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "no astro_body of that name is declared", NULL);
+
+    expect_both_("obs_contact_no_assembly",
+        "form RL_CONA\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body probe gm=1.0 parent=earth"
+        " pos_x=8.0e6 vel_y=7000.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe contact of probe as hit\n"
+        "    observe probe from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "carries no colliders and can report no contact", NULL);
+
+    /* The three channels are readable by name in the objective, which
+     * is the whole route by which a contact reaches a reward or a
+     * termination: nothing widens the objective's scope. */
+    expect_both_("obs_contact_channels_readable",
+        "form RL_CONR\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft assembly=\"kflc_rl_wheelonly.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "        terminated when hit_hit > 0.5\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe contact of craft as hit\n"
+        "    observe craft from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward hit_hit + hit_fraction + hit_speed + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    /* A body genuinely named `contact` still takes the ordinary form,
+     * because `observe contact from earth` has no `of` after the
+     * name. Without this the keyword would have taken a name away
+     * from every program that used it. */
+    expect_both_("obs_contact_is_not_a_keyword",
+        "form RL_CONK\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body contact gm=1.0 parent=earth"
+        " pos_x=8.0e6 vel_y=7000.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe contact from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward trk_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    /* The contact resolution line. One optional line inside the
+     * episode, because the resolution is a property of how the
+     * episode ends rather than of any one body; absent means arrest,
+     * which is the default, so no program written before the line
+     * existed changes meaning.
+     *
+     * The three accepted shapes run first. Without them every
+     * refusal below would be satisfied by a build that rejected
+     * `contact` lines outright, which is the difference between a
+     * gate on the coefficients and a gate on the keyword. */
+#define CONTACT_WORLD(LINE) \
+    "form RL_CRES\n" \
+    "fn world w\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body craft assembly=\"kflc_rl_wheelonly.k26asm\"" \
+    " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n" \
+    "    episode\n" \
+    "        control_dt 0.5\n" \
+    "        horizon 4\n" \
+    LINE \
+    "    end\n" \
+    "    action a box -1.0 1.0 default 0.0\n" \
+    "    observe contact of craft as hit\n" \
+    "    observe craft from earth mode=geometric as trk\n" \
+    "    objective\n" \
+    "        reward hit_hit + a * 0.0\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+    expect_both_("contact_absent",  CONTACT_WORLD(""), 0, NULL, "error");
+    expect_both_("contact_arrest",
+        CONTACT_WORLD("        contact arrest\n"), 0, NULL, "error");
+    expect_both_("contact_bounce",
+        CONTACT_WORLD("        contact bounce restitution 0.4"
+                      " friction 0.25\n"), 0, NULL, "error");
+    /* Both coefficients are compile-time expressions, not only
+     * literals, so a program can name its own constants. */
+    expect_both_("contact_bounce_expr",
+        CONTACT_WORLD("        contact bounce restitution 0.2 + 0.2"
+                      " friction 1.0 / 4.0\n"), 0, NULL, "error");
+
+    expect_both_("contact_unknown_kind",
+        CONTACT_WORLD("        contact squish\n"),
+        1, "takes `arrest` or `bounce`", NULL);
+    expect_both_("contact_arrest_trailing",
+        CONTACT_WORLD("        contact arrest restitution 0.5\n"),
+        1, "takes no further words", NULL);
+    expect_both_("contact_bounce_bare",
+        CONTACT_WORLD("        contact bounce\n"),
+        1, "requires `restitution <expr> friction <expr>`", NULL);
+    expect_both_("contact_bounce_no_friction",
+        CONTACT_WORLD("        contact bounce restitution 0.5\n"),
+        1, "requires `friction <expr>` after the restitution", NULL);
+    expect_both_("contact_restitution_high",
+        CONTACT_WORLD("        contact bounce restitution 1.5"
+                      " friction 0.2\n"),
+        1, "restitution` is 1.5", NULL);
+    expect_both_("contact_restitution_negative",
+        CONTACT_WORLD("        contact bounce restitution -0.1"
+                      " friction 0.2\n"),
+        1, "closed interval 0 to 1", NULL);
+    expect_both_("contact_friction_negative",
+        CONTACT_WORLD("        contact bounce restitution 0.5"
+                      " friction -0.2\n"),
+        1, "friction` is -0.2", NULL);
+    expect_both_("contact_duplicate",
+        CONTACT_WORLD("        contact arrest\n"
+                      "        contact bounce restitution 0.5"
+                      " friction 0.2\n"),
+        1, "duplicate `contact`", NULL);
+    /* The boundaries of the closed interval are inside it, which a
+     * check written with the wrong comparison would refuse. */
+    expect_both_("contact_restitution_zero",
+        CONTACT_WORLD("        contact bounce restitution 0.0"
+                      " friction 0.0\n"), 0, NULL, "error");
+    expect_both_("contact_restitution_one",
+        CONTACT_WORLD("        contact bounce restitution 1.0"
+                      " friction 0.0\n"), 0, NULL, "error");
+#undef CONTACT_WORLD
+
     /* Outside on_step: the same name in the objective is refused,
      * because a reward read of a command surface would be a read of
      * state the step has already moved on from. */

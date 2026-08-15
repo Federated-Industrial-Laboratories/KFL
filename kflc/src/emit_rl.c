@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* ---- Limits -------------------------------------------------------- */
 
@@ -67,7 +68,14 @@ static uint16_t rl_observe_mode_(const KflcNode *n)
      * one; the default astrometric value would claim a correction
      * that is not applied. */
     for (const KflcAttr *k = n->attrs; k; k = k->next) {
-        if (k->name && strcmp(k->name, "attitude") == 0) return 0;
+        if (!k->name) continue;
+        if (strcmp(k->name, "attitude") == 0) return 0;
+        /* A contact observe has no observer either, and applies no
+         * correction of any kind: it reports what a transition did.
+         * Geometric is true of it in the one sense the tag was minted
+         * for, and astrometric would assert a correction that is not
+         * made. */
+        if (strcmp(k->name, "contact") == 0) return 0;
     }
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "mode") == 0 &&
@@ -105,23 +113,58 @@ static const char *const RL_ATT_COMP_[RL_ATT_COMPS] = {
     "_omega_x", "_omega_y", "_omega_z"
 };
 
+/* A contact observe publishes what a transition did rather than where
+ * a body is: whether it contained a contact, at what fraction of the
+ * control period the first one happened, and how fast the pair was
+ * closing along the contact normal. Three channels rather than a flag
+ * bit, so that a consumer gets when and how fast as well as whether,
+ * and so that the frozen flag word is untouched. */
+#define RL_CON_COMPS 3
+static const char *const RL_CON_COMP_[RL_CON_COMPS] = {
+    "_hit", "_fraction", "_speed"
+};
+
+/* Which form an observe is. The marker attribute the parser leaves is
+ * what decides it, so the three are told apart in one place and the
+ * width and the names cannot drift apart between them. */
+typedef enum {
+    RL_OBS_LOS = 0,
+    RL_OBS_ATT = 1,
+    RL_OBS_CON = 2
+} RlObserveForm;
+
+static RlObserveForm rl_observe_form_(const KflcNode *n)
+{
+    if (!n) return RL_OBS_LOS;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (!a->name) continue;
+        if (strcmp(a->name, "attitude") == 0) return RL_OBS_ATT;
+        if (strcmp(a->name, "contact") == 0)  return RL_OBS_CON;
+    }
+    return RL_OBS_LOS;
+}
+
 static int rl_observe_is_attitude_(const KflcNode *n)
 {
-    if (!n) return 0;
-    for (const KflcAttr *a = n->attrs; a; a = a->next) {
-        if (a->name && strcmp(a->name, "attitude") == 0) return 1;
-    }
-    return 0;
+    return rl_observe_form_(n) == RL_OBS_ATT;
 }
 
 static int rl_observe_width_(const KflcNode *n)
 {
-    return rl_observe_is_attitude_(n) ? RL_ATT_COMPS : RL_OBS_COMPS;
+    switch (rl_observe_form_(n)) {
+    case RL_OBS_ATT: return RL_ATT_COMPS;
+    case RL_OBS_CON: return RL_CON_COMPS;
+    default:         return RL_OBS_COMPS;
+    }
 }
 
 static const char *rl_observe_comp_(const KflcNode *n, int c)
 {
-    return rl_observe_is_attitude_(n) ? RL_ATT_COMP_[c] : RL_OBS_COMP_[c];
+    switch (rl_observe_form_(n)) {
+    case RL_OBS_ATT: return RL_ATT_COMP_[c];
+    case RL_OBS_CON: return RL_CON_COMP_[c];
+    default:         return RL_OBS_COMP_[c];
+    }
 }
 
 /* The first channel index of observe `i`, and the total width. Both
@@ -152,6 +195,25 @@ typedef struct {
  * `body` is the model body index; `name` is what a program commands
  * it by. */
 #define RL_MAX_ACT 64
+/* Colliders across every collidable body in one program. The
+ * assembly reader's own limit is per assembly; this one is the
+ * program's total, and it is a fixed size because the per-step
+ * working set is preallocated and the loops are over fixed counts. */
+#define RL_MAX_COLL 256
+
+/* One collision primitive, already in its body's frame with the
+ * component placement baked in by the assembly reader. The axes are
+ * carried out in full rather than as a quaternion because that is the
+ * form the kernels take and converting per step would be arithmetic
+ * on the hot path for no gain. */
+typedef struct {
+    int    veh;
+    int    body;
+    int    kind;              /* the collision library's own kinds */
+    double centre[3];
+    double axis[3][3];
+    double half[3];
+} RlCollider;
 
 typedef struct {
     int    veh, body;
@@ -233,6 +295,9 @@ typedef struct {
 
     const KflcAttr *control_dt;
     const KflcAttr *substeps;
+    const KflcAttr *contact_kind;   /* `arrest` or `bounce`, or NULL */
+    const KflcAttr *restitution;
+    const KflcAttr *friction;
     RlWheel     wheels[RL_MAX_ACT];
     int         n_wheels;
     RlTorquer   torquers[RL_MAX_ACT];
@@ -240,7 +305,10 @@ typedef struct {
     RlThruster  thrusters[RL_MAX_ACT];
     int         n_thrusters;
     double      veh_com[RL_MAX_ACT][3];
+    double      veh_bound[RL_MAX_ACT];
     int         n_veh;
+    RlCollider  colliders[RL_MAX_COLL];
+    int         n_colliders;
     RlActRef    acts[RL_MAX_ACT];
     int         n_acts;
     const KflcAttr *horizon;          /* or NULL */
@@ -448,6 +516,70 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
             return 1;
         }
         for (int k = 0; k < 3; k++) m->veh_com[veh][k] = a->com[k];
+        m->veh_bound[veh] = a->bound_radius;
+
+        /* The collider set, taken in declaration order, which is the
+         * order the narrowphase tests them in and therefore the order
+         * the selection rule's tie-break is defined over. The reader
+         * has already baked the component placements in, so these are
+         * body-frame and comparable across components. */
+        for (int k = 0; k < a->n_colliders; k++) {
+            const KflcAsmCollider *cl = &a->colliders[k];
+            if (m->n_colliders >= RL_MAX_COLL) {
+                kflc_diag_errorf(diag, cl->line,
+                    "more than %d colliders in this program", RL_MAX_COLL);
+                kflc_arena_release(ar);
+                return 1;
+            }
+            RlCollider *rc = &m->colliders[m->n_colliders++];
+            memset(rc, 0, sizeof *rc);
+            rc->veh = veh; rc->body = i;
+            for (int q = 0; q < 3; q++) {
+                rc->centre[q] = cl->centre[q];
+                for (int w = 0; w < 3; w++) rc->axis[q][w] = cl->rot[w][q];
+            }
+            if (cl->kind == KFLC_SHAPE_SPHERE) {
+                rc->kind = 1;
+                rc->half[0] = cl->r;
+            } else if (cl->kind == KFLC_SHAPE_CAPSULE) {
+                /* The kernels take a capsule as a centre, a direction,
+                 * a radius, and half the segment's length, so the
+                 * reader's two endpoints are converted here once
+                 * rather than on every step. */
+                rc->kind = 2;
+                double d[3] = { cl->b[0] - cl->a[0], cl->b[1] - cl->a[1],
+                                cl->b[2] - cl->a[2] };
+                double len = sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                rc->half[0] = cl->r;
+                rc->half[2] = 0.5 * len;
+                if (len > 0.0) {
+                    for (int q = 0; q < 3; q++) rc->axis[2][q] = d[q] / len;
+                    /* Any pair completing the frame will do: a capsule
+                     * is symmetric about its axis, so only the third
+                     * direction carries meaning. */
+                    double up[3] = { 0.0, 0.0, 1.0 };
+                    if (rc->axis[2][2] > 0.9 || rc->axis[2][2] < -0.9) {
+                        up[0] = 1.0; up[2] = 0.0;
+                    }
+                    double ax[3] = {
+                        up[1] * rc->axis[2][2] - up[2] * rc->axis[2][1],
+                        up[2] * rc->axis[2][0] - up[0] * rc->axis[2][2],
+                        up[0] * rc->axis[2][1] - up[1] * rc->axis[2][0] };
+                    double al = sqrt(ax[0] * ax[0] + ax[1] * ax[1] +
+                                     ax[2] * ax[2]);
+                    for (int q = 0; q < 3; q++) rc->axis[0][q] = ax[q] / al;
+                    rc->axis[1][0] = rc->axis[2][1] * rc->axis[0][2]
+                                   - rc->axis[2][2] * rc->axis[0][1];
+                    rc->axis[1][1] = rc->axis[2][2] * rc->axis[0][0]
+                                   - rc->axis[2][0] * rc->axis[0][2];
+                    rc->axis[1][2] = rc->axis[2][0] * rc->axis[0][1]
+                                   - rc->axis[2][1] * rc->axis[0][0];
+                }
+            } else {
+                rc->kind = 3;
+                for (int q = 0; q < 3; q++) rc->half[q] = cl->a[q];
+            }
+        }
 
         for (int f = 0; f < a->n_features; f++) {
             const KflcAsmFeature *ft = &a->features[f];
@@ -698,6 +830,9 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
     m->control_dt      = rl_attr_(m->episode, "control_dt");
     m->horizon         = rl_attr_(m->episode, "horizon");
     m->substeps        = rl_attr_(m->episode, "substeps");
+    m->contact_kind    = rl_attr_(m->episode, "contact");
+    m->restitution     = rl_attr_(m->episode, "restitution");
+    m->friction        = rl_attr_(m->episode, "friction");
     m->terminated_when = rl_attr_(m->episode, "terminated_when");
     if (m->objective) {
         m->reward   = rl_attr_(m->objective, "reward");
@@ -1165,6 +1300,7 @@ static void rl_emit_actuators_(FILE *out, const RlModel *m)
 "    double cmd[KFLRL_N_CMD > 0 ? KFLRL_N_CMD : 1];\n"
 "} KflrlAct;\n\n", out);
 
+
     /* The accessors a command or reading in on_step lowers to. */
     for (int i = 0; i < m->n_acts; i++) {
         const RlActRef *r = &m->acts[i];
@@ -1352,6 +1488,9 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         "#include <k26astro_core/pos.h>\n"
         "#include <k26astro_vehicle/vehicle.h>\n"
         "#include <k26astro_att/att.h>\n", out);
+    if (m->n_colliders > 0) {
+        fputs("#include <k26astro_coll/coll.h>\n", out);
+    }
     if (m->n_torquers > 0) {
         /* Only a program that declares a magnetorquer pulls in the
          * field model, which is Fortran-backed: the dependency is a
@@ -1460,6 +1599,77 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
             n_v++;
         }
         if (n_v > 0) fputs("};\n\n", out);
+    }
+
+    /* ---- The collider set ---------------------------------------- *
+     *
+     * Counts and shapes are fixed at compile time, so the per-step
+     * working set is a fixed-size array and the loops are over
+     * constants. The primitives are already in their bodies' frames;
+     * only the rotation into the world frame is left to the step, and
+     * that is one quaternion per body rather than one per primitive.
+     */
+    fprintf(out, "#define KFLRL_N_COLL %d\n", m->n_colliders);
+    /* The contact block is one entry per collidable body, and at
+     * least one, so that a program with no vehicles still allocates
+     * something a pointer check can be made against. */
+    fprintf(out, "#define KFLRL_N_CONTACT %d\n\n",
+            m->n_veh > 0 ? m->n_veh : 1);
+    fputs(
+"/* What a contact observe form publishes: whether this transition\n"
+" * contained one, at what fraction of the control period the first\n"
+" * one occurred, and how fast the pair was closing along the contact\n"
+" * normal when it did. Zero on a transition with no contact, which\n"
+" * is what makes the three channels readable without a fourth saying\n"
+" * whether the other three mean anything. */\n"
+"typedef struct {\n"
+"    double hit;\n"
+"    double fraction;\n"
+"    double speed;\n"
+"} KflrlContact;\n\n", out);
+    if (m->n_colliders > 0) {
+        fputs("static const K26AstroCollShape kflrl_coll_[] = {\n", out);
+        for (int i = 0; i < m->n_colliders; i++) {
+            const RlCollider *c = &m->colliders[i];
+            fprintf(out,
+                "    { (K26AstroCollKind)%d, { %.17g, %.17g, %.17g },\n"
+                "      { { %.17g, %.17g, %.17g }, { %.17g, %.17g, %.17g },\n"
+                "        { %.17g, %.17g, %.17g } },\n"
+                "      { %.17g, %.17g, %.17g } },\n",
+                c->kind, c->centre[0], c->centre[1], c->centre[2],
+                c->axis[0][0], c->axis[0][1], c->axis[0][2],
+                c->axis[1][0], c->axis[1][1], c->axis[1][2],
+                c->axis[2][0], c->axis[2][1], c->axis[2][2],
+                c->half[0], c->half[1], c->half[2]);
+        }
+        fputs("};\n\n", out);
+
+        /* Where each vehicle's primitives begin and how many it has,
+         * so the pass slices one array rather than following
+         * pointers. */
+        fputs("static const int kflrl_coll_first_[] = {\n", out);
+        for (int v = 0; v < m->n_veh; v++) {
+            int first = -1;
+            for (int i = 0; i < m->n_colliders; i++) {
+                if (m->colliders[i].veh == v && first < 0) first = i;
+            }
+            fprintf(out, "    %d,\n", first < 0 ? 0 : first);
+        }
+        fputs("};\n\nstatic const int kflrl_coll_count_[] = {\n", out);
+        for (int v = 0; v < m->n_veh; v++) {
+            int n = 0;
+            for (int i = 0; i < m->n_colliders; i++) {
+                if (m->colliders[i].veh == v) n++;
+            }
+            fprintf(out, "    %d,\n", n);
+        }
+        fputs("};\n\n", out);
+
+        fputs("static const double kflrl_veh_bound_[] = {\n", out);
+        for (int v = 0; v < m->n_veh; v++) {
+            fprintf(out, "    %.17g,\n", m->veh_bound[v]);
+        }
+        fputs("};\n\n", out);
     }
 
     /* Assembly identity, per body that carries one. The assembly is
@@ -1657,6 +1867,40 @@ static int rl_emit_params_(FILE *out, const RlModel *m,
         fputs("1", out);
     }
     fputs(");\n}\n\n", out);
+
+    /* The contact resolution and, for bounce, its two coefficients.
+     * Emitted as accessors for the same reason as the subdivision:
+     * they are declared expressions, and create is where a declared
+     * value is read once. A program that declares no `contact` line
+     * gets arrest, which is the default the design fixes, so the
+     * absent case and the `contact arrest` case emit the same
+     * artifact. */
+    {
+        int bounce = m->contact_kind &&
+                     m->contact_kind->value.kind == KFLV_IDENT &&
+                     m->contact_kind->value.u.s &&
+                     strcmp(m->contact_kind->value.u.s, "bounce") == 0;
+        fprintf(out, "#define KFLRL_CONTACT_BOUNCE %d\n\n", bounce ? 1 : 0);
+        fputs("static double kflrl_restitution_(void)\n{\n    return (",
+              out);
+        if (bounce && m->restitution && m->restitution->expr) {
+            if (kflc_emit_expr(out, m->restitution->expr, arg_ctx, diag)) {
+                return 1;
+            }
+        } else {
+            fputs("0.0", out);
+        }
+        fputs(");\n}\n\n", out);
+        fputs("static double kflrl_friction_(void)\n{\n    return (", out);
+        if (bounce && m->friction && m->friction->expr) {
+            if (kflc_emit_expr(out, m->friction->expr, arg_ctx, diag)) {
+                return 1;
+            }
+        } else {
+            fputs("0.0", out);
+        }
+        fputs(");\n}\n\n", out);
+    }
 
     fputs("static uint32_t kflrl_horizon_(void)\n{\n    return (uint32_t)(",
           out);
@@ -2029,13 +2273,57 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
 static int rl_emit_observe_(FILE *out, const RlModel *m,
                             KflcDiag *diag)
 {
-    fputs("static void kflrl_observe_(K26AstroWorld *world, "
-          "double *out_v)\n"
+    fputs("/* The observation vector for one environment. `ct` is that\n"
+          " * environment's latched contact block, which a contact\n"
+          " * observe reads: contact is a fact about the transition\n"
+          " * just taken rather than about where a body is, so it is\n"
+          " * passed in rather than read back out of the world. */\n"
+          "static void kflrl_observe_(K26AstroWorld *world, "
+          "double *out_v,\n"
+          "                           const KflrlContact *ct)\n"
           "{\n"
-          "    (void)world; (void)out_v;\n", out);
+          "    (void)world; (void)out_v; (void)ct;\n", out);
     for (int i = 0; i < m->n_observes; i++) {
         const KflcNode *s = m->observes[i];
         int off = rl_obs_offset_(m->observes, i);
+        if (rl_observe_form_(s) == RL_OBS_CON) {
+            /* The body must be one the pass can report on, which is a
+             * body that binds an assembly: without one it has no
+             * colliders and would publish three channels that could
+             * never be anything but zero. */
+            int tgt = rl_body_index_of_(m, s->name);
+            if (tgt < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe contact of `%s`: no astro_body of that name "
+                    "is declared in this world", s->name);
+                return 1;
+            }
+            int slot = -1, seen = 0;
+            for (int b = 0; b < m->n_bodies; b++) {
+                if (!rl_body_has_assembly_(m, b)) continue;
+                if (b == tgt) slot = seen;
+                seen++;
+            }
+            if (slot < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe contact of `%s`: `%s` declares no "
+                    "`assembly=`, so it carries no colliders and can "
+                    "report no contact", s->name, s->name);
+                return 1;
+            }
+            fprintf(out,
+                "    if (ct) {\n"
+                "        out_v[%d] = ct[%d].hit;\n"
+                "        out_v[%d] = ct[%d].fraction;\n"
+                "        out_v[%d] = ct[%d].speed;\n"
+                "    } else {\n"
+                "        out_v[%d] = 0.0; out_v[%d] = 0.0; "
+                "out_v[%d] = 0.0;\n"
+                "    }\n",
+                off, slot, off + 1, slot, off + 2, slot,
+                off, off + 1, off + 2);
+            continue;
+        }
         if (rl_observe_is_attitude_(s)) {
             /* A body reporting itself: the orientation and the rate
              * as they stand after the advance, with no observer, no
@@ -3065,6 +3353,14 @@ static void rl_emit_env_core_(FILE *out)
 "    /* One actuator block per environment: commands written by\n"
 "     * on_step and the wheel momenta that persist between them. */\n"
 "    KflrlAct *act;\n"
+"    /* One latched contact per collidable body per environment. A\n"
+"     * contact is a fact about a transition, so it is cleared at the\n"
+"     * start of each one and the first contact in the transition is\n"
+"     * the one the channels report. The block exists whether or not\n"
+"     * the program declares a collider, because the observation\n"
+"     * function reads it either way and one signature is cheaper than\n"
+"     * a conditional one. */\n"
+"    KflrlContact *contact;\n"
 "    struct KflrlThrustCtx *thrust_ctx;\n"
 "    K26AstroBody *baseline;      /* n_envs * KFLRL_N_BODIES */\n"
 "    K26AstroEpoch *baseline_t;   /* n_envs */\n"
@@ -3086,6 +3382,8 @@ static void rl_emit_env_core_(FILE *out)
 "     * takes the remainder instead, so the advanced time sums to\n"
 "     * control_dt exactly however the division rounded. */\n"
 "    uint32_t  substeps;\n"
+"    double    restitution;       /* contact bounce, 0 for arrest */\n"
+"    double    friction;\n"
 "    double    sub_dt;\n", out);
     fputs(
 "    double    act_lo[KFLRL_ACT_TOTAL ? KFLRL_ACT_TOTAL : 1];\n"
@@ -3128,6 +3426,10 @@ static void rl_emit_env_core_(FILE *out)
 "     * triple says it is not. */\n"
 "    memset(&h->act[e], 0, sizeof h->act[e]);\n"
 "#endif\n"
+"    /* The latched contact belongs to the episode that produced it,\n"
+"     * so it is cleared here with the rest of the baseline. */\n"
+"    memset(&h->contact[(size_t)e * KFLRL_N_CONTACT], 0,\n"
+"           sizeof(KflrlContact) * KFLRL_N_CONTACT);\n"
 "#if KFLRL_N_BODIES > 0\n"
 "    K26AstroBody *b0 = k26astro_world_body_at(w, 0);\n"
 "    if (b0) {\n"
@@ -3154,7 +3456,8 @@ static void rl_emit_env_core_(FILE *out)
 "    h->ended[e]   = 0;\n"
 "    h->rew[e]     = 0.0;\n"
 "    h->fault[e]   = 0;\n"
-"    kflrl_observe_(w, h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
+"    kflrl_observe_(w, h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
+"                   &h->contact[(size_t)e * KFLRL_N_CONTACT]);\n"
 "}\n"
 "\n"
 "", out);
@@ -3329,6 +3632,7 @@ static void rl_emit_env_core_(FILE *out)
 "    }\n"
 "    free(h->vehicles);\n"
 "    free(h->act);\n"
+"    free(h->contact);\n"
 "    free(h->thrust_ctx);\n"
 "#endif\n"
 "    if (h->worlds) {\n"
@@ -3421,6 +3725,8 @@ static void rl_emit_env_core_(FILE *out)
 "    h->control_dt = kflrl_control_dt_();\n"
 "    h->horizon = kflrl_horizon_();\n"
 "    h->substeps = kflrl_substeps_();\n"
+"    h->restitution = kflrl_restitution_();\n"
+"    h->friction    = kflrl_friction_();\n"
 "    if (h->substeps < 1u) h->substeps = 1u;\n", out);
     fputs(
 "    /* The control period is checked first and keeps the status it\n"
@@ -3467,6 +3773,12 @@ static void rl_emit_env_core_(FILE *out)
 "    h->wscal = (double *)calloc(\n"
 "        (size_t)n_envs * (KFLRL_N_WSCAL ? KFLRL_N_WSCAL : 1),\n"
 "        sizeof(double));\n"
+"    /* The contact block is allocated for every program, not only\n"
+"     * for one that declares a vehicle, because the observation\n"
+"     * function takes it either way and a conditional signature\n"
+"     * would buy nothing but a second shape to keep agreeing. */\n"
+"    h->contact = (KflrlContact *)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_CONTACT, sizeof(KflrlContact));\n"
 "    h->scratch = (double *)calloc(\n"
 "        KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1, sizeof(double));\n"
 "    if (!h->seen_seeds || !h->worlds || !h->baseline || !h->baseline_t ||\n"
@@ -3475,7 +3787,7 @@ static void rl_emit_env_core_(FILE *out)
 "#if KFLRL_N_VEHICLES > 0\n"
 "        !h->vehicles || !h->act || !h->thrust_ctx ||\n"
 "#endif\n"
-"        !h->scratch) {\n"
+"        !h->contact || !h->scratch) {\n"
 "        kflrl_free_handle_(h);\n"
 "        return K26RL_E_INTERNAL;\n"
 "    }\n"
@@ -3541,7 +3853,8 @@ static void rl_emit_env_core_(FILE *out)
 "        kflrl_apply_draws_(h->worlds[e], h->key, e, 0, NULL, dr0);\n"
 "#endif\n"
 "        kflrl_observe_(h->worlds[e],\n"
-"                       h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
+"                       h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
+"                       &h->contact[(size_t)e * KFLRL_N_CONTACT]);\n"
 "    }\n"
 "\n"
 "    h->spec_len = kflrl_spec_write_(NULL, h);\n", out);
@@ -3743,6 +4056,11 @@ static void rl_emit_env_core_(FILE *out)
 "", out);
     fputs(
 "        kflrl_on_step_(h->worlds[e], aslice, &h->act[e]);\n"
+"        /* A contact is a fact about one transition, so the latch is\n"
+"         * cleared here and whatever the sub-advances below find is\n"
+"         * what this step reports. */\n"
+"        memset(&h->contact[(size_t)e * KFLRL_N_CONTACT], 0,\n"
+"               sizeof(KflrlContact) * KFLRL_N_CONTACT);\n"
 "        /* One transition is `substeps` sub-advances. Translation\n"
 "         * advances first, then attitude by the same interval with\n"
 "         * the torque held at its start, which is the splitting the\n"
@@ -3763,6 +4081,25 @@ static void rl_emit_env_core_(FILE *out)
 "            double step_dt = (sub + 1u == h->substeps)\n"
 "                           ? (h->control_dt - advanced)\n"
 "                           : h->sub_dt;\n"
+"#if KFLRL_N_COLL > 0\n"
+"            /* The sweep needs both endpoints of the sub-advance, so\n"
+"             * the starting configuration is taken before the world\n"
+"             * moves. Fixed-size buffers over compile-time counts:\n"
+"             * nothing here allocates. */\n"
+"            K26AstroPos csnap[KFLRL_N_VEHICLES];\n"
+"            K26V3       cvel0[KFLRL_N_VEHICLES];\n"
+"            K26Quat     cquat[KFLRL_N_VEHICLES];\n"
+"            for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"                const K26AstroBody *cb = k26astro_world_body_at(\n"
+"                    h->worlds[e], kflrl_body_idx_[kflrl_vehicle_body_[vi]]);\n"
+"                if (!cb) { memset(&csnap[vi], 0, sizeof csnap[vi]);\n"
+"                           cvel0[vi] = k26m3d_v3(0.0, 0.0, 0.0);\n"
+"                           cquat[vi] = k26m3d_quat_identity(); continue; }\n"
+"                csnap[vi] = cb->pos;\n"
+"                cvel0[vi] = cb->vel;\n"
+"                cquat[vi] = cb->attitude;\n"
+"            }\n"
+"#endif\n"
 "            rc = k26astro_world_step_exact(h->worlds[e], step_dt);\n"
 "            if (rc != 0) break;\n"
 "            advanced += step_dt;\n", out);
@@ -3829,6 +4166,119 @@ static void rl_emit_env_core_(FILE *out)
 "                break;\n"
 "            }\n"
 "#endif\n"
+"#if KFLRL_N_COLL > 0\n"
+"            /* The collision pass, between the sub-advances. A body\n"
+"             * that crosses a target inside one control period is not\n"
+"             * found by comparing the period's endpoints, and\n"
+"             * shortening the step to catch it would make the applied\n"
+"             * duration a function of the geometry; sweeping inside\n"
+"             * the sub-advance finds it and leaves the duration\n"
+"             * exactly what was declared.\n"
+"             *\n"
+"             * Every position is taken as an exact difference from\n"
+"             * one reference rather than as a flattened coordinate,\n"
+"             * because a position here is a sector index and a\n"
+"             * bounded offset, and flattening two of them before\n"
+"             * subtracting throws away the precision the sector grid\n"
+"             * exists to keep. */\n"
+"            {\n"
+"                K26AstroCollBody cbody[KFLRL_N_VEHICLES];\n"
+"                const K26AstroPos *cref = &csnap[0];\n"
+"                for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"                    memset(&cbody[vi], 0, sizeof cbody[vi]);\n"
+"                    const K26AstroBody *cb = k26astro_world_body_at(\n"
+"                        h->worlds[e],\n"
+"                        kflrl_body_idx_[kflrl_vehicle_body_[vi]]);\n"
+"                    if (!cb) continue;\n"
+"                    cbody[vi].pos0 = k26astro_pos_sub(&csnap[vi], cref);\n"
+"                    cbody[vi].pos1 = k26astro_pos_sub(&cb->pos, cref);\n"
+"                    cbody[vi].orientation = cquat[vi];\n"
+"                    cbody[vi].vel0 = cvel0[vi];\n"
+"                    cbody[vi].vel1 = cb->vel;\n"
+"                    cbody[vi].shapes = &kflrl_coll_[kflrl_coll_first_[vi]];\n"
+"                    cbody[vi].n_shapes = kflrl_coll_count_[vi];\n"
+"                    cbody[vi].bound_radius = kflrl_veh_bound_[vi];\n"
+"                    cbody[vi].mass = cb->mass;\n"
+"                    cbody[vi].com_offset = k26m3d_v3(\n"
+"                        kflrl_veh_com_[vi][0], kflrl_veh_com_[vi][1],\n"
+"                        kflrl_veh_com_[vi][2]);\n"
+"                    cbody[vi].omega = cb->omega;\n"
+"                }\n"
+"", out);
+    fputs(
+"                K26AstroCollContact cc;\n"
+"                if (k26astro_coll_pass(cbody, KFLRL_N_VEHICLES, step_dt,\n"
+"                                       &cc) == K26ASTRO_COLL_OK &&\n"
+"                    cc.hit) {\n"
+"                    /* Arrest, the default resolution: the pair is\n"
+"                     * placed at the sweep's own interpolated\n"
+"                     * configuration, so the reported contact and the\n"
+"                     * recorded state agree exactly, and the relative\n"
+"                     * velocity is removed by a momentum-conserving\n"
+"                     * merge. The remainder of the control period\n"
+"                     * advances with the pair moving together. */\n"
+"                    K26V3 apos, avel, bpos, bvel;\n"
+"                    K26V3 awb = cbody[cc.body_a].omega;\n"
+"                    K26V3 bwb = cbody[cc.body_b].omega;\n"
+"#if KFLRL_CONTACT_BOUNCE\n"
+"                    /* Bounce: one impulse at the contact point,\n"
+"                     * using the effective mass there, so an\n"
+"                     * off-centre impact spins the body by the\n"
+"                     * amount the geometry gives. */\n"
+"                    K26AstroCollStatus cst = k26astro_coll_bounce(\n"
+"                        &cbody[cc.body_a], &cbody[cc.body_b], &cc,\n"
+"                        h->restitution, &apos, &avel, &awb,\n"
+"                        &bpos, &bvel, &bwb);\n"
+"#else\n"
+"                    K26AstroCollStatus cst = k26astro_coll_arrest(\n"
+"                        &cbody[cc.body_a], &cbody[cc.body_b], cc.time,\n"
+"                        &apos, &avel, &bpos, &bvel);\n"
+"#endif\n"
+"                    if (cst == K26ASTRO_COLL_OK) {\n"
+"                        int pair[2] = { cc.body_a, cc.body_b };\n"
+"                        K26V3 np[2] = { apos, bpos };\n"
+"                        K26V3 nv[2] = { avel, bvel };\n"
+"                        K26V3 nw[2] = { awb, bwb };\n"
+"                        for (int q = 0; q < 2; q++) {\n"
+"                            int vi = pair[q];\n"
+"                            K26AstroBody *cb = k26astro_world_body_at(\n"
+"                                h->worlds[e],\n"
+"                                kflrl_body_idx_[kflrl_vehicle_body_[vi]]);\n"
+"                            if (!cb) continue;\n"
+"                            /* The correction is applied as a delta so\n"
+"                             * the sector representation is preserved\n"
+"                             * rather than rebuilt from a flattened\n"
+"                             * coordinate. */\n"
+"                            K26V3 now = k26astro_pos_sub(&cb->pos, cref);\n"
+"                            k26astro_pos_add(&cb->pos, k26m3d_v3(\n"
+"                                np[q].x - now.x, np[q].y - now.y,\n"
+"                                np[q].z - now.z));\n"
+"                            cb->vel = nv[q];\n"
+"                            cb->omega = nw[q];\n"
+"                        }\n"
+"                    }\n"
+"", out);
+    fputs(
+"                    /* The fraction the channels publish is of the\n"
+"                     * whole control period, not of this sub-advance,\n"
+"                     * and the first contact of the transition is the\n"
+"                     * one that is kept. */\n"
+"                    double cfrac = h->control_dt > 0.0\n"
+"                        ? ((advanced - step_dt) + cc.time * step_dt)\n"
+"                          / h->control_dt\n"
+"                        : 0.0;\n"
+"                    int pair[2] = { cc.body_a, cc.body_b };\n"
+"                    for (int q = 0; q < 2; q++) {\n"
+"                        KflrlContact *ct = &h->contact[\n"
+"                            (size_t)e * KFLRL_N_CONTACT + pair[q]];\n"
+"                        if (ct->hit != 0.0) continue;\n"
+"                        ct->hit      = 1.0;\n"
+"                        ct->fraction = cfrac;\n"
+"                        ct->speed    = cc.speed;\n"
+"                    }\n"
+"                }\n"
+"            }\n"
+"#endif\n"
 "        }\n"
 "        if (att_reason != 0) {\n"
 "            K26RlStatus fst = kflrl_fault_(h, e, aslice, att_reason);\n"
@@ -3847,7 +4297,8 @@ static void rl_emit_env_core_(FILE *out)
 "            continue;\n"
 "        }\n"
 "\n"
-"        kflrl_observe_(h->worlds[e], h->scratch);\n"
+"        kflrl_observe_(h->worlds[e], h->scratch,\n"
+"                       &h->contact[(size_t)e * KFLRL_N_CONTACT]);\n"
 "        int finite = 1;\n"
 "        for (uint32_t j = 0; j < KFLRL_OBS_TOTAL; j++) {\n"
 "            if (!std::isfinite(h->scratch[j])) finite = 0;\n"

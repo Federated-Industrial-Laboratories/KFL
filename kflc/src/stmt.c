@@ -558,7 +558,7 @@ static KflcNode *parse_episode_(Lexer *L, Token *cur,
         if (cur->kind != T_IDENT || !cur->str) {
             kflc_diag_errorf(diag, cur->line,
                 "episode: expected a keyword line (control_dt, horizon, "
-                "substeps, `terminated when`, reset, or end)");
+                "substeps, contact, `terminated when`, reset, or end)");
             *had_error = 1;
             rl_drain_line_(L, cur, arena, had_error);
             continue;
@@ -591,6 +591,103 @@ static KflcNode *parse_episode_(Lexer *L, Token *cur,
             KflcAttr *a = stmt_append_attr(arena, n, key, none, lineK);
             a->expr = kflc_parse_expr(t, arena, diag, lineK);
             if (!a->expr) *had_error = 1;
+            continue;
+        }
+
+        /* `contact arrest`
+         * `contact bounce restitution <expr> friction <expr>`
+         *
+         * One optional line, because the resolution is a property of
+         * how the episode ends rather than of any one body. Absent
+         * means arrest, which is the default the design already
+         * fixed, so no program written before this line existed
+         * changes meaning.
+         *
+         * `bounce` requires both coefficients and neither is
+         * defaulted: a restitution nobody declared is a number this
+         * compiler would have invented, and inventing physical
+         * constants is the habit these rules exist to prevent. */
+        if (is_ident_named(cur, "contact")) {
+            int lineK = cur->line;
+            char *src = take_line_remainder(L, arena);
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            if (stmt_find_attr_(n, "contact")) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: duplicate `contact` (allowed at most once)");
+                *had_error = 1;
+                continue;
+            }
+            char *t = trim(src);
+            char *rest = t;
+            while (*rest && *rest != ' ' && *rest != '\t') rest++;
+            int is_arrest = (rest - t) == 6 && strncmp(t, "arrest", 6) == 0;
+            int is_bounce = (rest - t) == 6 && strncmp(t, "bounce", 6) == 0;
+            if (!is_arrest && !is_bounce) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: `contact` takes `arrest` or `bounce`, not "
+                    "`%s`", t[0] ? t : "nothing");
+                *had_error = 1;
+                continue;
+            }
+            KflcValue kind;
+            memset(&kind, 0, sizeof kind);
+            kind.kind = KFLV_IDENT;
+            kind.u.s  = kflc_arena_strdup(arena, is_arrest ? "arrest"
+                                                           : "bounce");
+            stmt_append_attr(arena, n, "contact", kind, lineK);
+            if (is_arrest) {
+                if (*trim(rest) != '\0') {
+                    kflc_diag_errorf(diag, lineK,
+                        "episode: `contact arrest` takes no further "
+                        "words, and `%s` follows it", trim(rest));
+                    *had_error = 1;
+                }
+                continue;
+            }
+            /* `bounce` takes the two coefficients in a fixed order,
+             * each introduced by its own keyword so that a program
+             * cannot silently swap them. */
+            char *p2 = trim(rest);
+            if (strncmp(p2, "restitution", 11) != 0) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: `contact bounce` requires `restitution "
+                    "<expr> friction <expr>`; neither coefficient is "
+                    "defaulted, because a coefficient nobody declared "
+                    "is one this compiler invented");
+                *had_error = 1;
+                continue;
+            }
+            p2 = trim(p2 + 11);
+            char *fr = strstr(p2, "friction");
+            if (!fr || fr == p2) {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: `contact bounce` requires `friction "
+                    "<expr>` after the restitution");
+                *had_error = 1;
+                continue;
+            }
+            char *rest_src = kflc_arena_strdup(arena, p2);
+            rest_src[fr - p2] = '\0';
+            char *rr = trim(rest_src);
+            char *ff = trim(fr + 8);
+            if (rr[0] == '\0' || ff[0] == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "episode: `contact bounce` requires an expression "
+                    "for each of `restitution` and `friction`");
+                *had_error = 1;
+                continue;
+            }
+            KflcValue none;
+            memset(&none, 0, sizeof none);
+            KflcAttr *ra = stmt_append_attr(arena, n, "restitution", none,
+                                            lineK);
+            ra->expr = kflc_parse_expr(rr, arena, diag, lineK);
+            if (!ra->expr) *had_error = 1;
+            KflcAttr *fa = stmt_append_attr(arena, n, "friction", none,
+                                            lineK);
+            fa->expr = kflc_parse_expr(ff, arena, diag, lineK);
+            if (!fa->expr) *had_error = 1;
             continue;
         }
 
@@ -696,7 +793,8 @@ static KflcNode *parse_episode_(Lexer *L, Token *cur,
 
         kflc_diag_errorf(diag, cur->line,
             "episode: unknown keyword `%s` (expected control_dt, horizon, "
-            "`terminated when`, reset, or end)", cur->str);
+            "substeps, contact, `terminated when`, reset, or end)",
+            cur->str);
         *had_error = 1;
         rl_drain_line_(L, cur, arena, had_error);
     }
@@ -1475,14 +1573,23 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * genuinely called `attitude` is still observed by the
          * ordinary form, because `observe attitude from earth` has no
          * `of` after the name and takes the other branch. */
+        /* `observe contact of <body> as <name>` reads the same way and
+         * for the same reason: a body reporting a fact about itself,
+         * with no observer to name. The two self-reporting forms share
+         * this branch rather than each growing one, so a third is a
+         * table entry and not a third copy of the parse. */
         int attitude_form = 0;
-        if (strcmp(target_ident, "attitude") == 0 &&
+        int contact_form  = 0;
+        if ((strcmp(target_ident, "attitude") == 0 ||
+             strcmp(target_ident, "contact") == 0) &&
             is_ident_named(cur, "of"))
         {
+            contact_form = strcmp(target_ident, "contact") == 0;
             advance(L, cur, had_error);
             if (cur->kind != T_IDENT) {
                 kflc_diag_errorf(diag, line0,
-                    "observe attitude of: expected a body name");
+                    "observe %s of: expected a body name",
+                    contact_form ? "contact" : "attitude");
                 *had_error = 1;
                 while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
                 if (at_nl(cur)) advance(L, cur, had_error);
@@ -1532,7 +1639,8 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             memset(&kv, 0, sizeof kv);
             kv.kind = KFLV_IDENT;
             kv.u.s  = kflc_arena_strdup(arena, "1");
-            stmt_append_attr(arena, n, "attitude", kv, line0);
+            stmt_append_attr(arena, n, contact_form ? "contact" : "attitude",
+                             kv, line0);
         }
 
         /* Parse trailing `key=value` pairs (whitespace-separated).
