@@ -2256,6 +2256,193 @@ int main(void)
 
 #undef STATE_WORLD
 
+    /* ---- Docking ports and the capture envelope ------------------ *
+     *
+     * The asset side first, since the observe form below rests on it.
+     * A port's axis and roll reference define the frame every capture
+     * residual is measured in, and its envelope decides both the test
+     * and the mating plane the compiler builds, so all three are
+     * refused at the declaration rather than repaired downstream.
+     */
+    write_fixture_("/tmp/kflc_rl_port.k26asm",
+        "assembly grammar_port\n"
+        "    frame x_to_port\n"
+        "    provenance mass \"calibration shape, not a craft\" computed\n"
+        "    component hull\n"
+        "        mass 1000.0\n"
+        "        at 0 0 0\n"
+        "        collider box 1.0 0.5 0.5\n"
+        "    end\n"
+        "    port forward\n"
+        "        at 1.2 0.0 0.0\n"
+        "        axis 1.0 0.0 0.0\n"
+        "        roll_ref 0.0 1.0 0.0\n"
+        "        capture idss_e\n"
+        "    end\n"
+        "end\n");
+
+/* A world with two bodies carrying that assembly, so a port observe
+ * has both the port it names and the one it is measured against.
+ * BODIES lets a case take the second one away. */
+#define PORT_WORLD(BODIES, OBSERVE) \
+    "form RL_PORTG\n" \
+    "fn world w\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body craft assembly=\"kflc_rl_port.k26asm\" parent=earth" \
+    " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n" \
+    BODIES \
+    "    episode\n" \
+    "        control_dt 0.5\n" \
+    "        horizon 4\n" \
+    "    end\n" \
+    "    action push box -1.0 1.0 default 0.0\n" \
+    OBSERVE \
+    "    objective\n" \
+    "        reward 0.0\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+#define PORT_TARGET \
+    "    astro_body target assembly=\"kflc_rl_port.k26asm\" parent=earth" \
+    " pos_x=7.0e6 pos_z=20.0 vel_y=7546.0 quat_w=0.0 quat_z=1.0\n"
+
+    expect_both_("port_observe_ok",
+        PORT_WORLD(PORT_TARGET, "    observe port forward of craft as dock\n"),
+        0, NULL, "error");
+
+    expect_both_("port_observe_unknown_body",
+        PORT_WORLD(PORT_TARGET, "    observe port forward of ghost as dock\n"),
+        1, "no astro_body of that name", NULL);
+
+    expect_both_("port_observe_no_assembly",
+        PORT_WORLD(PORT_TARGET
+                   "    astro_body probe gm=1.0 parent=earth pos_x=8.0e6"
+                   " vel_y=7000.0\n",
+                   "    observe port forward of probe as dock\n"),
+        1, "declares no `assembly=`", NULL);
+
+    expect_both_("port_observe_unknown_port",
+        PORT_WORLD(PORT_TARGET, "    observe port aft of craft as dock\n"),
+        1, "declares no port of that name", NULL);
+
+    /* One port in the world has nothing to be measured against, and
+     * three leave the pairing to declaration order. Both are refused
+     * rather than answered with an arbitrary choice. */
+    expect_both_("port_observe_alone",
+        PORT_WORLD("", "    observe port forward of craft as dock\n"),
+        1, "ports carrying a capture envelope are declared on other",
+        NULL);
+
+    expect_both_("port_observe_three",
+        PORT_WORLD(PORT_TARGET
+                   "    astro_body spare assembly=\"kflc_rl_port.k26asm\""
+                   " parent=earth pos_x=7.0e6 pos_z=40.0 vel_y=7546.0"
+                   " quat_w=1.0\n",
+                   "    observe port forward of craft as dock\n"),
+        1, "ports carrying a capture envelope are declared on other",
+        NULL);
+
+    expect_("port_observe_missing_of",
+        PORT_WORLD(PORT_TARGET, "    observe port forward craft as dock\n"),
+        1, "expected `of` and the name of the body", NULL);
+
+    /* Nothing after `of` at all. A name there is a body name
+     * whatever it spells, so this case ends the line instead. */
+    expect_("port_observe_missing_body",
+        PORT_WORLD(PORT_TARGET, "    observe port forward of\n"),
+        1, "expected a body name", NULL);
+
+    /* The nine channels are readable in the objective by their
+     * published names. */
+    expect_both_("port_channels_readable",
+        PORT_WORLD(PORT_TARGET,
+                   "    observe port forward of craft as dock\n")
+        , 0, NULL, "error");
+
+    /* A body genuinely called `port` still takes the ordinary form,
+     * because that form has `from` where this one has a port name. */
+    expect_("port_named_body",
+        "form RL_PORTN\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body port gm=1.0 parent=earth pos_x=7.0e6"
+        " vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    observe port from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward trk_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    /* The asset-side refusals. Each is the working asset above with
+     * one port line changed or missing, so what is refused is that
+     * line and nothing else. */
+    {
+        static const char *const PORT_ASSET_HEAD =
+            "assembly grammar_port_bad\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"calibration shape\" computed\n"
+            "    component hull\n"
+            "        mass 1000.0\n"
+            "        at 0 0 0\n"
+            "        collider box 1.0 0.5 0.5\n"
+            "    end\n"
+            "    port forward\n"
+            "        at 1.2 0.0 0.0\n";
+        static const struct { const char *tag; const char *keys;
+                              const char *msg; } bad[] = {
+            { "port_axis_not_unit",
+              "        axis 1.0 1.0 0.0\n"
+              "        roll_ref 0.0 1.0 0.0\n"
+              "        capture idss_e\n",
+              "`axis` is not a unit vector" },
+            { "port_axis_absent",
+              "        roll_ref 0.0 1.0 0.0\n"
+              "        capture idss_e\n",
+              "`axis` is not a unit vector" },
+            { "port_roll_parallel",
+              "        axis 1.0 0.0 0.0\n"
+              "        roll_ref 2.0 0.0 0.0\n"
+              "        capture idss_e\n",
+              "names no direction in the mating plane" },
+            { "port_roll_absent",
+              "        axis 1.0 0.0 0.0\n"
+              "        capture idss_e\n",
+              "names no direction in the mating plane" },
+            { "port_capture_unknown",
+              "        axis 1.0 0.0 0.0\n"
+              "        roll_ref 0.0 1.0 0.0\n"
+              "        capture idss_f\n",
+              "names no defined envelope" }
+        };
+        for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+            char asset[1024];
+            snprintf(asset, sizeof asset, "%s%s    end\nend\n",
+                     PORT_ASSET_HEAD, bad[i].keys);
+            write_fixture_("/tmp/kflc_rl_port_bad.k26asm", asset);
+            expect_(bad[i].tag,
+                "form RL_PORTB\n"
+                "fn world w\n"
+                "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+                "    astro_body craft assembly=\"kflc_rl_port_bad.k26asm\""
+                " parent=earth pos_x=7.0e6 vel_y=7546.0\n"
+                "end\n"
+                "end\n",
+                1, bad[i].msg, NULL);
+        }
+        unlink("/tmp/kflc_rl_port_bad.k26asm");
+    }
+
+#undef PORT_WORLD
+#undef PORT_TARGET
+    unlink("/tmp/kflc_rl_port.k26asm");
+
     printf("test_rl_grammar: %d case(s) passed\n", n_pass);
     return 0;
 }

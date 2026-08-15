@@ -387,6 +387,12 @@ static const char *const OBS_SFX_CON_[] =
     { "_hit", "_fraction", "_speed", NULL };
 static const char *const OBS_SFX_REL_[] =
     { "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z", NULL };
+/* A port observe publishes whether the contact it just made was a
+ * capture, the four alignment residuals a capture is judged on, and
+ * their four rates, which is nine. */
+static const char *const OBS_SFX_PORT_[] =
+    { "_captured", "_axial", "_lateral", "_pitchyaw", "_roll",
+      "_v_axial", "_v_lateral", "_v_pitchyaw", "_v_roll", NULL };
 
 static int observe_marker_(const KflcNode *n, const char *marker)
 {
@@ -408,6 +414,7 @@ static int observe_has_truth_(const KflcNode *n)
 
 static const char *const *observe_suffixes_(const KflcNode *n)
 {
+    if (observe_marker_(n, "port"))     return OBS_SFX_PORT_;
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
     if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;
     if (observe_marker_(n, "relative")) return OBS_SFX_REL_;
@@ -449,7 +456,8 @@ static size_t observe_as_bound_(void)
      * outgrown the entry. */
     size_t longest = 0;
     const char *const *lists[] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
-                                   OBS_SFX_CON_, OBS_SFX_REL_ };
+                                   OBS_SFX_CON_, OBS_SFX_REL_,
+                                   OBS_SFX_PORT_ };
     for (size_t i = 0; i < sizeof lists / sizeof lists[0]; i++) {
         for (int k = 0; lists[i][k]; k++) {
             /* `_truth` is what a paired channel inserts, so the

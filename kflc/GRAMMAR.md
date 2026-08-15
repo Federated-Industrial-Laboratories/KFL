@@ -517,6 +517,52 @@ rejected, whether called directly or through a `fn`. Outside `on_step` the dotte
 all, and an objective or termination expression that names body state is
 told to read it through an `observe ... as` channel instead.
 
+### Vehicle assemblies
+
+```
+astro_body chaser assembly="crew_vehicle.k26asm" pos_x=... vel_y=...
+```
+
+An assembly is a text description of a vehicle: components with
+placements and masses, collision primitives, docking ports, thrusters
+and momentum devices. The compiler reads it, derives the vehicle's
+mass, centre of mass and inertia tensor from the geometry, and writes
+those numbers into the artifact as constants, so a running simulation
+never opens an asset file. The path resolves against the directory of
+the source file that names it, and the asset's bytes are hashed into
+the compiled program's identity, so a changed asset is a changed
+program.
+
+A body that binds one gains mass properties, colliders, attitude, and
+whatever actuators and ports the assembly declares. Declaring `mass=`
+or `gm=` beside `assembly=` is refused naming both lines, because the
+derivation is the one source of that number. `examples/assets/` holds
+worked assets; every key the format takes is documented in the
+compiler's own assembly reader.
+
+A docking port is declared in the assembly and named by the port
+observe form below:
+
+```
+    port forward
+        at 3.5 0.0 0.0
+        axis 1.0 0.0 0.0
+        roll_ref 0.0 1.0 0.0
+        capture idss_e
+    end
+```
+
+`at` is the centre of the mating plane in the body frame, `axis` its
+outward normal, and `roll_ref` a direction in the plane from which
+roll misalignment is measured; the axis must be a unit vector and the
+roll reference must not be parallel to it. `capture` names the
+envelope a contact at this port is judged against, and the compiler
+builds the port's mating plane collider from the diameter that
+envelope publishes, so the interface geometry is the envelope's and
+not the author's. One envelope is defined, `idss_e`; any other name is
+refused. A port declaring no envelope is geometry the program can
+describe and carries no collider and no test.
+
 ### Observation channels
 
 ```
@@ -624,6 +670,59 @@ than given three channels that could never be anything but zero.
 A contact ends an episode only if the program says so, through an
 ordinary `terminated when` predicate over these channels. It is not a
 fault.
+
+#### Docking ports
+
+```
+observe port <port> of <body> as <name>
+```
+
+Publishes how far a named docking port on a body is from mated with
+the port it faces, and whether the contact it just made was a capture.
+Nine components:
+
+| Component            | Value                                                                              |
+|----------------------|------------------------------------------------------------------------------------|
+| `<name>_captured`    | 1.0 when the transition's contact met every condition of the port's capture envelope, 0.0 otherwise. |
+| `<name>_axial`       | Separation of the two mating planes along the other port's axis, in metres, positive while apart. |
+| `<name>_lateral`     | Distance from this port's centre to the other port's axis, in metres.              |
+| `<name>_pitchyaw`    | Vector sum of the pitch and yaw misalignment, in radians.                          |
+| `<name>_roll`        | Roll misalignment, in radians.                                                     |
+| `<name>_v_axial`     | Closing rate along the other port's axis, in metres per second, positive while closing. |
+| `<name>_v_lateral`   | Lateral rate at the ports, in metres per second.                                   |
+| `<name>_v_pitchyaw`  | Vector sum of the pitch and yaw rate, in radians per second.                        |
+| `<name>_v_roll`      | Roll rate, in radians per second.                                                  |
+
+Angles are the yaw, pitch and roll of this port's frame with respect
+to the mated configuration, taken in that order about the other port's
+third, second and first axes. Units are SI throughout, so a program
+comparing against an envelope published in degrees converts once.
+
+The eight residuals are recomputed every step from the state as it
+stands, which is what an approach is flown on. On a step whose
+transition ended in a contact between the two ports they instead carry
+the values the capture test itself was given, taken at the instant of
+contact: by the end of that transition the contact has been resolved
+and the closing rate the test read is gone, so publishing the later
+state would hide the test's own inputs.
+
+The body must declare an `assembly=` carrying a port of that name with
+a `capture` envelope, and exactly one port carrying an envelope must
+be declared on some other body: that is the port this one is measured
+against, and a world with none or with several is refused rather than
+paired by declaration order.
+
+A port stands proud of the hull it is mounted on if it is to be the
+first thing the other craft meets. Its mating plane is an ordinary
+collider, and a hull that reaches the same plane contacts at the same
+instant; the contact reported is then the hull's, the capture channel
+stays clear, and the approach reads as an impact.
+
+Capture is not a resolution the program declares. It is a consequence
+of the geometry: when a contact between two ports meets every
+condition, the capture channel is set for that step, and a program
+ends the episode on it through an ordinary `terminated when`
+predicate.
 
 #### Sensors, and the truth beside the measurement
 

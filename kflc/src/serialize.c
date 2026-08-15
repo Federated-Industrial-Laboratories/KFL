@@ -579,7 +579,13 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
         const int m_att = find_attr_(n->attrs, "attitude") != NULL;
         const int m_con = find_attr_(n->attrs, "contact") != NULL;
         const int m_rel = find_attr_(n->attrs, "relative") != NULL;
-        if (m_att || m_con) {
+        const KflcAttr *m_port = find_attr_(n->attrs, "port");
+        if (m_port) {
+            fprintf(out, "observe port %s of %s",
+                    (m_port->value.kind == KFLV_IDENT && m_port->value.u.s)
+                        ? m_port->value.u.s : "?",
+                    n->name ? n->name : "?");
+        } else if (m_att || m_con) {
             fprintf(out, "observe %s of %s", m_con ? "contact" : "attitude",
                     n->name ? n->name : "?");
         } else if (m_rel) {
@@ -601,6 +607,7 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
             if (strcmp(a->name, "attitude") == 0) continue;
             if (strcmp(a->name, "contact") == 0) continue;
             if (strcmp(a->name, "relative") == 0) continue;
+            if (strcmp(a->name, "port") == 0) continue;
             const char *v = (a->value.kind == KFLV_IDENT && a->value.u.s)
                             ? a->value.u.s : "?";
             fprintf(out, " %s=%s", a->name, v);

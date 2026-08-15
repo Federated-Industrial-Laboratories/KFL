@@ -1748,12 +1748,52 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             target_ident  = cur->str;
             advance(L, cur, had_error);
         }
+        /* `observe port <port> of <body> as <name>` publishes how far
+         * a named docking port on a body is from mated with the port
+         * it faces, and whether the contact it just made was a
+         * capture. It is the only form naming something inside an
+         * assembly rather than a body, so it carries two names, and
+         * the same rule tells it apart: a body genuinely called
+         * `port` still takes the ordinary form, because `observe port
+         * from earth` has `from` where this form has a port name. */
+        int         port_form = 0;
+        const char *port_ident = NULL;
+        if (!relative_form && strcmp(target_ident, "port") == 0 &&
+            cur->kind == T_IDENT && !is_ident_named(cur, "from"))
+        {
+            port_ident = cur->str;
+            advance(L, cur, had_error);
+            if (!is_ident_named(cur, "of")) {
+                kflc_diag_errorf(diag, line0,
+                    "observe port %s: expected `of` and the name of the "
+                    "body that carries the port", port_ident);
+                *had_error = 1;
+                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
+                if (at_nl(cur)) advance(L, cur, had_error);
+                return NULL;
+            }
+            advance(L, cur, had_error);
+            if (cur->kind != T_IDENT) {
+                kflc_diag_errorf(diag, line0,
+                    "observe port %s of: expected a body name", port_ident);
+                *had_error = 1;
+                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
+                if (at_nl(cur)) advance(L, cur, had_error);
+                return NULL;
+            }
+            /* As the self-reporting forms below: the cursor stays on
+             * the body name, which is where the trailing-clause scan
+             * takes the remainder of the line from. */
+            target_ident  = cur->str;
+            port_form     = 1;
+            attitude_form = 1;
+        }
         /* Not after the relative branch has consumed a target name: a
          * target that happens to be called `attitude` or `contact` is
          * a name here, not a form, and re-entering the branch below
          * would rewrite the target a second time and leave the
          * diagnostic naming the wrong body. */
-        if (!relative_form &&
+        if (!relative_form && !port_form &&
             (strcmp(target_ident, "attitude") == 0 ||
              strcmp(target_ident, "contact") == 0) &&
             is_ident_named(cur, "of"))
@@ -1818,9 +1858,14 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             KflcValue kv;
             memset(&kv, 0, sizeof kv);
             kv.kind = KFLV_IDENT;
-            kv.u.s  = kflc_arena_strdup(arena, "1");
+            /* The port form's marker carries the port's own name
+             * rather than a bare 1, because that name is the second
+             * thing the statement said and the round trip has to
+             * print it back. */
+            kv.u.s  = kflc_arena_strdup(arena, port_form ? port_ident : "1");
             const char *marker = relative_form ? "relative"
-                               : (contact_form ? "contact" : "attitude");
+                               : port_form     ? "port"
+                               : contact_form  ? "contact" : "attitude";
             stmt_append_attr(arena, n, marker, kv, line0);
         }
 

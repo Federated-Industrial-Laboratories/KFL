@@ -42,6 +42,7 @@
 #include "k26sense.h"
 #include "k26rl_env.h"
 #include "assembly.h"
+#include "capture.h"
 
 #include <ctype.h>
 #include <stdio.h>
@@ -89,6 +90,10 @@ static uint16_t rl_observe_mode_(const KflcNode *n)
          * is; astrometric would assert a correction that is not
          * made. */
         if (strcmp(k->name, "relative") == 0) return 0;
+        /* A port observe reports the geometry of one docking interface
+         * against another, both of which the integrator already
+         * produced. No correction of any kind is applied to it. */
+        if (strcmp(k->name, "port") == 0) return 0;
     }
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "mode") == 0 &&
@@ -151,14 +156,29 @@ static const char *const RL_REL_COMP_[RL_REL_COMPS] = {
     "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z"
 };
 
+/* A port observe publishes what a docking interface is doing: whether
+ * the contact it just made satisfied every condition of its declared
+ * capture envelope, the four residuals that condition is judged on,
+ * and their four rates. The residuals are published every step, since
+ * that is what a shaping term needs to fly an approach; on a step
+ * whose transition contained a contact at this port they carry the
+ * values the capture test itself was given, so nothing about the test
+ * is invisible to the agent or to the record. */
+#define RL_PORT_COMPS 9
+static const char *const RL_PORT_COMP_[RL_PORT_COMPS] = {
+    "_captured", "_axial", "_lateral", "_pitchyaw", "_roll",
+    "_v_axial", "_v_lateral", "_v_pitchyaw", "_v_roll"
+};
+
 /* Which form an observe is. The marker attribute the parser leaves is
  * what decides it, so the four are told apart in one place and the
  * width and the names cannot drift apart between them. */
 typedef enum {
-    RL_OBS_LOS = 0,
-    RL_OBS_ATT = 1,
-    RL_OBS_CON = 2,
-    RL_OBS_REL = 3
+    RL_OBS_LOS  = 0,
+    RL_OBS_ATT  = 1,
+    RL_OBS_CON  = 2,
+    RL_OBS_REL  = 3,
+    RL_OBS_PORT = 4
 } RlObserveForm;
 
 static RlObserveForm rl_observe_form_(const KflcNode *n)
@@ -169,6 +189,7 @@ static RlObserveForm rl_observe_form_(const KflcNode *n)
         if (strcmp(a->name, "attitude") == 0) return RL_OBS_ATT;
         if (strcmp(a->name, "contact") == 0)  return RL_OBS_CON;
         if (strcmp(a->name, "relative") == 0) return RL_OBS_REL;
+        if (strcmp(a->name, "port") == 0)     return RL_OBS_PORT;
     }
     return RL_OBS_LOS;
 }
@@ -213,6 +234,7 @@ static int rl_observe_base_width_(const KflcNode *n)
     case RL_OBS_ATT: return RL_ATT_COMPS;
     case RL_OBS_CON: return RL_CON_COMPS;
     case RL_OBS_REL: return RL_REL_COMPS;
+    case RL_OBS_PORT: return RL_PORT_COMPS;
     case RL_OBS_LOS: return RL_OBS_COMPS;
     }
     return RL_OBS_COMPS;
@@ -236,6 +258,7 @@ static const char *rl_observe_base_comp_(const KflcNode *n, int c)
     case RL_OBS_ATT: return RL_ATT_COMP_[c];
     case RL_OBS_CON: return RL_CON_COMP_[c];
     case RL_OBS_REL: return RL_REL_COMP_[c];
+    case RL_OBS_PORT: return RL_PORT_COMP_[c];
     case RL_OBS_LOS: return RL_OBS_COMP_[c];
     }
     return RL_OBS_COMP_[c];
@@ -350,6 +373,26 @@ typedef struct {
     double max_thrust;
 } RlThruster;
 
+/* One docking port that named a capture envelope, copied out of its
+ * assembly at model build. `coll` is the index, within this program's
+ * whole collider set, of the mating plane the assembly reader built
+ * from the envelope's published diameter: it is what tells a contact
+ * at this interface from a contact anywhere else on the craft. The
+ * basis is orthonormal and body-frame, its first axis the outward
+ * normal of the mating plane. The envelope travels in SI, converted
+ * once from the printed figures. */
+typedef struct {
+    int    veh, body, coll;
+    char   name[KFLC_ASM_NAME_MAX];
+    double com[3];
+    double at[3];
+    double basis[3][3];
+    double axial_rate_min, axial_rate_max;
+    double lateral_rate, pitchyaw_rate, roll_rate;
+    double lateral, pitchyaw, roll;
+    double diameter;
+} RlPort;
+
 /* One resolved actuator command or read inside on_step. */
 typedef struct {
     int kind;      /* 0 wheel, 1 magnetorquer, 2 thruster */
@@ -422,6 +465,8 @@ typedef struct {
     int         n_torquers;
     RlThruster  thrusters[RL_MAX_ACT];
     int         n_thrusters;
+    RlPort      ports[RL_MAX_ACT];
+    int         n_ports;
     double      veh_com[RL_MAX_ACT][3];
     double      veh_bound[RL_MAX_ACT];
     int         n_veh;
@@ -967,6 +1012,61 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
                     t->dir[k] = ft->dir[k];
                 }
                 t->max_thrust = ft->thrust;
+            } else if (ft->kind == KFLC_FEAT_PORT && ft->collider >= 0) {
+                /* Only a port that named a capture envelope reaches
+                 * here: the reader gives one a mating plane collider
+                 * and leaves the index at -1 otherwise, so a port
+                 * declared without an envelope is geometry the
+                 * program can describe and nothing this emitter has a
+                 * test to apply to. */
+                const KflcCaptureEnvelope *env =
+                    kflc_capture_envelope(ft->capture);
+                if (!env) {
+                    kflc_diag_errorf(diag, ft->line,
+                        "port `%s` names capture envelope `%s`, which is "
+                        "not defined", ft->name, ft->capture);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
+                if (m->n_ports >= RL_MAX_ACT) {
+                    kflc_diag_errorf(diag, ft->line,
+                        "more than %d docking ports in this program",
+                        RL_MAX_ACT);
+                    kflc_arena_release(ar);
+                    return 1;
+                }
+                RlPort *pt = &m->ports[m->n_ports++];
+                memset(pt, 0, sizeof *pt);
+                pt->veh = veh; pt->body = i;
+                for (int k = 0; k < 3; k++) pt->com[k] = a->com[k];
+                /* The pass reports a shape index within the body's
+                 * own slice, which is the assembly's collider order,
+                 * so the reader's index is what a contact is
+                 * compared against. */
+                pt->coll = ft->collider;
+                snprintf(pt->name, sizeof pt->name, "%s", ft->name);
+                const KflcAsmCollider *plate = &a->colliders[ft->collider];
+                for (int k = 0; k < 3; k++) {
+                    pt->at[k] = ft->at[k];
+                    /* The reader built the plate on the port's own
+                     * frame, so the basis is read back from it rather
+                     * than orthonormalised a second time here, which
+                     * would be a second place for it to be wrong. */
+                    for (int w = 0; w < 3; w++) {
+                        pt->basis[k][w] = plate->rot[w][k];
+                    }
+                }
+                /* The one conversion from the envelope's printed
+                 * units to the units the artifact carries. */
+                pt->axial_rate_min = env->axial_rate_min;
+                pt->axial_rate_max = env->axial_rate_max;
+                pt->lateral_rate   = env->lateral_rate;
+                pt->pitchyaw_rate  = kflc_capture_deg_to_rad(env->pitchyaw_rate_deg);
+                pt->roll_rate      = kflc_capture_deg_to_rad(env->roll_rate_deg);
+                pt->lateral        = env->lateral;
+                pt->pitchyaw       = kflc_capture_deg_to_rad(env->pitchyaw_deg);
+                pt->roll           = kflc_capture_deg_to_rad(env->roll_deg);
+                pt->diameter       = kflc_capture_mm_to_m(env->mating_diameter_mm);
             }
         }
 
@@ -2211,6 +2311,23 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
 "    double hit;\n"
 "    double fraction;\n"
 "    double speed;\n"
+"    /* What a port observe form publishes on a transition whose\n"
+"     * contact was between two docking interfaces: whether it\n"
+"     * satisfied every condition of the declared envelope, and the\n"
+"     * residuals the test was given. They are latched because the\n"
+"     * test is a statement about the instant of contact, and by the\n"
+"     * end of the transition the resolution has already removed the\n"
+"     * relative velocity the test read. */\n"
+"    double port_hit;\n"
+"    double captured;\n"
+"    double axial;\n"
+"    double lateral;\n"
+"    double pitchyaw;\n"
+"    double roll;\n"
+"    double v_axial;\n"
+"    double v_lateral;\n"
+"    double v_pitchyaw;\n"
+"    double v_roll;\n"
 "} KflrlContact;\n\n", out);
     if (m->n_colliders > 0) {
         fputs("static const K26AstroCollShape kflrl_coll_[] = {\n", out);
@@ -2255,6 +2372,72 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
             fprintf(out, "    %.17g,\n", m->veh_bound[v]);
         }
         fputs("};\n\n", out);
+    }
+
+    /* ---- Docking ports ---------------------------------------- *
+     *
+     * One entry per port that named a capture envelope. `shape` is
+     * the index, within its own vehicle's collider slice, of the
+     * mating plane the assembly reader built from the envelope's
+     * published diameter, which is what tells a contact at the
+     * docking interface from a contact anywhere else on the craft.
+     *
+     * The envelope arrives here already in SI. Its printed figures
+     * and the single conversion that turns them into these constants
+     * live in the compiler's capture table, so a citation stays exact
+     * and the arithmetic that changed the units is in one place
+     * rather than spread through the artifact.
+     */
+    fprintf(out, "#define KFLRL_N_PORTS %d\n\n", m->n_ports);
+    if (m->n_ports > 0) {
+        fputs(
+"typedef struct {\n"
+"    int                  veh;\n"
+"    int                  shape;\n"
+"    K26V3                com;\n"
+"    K26AstroCollPort     geom;\n"
+"    K26AstroCollEnvelope env;\n"
+"} KflrlPort;\n\n", out);
+        fputs("static const KflrlPort kflrl_ports_[] = {\n", out);
+        for (int i = 0; i < m->n_ports; i++) {
+            const RlPort *pt = &m->ports[i];
+            fprintf(out,
+                "    { %d, %d,\n"
+                "      { %.17g, %.17g, %.17g },\n"
+                "      { { %.17g, %.17g, %.17g },\n"
+                "        { { %.17g, %.17g, %.17g }, { %.17g, %.17g, %.17g },\n"
+                "          { %.17g, %.17g, %.17g } } },\n"
+                "      { %.17g, %.17g, %.17g, %.17g, %.17g,\n"
+                "        %.17g, %.17g, %.17g } },\n",
+                pt->veh, pt->coll,
+                pt->com[0], pt->com[1], pt->com[2],
+                pt->at[0], pt->at[1], pt->at[2],
+                pt->basis[0][0], pt->basis[0][1], pt->basis[0][2],
+                pt->basis[1][0], pt->basis[1][1], pt->basis[1][2],
+                pt->basis[2][0], pt->basis[2][1], pt->basis[2][2],
+                pt->axial_rate_min, pt->axial_rate_max, pt->lateral_rate,
+                pt->pitchyaw_rate, pt->roll_rate,
+                pt->lateral, pt->pitchyaw, pt->roll);
+        }
+        fputs("};\n\n", out);
+        fputs(
+"/* One body as the port geometry takes it, at rest over a zero\n"
+" * interval: the residuals a port observe publishes between contacts\n"
+" * are of the state as it stands, so both endpoints of the interval\n"
+" * are the same state and the fraction asked for is zero. */\n"
+"static void kflrl_port_snap_(const K26AstroBody *b, K26V3 com, K26V3 pos,\n"
+"                             K26AstroCollBody *out)\n"
+"{\n"
+"    memset(out, 0, sizeof *out);\n"
+"    out->pos0 = pos;\n"
+"    out->pos1 = pos;\n"
+"    out->orientation = b->attitude;\n"
+"    out->vel0 = b->vel;\n"
+"    out->vel1 = b->vel;\n"
+"    out->omega = b->omega;\n"
+"    out->mass = b->mass;\n"
+"    out->com_offset = com;\n"
+"}\n\n", out);
     }
 
     /* Assembly identity, per body that carries one. The assembly is
@@ -2929,6 +3112,137 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
     for (int i = 0; i < m->n_observes; i++) {
         const KflcNode *s = m->observes[i];
         int off = rl_obs_offset_(m->observes, i);
+        if (rl_observe_form_(s) == RL_OBS_PORT) {
+            /* The form names a port on a body, and the state it
+             * publishes is that port's with respect to the one it
+             * faces. Which port it faces is not written in the
+             * statement, so it is resolved here: the one port
+             * declared on any other body. A world with none has
+             * nothing to measure against, and a world with several
+             * leaves the pairing to an accident of declaration
+             * order, so both are refused where they are written
+             * rather than publishing nine channels about an
+             * arbitrary choice. */
+            const char *pname = NULL;
+            for (const KflcAttr *a = s->attrs; a; a = a->next) {
+                if (a->name && strcmp(a->name, "port") == 0 &&
+                    a->value.kind == KFLV_IDENT) {
+                    pname = a->value.u.s;
+                }
+            }
+            int tgt = rl_body_index_of_(m, s->name);
+            if (tgt < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe port %s of `%s`: no astro_body of that name "
+                    "is declared in this world", pname ? pname : "?",
+                    s->name);
+                return 1;
+            }
+            if (!rl_body_has_assembly_(m, tgt)) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe port %s of `%s`: `%s` declares no "
+                    "`assembly=`, so it carries no docking ports",
+                    pname ? pname : "?", s->name, s->name);
+                return 1;
+            }
+            int active = -1;
+            for (int q = 0; q < m->n_ports; q++) {
+                if (m->ports[q].body == tgt && pname &&
+                    strcmp(m->ports[q].name, pname) == 0) {
+                    active = q;
+                }
+            }
+            if (active < 0) {
+                char have[256];
+                size_t used = 0;
+                int    seen = 0;
+                have[0] = '\0';
+                for (int q = 0; q < m->n_ports; q++) {
+                    if (m->ports[q].body != tgt) continue;
+                    int wrote = snprintf(have + used, sizeof have - used,
+                                         "%s`%s`", seen++ ? ", " : "",
+                                         m->ports[q].name);
+                    if (wrote < 0 || (size_t)wrote >= sizeof have - used) break;
+                    used += (size_t)wrote;
+                }
+                kflc_diag_errorf(diag, s->line,
+                    "observe port %s of %s: `%s` declares no port of that "
+                    "name carrying a capture envelope; it carries %s",
+                    pname ? pname : "?", s->name, s->name,
+                    seen ? have : "none");
+                return 1;
+            }
+            int passive = -1, others = 0;
+            for (int q = 0; q < m->n_ports; q++) {
+                if (m->ports[q].body == tgt) continue;
+                passive = q;
+                others++;
+            }
+            if (others != 1) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe port %s of %s: the state this form publishes "
+                    "is against the port it faces, and %d ports carrying a "
+                    "capture envelope are declared on other bodies; exactly "
+                    "one is needed", pname, s->name, others);
+                return 1;
+            }
+            int aslot = m->ports[active].veh;
+            int pbody = m->ports[passive].body;
+            fprintf(out,
+                "    {\n"
+                "        const K26AstroBody *_kfl_pa = "
+                "k26astro_world_body_at(world, kflrl_body_idx_[%d]);\n"
+                "        const K26AstroBody *_kfl_pp = "
+                "k26astro_world_body_at(world, kflrl_body_idx_[%d]);\n"
+                "        K26AstroCollPortState _kfl_ps;\n"
+                "        double _kfl_cap = 0.0;\n"
+                "        memset(&_kfl_ps, 0, sizeof _kfl_ps);\n"
+                /* A transition that ended at this interface publishes
+                 * the state the capture test was given; any other
+                 * step publishes the state as it stands, which is
+                 * what an approach is flown on. */
+                "        if (ct && ct[%d].port_hit != 0.0) {\n"
+                "            _kfl_cap           = ct[%d].captured;\n"
+                "            _kfl_ps.axial      = ct[%d].axial;\n"
+                "            _kfl_ps.lateral    = ct[%d].lateral;\n"
+                "            _kfl_ps.pitchyaw   = ct[%d].pitchyaw;\n"
+                "            _kfl_ps.roll       = ct[%d].roll;\n"
+                "            _kfl_ps.v_axial    = ct[%d].v_axial;\n"
+                "            _kfl_ps.v_lateral  = ct[%d].v_lateral;\n"
+                "            _kfl_ps.v_pitchyaw = ct[%d].v_pitchyaw;\n"
+                "            _kfl_ps.v_roll     = ct[%d].v_roll;\n"
+                "        } else if (_kfl_pa && _kfl_pp) {\n"
+                "            K26AstroCollBody _kfl_ba, _kfl_bp;\n"
+                "            kflrl_port_snap_(_kfl_pa, "
+                "kflrl_ports_[%d].com,\n"
+                "                k26astro_pos_sub(&_kfl_pa->pos, "
+                "&_kfl_pp->pos), &_kfl_ba);\n"
+                "            kflrl_port_snap_(_kfl_pp, "
+                "kflrl_ports_[%d].com,\n"
+                "                k26m3d_v3(0.0, 0.0, 0.0), &_kfl_bp);\n"
+                "            (void)k26astro_coll_port_state(&_kfl_ba,\n"
+                "                &kflrl_ports_[%d].geom, &_kfl_bp,\n"
+                "                &kflrl_ports_[%d].geom, 0.0, &_kfl_ps);\n"
+                "        }\n"
+                "        out_v[%d] = _kfl_cap;\n"
+                "        out_v[%d] = _kfl_ps.axial;\n"
+                "        out_v[%d] = _kfl_ps.lateral;\n"
+                "        out_v[%d] = _kfl_ps.pitchyaw;\n"
+                "        out_v[%d] = _kfl_ps.roll;\n"
+                "        out_v[%d] = _kfl_ps.v_axial;\n"
+                "        out_v[%d] = _kfl_ps.v_lateral;\n"
+                "        out_v[%d] = _kfl_ps.v_pitchyaw;\n"
+                "        out_v[%d] = _kfl_ps.v_roll;\n"
+                "    }\n",
+                tgt, pbody,
+                aslot, aslot, aslot, aslot, aslot, aslot, aslot, aslot,
+                aslot, aslot,
+                active, passive,
+                active, passive,
+                off, off + 1, off + 2, off + 3, off + 4, off + 5,
+                off + 6, off + 7, off + 8);
+            continue;
+        }
         if (rl_observe_form_(s) == RL_OBS_CON) {
             /* The body must be one the pass can report on, which is a
              * body that binds an assembly: without one it has no
@@ -5176,6 +5490,24 @@ static void rl_emit_env_core_(FILE *out)
 "                          / h->control_dt\n"
 "                        : 0.0;\n"
 "                    int pair[2] = { cc.body_a, cc.body_b };\n"
+"", out);
+    fputs(
+"#if KFLRL_N_PORTS > 1\n"
+"                    /* Was this contact between two docking\n"
+"                     * interfaces? Only then is there a capture\n"
+"                     * envelope to judge it against; a contact\n"
+"                     * anywhere else on either craft is an impact\n"
+"                     * whatever its geometry. */\n"
+"                    int pidx[2] = { -1, -1 };\n"
+"                    for (int q = 0; q < KFLRL_N_PORTS; q++) {\n"
+"                        if (kflrl_ports_[q].veh == cc.body_a &&\n"
+"                            kflrl_ports_[q].shape == cc.shape_a) pidx[0] = q;\n"
+"                        if (kflrl_ports_[q].veh == cc.body_b &&\n"
+"                            kflrl_ports_[q].shape == cc.shape_b) pidx[1] = q;\n"
+"                    }\n"
+"#endif\n"
+"", out);
+    fputs(
 "                    for (int q = 0; q < 2; q++) {\n"
 "                        KflrlContact *ct = &h->contact[\n"
 "                            (size_t)e * KFLRL_N_CONTACT + pair[q]];\n"
@@ -5183,6 +5515,38 @@ static void rl_emit_env_core_(FILE *out)
 "                        ct->hit      = 1.0;\n"
 "                        ct->fraction = cfrac;\n"
 "                        ct->speed    = cc.speed;\n"
+"#if KFLRL_N_PORTS > 1\n"
+"                        if (pidx[0] < 0 || pidx[1] < 0) continue;\n"
+"                        /* The residuals are of this body\'s own port\n"
+"                         * as the active one, which is the sense the\n"
+"                         * form that reads them names. The state is\n"
+"                         * taken at the impact configuration, before\n"
+"                         * the resolution above reached the world. */\n"
+"                        {\n"
+"                            int ai = pidx[q], pi = pidx[1 - q];\n"
+"                            K26AstroCollPortState ps;\n"
+"                            if (k26astro_coll_port_state(\n"
+"                                    &cbody[pair[q]], &kflrl_ports_[ai].geom,\n"
+"                                    &cbody[pair[1 - q]],\n"
+"                                    &kflrl_ports_[pi].geom,\n"
+"                                    cc.time, &ps) != K26ASTRO_COLL_OK) {\n"
+"                                continue;\n"
+"                            }\n"
+"", out);
+    fputs(
+"                            ct->port_hit   = 1.0;\n"
+"                            ct->captured   = k26astro_coll_port_captured(\n"
+"                                &ps, &kflrl_ports_[ai].env) ? 1.0 : 0.0;\n"
+"                            ct->axial      = ps.axial;\n"
+"                            ct->lateral    = ps.lateral;\n"
+"                            ct->pitchyaw   = ps.pitchyaw;\n"
+"                            ct->roll       = ps.roll;\n"
+"                            ct->v_axial    = ps.v_axial;\n"
+"                            ct->v_lateral  = ps.v_lateral;\n"
+"                            ct->v_pitchyaw = ps.v_pitchyaw;\n"
+"                            ct->v_roll     = ps.v_roll;\n"
+"                        }\n"
+"#endif\n"
 "                    }\n"
 "                }\n"
 "            }\n"
