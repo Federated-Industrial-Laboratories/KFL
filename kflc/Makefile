@@ -379,6 +379,34 @@ $(RL_LIFECYCLE_TEST): tests/test_rl_lifecycle.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The `agent` block: per-agent slice partition with two agents of
+# different channel counts, qualified published names and the agent
+# name bound, the mixing and collision refusals, unqualified
+# resolution inside on_step, cross-agent reads in an objective driven
+# against a fixture whose agents differ at every step, and batch mode
+# at the declared defaults. Skips (77) when the sibling stack archives
+# are not built.
+RL_AGENT_TEST = tests/test_rl_agent
+$(RL_AGENT_TEST): tests/test_rl_agent.c $(RL_GATE_DEPS) \
+                  ../libk26rl/include/k26rl_env.h \
+                  ../libk26rl/include/k26rl_episode.h \
+                  ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
+# A programme with no agent block publishes the spec it published
+# before the block existed. Builds the compiler at the base commit
+# from history, compiles every reinforcement learning programme in the
+# tree with both, and compares the two spec blobs byte for byte. Its
+# own binary so that "history unavailable" is the harness's skip code
+# (77) rather than a silent pass.
+RL_AGENT_ID_TEST = tests/test_rl_agent_identity
+$(RL_AGENT_ID_TEST): tests/test_rl_agent_identity.c $(RL_GATE_DEPS) \
+                     ../libk26rl/include/k26rl_env.h \
+                     ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 # Grammar 3.1 pins: the 3.1 `step` statement still lowers to the
 # clamped stepping entry (the exact-dt entry belongs to the episode
 # machinery alone), and a reinforcement learning program stripped of
@@ -401,7 +429,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_AGENT_ID_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -410,6 +438,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
+	./$(TEST_BIN) integration_tests/rl_multi_agent.kfl
 	./$(MANIFEST_TEST)
 	./$(BODY_BINDING_TEST)
 	./$(W8_ARENA_TEST)
@@ -424,7 +453,8 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_BODIES_TEST) $(RL_ATT_TEST) \
 	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
-	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST); do \
+	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
+	          $(RL_AGENT_TEST) $(RL_AGENT_ID_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \

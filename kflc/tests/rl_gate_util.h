@@ -219,6 +219,16 @@ typedef struct {
     int      n_modes;
     char     body_names[16][64];
     int      n_body_names;
+    /* Per agent, in the order the slice tags name them: the offset
+     * and count of that agent's observation and action slices. */
+    uint32_t obs_slice[16][2];
+    uint32_t act_slice[16][2];
+    int      n_obs_slices;
+    int      n_act_slices;
+    /* The published channel names, by channel index. Sized to the
+     * entry the emitter writes so a qualified name arrives whole. */
+    char     chan_names[64][96];
+    int      n_chan_names;
 } RlSpecView;
 
 static inline uint32_t rl_get_u32_(const uint8_t *p)
@@ -266,7 +276,38 @@ static inline void rl_parse_spec_(const uint8_t *blob, uint32_t len,
         case K26RL_TAG_ACT_TOTAL:    v->act_total    = rl_get_u32_(val); break;
         case K26RL_TAG_ACT_BOUNDS:   v->saw_bounds   = 1; break;
         case K26RL_TAG_ACT_KIND:     v->saw_kind     = 1; break;
-        case K26RL_TAG_OBS_CHANNEL_NAME: v->saw_names = 1; break;
+        case K26RL_TAG_OBS_CHANNEL_NAME: {
+            v->saw_names = 1;
+            uint32_t ch = rl_get_u32_(val);
+            if (ch < 64 && l >= 4) {
+                uint32_t nl = l - 4;
+                if (nl > 95) nl = 95;
+                memcpy(v->chan_names[ch], val + 4, nl);
+                v->chan_names[ch][nl] = '\0';
+                if ((int)ch + 1 > v->n_chan_names) {
+                    v->n_chan_names = (int)ch + 1;
+                }
+            }
+            break;
+        }
+        case K26RL_TAG_AGENT_OBS_SLICE: {
+            uint32_t a = rl_get_u32_(val);
+            if (a < 16 && l >= 12) {
+                v->obs_slice[a][0] = rl_get_u32_(val + 4);
+                v->obs_slice[a][1] = rl_get_u32_(val + 8);
+                if ((int)a + 1 > v->n_obs_slices) v->n_obs_slices = (int)a + 1;
+            }
+            break;
+        }
+        case K26RL_TAG_AGENT_ACT_SLICE: {
+            uint32_t a = rl_get_u32_(val);
+            if (a < 16 && l >= 12) {
+                v->act_slice[a][0] = rl_get_u32_(val + 4);
+                v->act_slice[a][1] = rl_get_u32_(val + 8);
+                if ((int)a + 1 > v->n_act_slices) v->n_act_slices = (int)a + 1;
+            }
+            break;
+        }
         case K26RL_TAG_EPISODE_FLAGS: v->episode_flags = rl_get_u32_(val); break;
         case K26RL_TAG_OBS_CHANNEL_MODE: {
             uint32_t ch = rl_get_u32_(val);
