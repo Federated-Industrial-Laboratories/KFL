@@ -44,9 +44,9 @@ assembly space_station
 
     provenance mass "NASA, International Space Station Facts and Figures, page dated 16 July 2024: 925 335 pounds (419 725 kilograms)" cited
     provenance dimensions "NASA, same page: truss 310 ft (94 m), pressurised module length 218 ft along the major axis (67 m), solar array length 239 ft across both arrays (73 m)" cited
-    provenance hull_geometry "modelled: one box of the cited half extents, the three published lengths assigned to the docking axis, the truss axis and the third axis; NASA publishes lengths and not a bounding box" computed
+    provenance hull_geometry "one box of the cited half extents, the three published lengths assigned to the docking axis, the truss axis and the third axis; NASA publishes lengths and not a bounding box, so the assignment is chosen and not derived" modelled
     provenance inertia "computed from the cited mass and the modelled box at uniform density; it overstates, being 4.3, 5.5 and 2.8 times the 350-tonne design-case article of IDSS IDD Rev E Table 3.3.1.2-1" computed
-    provenance port_dock "modelled: the mating plane 0.1 m ahead of the box's forward face so it is the first geometry an arriving craft meets" computed
+    provenance port_dock "the mating plane 0.1 m ahead of the box's forward face so it is the first geometry an arriving craft meets; no docking interface coordinate is published for this station" modelled
 
     component structure
         mass 419725.0

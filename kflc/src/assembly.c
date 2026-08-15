@@ -724,9 +724,12 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
                 } else if (strcmp(tok[3].text, "unverified") == 0) {
                     p->status = KFLC_PROV_UNVERIFIED;
                     a->n_unverified++;
+                } else if (strcmp(tok[3].text, "modelled") == 0) {
+                    p->status = KFLC_PROV_MODELLED;
+                    a->n_modelled++;
                 } else {
                     ASM_ERR("%s: `%s` is not a provenance status; the set "
-                            "is cited, computed, unverified",
+                            "is cited, computed, modelled, unverified",
                             resolved, tok[3].text);
                 }
                 continue;
@@ -1326,6 +1329,14 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
         if (a->provenance[i].status == KFLC_PROV_UNVERIFIED) {
             kflc_diag_warnf(diag, line,
                 "%s: provenance of `%s` is unverified (%s)",
+                resolved, a->provenance[i].property, a->provenance[i].source);
+        } else if (a->provenance[i].status == KFLC_PROV_MODELLED) {
+            /* Reported rather than refused. A modelled property is an
+             * arrangement the asset chose and disclosed, which is a
+             * legitimate thing for an asset to carry and not a
+             * legitimate thing for it to carry silently. */
+            kflc_diag_warnf(diag, line,
+                "%s: provenance of `%s` is modelled (%s)",
                 resolved, a->provenance[i].property, a->provenance[i].source);
         }
     }

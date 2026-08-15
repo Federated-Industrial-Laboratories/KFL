@@ -678,8 +678,8 @@ static void shipped_assets_(void)
         ASSERT(a->n_provenance > 0);
         char hex[2 * KFLC_ASM_DIGEST + 1];
         kflc_assembly_digest_hex(a->digest, hex);
-        printf("  %-28s mass %10.3f kg  digest %.16s...\n",
-               names[i], a->mass, hex);
+        printf("  %-28s mass %10.3f kg  %d modelled  digest %.16s...\n",
+               names[i], a->mass, a->n_modelled, hex);
         n_pass++;
         kflc_arena_release(arena);
     }
@@ -711,6 +711,74 @@ static void shipped_assets_(void)
     printf("  an asset carrying an unverified line is what the rule "
            "above rejects: OK\n");
     n_pass++;
+
+    /* The fourth status word, which the gate admits and reports. A
+     * modelled property is an arrangement the asset chose and
+     * disclosed; refusing it would leave a truthful asset with
+     * nowhere to sit, and passing it silently would let the status
+     * word disagree with the asset's own prose. */
+    write_file_(WORK "/shipped_modelled.k26asm",
+        "assembly shipped_modelled\n"
+        "    frame x_to_port\n"
+        "    provenance layout \"chosen, not published anywhere\" modelled\n"
+        "    component hull\n"
+        "        mass 1.0\n"
+        "        collider box 1 1 1\n"
+        "    end\n"
+        "end\n");
+    {
+        KflcArena *ar = kflc_arena_create();
+        KflcDiag   dg;
+        char        buf[4096];
+        FILE       *cap = fmemopen(buf, sizeof buf, "w");
+        ASSERT(cap != NULL);
+        kflc_diag_init(&dg, WORK "/program.kfl", cap);
+        KflcAssembly *m = kflc_assembly_load(WORK "/shipped_modelled.k26asm",
+                                             WORK "/program.kfl", 1, ar, &dg);
+        fflush(cap);
+        fclose(cap);
+        ASSERT(m != NULL);
+        ASSERT(dg.errors == 0);
+        ASSERT(m->n_modelled == 1);
+        ASSERT(m->n_unverified == 0);
+        /* Admitted, and reported: the diagnostic names the property
+         * and repeats the source, so the disclosure travels. */
+        ASSERT(strstr(buf, "is modelled") != NULL);
+        ASSERT(strstr(buf, "`layout`") != NULL);
+        ASSERT(strstr(buf, "chosen, not published anywhere") != NULL);
+        kflc_arena_release(ar);
+        printf("  a modelled line is admitted and reported: OK\n");
+        n_pass++;
+    }
+
+    /* And the set stays closed: a fifth word is refused, naming all
+     * four. */
+    write_file_(WORK "/shipped_fifth.k26asm",
+        "assembly shipped_fifth\n"
+        "    frame x_to_port\n"
+        "    provenance layout \"a source\" guessed\n"
+        "    component hull\n"
+        "        mass 1.0\n"
+        "        collider box 1 1 1\n"
+        "    end\n"
+        "end\n");
+    {
+        KflcArena *ar = kflc_arena_create();
+        KflcDiag   dg;
+        char        buf[4096];
+        FILE       *cap = fmemopen(buf, sizeof buf, "w");
+        ASSERT(cap != NULL);
+        kflc_diag_init(&dg, WORK "/program.kfl", cap);
+        KflcAssembly *m = kflc_assembly_load(WORK "/shipped_fifth.k26asm",
+                                             WORK "/program.kfl", 1, ar, &dg);
+        fflush(cap);
+        fclose(cap);
+        ASSERT(m == NULL);
+        ASSERT(strstr(buf, "cited, computed, modelled, unverified") != NULL);
+        kflc_arena_release(ar);
+        printf("  a fifth status word is refused, naming the four: OK\n");
+        n_pass++;
+    }
 }
 
 int main(void)

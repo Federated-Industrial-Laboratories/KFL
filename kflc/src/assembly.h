@@ -122,11 +122,28 @@ typedef struct {
 } KflcAsmComponent;
 
 /* Provenance status words. The set is closed: an asset says where a
- * number came from in one of three ways or is refused. */
+ * number came from in one of four ways or is refused.
+ *
+ * `cited` is read from the named source. `computed` is derived here
+ * from cited inputs, and the derivation is the source. `modelled` is
+ * an arrangement chosen rather than found: the source names what was
+ * chosen and what is not published, and the choice is disclosed
+ * rather than dressed as a derivation. `unverified` is a working
+ * figure whose source has not been checked.
+ *
+ * The fourth word exists because the first three left a real case
+ * with nowhere truthful to sit. A thruster layout placed on a hull
+ * whose dimensions are cited is not derived from those dimensions in
+ * any sense that would let a reader reconstruct it, so calling it
+ * computed overstates; and it is not an unchecked working figure
+ * either, since there is nothing to check it against. Marking it
+ * either way made the status word disagree with the asset's own
+ * prose, which is the disagreement this word removes. */
 typedef enum {
     KFLC_PROV_CITED      = 1,
     KFLC_PROV_COMPUTED   = 2,
-    KFLC_PROV_UNVERIFIED = 3
+    KFLC_PROV_UNVERIFIED = 3,
+    KFLC_PROV_MODELLED   = 4
 } KflcAsmProvStatus;
 
 typedef struct {
@@ -155,6 +172,7 @@ typedef struct {
     int     n_features;
     int     n_provenance;
     int     n_unverified;
+    int     n_modelled;
     KflcAsmComponent  components[KFLC_ASM_MAX_COMP];
     KflcAsmCollider   colliders[KFLC_ASM_MAX_COLL];
     KflcAsmFeature    features[KFLC_ASM_MAX_FEAT];
@@ -171,8 +189,11 @@ typedef struct {
  * @param diag     Diagnostics; every refusal names a file and a line.
  * @return The derived assembly, or NULL when it was refused.
  * @note  Warns once per property whose provenance status is
- *        unverified; the count is left in n_unverified so a caller
- *        can apply a stricter rule.
+ *        unverified and once per property that is modelled; the
+ *        counts are left in n_unverified and n_modelled so a caller
+ *        can apply a stricter rule to either. The rule this tree
+ *        applies is that a shipped asset carries no unverified
+ *        property and may carry modelled ones, which are reported.
  */
 KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
                                  int line, KflcArena *arena,

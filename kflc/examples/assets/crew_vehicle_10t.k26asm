@@ -28,8 +28,9 @@
 # own closed forms return the article's cited mass and inertia. The
 # solution is
 #
-#     radius  1.926124891819624 m
-#     segment 3.579644032781015 m between its endpoints
+#     radius      1.9261248918196237 m
+#     half length 1.7898220163905079 m from the centre to each
+#                 segment endpoint, so a segment of twice that
 #
 # giving an overall length of 7.4319 m and a diameter of 3.8523 m.
 # Those dimensions were not chosen: they fall out of the cited
@@ -48,8 +49,12 @@
 # tensor, reproduced by geometry, and the thruster layout below is a
 # modelled arrangement placed on this asset's own computed hull. It is
 # not a claim about any vehicle's thruster geometry. What is real in
-# it is the count and the thrust: twelve manoeuvring thrusters, which
-# is the count NASA gives for Crew Dragon, each of 400 N.
+# it is the count and the thrust, and even the count is not agreed
+# across sources: NASA says twelve Draco engines, the manufacturer's
+# own page says sixteen, and the press kit for the earlier cargo
+# vehicle says eighteen. Twelve is modelled here because it is the
+# figure from the source that was retrievable and readable in full;
+# the disagreement is recorded on the property rather than resolved.
 #
 # The docking interface stands 0.034 m ahead of the hull's forward
 # extreme so that it is the first geometry another craft meets. The
@@ -71,18 +76,19 @@ assembly crew_vehicle_10t
 
     provenance mass "IDSS IDD Rev E, Oct 2016, Table 3.3.1.2-1, article IDSS-10T: 10 000 kg" cited
     provenance inertia "IDSS IDD Rev E, Oct 2016, Table 3.3.1.2-1, article IDSS-10T: 17 000, 42 000, 42 000 kg m^2 about the centre of gravity, no products" cited
-    provenance hull_geometry "computed: the capsule radius and segment length that reproduce the cited mass and inertia under this compiler's closed forms" computed
-    provenance vehicle_class "computed: the mean of Soyuz launch mass 7190 kg (NASA NP-2015-05-022-JSC) and Crew Dragon undock mass 27 600 lb (NASA, Demo-2 return, 2020) is 9855 kg, which selects this article" computed
-    provenance thruster_count "NASA, Houston We Have a Podcast, The SpaceX Crew Dragon, recorded 20 August 2019: twelve Draco engines" cited
-    provenance thrust "NASA and SpaceX, COTS 2 Mission Press Kit, May 2012: Draco thruster 90 lbf, 400 N; the figure is published for the Dragon 1 thruster" cited
-    provenance thruster_layout "modelled: two rings on the hull at the cylinder ends, in opposed pairs about the centre of mass; no thruster position is published for either vehicle this article represents" computed
-    provenance port_forward "modelled: the mating plane 0.034 m ahead of the hull's forward extreme so it is the first geometry another craft meets; the article's hard capture plane is at 3.5 m" computed
-    provenance wheels "computed: sized to null 0.2 deg/s about the transverse axis within a minute at the article's cited transverse inertia" computed
+    provenance hull_geometry "computed: the capsule radius and half length that reproduce the cited mass and inertia under this compiler's closed forms" computed
+    provenance vehicle_class "computed: the mean of Soyuz 7190 kg and Crew Dragon about 12 520 kg, the latter from approximately 27 600 lb rounded up, is 9855 kg, which selects this article" computed
+    provenance thruster_count "NASA, Houston We Have a Podcast, 20 August 2019: twelve Draco engines. Sources disagree; see the note above on sixteen and eighteen" cited
+    provenance thrust "NASA and SpaceX, COTS 2 Mission Press Kit, May 2012: Draco thruster 90 lbf, 400 N, published for the Dragon 1 thruster" cited
+    provenance thruster_layout "two rings on the hull at the cylinder ends in opposed pairs; no thruster position is published for either vehicle, so this arrangement is chosen and not derived" modelled
+    provenance port_forward "the mating plane 0.034 m ahead of the hull's forward extreme so it is the first geometry another craft meets; the standard publishes the offset only in a figure" modelled
+    provenance wheel_limits "computed: the torque that nulls 0.2 deg/s about the transverse axis in a minute at the cited transverse inertia, that torque held for 100 s, and 1000 rad/s when saturated" computed
+    provenance wheel_friction "a chosen friction model of the right order for a wheel of this size; no figure for the viscous, Coulomb or dead-rate terms is published or derived here" modelled
 
     component hull
         mass 10000.0
         at 0.0 0.0 0.0
-        collider capsule -1.789822016390510 0.0 0.0 1.789822016390510 0.0 0.0 1.926124891819624
+        collider capsule -1.7898220163905079 0.0 0.0 1.7898220163905079 0.0 0.0 1.9261248918196237
     end
 
     port forward
@@ -97,22 +103,22 @@ assembly crew_vehicle_10t
     # at one ring, so firing a pair together is a force through the
     # centre of mass and firing one alone is a pitch or yaw command.
     thruster close_yp
-        at -1.789822016390510 1.926124891819624 0.0
+        at -1.7898220163905079 1.9261248918196237 0.0
         dir 1.0 0.0 0.0
         thrust 400.0
     end
     thruster close_ym
-        at -1.789822016390510 -1.926124891819624 0.0
+        at -1.7898220163905079 -1.9261248918196237 0.0
         dir 1.0 0.0 0.0
         thrust 400.0
     end
     thruster brake_yp
-        at 1.789822016390510 1.926124891819624 0.0
+        at 1.7898220163905079 1.9261248918196237 0.0
         dir -1.0 0.0 0.0
         thrust 400.0
     end
     thruster brake_ym
-        at 1.789822016390510 -1.926124891819624 0.0
+        at 1.7898220163905079 -1.9261248918196237 0.0
         dir -1.0 0.0 0.0
         thrust 400.0
     end
@@ -121,42 +127,42 @@ assembly crew_vehicle_10t
     # one forward and one aft of the centre of mass with the same
     # direction, so the pair translates and either one alone turns.
     thruster lat_yp_fwd
-        at 1.789822016390510 -1.926124891819624 0.0
+        at 1.7898220163905079 -1.9261248918196237 0.0
         dir 0.0 1.0 0.0
         thrust 400.0
     end
     thruster lat_yp_aft
-        at -1.789822016390510 -1.926124891819624 0.0
+        at -1.7898220163905079 -1.9261248918196237 0.0
         dir 0.0 1.0 0.0
         thrust 400.0
     end
     thruster lat_ym_fwd
-        at 1.789822016390510 1.926124891819624 0.0
+        at 1.7898220163905079 1.9261248918196237 0.0
         dir 0.0 -1.0 0.0
         thrust 400.0
     end
     thruster lat_ym_aft
-        at -1.789822016390510 1.926124891819624 0.0
+        at -1.7898220163905079 1.9261248918196237 0.0
         dir 0.0 -1.0 0.0
         thrust 400.0
     end
     thruster lat_zp_fwd
-        at 1.789822016390510 0.0 -1.926124891819624
+        at 1.7898220163905079 0.0 -1.9261248918196237
         dir 0.0 0.0 1.0
         thrust 400.0
     end
     thruster lat_zp_aft
-        at -1.789822016390510 0.0 -1.926124891819624
+        at -1.7898220163905079 0.0 -1.9261248918196237
         dir 0.0 0.0 1.0
         thrust 400.0
     end
     thruster lat_zm_fwd
-        at 1.789822016390510 0.0 1.926124891819624
+        at 1.7898220163905079 0.0 1.9261248918196237
         dir 0.0 0.0 -1.0
         thrust 400.0
     end
     thruster lat_zm_aft
-        at -1.789822016390510 0.0 1.926124891819624
+        at -1.7898220163905079 0.0 1.9261248918196237
         dir 0.0 0.0 -1.0
         thrust 400.0
     end
