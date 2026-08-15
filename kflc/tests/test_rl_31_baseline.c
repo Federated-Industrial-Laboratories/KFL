@@ -93,13 +93,27 @@ int main(void)
     ASSERT(glob("examples/*.kfl", 0, NULL, &g) == 0);
     ASSERT(glob("integration_tests/astro_w*.kfl", GLOB_APPEND, NULL, &g)
            == 0);
-    int n_same = 0, n_diag = 0;
+    int n_same = 0, n_diag = 0, n_newer = 0;
     for (size_t i = 0; i < g.gl_pathc; i++) {
         const char *kfl = g.gl_pathv[i];
         int rc_old = emit_(WORK_DIR "/kflc/bin/kflc", kfl,
                            WORK_DIR "/old.cc", WORK_DIR "/old.err");
         int rc_new = emit_("./bin/kflc", kfl,
                            WORK_DIR "/new.cc", WORK_DIR "/new.err");
+        if (rc_old != 0 && rc_new == 0) {
+            /* A programme the base grammar has no constructs for.
+             * There is no baseline for it to be identical to: the
+             * base compiler cannot emit it at all, which is what
+             * makes it a later grammar's fixture rather than this
+             * gate's. It is counted and named rather than skipped
+             * quietly, and the count is pinned below, so a 3.1
+             * fixture that started failing on the base would land
+             * here and fail this gate rather than disappear from it. */
+            fprintf(stderr, "%s: accepted by today's grammar and not by"
+                    " the base\n", kfl);
+            n_newer++;
+            continue;
+        }
         if (rc_old != rc_new) {
             fprintf(stderr, "%s: exit %d (base) vs %d (now)\n", kfl,
                     rc_old, rc_new);
@@ -124,8 +138,11 @@ int main(void)
     }
     globfree(&g);
     ASSERT(n_same >= 12);
+    /* One fixture in this tree is a later grammar's: the docking
+     * benchmark. */
+    ASSERT(n_newer == 1);
     printf("test_rl_31_baseline: %d fixture(s) byte-identical to the"
-           " pre-RL base, %d refused identically on both: OK\n",
-           n_same, n_diag);
+           " pre-RL base, %d refused identically on both, %d beyond the"
+           " base grammar: OK\n", n_same, n_diag, n_newer);
     return 0;
 }

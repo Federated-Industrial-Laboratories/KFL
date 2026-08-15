@@ -200,24 +200,38 @@ static const char *const HP_KFL =
     "end\n"
     "end\n";
 
-/* The collision fixture. Two bodies bind the same assembly, so the
- * pass has a pair to test and the broadphase, the sweep and the
- * resolution are all compiled in; a program with one collidable body
- * compiles the pair loop to nothing and would measure an empty pass.
+/* The collision fixture, and the one that carries every recent
+ * addition to the stepping path at once: an assembly, an attitude
+ * advance with wheels, a collision pass that reaches a contact, a
+ * docking port whose capture test runs at that contact, a relative
+ * observe and a sensor chain. Measuring them together is the point:
+ * each is cheap to measure beside the window and worth nothing there.
+ *
+ * Two bodies bind the same assembly, so the pass has a pair to test
+ * and the broadphase, the sweep and the resolution are all compiled
+ * in; a program with one collidable body compiles the pair loop to
+ * nothing and would measure an empty pass. The same sharing gives
+ * each body a port, which is what the port observe needs: one port on
+ * the body it names and exactly one on another.
  *
  * The geometry is arranged so a contact happens inside every episode
  * rather than once at the start of the drive. The two start four
- * metres apart along the approach and close at 2.5 m/s, so their
- * centres reach the contact separation of one metre after 1.2 s, step
- * 12 of a 24-step episode; the resolution then removes the closing
- * rate and the pair stays in contact for the rest of the episode, and
- * truncation at the horizon returns them to their declared separation
- * for the next one. Nothing here is randomised, which is what lets a
- * fixed separation survive a reset.
+ * metres apart along the docking axis and close at 2.5 m/s. Each
+ * carries its mating plane 1.2 m out along that axis, so the planes
+ * meet when the centres are 2.4 m apart, after 0.64 s, inside
+ * the seventh control period of a 24-step episode. The hulls reach each other only at 2.0 m, so the
+ * contact reported is the one at the ports and the capture test runs
+ * on it; it refuses, the closing rate being twenty-five times the
+ * envelope's limit, which is the arithmetic and not the point. The
+ * resolution then removes the closing rate and the pair stays in
+ * contact for the rest of the episode, and truncation at the horizon
+ * returns them to their declared separation for the next one. Nothing
+ * here is randomised, which is what lets a fixed separation survive a
+ * reset.
  *
  * The approach is slow relative to the subdivision on purpose: a
  * sub-advance is 12.5 ms, in which the pair closes 31 mm against a
- * contact separation of one metre, so the fixture sits well inside the
+ * contact separation of 2.4 m, so the fixture sits well inside the
  * separation precondition the pass requires rather than at its edge. */
 static const char *const HP_COLL_ASM =
     "assembly hotpath_coll\n"
@@ -227,6 +241,30 @@ static const char *const HP_COLL_ASM =
     "        mass 1000.0\n"
     "        at 0 0 0\n"
     "        collider box 1.0 0.5 0.5\n"
+    "    end\n"
+    "    port dock\n"
+    "        at 1.2 0.0 0.0\n"
+    "        axis 1.0 0.0 0.0\n"
+    "        roll_ref 0.0 1.0 0.0\n"
+    "        capture idss_e\n"
+    "    end\n"
+    "    wheel spin_a\n"
+    "        axis 0.0 1.0 0.0\n"
+    "        spin_inertia 0.031\n"
+    "        max_momentum 15.0\n"
+    "        max_torque 0.10\n"
+    "        viscous 1.0e-5\n"
+    "        coulomb 2.0e-4\n"
+    "        dead_rate 1.0e-3\n"
+    "    end\n"
+    "    wheel spin_b\n"
+    "        axis 0.0 0.0 1.0\n"
+    "        spin_inertia 0.027\n"
+    "        max_momentum 12.0\n"
+    "        max_torque 0.08\n"
+    "        viscous 2.0e-5\n"
+    "        coulomb 3.0e-4\n"
+    "        dead_rate 2.0e-3\n"
     "    end\n"
     "end\n";
 
@@ -238,9 +276,12 @@ static const char *const HP_COLL_KFL =
     "    astro_body alpha assembly=\"hpcoll.k26asm\" parent=earth"
     " pos_x=7.0e6 vel_y=7546.0"
     " quat_w=1.0 omega_x=0.01 omega_y=0.02 omega_z=0.03\n"
+    /* Beta faces alpha: the assembly puts its port on the body's
+     * first axis, so a half turn about the third points it back down
+     * the approach. */
     "    astro_body beta assembly=\"hpcoll.k26asm\" parent=earth"
-    " pos_x=7.0e6 pos_z=-4.0 vel_y=7546.0 vel_z=2.5"
-    " quat_w=1.0 omega_x=-0.02 omega_y=0.01 omega_z=0.02\n"
+    " pos_x=7.0000040e6 vel_y=7546.0 vel_x=-2.5"
+    " quat_w=0.0 quat_z=1.0 omega_x=-0.02 omega_y=0.01 omega_z=0.02\n"
     "    episode\n"
     "        control_dt 0.1\n"
     "        horizon 24\n"
@@ -249,6 +290,10 @@ static const char *const HP_COLL_KFL =
     "    action push box -1.0 1.0 default 0.0\n"
     "    on_step\n"
     "        alpha.omega_x = alpha.omega_x + push * 0.0\n"
+    "        alpha.spin_a.torque = push * 0.05\n"
+    "        alpha.spin_b.torque = push * 0.03\n"
+    "        beta.spin_a.torque = push * 0.02\n"
+    "        beta.spin_b.torque = push * 0.04\n"
     "    end\n"
     /* A sensor chain on the tracking observe, so noise applied per
      * channel per step sits inside the armed window rather than beside
@@ -275,15 +320,21 @@ static const char *const HP_COLL_KFL =
      * exactly the program that asks for it. Its cost is measured with
      * theirs. */
     "    observe relative beta from alpha as rel\n"
+    /* The docking port form, whose residuals are recomputed every
+     * step and whose capture test runs inside the contact the pass
+     * finds. Both halves are on the stepping path and both are
+     * therefore inside the armed window. */
+    "    observe port dock of beta as prt\n"
     "    objective\n"
-    "        reward hit_hit + trk_range + rel_r_y\n"
+    "        reward hit_hit + trk_range + rel_r_y + prt_axial\n"
     "    end\n"
     "end\n"
     "end\n";
 
 /* Three contact channels, five tracking channels and their five
- * paired truth channels, six relative ones; one action. */
-#define HP_COLL_OBS     19
+ * paired truth channels, six relative ones, nine port ones; one
+ * action. */
+#define HP_COLL_OBS     28
 #define HP_COLL_HIT      0
 #define HP_COLL_ACT      1
 #define HP_COLL_HORIZON 24
@@ -662,8 +713,8 @@ static int child_main_(void)
 
             unsigned long a = alloc_total_(), w = write_total_();
             printf("gate 6: %2d episode(s), %3d steps x %d envs,"
-                   " a collidable pair, a relative observe and a"
-                   " sensor chain:"
+                   " an assembly, wheels, a contacting pair, a capture"
+                   " test, a relative observe and a sensor chain:"
                    " alloc-family %lu"
                    " (malloc %lu calloc %lu realloc %lu free %lu),"
                    " write-family %lu\n",
@@ -675,8 +726,8 @@ static int child_main_(void)
         }
         dlclose(cso);
     }
-    printf("gate 6: the collision pass, the relative observe and the"
-           " sensor chain allocate nothing and write nothing: OK\n");
+    printf("gate 6: every addition to the stepping path measured here"
+           " allocates nothing and writes nothing: OK\n");
 
     dlclose(so);
     fclose(fnull);

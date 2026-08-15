@@ -124,9 +124,24 @@ $(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB) $(BIN)
 # artifact from scratch.
 RL_GATE_DEPS = tests/rl_gate_util.h $(BIN)
 
+# The docking benchmark: the capture envelope's figures as the
+# compiler carries them, each of its conditions at its limit, the port
+# form's nine channels against an independent computation, the task's
+# four outcomes, and two processes byte for byte. Links the collision
+# library for the envelope test, which is where the conditions live.
+RL_DOCKING_TEST = tests/test_rl_docking
+$(RL_DOCKING_TEST): tests/test_rl_docking.c $(RL_GATE_DEPS) \
+                    ../libk26rl/include/k26rl_env.h \
+                    ../libk26rl/libk26rl.a \
+                    ../libk26astro_coll/libk26astro_coll.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -I../libk26astro_coll/include \
+	    -I../libk26m3d/include -o $@ $< \
+	    ../libk26rl/libk26rl.a ../libk26astro_coll/libk26astro_coll.a \
+	    ../libk26m3d/libk26m3d.a -ldl -lm
+
 RL_GRAMMAR_TEST = tests/test_rl_grammar
 $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)
-	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS) -lm
 
 # Gate for the Grammar 3.2 dual-mode artifact: kflc -o on an RL
 # program produces the batch executable plus the companion shared
@@ -361,7 +376,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -383,7 +398,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_BODIES_TEST) $(RL_ATT_TEST) \
 	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
-	          $(RL_SENSOR_TEST); do \
+	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -467,5 +482,6 @@ clean:
 	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \
 	      $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) \
 	      $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
+	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	      tests/bench_parse
 	rm -rf bin
