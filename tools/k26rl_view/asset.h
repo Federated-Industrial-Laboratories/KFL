@@ -32,6 +32,8 @@
 #include <string>
 #include <vector>
 
+#include "model.h"
+
 namespace k26rl_view {
 
 /* One line of the wireframe, as two vertex indices. */
@@ -67,6 +69,31 @@ Asset asset_load(const std::string &path);
 
 /* Lowercase hexadecimal, for a panel and for a diagnostic. */
 std::string digest_hex(const uint8_t d[32]);
+
+/* Whether an asset on disk is the one a recording was made with. */
+enum AssetVerdict {
+    ASSET_DRAWABLE = 0,   /* the bytes are the bytes that flew */
+    ASSET_NO_BODY,        /* no body binds an assembly of this name */
+    ASSET_NO_DIGEST,      /* the recording carries none for it */
+    ASSET_MISMATCH        /* it carries one and the bytes differ */
+};
+
+/* Match an asset against a recording's spec: which body binds it, and
+ * whether its digest is the recorded one.
+ *
+ * One implementation, called by both presenters. The safety property
+ * this whole panel exists for is that a craft whose bytes are not the
+ * recorded bytes is never drawn, and a property implemented twice is
+ * a property that holds in whichever copy was last looked at. On any
+ * verdict but ASSET_DRAWABLE the caller draws nothing.
+ *
+ * @param sp    The recording's spec.
+ * @param a     A loaded asset.
+ * @param out   Receives the matching body's record when one is found.
+ * @return The verdict.
+ */
+AssetVerdict asset_verdict(const Spec &sp, const Asset &a,
+                           const AssemblyRef **out);
 
 }  /* namespace k26rl_view */
 

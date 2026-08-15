@@ -64,8 +64,14 @@ std::string resolve_(const std::string &rel, const std::string &base)
 }
 
 /* One line's whitespace-separated tokens, with `#` to end of line
- * dropped. The accepted subset of both formats is line-oriented, so a
- * line is the whole of the lexical state. */
+ * dropped and a quoted token taken whole with its quotes removed.
+ * The accepted subset of both formats is line-oriented, so a line is
+ * the whole of the lexical state.
+ *
+ * The quotes matter: the compiler's own tokenizer strips them, so a
+ * quoted mesh path is an ordinary path to it. A reader that kept them
+ * would refuse a file the compiler accepted, which fails safe and
+ * blames the file for its own reading. */
 void tokens_(const std::string &line, std::vector<std::string> *out)
 {
     out->clear();
@@ -76,6 +82,14 @@ void tokens_(const std::string &line, std::vector<std::string> *out)
             i++;
         if (i >= line.size() || line[i] == '#')
             break;
+        if (line[i] == '"') {
+            size_t j = ++i;
+            while (j < line.size() && line[j] != '"')
+                j++;
+            out->push_back(line.substr(i, j - i));
+            i = (j < line.size()) ? j + 1 : j;
+            continue;
+        }
         size_t j = i;
         while (j < line.size() && line[j] != ' ' && line[j] != '\t' &&
                line[j] != '\r' && line[j] != '#')
@@ -155,6 +169,25 @@ std::string digest_hex(const uint8_t d[32])
     return out;
 }
 
+AssetVerdict asset_verdict(const Spec &sp, const Asset &a,
+                           const AssemblyRef **out)
+{
+    const AssemblyRef *match = 0;
+    for (size_t i = 0; i < sp.assemblies.size(); i++) {
+        if (sp.assemblies[i].name == a.name)
+            match = &sp.assemblies[i];
+    }
+    if (out)
+        *out = match;
+    if (!match)
+        return ASSET_NO_BODY;
+    if (!match->has_digest)
+        return ASSET_NO_DIGEST;
+    if (memcmp(match->digest, a.digest, K26RL_SHA256_BYTES) != 0)
+        return ASSET_MISMATCH;
+    return ASSET_DRAWABLE;
+}
+
 Asset asset_load(const std::string &path)
 {
     Asset a;
@@ -178,9 +211,20 @@ Asset asset_load(const std::string &path)
     /* Walk the assembly for what a wireframe needs: its name, and
      * each component's placement and mesh. Everything else is skipped
      * by name rather than refused, because the compiler has already
-     * accepted this file and this reader is not a second gate on it. */
+     * accepted this file and this reader is not a second gate on it.
+     *
+     * A component's placement is settled at the block's `end` and not
+     * at whatever line the mesh happened to follow. The compiler
+     * parses the whole block and derives afterwards, so key order
+     * inside a block is free for it; a reader that snapshotted the
+     * placement at the `mesh` line would make that order load-bearing
+     * for itself alone, and would draw a craft at its raw mesh
+     * coordinates while the digest, which is over bytes and says
+     * nothing about how they are read, still matched. */
     Placement cur;
     bool in_component = false;
+    bool have_mesh = false;
+    std::string pending_mesh;
     std::vector<Placement> placements;
     std::vector<std::string> mesh_paths;
     std::vector<std::string> tok;
@@ -195,12 +239,19 @@ Asset asset_load(const std::string &path)
         }
         if (tok[0] == "component") {
             in_component = true;
+            have_mesh = false;
+            pending_mesh.clear();
             memset(&cur, 0, sizeof cur);
             cur.q[0] = 1.0;
             continue;
         }
         if (tok[0] == "end") {
+            if (in_component && have_mesh) {
+                mesh_paths.push_back(pending_mesh);
+                placements.push_back(cur);
+            }
             in_component = false;
+            have_mesh = false;
             continue;
         }
         if (!in_component)
@@ -220,8 +271,10 @@ Asset asset_load(const std::string &path)
                 }
             }
         } else if (tok[0] == "mesh" && tok.size() >= 2) {
-            mesh_paths.push_back(tok[1]);
-            placements.push_back(cur);
+            /* A second mesh line replaces the first, which is what
+             * the compiler's own single-valued field does. */
+            pending_mesh = tok[1];
+            have_mesh = true;
         }
     }
 
@@ -240,6 +293,12 @@ Asset asset_load(const std::string &path)
                          (uint64_t)mbytes.size());
         a.meshes.push_back(mpath);
 
+        /* Two passes over the mesh, because the compiler makes two:
+         * it counts the vertices over the whole file first and bounds
+         * every face index by that total, so a mesh whose faces are
+         * written before its vertices is a mesh it accepts. A reader
+         * that bounded by the vertices it had seen so far would
+         * refuse a file the compiler compiled. */
         std::vector<std::string> mlines;
         lines_(mbytes, &mlines);
         uint32_t base = (uint32_t)(a.vertices.size() / 3);
@@ -261,27 +320,35 @@ Asset asset_load(const std::string &path)
                     a.vertices.push_back(w[c] + placements[m].at[c]);
                 local++;
                 a.mesh_vertices++;
-            } else if (tok[0] == "f" && tok.size() >= 4) {
-                double idx[3];
-                for (int c = 0; c < 3; c++) {
-                    if (!number_(tok[1 + c], &idx[c]) || idx[c] < 1.0 ||
-                        idx[c] > (double)local) {
-                        a.error = "malformed face in `" + mpath + "`";
-                        return a;
-                    }
-                }
-                uint32_t f[3];
-                for (int c = 0; c < 3; c++)
-                    f[c] = base + (uint32_t)idx[c] - 1u;
-                add_edge_(&seen, &a.edges, f[0], f[1]);
-                add_edge_(&seen, &a.edges, f[1], f[2]);
-                add_edge_(&seen, &a.edges, f[2], f[0]);
-                a.mesh_triangles++;
-            } else {
+            } else if (tok[0] != "f") {
                 a.error = "`" + tok[0] + "` is not a mesh directive in `" +
                           mpath + "`";
                 return a;
             }
+        }
+        for (size_t i = 0; i < mlines.size(); i++) {
+            tokens_(mlines[i], &tok);
+            if (tok.empty() || tok[0] != "f")
+                continue;
+            if (tok.size() < 4) {
+                a.error = "malformed face in `" + mpath + "`";
+                return a;
+            }
+            double idx[3];
+            for (int c = 0; c < 3; c++) {
+                if (!number_(tok[1 + c], &idx[c]) || idx[c] < 1.0 ||
+                    idx[c] > (double)local) {
+                    a.error = "malformed face in `" + mpath + "`";
+                    return a;
+                }
+            }
+            uint32_t f[3];
+            for (int c = 0; c < 3; c++)
+                f[c] = base + (uint32_t)idx[c] - 1u;
+            add_edge_(&seen, &a.edges, f[0], f[1]);
+            add_edge_(&seen, &a.edges, f[1], f[2]);
+            add_edge_(&seen, &a.edges, f[2], f[0]);
+            a.mesh_triangles++;
         }
     }
 
