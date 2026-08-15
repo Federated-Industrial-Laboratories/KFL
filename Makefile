@@ -155,7 +155,13 @@ astro: bedrock aux
 	    echo ""; \
 	fi
 
-compiler:
+# kflc links archives from the bedrock tier (the episode format, the
+# sampling substrate and the sensor models), so the tier must be built
+# before it. Listing the phases in order under `all` does not order
+# them: a parallel build runs prerequisites concurrently, and without
+# this line `make -j8` from clean can start the compiler while those
+# archives do not yet exist.
+compiler: bedrock
 	@echo "==> kflc"
 	$(MAKE) -C kflc
 
