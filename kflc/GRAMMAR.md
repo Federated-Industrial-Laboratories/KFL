@@ -571,6 +571,16 @@ not the author's. One envelope is defined, `idss_e`; any other name is
 refused. A port declaring no envelope is geometry the program can
 describe and carries no collider and no test.
 
+The mating plane is a square plate circumscribing the published
+circle, because the collider set has no round primitive. The square
+contains the circle, so it reports every contact a disc would report
+and some a disc would miss: an approach passing between the circle's
+edge and the square's corner, which for the defined envelope is
+between 0.60 m and 0.85 m off the axis, meets the plate where a disc
+would let it by. That band is far outside any capture, whose lateral
+misalignment limit is 0.10 m, so it changes which approaches count as
+an impact and never which count as a capture.
+
 ### Observation channels
 
 ```
