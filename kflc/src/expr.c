@@ -41,8 +41,11 @@
  * and which touches nothing else: no world state, no I/O, no
  * allocation. Callers that must be able to re-evaluate an expression
  * and get the same program back consult it through
- * kflc_builtin_is_pure. Only `concat` is impure in the static table,
- * because it allocates its result. */
+ * kflc_builtin_is_pure, and so does every expression position on a
+ * stepping path. Only `concat` is impure in the static table, because
+ * it allocates its result; in the dynamic registry the property is
+ * whatever the registering library declared, and an entry that
+ * declared nothing is impure. */
 typedef struct {
     const char *kfl_name;
     const char *cxx_name;
@@ -80,7 +83,7 @@ static const BuiltinFn BUILTINS[] = {
     { NULL,    NULL,      0, 0 }
 };
 
-/* Dynamic registry, populated by kflc_register_builtin. External
+/* Dynamic registry, populated by kflc_register_builtin_pure. External
  * libraries (or the future .kflbi manifest loader) call the public API
  * before parsing starts; lookup_builtin walks the static table first,
  * then this one. Cap is generous — astro alone projects ~100 entries
@@ -90,7 +93,8 @@ static const BuiltinFn BUILTINS[] = {
 static BuiltinFn g_dynamic_builtins[KFLC_DYNAMIC_BUILTIN_MAX];
 static int       g_dynamic_builtin_count = 0;
 
-int kflc_register_builtin(const char *kfl_name, const char *cxx_name, int arity)
+int kflc_register_builtin_pure(const char *kfl_name, const char *cxx_name,
+                               int arity, int pure)
 {
     if (!kfl_name || !cxx_name) return 1;
     /* Refuse a duplicate KFL name regardless of which table it's in —
@@ -106,12 +110,20 @@ int kflc_register_builtin(const char *kfl_name, const char *cxx_name, int arity)
     g_dynamic_builtins[g_dynamic_builtin_count].kfl_name = kfl_name;
     g_dynamic_builtins[g_dynamic_builtin_count].cxx_name = cxx_name;
     g_dynamic_builtins[g_dynamic_builtin_count].arity    = arity;
-    /* A registered library surface is impure until a manifest can say
-     * otherwise: these entries reach world state, and the registry
-     * carries no purity field to declare with. */
-    g_dynamic_builtins[g_dynamic_builtin_count].pure     = 0;
+    g_dynamic_builtins[g_dynamic_builtin_count].pure     = pure ? 1 : 0;
     g_dynamic_builtin_count++;
     return 0;
+}
+
+int kflc_register_builtin(const char *kfl_name, const char *cxx_name, int arity)
+{
+    /* Registering without declaring purity registers an impure
+     * builtin. The default is the safe direction rather than the
+     * convenient one: an entry that reaches world state, allocates or
+     * performs I/O and forgets to say so is then refused from the
+     * positions that cannot tolerate it, where the opposite default
+     * would admit it silently. */
+    return kflc_register_builtin_pure(kfl_name, cxx_name, arity, 0);
 }
 
 void kflc_clear_builtins(void)

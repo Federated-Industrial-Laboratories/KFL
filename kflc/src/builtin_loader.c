@@ -12,8 +12,15 @@
  *   library <name>                              -- informational
  *   version <semver>                            -- informational
  *   opaque  <kfl_name> <cxx_type...>            -- opaque registration
- *   builtin <kfl_name> <cxx_name> <arity>       -- builtin registration
+ *   builtin <kfl_name> <cxx_name> <arity> [pure] -- builtin registration
  *   # comments + blank lines ignored
+ *
+ * The trailing `pure` qualifier on a builtin line is the library's
+ * declaration that the entry's result depends on its arguments alone
+ * and that it touches no world state, no I/O and no allocation, which
+ * is what admits it to an expression the runtime re-evaluates. A line
+ * that omits it registers an impure builtin, so a manifest written
+ * before the qualifier existed keeps the answer it always had.
  *
  * Error handling:
  *   - Each malformed line emits a stderr warning ("file:line:" prefix);
@@ -174,10 +181,28 @@ static int parse_manifest_(const char *path)
                         path, line_no); errors++; continue;
             }
             int arity = atoi(arity_s);
+            int pure  = 0;
+            char *qual = next_tok_(&cursor);
+            if (qual) {
+                if (strcmp(qual, "pure") == 0) {
+                    pure = 1;
+                } else {
+                    /* An unrecognised qualifier leaves the entry
+                     * impure and says so, because the alternative is
+                     * a typo that quietly widens what a stepping path
+                     * may reach. */
+                    fprintf(stderr,
+                            "%s:%d: builtin %s: unknown qualifier '%s'"
+                            " (expected `pure`); registered impure\n",
+                            path, line_no, kfl_name, qual);
+                    errors++;
+                }
+            }
             char *kfl_dup = xstrdup_(kfl_name);
             char *cxx_dup = xstrdup_(cxx_name);
             if (!kfl_dup || !cxx_dup) { errors++; continue; }
-            int rc = kflc_register_builtin(kfl_dup, cxx_dup, arity);
+            int rc = kflc_register_builtin_pure(kfl_dup, cxx_dup, arity,
+                                                pure);
             if (rc != 0 && rc != 2 /* collision */) {
                 fprintf(stderr, "%s:%d: builtin register %s -> %s/%d rc=%d\n",
                         path, line_no, kfl_dup, cxx_dup, arity, rc);

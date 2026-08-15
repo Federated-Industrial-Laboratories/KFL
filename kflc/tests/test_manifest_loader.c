@@ -14,6 +14,9 @@
  *   4. Schema mismatch rejects whole file (clear stderr message).
  *   5. Collision with prior registration produces "first wins"
  *      semantics (no crash, kflc_opaque_cxx returns first cxx_name).
+ *   6. The `pure` qualifier on a builtin line: declared pure
+ *      registers pure, an undeclared line registers impure, and a
+ *      mistyped qualifier registers impure and warns.
  */
 #include "kflc.h"
 
@@ -52,6 +55,7 @@ int main(void)
         "opaque  demo_widget   K26DemoWidget *\n"
         "builtin demo_open     k26demo_open       0\n"
         "builtin demo_close    k26demo_close      1\n"
+        "builtin demo_read     k26demo_read       1 pure\n"
         "# trailing comment\n";
 
     if (write_manifest_(dir, "k26astro_demo.kflbi", valid) != 0) {
@@ -65,6 +69,7 @@ int main(void)
         "opaque\n"                  /* incomplete */
         "builtin bad_one\n"         /* missing fields */
         "weird_directive foo bar\n" /* unknown */
+        "builtin misc_typo k26misc_typo 1 puer\n"  /* qualifier typo */
         "opaque well_formed K26WellFormed *\n";
     if (write_manifest_(dir, "k26misc.kflbi", malformed) != 0) {
         fprintf(stderr, "write malformed: failed\n");
@@ -106,6 +111,41 @@ int main(void)
         return 1;
     }
 
+    /* Purity is the manifest's to declare, and the default is the
+     * safe one. A line that declares `pure` registers a pure builtin;
+     * a line that declares nothing, which is every line written
+     * before the qualifier existed, registers an impure one; and a
+     * line whose qualifier is a typo registers an impure one too,
+     * because the alternative is a misspelling that quietly widens
+     * what a stepping path may reach. */
+    if (!kflc_builtin_known("demo_read") ||
+        kflc_builtin_is_pure("demo_read") != 1)
+    {
+        fprintf(stderr, "FAIL: `pure` on a builtin line did not register"
+                        " (known=%d pure=%d)\n",
+                kflc_builtin_known("demo_read"),
+                kflc_builtin_is_pure("demo_read"));
+        return 1;
+    }
+    if (!kflc_builtin_known("demo_open") ||
+        kflc_builtin_is_pure("demo_open") != 0)
+    {
+        fprintf(stderr, "FAIL: an undeclared builtin line is not impure"
+                        " (known=%d pure=%d)\n",
+                kflc_builtin_known("demo_open"),
+                kflc_builtin_is_pure("demo_open"));
+        return 1;
+    }
+    if (!kflc_builtin_known("misc_typo") ||
+        kflc_builtin_is_pure("misc_typo") != 0)
+    {
+        fprintf(stderr, "FAIL: a mistyped qualifier is not impure"
+                        " (known=%d pure=%d)\n",
+                kflc_builtin_known("misc_typo"),
+                kflc_builtin_is_pure("misc_typo"));
+        return 1;
+    }
+
     /* --- Collision: register demo_widget by C API, then re-load.
      * The pre-registered cxx_name must win (first wins). */
     kflc_opaque_clear();
@@ -130,6 +170,6 @@ int main(void)
     rmdir(dir);
 
     printf("test_manifest_loader: OK "
-           "(valid + malformed + bad-schema + collision paths)\n");
+           "(valid + malformed + bad-schema + collision + purity paths)\n");
     return 0;
 }

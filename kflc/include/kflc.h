@@ -299,7 +299,21 @@ void        kflc_opaque_clear(void);
  * emitter can resolve KFL-level call names to their C++ counterparts.
  * Strings must outlive the compiler invocation (static literals or
  * arena-allocated). Arity is checked at emit time. Returns 0 on
- * success, 1 on NULL inputs, 2 on collision, 3 on table full. */
+ * success, 1 on NULL inputs, 2 on collision, 3 on table full.
+ *
+ * `pure` is the registering library's declaration that the builtin's
+ * result depends on its arguments alone and that it touches no world
+ * state, no I/O and no allocation. It decides whether the builtin may
+ * be reached from an expression the runtime has to re-evaluate, the
+ * per-step block included; see kflc_builtin_is_pure. */
+int         kflc_register_builtin_pure(const char *kfl_name,
+                                       const char *cxx_name,
+                                       int         arity,
+                                       int         pure);
+/* Registration without a purity declaration, which registers an
+ * impure builtin. Kept as the plain form so that a library that has
+ * not considered the question gets the safe answer rather than the
+ * convenient one. */
 int         kflc_register_builtin(const char *kfl_name,
                                   const char *cxx_name,
                                   int         arity);
@@ -311,9 +325,11 @@ void        kflc_clear_builtins(void);
 int         kflc_builtin_known(const char *name);
 /* 1 when that builtin is marked pure: its result depends on its
  * arguments alone and it touches no world state, no I/O, and no
- * allocation. Registered library surfaces are impure, since the
- * registry has no way to declare otherwise. Expression positions that
- * must stay re-evaluable consult this. */
+ * allocation. A registered library surface carries whatever purity
+ * its registration declared, and a registration that declared
+ * nothing is impure. Expression positions that must stay re-evaluable
+ * consult this, and so does every expression a stepping path
+ * evaluates. */
 int         kflc_builtin_is_pure(const char *name);
 
 /* Astro bootstrap. Registers the `world` / `starfield` opaque types

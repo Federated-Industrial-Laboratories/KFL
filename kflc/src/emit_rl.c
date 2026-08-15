@@ -3698,6 +3698,143 @@ static int rl_reject_impure_(const KflcNode *form, const KflcExpr *e,
     return 1;
 }
 
+/* ---- What a stepping path may reach ---------------------------------- */
+
+/* Every expression the on_step body evaluates is side-effect free, in
+ * every position it can occupy. The block runs once per external step
+ * of every environment, so a call to an impure builtin anywhere in it
+ * puts an allocation, an input or output, or a world mutation on the
+ * path whose contract is that it does none of those, and a recorded
+ * episode replayed from its recorded inputs would not reproduce it.
+ * Enforcing this on the assigned expression alone left a `let`, a
+ * bare expression statement and a condition able to reach the same
+ * builtins, so the rule is a property of the block.
+ *
+ * Following an initialiser is what follows the dataflow into a
+ * binding: a name bound to an impure call is refused where it is
+ * bound, so no later read of it has to be traced.
+ *
+ * The rule is over expressions rather than over statements, and the
+ * distinction is load bearing. A statement form whose effect is
+ * declared and bounded is admissible in the block on the strength of
+ * that declaration; what it may not do is evaluate an expression that
+ * reaches an undeclared one. Such a form joins the position table
+ * below by naming the expression slots it evaluates, which is an
+ * addition to this rule rather than an exception to it.
+ *
+ * Positions are named in the diagnostic because they fail in
+ * different-looking ways, and a reader told only that the block is
+ * impure has to find the call for themselves. */
+
+#define RL_STEP_POS_MAX 192
+
+/* The name of the block `s` opens, for the diagnostics of the
+ * statements inside it; `outer` for a statement that opens none. */
+static const char *rl_step_block_(const KflcNode *s, const char *outer)
+{
+    switch (s->kind) {
+    case KFLN_STMT_IF:       return "an `if` body";
+    case KFLN_STMT_WHILE:    return "a `while` body";
+    case KFLN_STMT_FOR_EACH: return "a `for_each` body";
+    default:                 return outer;
+    }
+}
+
+/* Writes the name of the position that expression slot `slot` of `s`
+ * occupies, completing the sentence "<position> must be side-effect
+ * free". Slot 0 is KflcNode::expr and slot 1 is KflcNode::expr2, whose
+ * meanings differ by statement kind. `inside` names the enclosing
+ * block, or is NULL at the top of the body. */
+static void rl_step_position_(char *buf, size_t n, const KflcNode *s,
+                              int slot, const char *inside)
+{
+    const char *nm = s->name ? s->name : "?";
+    char base[128];
+
+    switch (s->kind) {
+    case KFLN_STMT_LET:
+    case KFLN_STMT_CONST:
+        snprintf(base, sizeof base, "the initialiser of `%s`", nm);
+        break;
+    case KFLN_STMT_ASSIGN:
+        snprintf(base, sizeof base, "the assignment to `%s`", nm);
+        break;
+    case KFLN_STMT_INDEX_ASSIGN:
+        if (slot == 1) snprintf(base, sizeof base, "an index expression");
+        else snprintf(base, sizeof base, "the assignment to `%s`", nm);
+        break;
+    case KFLN_STMT_LVALUE_ASSIGN:
+        if (slot == 1) snprintf(base, sizeof base, "an assigned expression");
+        else snprintf(base, sizeof base, "an assignment target");
+        break;
+    case KFLN_STMT_EXPR:
+        snprintf(base, sizeof base, "an expression statement");
+        break;
+    case KFLN_STMT_IF:
+        snprintf(base, sizeof base, "an `if` condition");
+        break;
+    case KFLN_STMT_WHILE:
+        snprintf(base, sizeof base, "a `while` condition");
+        break;
+    case KFLN_STMT_RETURN:
+        snprintf(base, sizeof base, "a returned expression");
+        break;
+    default:
+        snprintf(base, sizeof base, "an expression");
+        break;
+    }
+
+    if (inside) snprintf(buf, n, "on_step: %s in %s", base, inside);
+    else        snprintf(buf, n, "on_step: %s", base);
+}
+
+/* Walks the block, refusing the first impure reach it finds. Every
+ * expression slot a statement carries is checked, its attribute
+ * expressions included, and nested blocks are walked with the name of
+ * the block they sit in. Arguments need no case of their own: the
+ * sweep this calls descends through a call's arguments before it
+ * judges the call, so an impure builtin passed to a pure one is found
+ * wherever the outer call sits. */
+static int rl_reject_impure_block_(const KflcNode *form,
+                                   const KflcNode *stmts,
+                                   const char *inside, KflcDiag *diag)
+{
+    for (const KflcNode *s = stmts; s; s = s->next) {
+        char pos[RL_STEP_POS_MAX];
+        if (s->expr) {
+            rl_step_position_(pos, sizeof pos, s, 0, inside);
+            if (rl_reject_impure_(form, s->expr, pos, s->line, diag)) return 1;
+        }
+        if (s->expr2) {
+            rl_step_position_(pos, sizeof pos, s, 1, inside);
+            if (rl_reject_impure_(form, s->expr2, pos, s->line, diag)) {
+                return 1;
+            }
+        }
+        for (const KflcAttr *a = s->attrs; a; a = a->next) {
+            if (!a->expr) continue;
+            if (inside) {
+                snprintf(pos, sizeof pos, "on_step: the `%s` attribute in %s",
+                         a->name ? a->name : "?", inside);
+            } else {
+                snprintf(pos, sizeof pos, "on_step: the `%s` attribute",
+                         a->name ? a->name : "?");
+            }
+            if (rl_reject_impure_(form, a->expr, pos, a->line, diag)) return 1;
+        }
+        const char *body = rl_step_block_(s, inside);
+        if (rl_reject_impure_block_(form, s->children, body, diag)) return 1;
+        if (s->else_children) {
+            const char *els = (s->kind == KFLN_STMT_IF) ? "an `else` body"
+                                                        : body;
+            if (rl_reject_impure_block_(form, s->else_children, els, diag)) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 /* ---- Body state inside on_step -------------------------------------- */
 
 /* Split a name at its single dot. Returns 1 when exactly one dot sits
@@ -3983,8 +4120,7 @@ static int rl_bs_rewrite_expr_(RlModel *m, KflcExpr *e, int line,
  * calling the state setter. Nested blocks are rewritten too, so the
  * form works wherever an ordinary assignment does. */
 static int rl_bs_rewrite_stmts_(RlModel *m, KflcNode *stmts,
-                                const KflcNode *form, KflcArena *arena,
-                                KflcDiag *diag)
+                                KflcArena *arena, KflcDiag *diag)
 {
     for (KflcNode *s = stmts; s; s = s->next) {
         if (s->kind == KFLN_STMT_ASSIGN && s->name &&
@@ -3995,9 +4131,6 @@ static int rl_bs_rewrite_stmts_(RlModel *m, KflcNode *stmts,
                 if (rl_bs_rewrite_expr_(m, s->expr, s->line, arena, diag)) {
                     return 1;
                 }
-                if (rl_reject_impure_(form, s->expr,
-                                      "on_step: an actuator command",
-                                      s->line, diag)) return 1;
                 char fn[64];
                 snprintf(fn, sizeof fn, "kflrl_act_set_%d", aslot);
                 KflcExpr *blk = (KflcExpr *)kflc_arena_alloc(arena,
@@ -4028,10 +4161,6 @@ static int rl_bs_rewrite_stmts_(RlModel *m, KflcNode *stmts,
             if (rl_bs_rewrite_expr_(m, s->expr, s->line, arena, diag)) {
                 return 1;
             }
-            if (rl_reject_impure_(form, s->expr,
-                                  "on_step: a body state assignment",
-                                  s->line, diag)) return 1;
-
             char fn[192];
             rl_bs_fn_name_(m, slot, 1, fn, sizeof fn);
             KflcExpr *world = (KflcExpr *)kflc_arena_alloc(arena,
@@ -4060,10 +4189,10 @@ static int rl_bs_rewrite_stmts_(RlModel *m, KflcNode *stmts,
         }
         if (rl_bs_rewrite_expr_(m, s->expr, s->line, arena, diag)) return 1;
         if (rl_bs_rewrite_expr_(m, s->expr2, s->line, arena, diag)) return 1;
-        if (rl_bs_rewrite_stmts_(m, s->children, form, arena, diag)) {
+        if (rl_bs_rewrite_stmts_(m, s->children, arena, diag)) {
             return 1;
         }
-        if (rl_bs_rewrite_stmts_(m, s->else_children, form, arena, diag)) {
+        if (rl_bs_rewrite_stmts_(m, s->else_children, arena, diag)) {
             return 1;
         }
     }
@@ -4120,8 +4249,14 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
          * in anything this body calls, would falsify the artifact's
          * contract. */
         if (rl_reject_print_(form, m->on_step->children, diag)) return 1;
-        if (rl_bs_rewrite_stmts_(m, m->on_step->children, form, arena,
-                                 diag)) {
+        /* Before the rewrite below, so that the positions the
+         * diagnostic names are the ones the source wrote rather than
+         * the accessor calls they lower to. */
+        if (rl_reject_impure_block_(form, m->on_step->children, NULL,
+                                    diag)) {
+            return 1;
+        }
+        if (rl_bs_rewrite_stmts_(m, m->on_step->children, arena, diag)) {
             return 1;
         }
         rl_emit_state_accessors_(out, m);

@@ -310,7 +310,11 @@ manifest registers:
   confusion. Once registered, an opaque name may be used in any type
   position (`let e: body = ...`, `fn world`, function arguments).
 - **Builtins** — named functions with a fixed arity, callable from KFL
-  expressions and simulation statements.
+  expressions and simulation statements. A builtin line may end with the
+  qualifier `pure`, the library's declaration that the function's result
+  depends on its arguments alone and that it touches no world state, no
+  input or output and no allocation. A line without it registers an impure
+  builtin, which is what the positions below refuse.
 
 With the astronomy libraries installed, a program can drive a physical
 simulation.
@@ -509,13 +513,28 @@ position key means metres from the world origin, the same meaning it
 carries as an `astro_body` attribute and as a `reset` target; the
 velocity keys are metres per second.
 
-The assigned expression must be side-effect free: it may call the scalar
-maths built-ins and the string helpers that only read their arguments
-(`strlen`, `streq`, `starts_with`, `ends_with`), while `concat`, which
-allocates, and every library built-in registered by a manifest are
-rejected, whether called directly or through a `fn`. Outside `on_step` the dotted form is not a name at
-all, and an objective or termination expression that names body state is
-told to read it through an `observe ... as` channel instead.
+**Purity.** Every expression the block evaluates must be side-effect free,
+in every position it can occupy: an assignment, a `let` or `const`
+initialiser, an expression statement, an `if` or `while` condition, an
+argument to another call, and anything inside a `for_each` body. The block
+runs once per control step of every environment, so a call that allocates,
+performs input or output, or changes the world is a call the stepping path
+cannot carry, and an episode replayed from its recorded inputs would not
+reproduce it.
+
+A side-effect-free expression may call the scalar maths built-ins and the
+string helpers that only read their arguments (`strlen`, `streq`,
+`starts_with`, `ends_with`). `concat`, which allocates, is rejected, and so
+is every library built-in whose manifest did not declare it `pure`,
+whether it is called directly or through a `fn`. The refusal names the
+position, the line and the built-in it found. Because an initialiser is a
+position like any other, a name bound to a rejected call is rejected where
+it is bound, and no later read of that name can carry the call past the
+check.
+
+Outside `on_step` the dotted form is not a name at all, and an objective or
+termination expression that names body state is told to read it through an
+`observe ... as` channel instead.
 
 ### Vehicle assemblies
 

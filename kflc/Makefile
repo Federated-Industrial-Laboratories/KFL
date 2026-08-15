@@ -143,6 +143,14 @@ RL_GRAMMAR_TEST = tests/test_rl_grammar
 $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS) -lm
 
+# What a stepping path may reach: the registry's purity property and
+# one program per expression position inside the per-step block. Links
+# libkflc.a for the registry half and drives the built kflc for the
+# position half.
+RL_PURITY_TEST = tests/test_rl_purity
+$(RL_PURITY_TEST): tests/test_rl_purity.c $(LIB) $(RL_LIB) $(BIN)
+	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS) -lm
+
 # Gate for the Grammar 3.2 dual-mode artifact: kflc -o on an RL
 # program produces the batch executable plus the companion shared
 # object with exactly the k26rl_env.h export set; a small batch run
@@ -395,7 +403,7 @@ else
 RL_DRIVE_GATES =
 endif
 
-test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_DRIVE_GATES) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
+test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_PURITY_TEST) $(RL_DRIVE_GATES) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
@@ -406,6 +414,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	./$(RESERVED_KW_TEST)
 	./$(ASSEMBLY_TEST)
 	./$(RL_GRAMMAR_TEST)
+	./$(RL_PURITY_TEST)
 	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
@@ -489,7 +498,8 @@ install: $(BIN) $(LIB)
 clean:
 	rm -f src/*.o $(BIN) $(LIB) $(TEST_BIN) $(MANIFEST_TEST) \
 	      $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) \
-	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_EMIT_TEST) \
+	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_PURITY_TEST) \
+	      $(RL_EMIT_TEST) \
 	      $(ASSEMBLY_TEST) \
 	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
 	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
