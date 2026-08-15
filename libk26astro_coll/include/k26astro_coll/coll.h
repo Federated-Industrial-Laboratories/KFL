@@ -290,6 +290,138 @@ K26AstroCollStatus k26astro_coll_bounce(const K26AstroCollBody *a,
                                         K26V3 *pos_b, K26V3 *vel_b,
                                         K26V3 *omega_b);
 
+/* ---- Docking ports and the capture envelope ---------------------- *
+ *
+ * A docking port is a mating plane with an axis and a roll reference.
+ * Two ports mate when their planes coincide and their axes are
+ * opposed; how far a contact is from that configuration is what a
+ * capture envelope bounds.
+ *
+ * Arithmetic, stated apart from the restriction above because this
+ * one surface departs from it. The port state's angles are Euler
+ * angles, and extracting them calls the inverse trigonometric
+ * functions, which no rearrangement removes: an angle is not an
+ * algebraic function of a rotation matrix. The residual angles and
+ * every test over them therefore reproduce bit for bit for a given
+ * binary on a given platform, which is what the stepping contract
+ * binds, and do not carry the cross-platform claim the kernels above
+ * do. The distances and the rates use the five correctly rounded
+ * operations alone and keep it. The split is stated here rather than
+ * left for a reader to infer from the includes.
+ */
+
+/* One port in its body frame, with its basis already orthonormal.
+ * `axis[0]` is the outward normal of the mating plane, pointing away
+ * from the vehicle that carries it; `axis[1]` is the roll reference
+ * in the plane; `axis[2]` completes the right-handed set. */
+typedef struct {
+    K26V3 at;
+    K26V3 axis[3];
+} K26AstroCollPort;
+
+/* Build a port's basis from a declared axis and roll reference.
+ *
+ * The axis is normalised; the roll reference has its component along
+ * the axis removed and is then normalised. A roll reference parallel
+ * to the axis names no direction in the plane, and the fallback is
+ * the world axis least aligned with the port axis, which is a
+ * deterministic choice rather than an arbitrary one. A caller that
+ * cares refuses that input before reaching here; this function is
+ * total so that no configuration can leave the basis unset.
+ *
+ * @param axis     Outward normal of the mating plane, need not be unit.
+ * @param roll_ref Roll reference, need not be unit or orthogonal.
+ * @param at       Mating plane centre in the body frame.
+ * @param out      Receives the port.
+ * @return 0 when the axis and the roll reference gave the basis, 1
+ *         when the fallback was used.
+ */
+int k26astro_coll_port_basis(K26V3 axis, K26V3 roll_ref, K26V3 at,
+                             K26AstroCollPort *out);
+
+/* The capture envelope, in SI units.
+ *
+ * The closing rate is an interval rather than a ceiling because the
+ * envelope this models publishes it as one: a mechanism captures
+ * within a band of closing rates, and arriving too slowly is outside
+ * the band as surely as arriving too fast. Every other entry is a
+ * ceiling on a magnitude. */
+typedef struct {
+    double axial_rate_min;   /* m/s, closing, positive approaching */
+    double axial_rate_max;   /* m/s */
+    double lateral_rate;     /* m/s */
+    double pitchyaw_rate;    /* rad/s, vector sum of pitch and yaw */
+    double roll_rate;        /* rad/s */
+    double lateral;          /* m */
+    double pitchyaw;         /* rad, vector sum of pitch and yaw */
+    double roll;             /* rad */
+} K26AstroCollEnvelope;
+
+/* The state of one port with respect to another: four alignment
+ * residuals, four rates, and the derived rate the envelope's own note
+ * adds.
+ *
+ * Every quantity is of the active port with respect to the passive
+ * one, resolved on the passive port's axes. `axial` is positive when
+ * the two planes are apart and `v_axial` is positive when they are
+ * closing, so a nominal approach reads a shrinking positive axial
+ * distance at a positive closing rate. The three angles are the yaw,
+ * pitch and roll of the active port frame with respect to the mated
+ * configuration, taken in that order about the passive port's third,
+ * second and first axes; `pitchyaw` is the vector sum of the first
+ * two, which is the quantity a published envelope bounds.
+ *
+ * `v_lateral_cg` is the lateral rate at the vehicle centres of mass
+ * rather than at the ports. Lateral rate at the port and pitch or yaw
+ * rate combine into a lateral rate at the centre of mass that neither
+ * alone describes, and an envelope that bounds the port rate without
+ * bounding this one admits a contact that swings the vehicle. */
+typedef struct {
+    double axial;
+    double lateral;
+    double pitchyaw;
+    double roll;
+    double v_axial;
+    double v_lateral;
+    double v_pitchyaw;
+    double v_roll;
+    double v_lateral_cg;
+} K26AstroCollPortState;
+
+/**
+ * @brief Resolve one port's state with respect to another.
+ * @param active  Body carrying the active port.
+ * @param ap      The active port, in that body's frame.
+ * @param passive Body carrying the passive port.
+ * @param pp      The passive port, in that body's frame.
+ * @param time    Interval fraction the state is taken at, in [0, 1];
+ *                positions interpolate, orientation and the rates are
+ *                the interval's own, which is the sweep's motion model.
+ * @param out     Receives the residuals and the rates.
+ * @return K26ASTRO_COLL_OK, or E_NULL, or E_BAD_DT when time is not
+ *         finite or lies outside the interval.
+ * @note  The two bodies' positions must be expressed in one frame
+ *        common to the pair, exactly as the pass requires.
+ */
+K26AstroCollStatus k26astro_coll_port_state(const K26AstroCollBody *active,
+                                            const K26AstroCollPort *ap,
+                                            const K26AstroCollBody *passive,
+                                            const K26AstroCollPort *pp,
+                                            double time,
+                                            K26AstroCollPortState *out);
+
+/**
+ * @brief Test a port state against a capture envelope.
+ * @param s State from k26astro_coll_port_state.
+ * @param e The envelope.
+ * @return 1 when every condition holds, 0 when any fails.
+ * @note  The conditions apply simultaneously: one failure is a
+ *        failure. Each is a non-strict comparison, so a state exactly
+ *        at a limit is inside the envelope.
+ */
+int k26astro_coll_port_captured(const K26AstroCollPortState *s,
+                                const K26AstroCollEnvelope *e);
+
 #ifdef __cplusplus
 }
 #endif
