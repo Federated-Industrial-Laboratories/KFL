@@ -1,0 +1,106 @@
+# docking_benchmark.kfl: a six-degree-of-freedom docking task.
+#
+# A ten-tonne class crew vehicle holds station ten metres off a large
+# station's docking interface and has to close, stay inside the
+# capture envelope its port declares, and mate. Translation is flown
+# on twelve thrusters and attitude on three reaction wheels, and both
+# have to be right at the same instant, which is what makes this one
+# task rather than an approach and a pointing problem side by side.
+#
+# The initial state is not a hand-computed state vector. The chaser
+# sits at the station-keeping hold point of the linearised relative
+# motion, 47.35 m ahead along the direction of travel, which is the
+# offset that leaves the mating planes ten metres apart. A craft held
+# there needs no relative velocity in the rotating frame, so its world
+# velocity is the station's plus the frame's own rotation across the
+# offset, which is 0.0536549 m/s inward.
+#
+# Free drift does not dock. Closing along the direction of travel
+# drives a radial acceleration of twice the mean motion times the
+# closing rate, which over the approach carries the chaser about 1.6 m
+# off the docking axis, sixteen times the envelope's lateral
+# misalignment limit. The lateral thrusters are what answer that, and
+# the wheels are what answer the initial angular rate: left alone, the
+# rate the reset draws turns the vehicle by far more than the four
+# degrees the envelope admits.
+#
+# The four outcomes are the ones the task has, and each is an ordinary
+# ending rather than a special case. Docked: the contact satisfied
+# every condition and `dock_captured` is set. Impact: contact anywhere
+# else, or a port contact outside the envelope, ends the episode with
+# that channel clear. Horizon: the declared horizon truncates. Fault:
+# the physics could not advance honestly, which nothing in this task
+# introduces.
+#
+# The vehicles are `examples/assets/crew_vehicle_10t.k26asm` and
+# `examples/assets/space_station.k26asm`, and every number in both
+# carries its provenance in the asset's own bytes.
+
+form DOCKING_BENCHMARK
+title "Six-degree-of-freedom docking benchmark"
+size 320x200
+
+fn world docking_world
+    astro_body earth gm=3.986004418e14 mass=5.972e24 radius=6.371e6
+    astro_body station assembly="assets/space_station.k26asm" parent=earth pos_x=6771000.0 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7672.5986483850129 vel_z=0.0 quat_w=0.5 quat_x=0.5 quat_y=0.5 quat_z=0.5 omega_x=0.0 omega_y=0.0011331559073083758 omega_z=0.0
+    astro_body chaser assembly="assets/crew_vehicle_10t.k26asm" parent=earth pos_x=6771000.0 pos_y=47.35 pos_z=0.0 vel_x=-0.053654932211051595 vel_y=7672.5986483850129 vel_z=0.0 quat_w=0.5 quat_x=0.5 quat_y=-0.5 quat_z=-0.5 omega_x=0.0 omega_y=0.0011331559073083758 omega_z=0.0
+
+    episode
+        control_dt 0.5
+        substeps 5
+        horizon 400
+        terminated when touch_hit > 0.5
+        reset chaser.pos_x uniform(6770999.5, 6771000.5)
+        reset chaser.pos_z uniform(-0.5, 0.5)
+        reset chaser.quat_z uniform(-0.52, -0.48)
+        reset chaser.omega_z uniform(-0.002, 0.002)
+    end
+
+    action close box 0.0 1.0 default 0.0
+    action brake box 0.0 1.0 default 0.0
+    action lat_yp box 0.0 1.0 default 0.0
+    action lat_ym box 0.0 1.0 default 0.0
+    action lat_zp box 0.0 1.0 default 0.0
+    action lat_zm box 0.0 1.0 default 0.0
+    action tq_x box -1.0 1.0 default 0.0
+    action tq_y box -1.0 1.0 default 0.0
+    action tq_z box -1.0 1.0 default 0.0
+
+    # The navigation sensor the relative state is read through. The
+    # true values travel beside the measured ones so a privileged
+    # critic and the record can see both.
+    sensor nav
+        noise normal 0.0 0.01
+        latency 1
+    end
+
+    on_step
+        chaser.close_yp.throttle = close
+        chaser.close_ym.throttle = close
+        chaser.brake_yp.throttle = brake
+        chaser.brake_ym.throttle = brake
+        chaser.lat_yp_fwd.throttle = lat_yp
+        chaser.lat_yp_aft.throttle = lat_yp
+        chaser.lat_ym_fwd.throttle = lat_ym
+        chaser.lat_ym_aft.throttle = lat_ym
+        chaser.lat_zp_fwd.throttle = lat_zp
+        chaser.lat_zp_aft.throttle = lat_zp
+        chaser.lat_zm_fwd.throttle = lat_zm
+        chaser.lat_zm_aft.throttle = lat_zm
+        chaser.wheel_x.torque = 5.0 * tq_x
+        chaser.wheel_y.torque = 5.0 * tq_y
+        chaser.wheel_z.torque = 5.0 * tq_z
+    end
+
+    observe relative station from chaser through nav with truth as rel
+    observe attitude of chaser as att
+    observe attitude of station as sta
+    observe port forward of chaser as dock
+    observe contact of chaser as touch
+
+    objective
+        reward 0.1 * dock_v_axial - 0.02 * dock_axial - 2.0 * dock_lateral - 5.0 * dock_pitchyaw - 5.0 * dock_roll - 0.5 * dock_v_lateral - 20.0 * dock_v_pitchyaw - 20.0 * dock_v_roll
+        terminal 100.0 * dock_captured - 20.0
+    end
+end
+end

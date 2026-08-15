@@ -1,0 +1,63 @@
+# space_station.k26asm - the passive vehicle of the docking benchmark.
+#
+# WHAT IS CITED. Mass and overall dimensions are the International
+# Space Station's, as NASA publishes them on its space station facts
+# and figures page, read on 2026-08-15 and carrying a page date of
+# 16 July 2024:
+#
+#     mass                       925 335 pounds (419 725 kilograms)
+#     truss length               310 feet (94 metres)
+#     pressurised module length  218 feet along the major axis
+#                                (67 metres)
+#     solar array length         239 feet across both longitudinally
+#                                aligned arrays (73 metres)
+#
+# WHAT IS MODELLED. NASA publishes lengths, not a bounding box, so
+# assigning the three to the three body axes is this asset's choice
+# and not a measurement: the pressurised modules run along the docking
+# axis, the truss across it, and the arrays on the third axis. The
+# collider is one box of those half extents, and the derivation treats
+# it as a solid of uniform density, which is the only mass
+# distribution this asset can honestly claim to know.
+#
+# WHAT THAT COSTS, STATED. A uniform solid of the station's overall
+# extent puts mass further from the centre than the station does, so
+# the derived inertia OVERSTATES. Against the 350-tonne design-case
+# article of the docking standard (IDSS IDD Revision E, October 2016,
+# Table 3.3.1.2-1: 3.50e5 kg, Ixx 1.15e8, Iyy 6.20e7, Izz 1.65e8
+# kg m^2) the derived tensor is 4.3, 5.5 and 2.8 times its entries,
+# on a mass 1.20 times the article's. The article is a class
+# representative and not a model of any particular station, so
+# agreement to a factor is the most either can assert about the other;
+# the factors are recorded here so that a reader can see which way the
+# figure errs rather than being told it is right.
+#
+# The docking interface is placed 0.1 m ahead of the box's forward
+# face so that it is the first geometry an arriving craft meets. Its
+# distance from the centre of mass, 33.6 m, is this asset's own
+# geometry; the standard's 350-tonne article puts its hard capture
+# mating plane at 20.0 m, which is the class figure and not this
+# station's.
+
+assembly space_station
+    frame x_to_port
+
+    provenance mass "NASA, International Space Station Facts and Figures, page dated 16 July 2024: 925 335 pounds (419 725 kilograms)" cited
+    provenance dimensions "NASA, same page: truss 310 ft (94 m), pressurised module length 218 ft along the major axis (67 m), solar array length 239 ft across both arrays (73 m)" cited
+    provenance hull_geometry "modelled: one box of the cited half extents, the three published lengths assigned to the docking axis, the truss axis and the third axis; NASA publishes lengths and not a bounding box" computed
+    provenance inertia "computed from the cited mass and the modelled box at uniform density; it overstates, being 4.3, 5.5 and 2.8 times the 350-tonne design-case article of IDSS IDD Rev E Table 3.3.1.2-1" computed
+    provenance port_dock "modelled: the mating plane 0.1 m ahead of the box's forward face so it is the first geometry an arriving craft meets" computed
+
+    component structure
+        mass 419725.0
+        at 0.0 0.0 0.0
+        collider box 33.5 47.0 36.5
+    end
+
+    port dock
+        at 33.6 0.0 0.0
+        axis 1.0 0.0 0.0
+        roll_ref 0.0 1.0 0.0
+        capture idss_e
+    end
+end

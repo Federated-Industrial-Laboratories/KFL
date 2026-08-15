@@ -115,6 +115,34 @@ ImPlot
              simulation. Dear ImGui, which it extends, and GLFW are
              system dependencies rather than vendored code.
 
+== Docking interface reference material ==
+
+The following values are transcribed from an openly published
+interface standard and ship inline in the compiler and in the example
+assets. They are reference data, not third-party source code, and the
+document itself is not redistributed.
+
+International Docking System Standard (IDSS)
+  Interface Definition Document, Revision E, October 2016
+  Path:      kflc/src/capture.c (the named capture envelope)
+             kflc/examples/assets/crew_vehicle_10t.k26asm
+             kflc/examples/assets/space_station.k26asm
+  Values:    the recommended initial contact conditions of
+             Table 3.3.1.1-2, which the named envelope `idss_e`
+             carries as a benchmark's success condition; the soft
+             capture mating plane diameter of 1200 mm from
+             section 3.2; and the design-case vehicle mass properties
+             of Table 3.3.1.2-1.
+  Note:      the standard publishes the contact conditions as
+             recommendations for interoperability between docking
+             mechanisms. Treating them as a task's success condition
+             is a use of the published figures and not a claim about
+             what the standard requires.
+
+International Space Station mass and dimensions
+  Path:      kflc/examples/assets/space_station.k26asm
+  Source:    NASA, International Space Station Facts and Figures.
+
 == Deterministic sampling reference material ==
 
 The following values are transcribed from open publications and ship

@@ -1,0 +1,200 @@
+# crew_vehicle_10t.k26asm - a ten-tonne class crew vehicle.
+#
+# WHAT THIS IS. The mass properties are the design-case article
+# IDSS-10T of the International Docking System Standard Interface
+# Definition Document, Revision E, October 2016, Table 3.3.1.2-1:
+# mass 10 000 kg, Ixx 17 000, Iyy 42 000, Izz 42 000 kg m^2 about the
+# centre of gravity, no products of inertia, in a frame whose x axis
+# runs along the vehicle's longitudinal axis positive toward the
+# docking interface, which is this format's `x_to_port`. The article
+# is a class representative published for docking analysis. It is not
+# a particular vehicle, and this asset does not claim to be one.
+#
+# WHY THIS CLASS. The class was chosen from the published masses of
+# the two crew vehicles it is meant to represent. Soyuz: launch mass
+# 7190 kg (NASA, Reference Guide to the International Space Station,
+# Utilization Edition, NP-2015-05-022-JSC, 2015; the table is Soyuz
+# TMA era and is labelled simply Soyuz, so it is read as the family
+# and not as Soyuz MS). Crew Dragon: 27 600 pounds at undock, capsule
+# and trunk together (NASA, "Top 10 Things to Know for NASA's SpaceX
+# Demo-2 Return", 24 July 2020), which is 12 519 kg by the pound of
+# 0.45359237 kg. Their mean is 9855 kg, and the standard's nearest
+# design-case article is IDSS-10T. NASA gives no launch mass for Crew
+# Dragon in any source found, so the undock mass stands in for it and
+# is named as what it is.
+#
+# WHERE THE GEOMETRY COMES FROM. The hull is one capsule primitive
+# whose radius and segment length were solved so that this compiler's
+# own closed forms return the article's cited mass and inertia. The
+# solution is
+#
+#     radius  1.926124891819624 m
+#     segment 3.579644032781015 m between its endpoints
+#
+# giving an overall length of 7.4319 m and a diameter of 3.8523 m.
+# Those dimensions were not chosen: they fall out of the cited
+# tensor. That they land between the two real vehicles is the check
+# that the article represents the class. Soyuz is 7 m long and 2.7 m
+# in maximum diameter, Crew Dragon 26.7 ft by 13 ft, which is 8.138 m
+# by 3.962 m (NASA, SpaceX Crew-2 Mission Overview, SP-2021-03-170-KSC).
+#
+# WHAT IS NOT PUBLISHED, AND WHAT THIS ASSET DOES INSTEAD. No inertia
+# tensor is published for either real vehicle, and no thruster
+# positions are published for either. A search of the technical report
+# server, of the operators' own pages and of the mission press kits
+# found the qualitative statement that Crew Dragon's manoeuvring
+# thrusters sit near the base of the capsule and under the nose cone,
+# and nothing numeric. So: the inertia here is the article's cited
+# tensor, reproduced by geometry, and the thruster layout below is a
+# modelled arrangement placed on this asset's own computed hull. It is
+# not a claim about any vehicle's thruster geometry. What is real in
+# it is the count and the thrust: twelve manoeuvring thrusters, which
+# is the count NASA gives for Crew Dragon, each of 400 N.
+#
+# The docking interface stands 0.034 m ahead of the hull's forward
+# extreme so that it is the first geometry another craft meets. The
+# article's own hard capture mating plane sits at x = 3.5 m from the
+# centre of gravity; the soft capture plane, where first contact
+# happens, lies ahead of it by a distance the standard publishes only
+# in a figure. Placing the interface at the hull's extreme therefore
+# overstates its distance from the centre of gravity by 0.25 m, which
+# is the conservative direction: a longer arm makes the lateral rate
+# at the centre of gravity larger for a given angular rate, and that
+# rate is one of the conditions a capture has to satisfy.
+#
+# Plume impingement is not modelled. The braking thrusters point their
+# exhaust along the docking axis, which a real vehicle avoids by
+# canting them; canting them here would be an invented angle.
+
+assembly crew_vehicle_10t
+    frame x_to_port
+
+    provenance mass "IDSS IDD Rev E, Oct 2016, Table 3.3.1.2-1, article IDSS-10T: 10 000 kg" cited
+    provenance inertia "IDSS IDD Rev E, Oct 2016, Table 3.3.1.2-1, article IDSS-10T: 17 000, 42 000, 42 000 kg m^2 about the centre of gravity, no products" cited
+    provenance hull_geometry "computed: the capsule radius and segment length that reproduce the cited mass and inertia under this compiler's closed forms" computed
+    provenance vehicle_class "computed: the mean of Soyuz launch mass 7190 kg (NASA NP-2015-05-022-JSC) and Crew Dragon undock mass 27 600 lb (NASA, Demo-2 return, 2020) is 9855 kg, which selects this article" computed
+    provenance thruster_count "NASA, Houston We Have a Podcast, The SpaceX Crew Dragon, recorded 20 August 2019: twelve Draco engines" cited
+    provenance thrust "NASA and SpaceX, COTS 2 Mission Press Kit, May 2012: Draco thruster 90 lbf, 400 N; the figure is published for the Dragon 1 thruster" cited
+    provenance thruster_layout "modelled: two rings on the hull at the cylinder ends, in opposed pairs about the centre of mass; no thruster position is published for either vehicle this article represents" computed
+    provenance port_forward "modelled: the mating plane 0.034 m ahead of the hull's forward extreme so it is the first geometry another craft meets; the article's hard capture plane is at 3.5 m" computed
+    provenance wheels "computed: sized to null 0.2 deg/s about the transverse axis within a minute at the article's cited transverse inertia" computed
+
+    component hull
+        mass 10000.0
+        at 0.0 0.0 0.0
+        collider capsule -1.789822016390510 0.0 0.0 1.789822016390510 0.0 0.0 1.926124891819624
+    end
+
+    port forward
+        at 3.75 0.0 0.0
+        axis 1.0 0.0 0.0
+        roll_ref 0.0 1.0 0.0
+        capture idss_e
+    end
+
+    # Two thrusters push the vehicle toward its docking interface and
+    # two push it away. Each pair sits on opposite sides of the hull
+    # at one ring, so firing a pair together is a force through the
+    # centre of mass and firing one alone is a pitch or yaw command.
+    thruster close_yp
+        at -1.789822016390510 1.926124891819624 0.0
+        dir 1.0 0.0 0.0
+        thrust 400.0
+    end
+    thruster close_ym
+        at -1.789822016390510 -1.926124891819624 0.0
+        dir 1.0 0.0 0.0
+        thrust 400.0
+    end
+    thruster brake_yp
+        at 1.789822016390510 1.926124891819624 0.0
+        dir -1.0 0.0 0.0
+        thrust 400.0
+    end
+    thruster brake_ym
+        at 1.789822016390510 -1.926124891819624 0.0
+        dir -1.0 0.0 0.0
+        thrust 400.0
+    end
+
+    # Eight lateral thrusters, four to a plane. Each group of two is
+    # one forward and one aft of the centre of mass with the same
+    # direction, so the pair translates and either one alone turns.
+    thruster lat_yp_fwd
+        at 1.789822016390510 -1.926124891819624 0.0
+        dir 0.0 1.0 0.0
+        thrust 400.0
+    end
+    thruster lat_yp_aft
+        at -1.789822016390510 -1.926124891819624 0.0
+        dir 0.0 1.0 0.0
+        thrust 400.0
+    end
+    thruster lat_ym_fwd
+        at 1.789822016390510 1.926124891819624 0.0
+        dir 0.0 -1.0 0.0
+        thrust 400.0
+    end
+    thruster lat_ym_aft
+        at -1.789822016390510 1.926124891819624 0.0
+        dir 0.0 -1.0 0.0
+        thrust 400.0
+    end
+    thruster lat_zp_fwd
+        at 1.789822016390510 0.0 -1.926124891819624
+        dir 0.0 0.0 1.0
+        thrust 400.0
+    end
+    thruster lat_zp_aft
+        at -1.789822016390510 0.0 -1.926124891819624
+        dir 0.0 0.0 1.0
+        thrust 400.0
+    end
+    thruster lat_zm_fwd
+        at 1.789822016390510 0.0 1.926124891819624
+        dir 0.0 0.0 -1.0
+        thrust 400.0
+    end
+    thruster lat_zm_aft
+        at -1.789822016390510 0.0 1.926124891819624
+        dir 0.0 0.0 -1.0
+        thrust 400.0
+    end
+
+    # Three reaction wheels. The torque limit is what nulls the
+    # standard's own limiting pitch or yaw rate of 0.2 deg/sec within
+    # a minute at the article's transverse inertia of 42 000 kg m^2:
+    # 42 000 times 0.0034907 over 60 is 2.44 N m, and 5 N m is the
+    # round figure above it. The momentum limit is that torque held
+    # for a hundred seconds, and the spin inertia puts the wheel at
+    # 1000 rad/s when saturated. Friction is a small viscous term, a
+    # smaller Coulomb term, and a dead rate below which the Coulomb
+    # term is off so a wheel at rest does not chatter.
+    wheel wheel_x
+        axis 1.0 0.0 0.0
+        spin_inertia 0.5
+        max_momentum 500.0
+        max_torque 5.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+    wheel wheel_y
+        axis 0.0 1.0 0.0
+        spin_inertia 0.5
+        max_momentum 500.0
+        max_torque 5.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+    wheel wheel_z
+        axis 0.0 0.0 1.0
+        spin_inertia 0.5
+        max_momentum 500.0
+        max_torque 5.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+end
