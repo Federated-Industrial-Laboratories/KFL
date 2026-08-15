@@ -101,7 +101,12 @@ typedef struct {
     int    body_b;
     int    shape_a;
     int    shape_b;
-    double speed;          /* closing speed along the normal, m/s */
+    /* Closing speed along the normal, metres per second, positive
+     * when the pair is approaching. Taken at the start of the
+     * interval: by its end the pair has already passed through the
+     * contact, so the velocity there is a state the resolution
+     * discards rather than one the report should carry. */
+    double speed;
 } K26AstroCollContact;
 
 typedef enum {
@@ -240,6 +245,13 @@ K26AstroCollStatus k26astro_coll_arrest(const K26AstroCollBody *a,
  * normal, with a restitution coefficient in the closed unit interval.
  * Writes the two bodies' positions and post-impulse velocities.
  *
+ * The friction coefficient is Coulomb: the tangential impulse
+ * opposes the sliding at the contact point, and its magnitude is
+ * whatever would stop the sliding outright, or the coefficient times
+ * the normal impulse, whichever is smaller. Below that bound the
+ * surfaces grip and above it they slide, which is the whole of the
+ * model and is why a single coefficient is enough.
+ *
  * The impulse uses the effective mass at the contact point, so an
  * off-centre impact spins the body by the amount the geometry gives
  * rather than by too much. Omitting that term is the recorded defect
@@ -255,6 +267,7 @@ K26AstroCollStatus k26astro_coll_bounce(const K26AstroCollBody *a,
                                         const K26AstroCollBody *b,
                                         const K26AstroCollContact *hit,
                                         double restitution,
+                                        double friction,
                                         K26V3 *pos_a, K26V3 *vel_a,
                                         K26V3 *omega_a,
                                         K26V3 *pos_b, K26V3 *vel_b,

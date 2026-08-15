@@ -288,7 +288,7 @@ int main(void)
         ASSERT(c.hit);
 
         K26V3 pa, va, wa, pb, vb, wb;
-        ASSERT(k26astro_coll_bounce(&a, &b, &c, 0.5, &pa, &va, &wa,
+        ASSERT(k26astro_coll_bounce(&a, &b, &c, 0.5, 0.0, &pa, &va, &wa,
                                     &pb, &vb, &wb) == K26ASTRO_COLL_OK);
         near_("first body outgoing velocity",  va.x, -0.5, 1e-12);
         near_("second body outgoing velocity", vb.x,  1.5, 1e-12);
@@ -350,7 +350,7 @@ int main(void)
         near_("lever arm z", lever.z, -0.7, 1e-12);
 
         K26V3 pa, va, wa, pb, vb, wb;
-        ASSERT(k26astro_coll_bounce(&a, &b, &c, 0.4, &pa, &va, &wa,
+        ASSERT(k26astro_coll_bounce(&a, &b, &c, 0.4, 0.0, &pa, &va, &wa,
                                     &pb, &vb, &wb) == K26ASTRO_COLL_OK);
         printf("  first body angular velocity after "
                "(%.9f, %.9f, %.9f)\n", wa.x, wa.y, wa.z);
@@ -427,6 +427,83 @@ int main(void)
         printf("  the effective mass at the contact point is materially "
                "larger than the linear one, so omitting it would "
                "over-impulse: OK\n");
+        n_pass++;
+    }
+
+    printf("bounce, sliding:\n");
+    {
+        /* A sphere meeting a flat face with both a closing and a
+         * sliding velocity. The friction impulse opposes the sliding
+         * and is capped at the coefficient times the normal impulse,
+         * so a large coefficient stops the sliding outright and a
+         * zero one leaves it exactly as it was.
+         *
+         * The zero-friction arm is the control: without it the
+         * arm below would pass for an implementation that removed
+         * the tangential velocity whatever the coefficient, and with
+         * it a sign error in the tangential impulse shows up as
+         * sliding that grows rather than stops. */
+        K26AstroCollShape bx = box_at_(k26m3d_v3(0, 0, 0), 1.0, 1.0, 1.0);
+        K26AstroCollShape sp = sphere_(0.5);
+        K26AstroCollBody a = body_(k26m3d_v3(0, 0, 0), k26m3d_v3(0, 0, 0),
+                                   &bx, 1, 1.7320508075688772, 0.0);
+        K26AstroCollBody b = body_(k26m3d_v3(3.0, 0.0, 0.0),
+                                   k26m3d_v3(0.6, 0.0, 0.0),
+                                   &sp, 1, 0.5, 1.0);
+        b.vel0 = b.vel1 = k26m3d_v3(-2.4, 3.0, 0.0);
+        for (int i = 0; i < 3; i++) b.inv_inertia.m[i][i] = 2.0;
+
+        K26AstroCollBody bodies[2] = { a, b };
+        K26AstroCollContact c;
+        ASSERT(k26astro_coll_pass(bodies, 2, 1.0, &c) == K26ASTRO_COLL_OK);
+        ASSERT(c.hit);
+        near_("contact normal x", c.normal.x, 1.0, 1e-12);
+
+        K26V3 pa, va, wa, pb, vb, wb;
+        /* No friction: the sliding is untouched. */
+        ASSERT(k26astro_coll_bounce(&a, &b, &c, 0.0, 0.0, &pa, &va, &wa,
+                                    &pb, &vb, &wb) == K26ASTRO_COLL_OK);
+        printf("  frictionless: tangential velocity %.12f, declared "
+               "%.12f\n", vb.y, 3.0);
+        near_("frictionless tangential velocity", vb.y, 3.0, 1e-12);
+        ASSERT(vb.x != -2.4);        /* the normal part did act */
+
+        /* Enough friction to stop the sliding outright. The normal
+         * impulse here is the approach speed over the effective mass
+         * along the normal, and the contact sits on the sphere's own
+         * line of centres, so a coefficient of one is far above the
+         * bound and the tangential velocity goes to zero. */
+        ASSERT(k26astro_coll_bounce(&a, &b, &c, 0.0, 1.0, &pa, &va, &wa,
+                                    &pb, &vb, &wb) == K26ASTRO_COLL_OK);
+        printf("  gripping: tangential velocity %.12f\n", vb.y);
+        printf("  and it spins the sphere: (%.9f, %.9f, %.9f)\n",
+               wb.x, wb.y, wb.z);
+
+        /* The analytic outcome, derived from the geometry rather than
+         * read back. The first body is immovable, the contact sits on
+         * the sphere's own line of centres so the normal lever is
+         * zero and the normal impulse is the approach speed times the
+         * mass, 2.4. The tangential lever is the sphere's radius, so
+         * the tangential effective mass is 1 + 2 * 0.5 * 0.5 = 1.5
+         * and the impulse that would stop the sliding is 3 / 1.5 = 2,
+         * which is below the cap of 1.0 * 2.4. The centre therefore
+         * keeps 3 - 2 = 1 and the sphere spins at 2 * 0.5 * 2 = 2.
+         *
+         * The condition that matters is not that the centre stopped,
+         * because it does not: it is that the material point in
+         * contact stopped, which is what a friction impulse at the
+         * rolling limit means and what a centre-only assertion would
+         * miss entirely. */
+        near_("centre tangential velocity", vb.y, 1.0, 1e-12);
+        near_("spin about z", wb.z, 2.0, 1e-12);
+        K26V3 rb = { c.point.x - pb.x, c.point.y - pb.y, c.point.z - pb.z };
+        K26V3 surf = k26m3d_v3_cross(wb, rb);
+        printf("  contact point tangential velocity %.15f\n",
+               vb.y + surf.y);
+        near_("contact point tangential velocity", vb.y + surf.y, 0.0,
+              1e-12);
+        printf("  friction opposes the sliding, is capped by the "
+               "coefficient, and reaches the angular state: OK\n");
         n_pass++;
     }
 
