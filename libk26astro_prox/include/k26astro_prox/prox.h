@@ -22,11 +22,19 @@
  * addition, subtraction, multiplication, division and square root, and
  * nothing else; those five are correctly rounded under IEEE-754, so
  * this path is reproducible across platforms and not only across runs
- * on one. The state transition matrix calls the platform's sine and
- * cosine, which are not correctly rounded, so it carries the per-binary
- * claim only. That costs nothing, because the matrix is not on the
- * stepping path: the hold-point construction below reaches its answer
- * without a transcendental, and the matrix is otherwise the gates'.
+ * on one. It is the path a compiled program reaches: the emitted
+ * observation code calls the frame and the relative state and nothing
+ * else here.
+ *
+ * The state transition matrix calls the platform's sine and cosine,
+ * which are not correctly rounded, so it carries the per-binary claim
+ * only. That costs nothing today, because the matrix has no caller on
+ * any stepping path: its consumers are this library's own gates. The
+ * hold-point construction reaches its answer without a transcendental
+ * and would therefore keep the stronger claim if it were placed on
+ * one, but it has no caller in this tree yet either; the rendezvous
+ * benchmark that starts a craft on a declared standoff is the
+ * consumer it is built for.
  *
  * Provenance. The linearised equations of relative motion about a
  * circular reference orbit are
@@ -65,8 +73,10 @@ typedef enum {
     K26ASTRO_PROX_E_DEGENERATE = 2,  /* no frame: coincident centres,
                                       * or motion with no angular
                                       * momentum about the centre */
-    K26ASTRO_PROX_E_RANGE      = 3   /* mean motion or interval not a
-                                      * usable finite number */
+    K26ASTRO_PROX_E_RANGE      = 3   /* an argument is not a usable
+                                      * finite number: a position, a
+                                      * velocity, a mean motion or an
+                                      * interval */
 } K26AstroProxStatus;
 
 /**
@@ -123,7 +133,10 @@ typedef struct {
  *        ratio of the out-of-plane force to the central attraction.
  * @note  Refused as degenerate when the chief sits at the central
  *        body's centre, or when the two are in purely radial motion,
- *        because neither case names a direction of motion.
+ *        because neither case names a direction of motion. A position
+ *        or velocity that is not a usable finite number is refused as
+ *        out of range instead: the caller's inputs are broken, which
+ *        is a different thing from a state that names no frame.
  */
 K26AstroProxStatus k26astro_prox_frame(const K26AstroPos *central_pos,
                                        K26V3 central_vel,
@@ -210,8 +223,13 @@ K26AstroProxStatus k26astro_prox_cw_propagate(double n, double t,
  *        two-by-one ellipse about it once per orbit, which is the
  *        smallest honest answer, since no non-zero radial offset is a
  *        fixed point of the relative motion.
- * @note  No sine or cosine is called, so a reset that places a craft
- *        through this function is reproducible across platforms.
+ * @note  No sine or cosine is called, so a reset placing a craft
+ *        through this function would be reproducible across platforms
+ *        and not only across runs on one. Nothing in this tree calls
+ *        it yet: the compiled programs reach the frame and the
+ *        relative state only, and the rendezvous benchmark that starts
+ *        a craft on a declared standoff is the consumer this is built
+ *        for.
  */
 K26AstroProxStatus k26astro_prox_cw_hold(double n, K26V3 hold,
                                          K26V3 *out_v);

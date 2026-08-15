@@ -13,18 +13,32 @@
  *   A relative-velocity arm over a fixture whose two craft have the
  *   same inertial velocity cannot tell the rotating-frame rate from
  *   the inertial difference, because the two coincide there. The
- *   station-keeping arm uses a pair on one circular orbit separated
- *   in phase, where the inertial difference is metres per second and
- *   the rotating-frame rate is zero, and it asserts both, so an
- *   implementation that omitted the frame's rotation would fail it by
- *   the whole of that difference.
+ *   station-keeping arm uses a pair on one circular orbit separated in
+ *   phase, where the two are equal and opposite: the arm prints the
+ *   inertial difference, requires it to be well away from zero, and
+ *   requires the published rate to be zero, so an implementation that
+ *   omitted the frame's rotation fails by the whole of that
+ *   difference. At thirty metres of separation on this orbit the
+ *   difference is 0.0323 m/s, and the arm's floor is 0.03.
  *
  *   An arm run near the coordinate origin cannot see whether the
- *   separation was taken through the exact sector-aware subtraction
- *   or through flattened coordinates, since both agree there. The
- *   far-field arm places the pair fourteen sectors out, roughly six
- *   times the Earth-Sun distance, with a one-metre separation, where
- *   a flattened difference has lost every digit of it.
+ *   separation was taken through the exact sector-aware subtraction or
+ *   through flattened coordinates, since both agree there. Distance
+ *   alone is not enough either, and the reason is arithmetic rather
+ *   than magnitude: a sector boundary is a power of two, the spacing
+ *   of binary64 coordinates there is a power of two, and a separation
+ *   of one or two metres is a whole number of spacings, so a flattened
+ *   difference reproduces it exactly however far out the pair sits.
+ *   The first version of the far-field arm did exactly that, fourteen
+ *   sectors out with a one-metre separation, and its control
+ *   reproduced the answer to every digit: the arm measured nothing.
+ *   The shipped arm puts the pair eighty-seven sectors out, at about
+ *   Pluto's distance, which is the case the position type's own header
+ *   argues from, and separates it by a third, two sevenths and a
+ *   eleventh of a metre, none of which can land on the grid. It then
+ *   requires the flattened control to be visibly wrong before it
+ *   credits the exact path: the control misses by 3.3e-4 m and the
+ *   exact path holds the value to 3.1e-10 m.
  */
 #include "k26astro_prox/prox.h"
 
@@ -286,9 +300,34 @@ int main(void)
                == K26ASTRO_PROX_E_DEGENERATE);
         printf("  null, coincident centres, and purely radial motion"
                " each refused\n");
+
+        /* A broken input and a state that names no frame are different
+         * conditions and carry different statuses, because a caller
+         * can act on the difference. */
+        double nan_ = 0.0 / 0.0, inf_ = 1.0 / 0.0;
+        ASSERT(k26astro_prox_frame(&centre, k26m3d_v3(0, 0, 0), &out,
+                                   k26m3d_v3(0.0, nan_, 0.0), &f)
+               == K26ASTRO_PROX_E_RANGE);
+        ASSERT(k26astro_prox_frame(&centre, k26m3d_v3(inf_, 0, 0), &out,
+                                   k26m3d_v3(0, 7500, 0), &f)
+               == K26ASTRO_PROX_E_RANGE);
+        K26AstroProxFrame good;
+        ASSERT(k26astro_prox_frame(&centre, k26m3d_v3(0, 0, 0), &out,
+                                   k26m3d_v3(0, 7500, 0), &good)
+               == K26ASTRO_PROX_OK);
+        K26AstroProxRel rel;
+        ASSERT(k26astro_prox_relative(&good, &out, k26m3d_v3(0, nan_, 0),
+                                      &centre, k26m3d_v3(0, 0, 0), &rel)
+               == K26ASTRO_PROX_E_RANGE);
+        ASSERT(k26astro_prox_relative(&good, &out, k26m3d_v3(0, 7500, 0),
+                                      &centre, k26m3d_v3(inf_, 0, 0), &rel)
+               == K26ASTRO_PROX_E_RANGE);
+        printf("  a velocity that is not a finite number is refused as"
+               " out of range, not as a degenerate geometry\n");
         n_pass++;
         printf("gate 6: a state with no frame is refused, not"
-               " approximated: OK\n");
+               " approximated, and a broken input is told apart from"
+               " one: OK\n");
     }
 
     printf("test_prox_frame: %d gates passed\n", n_pass);

@@ -57,8 +57,12 @@ K26AstroProxStatus k26astro_prox_frame(const K26AstroPos *central_pos,
                                        K26AstroProxFrame *out)
 {
     if (!central_pos || !chief_pos || !out) return K26ASTRO_PROX_E_NULL;
+    /* A value that is not a usable finite number is a range fault, not
+     * a degenerate geometry: the two are told apart because a caller
+     * can act on the difference, one meaning its inputs are broken and
+     * the other meaning this state names no frame. */
     if (!prox_finite_v3_(central_vel) || !prox_finite_v3_(chief_vel)) {
-        return K26ASTRO_PROX_E_DEGENERATE;
+        return K26ASTRO_PROX_E_RANGE;
     }
 
     /* The exact sector-aware difference. The pair may sit anywhere in
@@ -66,15 +70,17 @@ K26AstroProxStatus k26astro_prox_frame(const K26AstroPos *central_pos,
      * the case a flattened coordinate difference destroys. */
     K26V3 r = k26astro_pos_sub(chief_pos, central_pos);
     K26V3 v = k26m3d_v3_sub(chief_vel, central_vel);
-    if (!prox_finite_v3_(r)) return K26ASTRO_PROX_E_DEGENERATE;
+    if (!prox_finite_v3_(r)) return K26ASTRO_PROX_E_RANGE;
 
     double r2 = k26m3d_v3_dot(r, r);
-    if (!(r2 > 0.0) || !prox_finite_(r2)) return K26ASTRO_PROX_E_DEGENERATE;
+    if (!prox_finite_(r2)) return K26ASTRO_PROX_E_RANGE;
+    if (!(r2 > 0.0)) return K26ASTRO_PROX_E_DEGENERATE;
     double rmag = sqrt(r2);
 
     K26V3 h = k26m3d_v3_cross(r, v);
     double h2 = k26m3d_v3_dot(h, h);
-    if (!(h2 > 0.0) || !prox_finite_(h2)) return K26ASTRO_PROX_E_DEGENERATE;
+    if (!prox_finite_(h2)) return K26ASTRO_PROX_E_RANGE;
+    if (!(h2 > 0.0)) return K26ASTRO_PROX_E_DEGENERATE;
 
     K26V3 e1 = k26m3d_v3_scale(r, 1.0 / rmag);
     K26V3 e3 = k26m3d_v3_scale(h, 1.0 / sqrt(h2));
@@ -99,11 +105,11 @@ K26AstroProxStatus k26astro_prox_relative(const K26AstroProxFrame *f,
         return K26ASTRO_PROX_E_NULL;
     }
     if (!prox_finite_v3_(chief_vel) || !prox_finite_v3_(target_vel)) {
-        return K26ASTRO_PROX_E_DEGENERATE;
+        return K26ASTRO_PROX_E_RANGE;
     }
 
     K26V3 rho = k26astro_pos_sub(target_pos, chief_pos);
-    if (!prox_finite_v3_(rho)) return K26ASTRO_PROX_E_DEGENERATE;
+    if (!prox_finite_v3_(rho)) return K26ASTRO_PROX_E_RANGE;
 
     /* The rate an observer riding the frame sees. Subtracting the
      * frame's own rotation is what makes a station-keeping pair read

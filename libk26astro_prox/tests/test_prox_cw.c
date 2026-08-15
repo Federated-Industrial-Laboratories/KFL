@@ -25,9 +25,22 @@
  *   An agreement arm at one separation would pass for any model that
  *   happened to be close there. The disagreement is measured at four
  *   separations and required to fall as the square of the separation,
- *   which is the order of the term the linearisation drops, and at a
- *   separation where the linearisation is known not to hold it is
- *   required to leave the bound rather than merely to grow.
+ *   which is the order of the term the linearisation drops.
+ *
+ *   What the bound is, and what it is not. The bound below is a
+ *   ceiling derived from a worst-case coefficient and a heuristic
+ *   double integration, and it carries roughly sevenfold slack. Both
+ *   it and the disagreement grow as the square of the separation, so
+ *   their ratio is nearly constant and in fact falls slowly with
+ *   separation: 0.137 at a hundred metres and 0.133 at two hundred
+ *   kilometres. The disagreement therefore does not leave this bound
+ *   at any separation at which two-body motion is still the question,
+ *   and no arm here claims that it does. What the range arm
+ *   establishes is the growth: the disagreement as a fraction of the
+ *   separation is itself proportional to the separation, so a model
+ *   good to three millimetres in a hundred is wrong by eleven
+ *   kilometres in two hundred, and that is the statement a reader can
+ *   act on.
  *
  *   A hold-point arm asserting only that the craft returns after one
  *   orbit would pass for the trivial answer of zero velocity at a zero
@@ -409,7 +422,6 @@ int main(void)
     /* ---- 7. Against an integrated trajectory, and its range ------ */
     {
         double r0 = 7.0e6;
-        double quarter = (M_PI / 2.0) / n;
         /* The bound, from the term the linearisation drops. The exact
          * differential gravity expanded in rho/r0 has a second-order
          * term bounded by 12 mu rho^2 / r0^4 = 12 n^2 rho^2 / r0;
@@ -421,13 +433,30 @@ int main(void)
          * which over a quarter orbit, where n T = pi/2, is
          * 14.8 rho^2 / r0. As a fraction of the separation itself
          * that is 14.8 rho / r0. */
-        double coeff = 6.0 * (M_PI / 2.0) * (M_PI / 2.0);
-        printf("gate 7: bound coefficient %.4f, so at r0 = %.1f km the"
-               " relative bound is %.4g times rho\n",
-               coeff, r0 / 1000.0, coeff / r0);
+        printf("gate 7: against two-body motion at r0 = %.1f km, at"
+               " two intervals so that no term of the solution can"
+               " vanish at both\n", r0 / 1000.0);
 
-        double prev_err = 0.0;
+        /* Two intervals, and the reason is a coincidence found while
+         * red-checking this file. At exactly a quarter orbit the
+         * cosine is zero, so any entry whose only appearance is a
+         * coefficient on cos(nt) contributes nothing there and a
+         * mutation of that coefficient leaves every number in this arm
+         * unchanged. The structural arms above catch such a mutation
+         * through the determinant, the matrix exponential and the
+         * residual of the equations, so the gate set was never blind
+         * to it, but an arm that cannot move under a defect is worth
+         * no more than the fixture it runs on. The second interval is
+         * not a quarter, a half or a whole orbit, so no trigonometric
+         * term of the solution vanishes at it. */
+        static const double fracs[] = { 0.25, 0.37 };
         static const double seps[] = { 400.0, 200.0, 100.0, 50.0 };
+        for (int j = 0; j < 2; j++) {
+        double interval = fracs[j] * 2.0 * M_PI / n;
+        double icoeff = 6.0 * (fracs[j] * 2.0 * M_PI) * (fracs[j] * 2.0 * M_PI);
+        double prev_err = 0.0;
+        printf("  at %.2f of an orbit, bound coefficient %.4f\n",
+               fracs[j], icoeff);
         for (int k = 0; k < 4; k++) {
             double rho = seps[k];
             K26V3 hold = k26m3d_v3(rho, 0.0, 0.0), hv;
@@ -435,63 +464,104 @@ int main(void)
             double rel0[6] = { hold.x, hold.y, hold.z, hv.x, hv.y, hv.z };
 
             K26AstroProxRel s0 = { hold, hv }, cw;
-            ASSERT(k26astro_prox_cw_propagate(n, quarter, &s0, &cw)
+            ASSERT(k26astro_prox_cw_propagate(n, interval, &s0, &cw)
                    == K26ASTRO_PROX_OK);
 
             double drift = 0.0;
-            K26V3 tru = integrated_rel_(r0, rel0, quarter, 0.05, &drift);
+            K26V3 tru = integrated_rel_(r0, rel0, interval, 0.05, &drift);
             double err = sqrt((cw.r.x - tru.x) * (cw.r.x - tru.x) +
                               (cw.r.y - tru.y) * (cw.r.y - tru.y) +
                               (cw.r.z - tru.z) * (cw.r.z - tru.z));
-            double bound = coeff * rho * rho / r0;
+            double bound = icoeff * rho * rho / r0;
 
-            printf("  rho = %6.1f m: disagreement %.6e m, bound %.6e m,"
+            printf("    rho = %6.1f m: disagreement %.6e m, bound %.6e m,"
                    " integrator's own %.3e m\n", rho, err, bound, drift);
             /* The integration must not be what is being measured. */
             ASSERT(drift * 100.0 < err);
             ASSERT(err < bound);
             if (k > 0) {
                 double ratio = prev_err / err;
-                printf("    halving the separation divided the"
+                printf("      halving the separation divided the"
                        " disagreement by %.3f\n", ratio);
                 ASSERT(ratio > 3.0 && ratio < 5.0);
             }
             prev_err = err;
+        }
         }
         n_pass++;
         printf("gate 7: the disagreement is second order in the"
                " separation and inside the stated bound: OK\n");
     }
 
-    /* ---- 8. And it leaves the bound where it should -------------- */
+    /* ---- 8. How far the model reaches --------------------------- *
+     *
+     * The quantity compared here is the disagreement as a fraction of
+     * the separation, at a hundred metres and at two hundred
+     * kilometres. Since the disagreement is quadratic in the
+     * separation, that fraction is linear in it, and the arm requires
+     * it to grow in proportion. That is what "the model has a range"
+     * means in a number a reader can act on.
+     *
+     * The bound is printed at both separations, with the ratio the
+     * disagreement bears to it, and it is deliberately not the arm's
+     * acceptance: it grows quadratically too, so the ratio is nearly
+     * constant and the disagreement stays inside it everywhere
+     * two-body motion is still the question. A bound that cannot be
+     * exceeded cannot show a limit, and asserting that it was would be
+     * a claim the numbers on this line contradict. */
     {
         double r0 = 7.0e6;
         double quarter = (M_PI / 2.0) / n;
         double coeff = 6.0 * (M_PI / 2.0) * (M_PI / 2.0);
-        double small_rel = coeff * 100.0 / r0;   /* the 100 m relative bound */
+        static const double seps[] = { 100.0, 2.0e5 };
+        double frac[2] = { 0.0, 0.0 };
 
-        double rho = 2.0e5;                      /* 200 km, 2.9% of r0 */
-        K26V3 hold = k26m3d_v3(rho, 0.0, 0.0), hv;
-        ASSERT(k26astro_prox_cw_hold(n, hold, &hv) == K26ASTRO_PROX_OK);
-        double rel0[6] = { hold.x, hold.y, hold.z, hv.x, hv.y, hv.z };
-        K26AstroProxRel s0 = { hold, hv }, cw;
-        ASSERT(k26astro_prox_cw_propagate(n, quarter, &s0, &cw)
-               == K26ASTRO_PROX_OK);
-        double drift = 0.0;
-        K26V3 tru = integrated_rel_(r0, rel0, quarter, 0.05, &drift);
-        double err = sqrt((cw.r.x - tru.x) * (cw.r.x - tru.x) +
-                          (cw.r.y - tru.y) * (cw.r.y - tru.y) +
-                          (cw.r.z - tru.z) * (cw.r.z - tru.z));
-        printf("gate 8: rho = %.0f km (%.2f%% of the orbit radius):"
-               " disagreement %.4e m, %.4g of the separation\n",
-               rho / 1000.0, 100.0 * rho / r0, err, err / rho);
-        printf("  the relative bound that held at 100 m was %.4g\n",
-               small_rel);
-        ASSERT(drift * 100.0 < err);
-        ASSERT(err / rho > small_rel * 100.0);
+        for (int k = 0; k < 2; k++) {
+            double rho = seps[k];
+            K26V3 hold = k26m3d_v3(rho, 0.0, 0.0), hv;
+            ASSERT(k26astro_prox_cw_hold(n, hold, &hv) == K26ASTRO_PROX_OK);
+            double rel0[6] = { hold.x, hold.y, hold.z, hv.x, hv.y, hv.z };
+            K26AstroProxRel s0 = { hold, hv }, cw;
+            ASSERT(k26astro_prox_cw_propagate(n, quarter, &s0, &cw)
+                   == K26ASTRO_PROX_OK);
+            double drift = 0.0;
+            K26V3 tru = integrated_rel_(r0, rel0, quarter, 0.05, &drift);
+            double err = sqrt((cw.r.x - tru.x) * (cw.r.x - tru.x) +
+                              (cw.r.y - tru.y) * (cw.r.y - tru.y) +
+                              (cw.r.z - tru.z) * (cw.r.z - tru.z));
+            double bound = coeff * rho * rho / r0;
+            frac[k] = err / rho;
+            printf("gate 8: rho = %9.1f m (%.4f%% of the orbit radius):"
+                   " disagreement %.4e m, %.4e of the separation;"
+                   " bound %.4e m, disagreement is %.3f of it\n",
+                   rho, 100.0 * rho / r0, err, frac[k], bound,
+                   err / bound);
+            ASSERT(drift * 100.0 < err);
+            /* Inside the bound at both, which is the fact this arm
+             * reports rather than the one an earlier version of it
+             * claimed. */
+            ASSERT(err < bound);
+        }
+
+        double grew = frac[1] / frac[0];
+        double sep_ratio = seps[1] / seps[0];
+        printf("  the separation grew by a factor of %.0f and the"
+               " fractional disagreement by %.0f\n", sep_ratio, grew);
+        printf("  at %.0f m the model predicts to %.4e of the"
+               " separation; at %.0f km to %.4e of it\n",
+               seps[0], frac[0], seps[1] / 1000.0, frac[1]);
+        /* Linear growth of the fraction, to a wide tolerance, since
+         * what is asserted is the order and not a coefficient. */
+        ASSERT(grew > 0.5 * sep_ratio && grew < 2.0 * sep_ratio);
+        /* And the far case is quantitatively useless, which is the
+         * plain reading of a range: several per cent of the separation
+         * rather than parts per hundred thousand. */
+        ASSERT(frac[1] > 0.01);
+        ASSERT(frac[0] < 1.0e-4);
         n_pass++;
-        printf("gate 8: outside its range the model leaves the bound,"
-               " so the range is proved and not assumed: OK\n");
+        printf("gate 8: the disagreement is a fixed fraction of the"
+               " separation per unit separation, so the model's reach"
+               " is measured and not assumed: OK\n");
     }
 
     /* ---- 9. Refusals -------------------------------------------- */
