@@ -219,8 +219,10 @@ static void expect_state_(const GatePort *ap, const double aq[4], V3 apos,
 {
     V3 aax[3], pax[3];
     for (int i = 0; i < 3; i++) {
-        aax[i] = qrot_(aq, v3_(ap->basis[i][0], ap->basis[i][1], ap->basis[i][2]));
-        pax[i] = qrot_(pq, v3_(pp->basis[i][0], pp->basis[i][1], pp->basis[i][2]));
+        aax[i] = qrot_(aq, v3_(ap->basis[i][0], ap->basis[i][1],
+                               ap->basis[i][2]));
+        pax[i] = qrot_(pq, v3_(pp->basis[i][0], pp->basis[i][1],
+                               pp->basis[i][2]));
     }
     V3 aorg = add3_(apos, qrot_(aq, v3_(ap->at[0], ap->at[1], ap->at[2])));
     V3 porg = add3_(ppos, qrot_(pq, v3_(pp->at[0], pp->at[1], pp->at[2])));
@@ -279,7 +281,8 @@ typedef struct {
 } GateChan;
 
 static double clamp01_(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
-static double clamppm_(double v) { return v < -1.0 ? -1.0 : (v > 1.0 ? 1.0 : v); }
+static double clamppm_(double v)
+{ return v < -1.0 ? -1.0 : (v > 1.0 ? 1.0 : v); }
 
 /* One control step: hold the declared closing rate, null the lateral
  * offset the orbital dynamics build up, and hold the mated attitude
@@ -412,12 +415,14 @@ int main(void)
     {
         double radius = 0.5 * (IDSS_E_MATING_MM / 1000.0);
         double half   = radius * 0.01;
-        const char *cp = strstr(csrc, "static const K26AstroCollShape kflrl_coll_[] = {");
+        static const char *const CTAB =
+            "static const K26AstroCollShape kflrl_coll_[] = {";
+        const char *cp = strstr(csrc, CTAB);
         ASSERT(cp != NULL);
         const char *cend = strstr(cp, "\n};");
         ASSERT(cend != NULL);
         int plates = 0;
-        const char *q = cp + strlen("static const K26AstroCollShape kflrl_coll_[] = {");
+        const char *q = cp + strlen(CTAB);
         while (q < cend) {
             double v[16];
             const char *r = q;
@@ -533,7 +538,8 @@ int main(void)
         base.v_lateral_cg = 0.01;
         ASSERT(k26astro_coll_port_captured(&base, &e) == 1);
 
-        struct { const char *name; size_t off; double lim; int upper; } arm[] = {
+        struct { const char *name; size_t off; double lim;
+                 int upper; } arm[] = {
             { "closing rate lower bound",
               offsetof(K26AstroCollPortState, v_axial), e.axial_rate_min, 0 },
             { "closing rate upper bound",
@@ -551,7 +557,8 @@ int main(void)
             { "roll misalignment",
               offsetof(K26AstroCollPortState, roll), e.roll, 1 },
             { "lateral rate at the centre of mass",
-              offsetof(K26AstroCollPortState, v_lateral_cg), e.lateral_rate, 1 },
+              offsetof(K26AstroCollPortState, v_lateral_cg),
+              e.lateral_rate, 1 },
         };
         for (size_t i = 0; i < sizeof arm / sizeof arm[0]; i++) {
             K26AstroCollPortState at = base, beyond = base;
@@ -595,6 +602,9 @@ int main(void)
                "rate at the centre of mass: OK\n");
     }
     n_pass++;
+
+    char cwd[512];
+    ASSERT(getcwd(cwd, sizeof cwd) != NULL);
 
     /* ---- 3. the artifact ----------------------------------------- */
     rl_compile_(BENCH, WORK_DIR "/dock", WORK_DIR);
@@ -672,8 +682,10 @@ int main(void)
             V3 svel = v3_(bodies[1*6+3], bodies[1*6+4], bodies[1*6+5]);
             V3 cpos = v3_(bodies[2*6+0], bodies[2*6+1], bodies[2*6+2]);
             V3 cvel = v3_(bodies[2*6+3], bodies[2*6+4], bodies[2*6+5]);
-            double sq[4] = { atts[1*7+0], atts[1*7+1], atts[1*7+2], atts[1*7+3] };
-            double cq[4] = { atts[2*7+0], atts[2*7+1], atts[2*7+2], atts[2*7+3] };
+            double sq[4] = { atts[1*7+0], atts[1*7+1],
+                             atts[1*7+2], atts[1*7+3] };
+            double cq[4] = { atts[2*7+0], atts[2*7+1],
+                             atts[2*7+2], atts[2*7+3] };
             V3 som = v3_(atts[1*7+4], atts[1*7+5], atts[1*7+6]);
             V3 com = v3_(atts[2*7+4], atts[2*7+5], atts[2*7+6]);
             expect_state_(cha_port, cq, cpos, cvel, com,
@@ -683,10 +695,14 @@ int main(void)
                 near_("lateral", obs[ch.dock_axial + 1], want.lateral, 1e-9);
                 near_("pitch/yaw", obs[ch.dock_axial + 2], want.pitchyaw, 1e-9);
                 near_("roll", obs[ch.dock_axial + 3], want.roll, 1e-9);
-                near_("closing rate", obs[ch.dock_v_axial + 0], want.v_axial, 1e-12);
-                near_("lateral rate", obs[ch.dock_v_axial + 1], want.v_lateral, 1e-12);
-                near_("pitch/yaw rate", obs[ch.dock_v_axial + 2], want.v_pitchyaw, 1e-14);
-                near_("roll rate", obs[ch.dock_v_axial + 3], want.v_roll, 1e-14);
+                near_("closing rate", obs[ch.dock_v_axial + 0],
+                      want.v_axial, 1e-12);
+                near_("lateral rate", obs[ch.dock_v_axial + 1],
+                      want.v_lateral, 1e-12);
+                near_("pitch/yaw rate", obs[ch.dock_v_axial + 2],
+                      want.v_pitchyaw, 1e-14);
+                near_("roll rate", obs[ch.dock_v_axial + 3],
+                      want.v_roll, 1e-14);
                 /* The rate a second way: the fall of the axial
                  * residual across one control period, against the
                  * mean of the rates at its two ends. The mean rather
@@ -827,8 +843,6 @@ int main(void)
          * the chaser's attitude quaternion to zero norm, which the
          * advance cannot normalise. The asset paths are made absolute
          * because the copy does not sit beside them. */
-        char cwd[512];
-        ASSERT(getcwd(cwd, sizeof cwd) != NULL);
         char *src = read_whole_(BENCH, NULL);
         char *out = (char *)malloc(strlen(src) + 4096);
         ASSERT(out != NULL);
@@ -839,8 +853,8 @@ int main(void)
             if (!hit) break;
             memcpy(out + n, cur, (size_t)(hit - cur));
             n += (size_t)(hit - cur);
-            n += (size_t)snprintf(out + n, 1024, "assembly=\"%s/examples/assets/",
-                                  cwd);
+            n += (size_t)snprintf(out + n, 1024,
+                                  "assembly=\"%s/examples/assets/", cwd);
             cur = hit + strlen("assembly=\"assets/");
         }
         strcpy(out + n, cur);
@@ -857,7 +871,8 @@ int main(void)
         const char *anchor2 = "        chaser.wheel_z.torque = 5.0 * tq_z\n";
         const char *bp = strstr(out + pre, anchor2);
         ASSERT(bp != NULL);
-        memcpy(body + m, out + pre, (size_t)(bp - (out + pre)) + strlen(anchor2));
+        memcpy(body + m, out + pre,
+               (size_t)(bp - (out + pre)) + strlen(anchor2));
         m += (size_t)(bp - (out + pre)) + strlen(anchor2);
         m += (size_t)snprintf(body + m, 1024,
             "        chaser.quat_w = chaser.quat_w * (1.0 - kill)\n"
@@ -888,6 +903,397 @@ int main(void)
         ASSERT((ff[0] & 4u) != 0);
         ASSERT(fc[0] == (uint16_t)K26RL_E_DIVERGED);
         fs.destroy(fe);
+    }
+    n_pass++;
+
+    /* ---- the capture resolution ---------------------------------- *
+     *
+     * A capture is not one of the resolutions an environment
+     * declares, and this is where that is measured. Two programmes
+     * are built from the shipped benchmark: one keeps the default
+     * arrest, the other declares a bounce at a restitution high
+     * enough that an impulse would be unmistakable, and NEITHER
+     * terminates on first contact, because what is under test is
+     * what happens after it. Without precedence the bounce throws the
+     * pair apart on the very step the capture channel reads one.
+     *
+     * What would make this arm vacuous: a fixture that ends at the
+     * contact, which is what the shipped benchmark does and why it
+     * cannot serve here; and a separation bound loose enough that a
+     * pair merely near each other passes, which is why the bound is
+     * on the residuals the port form publishes rather than on the
+     * range.
+     */
+    printf("a capture takes precedence, and the pair becomes one body\n");
+    {
+        char *src = read_whole_(BENCH, NULL);
+        for (int variant = 0; variant < 2; variant++) {
+            char *body = (char *)malloc(strlen(src) + 8192);
+            ASSERT(body != NULL);
+            /* Absolute asset paths, a horizon ending, and for the
+             * second variant a declared bounce. */
+            const char *cur = src;
+            size_t n = 0;
+            for (;;) {
+                const char *hit = strstr(cur, "assembly=\"assets/");
+                if (!hit) break;
+                memcpy(body + n, cur, (size_t)(hit - cur));
+                n += (size_t)(hit - cur);
+                n += (size_t)snprintf(body + n, 1024,
+                                      "assembly=\"%s/examples/assets/", cwd);
+                cur = hit + strlen("assembly=\"assets/");
+            }
+            strcpy(body + n, cur);
+            char *out2 = (char *)malloc(strlen(body) + 4096);
+            ASSERT(out2 != NULL);
+            const char *term = "        terminated when touch_hit > 0.5\n";
+            const char *tp = strstr(body, term);
+            ASSERT(tp != NULL);
+            size_t pre = (size_t)(tp - body);
+            memcpy(out2, body, pre);
+            size_t m2 = pre;
+            m2 += (size_t)snprintf(out2 + m2, 512,
+                "        terminated when episode.steps > 340\n%s",
+                variant ? "        contact bounce restitution 0.9 "
+                          "friction 0.1\n" : "");
+            strcpy(out2 + m2, tp + strlen(term));
+            char path[320], bin[256], so_path[352];
+            snprintf(path, sizeof path, "%s/joined%d.kfl", WORK_DIR, variant);
+            snprintf(bin, sizeof bin, "%s/joined%d", WORK_DIR, variant);
+            rl_write_file_(path, out2);
+            free(out2);
+            free(body);
+            rl_compile_(path, bin, WORK_DIR);
+            snprintf(so_path, sizeof so_path, "%s.rlenv.so", bin);
+            void *jso = rl_dlopen_(so_path);
+            RlSurface js;
+            rl_resolve_surface_(jso, &js);
+            K26RlEnv *je = NULL;
+            ASSERT(js.create(11u, 1u, &je) == K26RL_OK);
+
+            int cap_step = -1;
+            double after[8][4];
+            int n_after = 0;
+            double bodies0[3 * 6], bodies1[3 * 6];
+            double sep_at_capture = 0.0;
+            for (int k = 0; k < 340; k++) {
+                ASSERT(js.obs(je, obs) == K26RL_OK);
+                if (cap_step < 0) pilot_(obs, &ch, 0.07, act);
+                else              memset(act, 0, sizeof act);
+                ASSERT(js.step(je, act) == K26RL_OK);
+                ASSERT(js.obs(je, obs) == K26RL_OK);
+                ASSERT(js.flags(je, flags) == K26RL_OK);
+                ASSERT((flags[0] & 4u) == 0);
+                if (cap_step < 0 && obs[ch.dock_cap] != 0.0) {
+                    cap_step = k;
+                    ASSERT(js.bodies(je, 1u, bodies0, 3 * 6) == 3 * 6);
+                    sep_at_capture = sqrt(
+                        bodies0[2*6+0]*bodies0[2*6+0] +
+                        bodies0[2*6+1]*bodies0[2*6+1] +
+                        bodies0[2*6+2]*bodies0[2*6+2]);
+                    continue;
+                }
+                if (cap_step >= 0 && n_after < 8 &&
+                    (k - cap_step) % 5 == 0) {
+                    after[n_after][0] = obs[ch.dock_axial + 0];
+                    after[n_after][1] = obs[ch.dock_axial + 1];
+                    after[n_after][2] = obs[ch.dock_v_axial + 0];
+                    after[n_after][3] = obs[ch.dock_v_axial + 1];
+                    n_after++;
+                }
+                if (cap_step >= 0 && k > cap_step + 40) break;
+            }
+            ASSERT(js.bodies(je, 1u, bodies1, 3 * 6) == 3 * 6);
+            double sep_after = sqrt(
+                bodies1[2*6+0]*bodies1[2*6+0] +
+                bodies1[2*6+1]*bodies1[2*6+1] +
+                bodies1[2*6+2]*bodies1[2*6+2]);
+            printf("  %-7s captured at step %d; separation %.9f m at "
+                   "capture, %.9f m forty steps later (drift %.3e m)\n",
+                   variant ? "bounce" : "arrest", cap_step,
+                   sep_at_capture, sep_after,
+                   sep_after - sep_at_capture);
+            ASSERT(cap_step >= 0);
+            ASSERT(n_after >= 4);
+            for (int i = 0; i < n_after; i++) {
+                printf("     +%2d steps: axial %+.3e lateral %+.3e "
+                       "closing %+.3e lateral rate %+.3e\n",
+                       i * 5, after[i][0], after[i][1], after[i][2],
+                       after[i][3]);
+                /* Mated: the two mating planes stay exactly where
+                 * the capture left them. The residuals are not zero
+                 * and should not be, the capture having happened at a
+                 * small misalignment and the pair having kept it;
+                 * what makes the pair one body is that they do not
+                 * MOVE. The rates are the rigid rotation carried
+                 * across that misalignment, and they are constant for
+                 * the same reason.
+                 *
+                 * A bounce that ran here would part the pair at
+                 * centimetres a second, which is metres over these
+                 * forty steps, so the bound below is four orders
+                 * inside what it has to tell apart. */
+                for (int c = 0; c < 4; c++) {
+                    ASSERT(fabs(after[i][c] - after[0][c]) < 1e-9);
+                }
+            }
+            /* And the pair holds its separation as a rigid body does,
+             * to a bound far below what either resolution would do to
+             * it: a bounce at this restitution parts them at
+             * centimetres a second, which is metres over forty
+             * steps. */
+            ASSERT(fabs(sep_after - sep_at_capture) < 1e-6);
+            js.destroy(je);
+        }
+        free(src);
+    }
+    n_pass++;
+
+    /* ---- the latch tells its two perspectives apart --------------- *
+     *
+     * The benchmark's own ports lie on their bodies' first axis with
+     * an identity basis, so the state of A against B and the state of
+     * B against A agree in every channel a contact latches, and
+     * nothing above can tell the two apart. This fixture is built so
+     * they cannot agree: the two ports sit at different offsets from
+     * their own centres, the arriving craft is tilted three degrees
+     * off the mating direction, and it carries an angular rate about
+     * a skew axis. Both craft publish their own port, and the two
+     * published sets are asserted to differ and to be ordered, so
+     * exchanging them fails.
+     */
+    printf("a contact latch resolved from each port's own side\n");
+    {
+        rl_write_file_(WORK_DIR "/perspa.k26asm",
+            "assembly perspa\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"gate fixture, not a craft\" computed\n"
+            "    component hull\n"
+            "        mass 1000.0\n"
+            "        at 0 0 0\n"
+            "        collider box 1.0 0.5 0.5\n"
+            "    end\n"
+            "    port dock\n"
+            "        at 1.2 0.0 0.0\n"
+            "        axis 1.0 0.0 0.0\n"
+            "        roll_ref 0.0 1.0 0.0\n"
+            "        capture idss_e\n"
+            "    end\n"
+            "end\n");
+        rl_write_file_(WORK_DIR "/perspb.k26asm",
+            "assembly perspb\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"gate fixture, not a craft\" computed\n"
+            "    component hull\n"
+            "        mass 3000.0\n"
+            "        at 0 0 0\n"
+            "        collider box 1.0 0.5 0.5\n"
+            "    end\n"
+            "    port dock\n"
+            "        at 2.5 0.0 0.0\n"
+            "        axis 1.0 0.0 0.0\n"
+            "        roll_ref 0.0 1.0 0.0\n"
+            "        capture idss_e\n"
+            "    end\n"
+            "end\n");
+        /* Half a turn about the third axis to face the other craft,
+         * then three degrees about the second, which is inside the
+         * envelope's four and enough that the two mated frames are
+         * not the same frame. */
+        double half = 3.14159265358979323846 / 2.0;
+        double t = 1.5 * 3.14159265358979323846 / 180.0;
+        double qy[4] = { cos(half), 0.0, sin(half), 0.0 };   /* face about */
+        /* three degrees off the mating direction */
+        double qz[4] = { cos(t), 0.0, 0.0, sin(t) };
+        double q[4];
+        q[0] = qz[0]*qy[0] - qz[1]*qy[1] - qz[2]*qy[2] - qz[3]*qy[3];
+        q[1] = qz[0]*qy[1] + qz[1]*qy[0] + qz[2]*qy[3] - qz[3]*qy[2];
+        q[2] = qz[0]*qy[2] - qz[1]*qy[3] + qz[2]*qy[0] + qz[3]*qy[1];
+        q[3] = qz[0]*qy[3] + qz[1]*qy[2] - qz[2]*qy[1] + qz[3]*qy[0];
+        char prog[3072];
+        snprintf(prog, sizeof prog,
+            "form RL_PERSP\n"
+            "fn world w\n"
+            "    astro_body one assembly=\"%s/perspa.k26asm\""
+            " pos_x=0.0 pos_y=0.0 pos_z=0.0 quat_w=1.0\n"
+            "    astro_body two assembly=\"%s/perspb.k26asm\""
+            " pos_x=5.3 pos_y=0.03 pos_z=0.01 vel_x=-0.07"
+            " quat_w=%.17g quat_x=%.17g quat_y=%.17g quat_z=%.17g"
+            " omega_x=0.0010 omega_y=0.0007 omega_z=-0.0005\n"
+            "    episode\n"
+            "        control_dt 0.5\n"
+            "        substeps 5\n"
+            "        horizon 80\n"
+            "        terminated when tc_hit > 0.5\n"
+            "    end\n"
+            "    action push box -1.0 1.0 default 0.0\n"
+            "    observe port dock of one as pa\n"
+            "    observe port dock of two as pb\n"
+            "    observe contact of one as tc\n"
+            "    objective\n"
+            "        reward pa_axial + pb_axial\n"
+            "    end\n"
+            "end\n"
+            "end\n", WORK_DIR, WORK_DIR, q[0], q[1], q[2], q[3]);
+        rl_write_file_(WORK_DIR "/persp.kfl", prog);
+        rl_compile_(WORK_DIR "/persp.kfl", WORK_DIR "/persp", WORK_DIR);
+        void *pso = rl_dlopen_(WORK_DIR "/persp.rlenv.so");
+        RlSurface ps;
+        rl_resolve_surface_(pso, &ps);
+        K26RlEnv *pe = NULL;
+        ASSERT(ps.create(3u, 1u, &pe) == K26RL_OK);
+        uint8_t pb2[16384];
+        int32_t plen = ps.spec(pe, pb2, sizeof pb2);
+        ASSERT(plen > 0);
+        int a0 = find_channel_(pb2, (uint32_t)plen, "pa_captured");
+        int b0 = find_channel_(pb2, (uint32_t)plen, "pb_captured");
+        ASSERT(a0 >= 0 && b0 >= 0);
+        double pobs[24];
+        double pact[1] = { 0.0 };
+        int tc = find_channel_(pb2, (uint32_t)plen, "tc_hit");
+        ASSERT(tc >= 0);
+        int hit_step = -1;
+        for (int k = 0; k < 80; k++) {
+            ASSERT(ps.step(pe, pact) == K26RL_OK);
+            ASSERT(ps.obs(pe, pobs) == K26RL_OK);
+            ASSERT(ps.flags(pe, flags) == K26RL_OK);
+            if (pobs[tc] != 0.0) { hit_step = k; break; }
+        }
+        static const char *const nm[8] = {
+            "axial", "lateral", "pitchyaw", "roll",
+            "v_axial", "v_lateral", "v_pitchyaw", "v_roll"
+        };
+        printf("  contact at step %d, captured %.0f\n", hit_step,
+               pobs[a0]);
+        ASSERT(hit_step >= 0);
+        int differ = 0;
+        for (int i = 0; i < 8; i++) {
+            double va = pobs[a0 + 1 + i], vb = pobs[b0 + 1 + i];
+            printf("    %-10s one %+.9f   two %+.9f   difference %+.3e\n",
+                   nm[i], va, vb, va - vb);
+            if (fabs(va - vb) > 1e-6) differ++;
+        }
+        ASSERT(hit_step >= 0);
+        /* The two sides disagree in most of what they publish, which
+         * is what makes the assignment measurable at all. */
+        printf("  channels that differ between the two sides: %d of 8\n",
+               differ);
+        ASSERT(differ >= 4);
+        /* And they are ordered, in three channels whose measured
+         * separation is a thousand times the bound asserted.
+         * Exchanging the two sides inverts every one of them, so a
+         * latch that stored each state against the wrong port fails
+         * here three times over. */
+        ASSERT(pobs[a0 + 1] < pobs[b0 + 1] - 1e-3);   /* axial */
+        ASSERT(pobs[a0 + 2] > pobs[b0 + 2] + 1e-3);   /* lateral */
+        ASSERT(pobs[a0 + 6] > pobs[b0 + 6] + 1e-4);   /* lateral rate */
+        printf("  each side's residuals are its own: OK\n");
+        ps.destroy(pe);
+    }
+    n_pass++;
+
+    /* ---- the joint body is the pair's, by momentum ---------------- *
+     *
+     * In orbit the pair's momentum changes by gravity between one
+     * step and the next, which swamps the impulse a capture applies.
+     * This fixture has no gravitating body at all: two craft in free
+     * space, one closing on the other, so the momentum before the
+     * capture and the momentum after it are exactly comparable and
+     * the joint velocity is exactly the mass-weighted mean. A joint
+     * velocity taken from either craft alone rather than from the
+     * pair fails here by the mass ratio.
+     */
+    printf("the joint body carries the pair's momentum\n");
+    {
+        char prog[3072];
+        snprintf(prog, sizeof prog,
+            "form RL_JOINP\n"
+            "fn world w\n"
+            "    astro_body one assembly=\"%s/perspa.k26asm\""
+            " pos_x=0.0 pos_y=0.0 pos_z=0.0 quat_w=1.0\n"
+            "    astro_body two assembly=\"%s/perspb.k26asm\""
+            " pos_x=5.3 pos_y=0.02 pos_z=0.0 vel_x=-0.07"
+            " quat_w=0.0 quat_x=0.0 quat_y=1.0 quat_z=0.0\n"
+            "    episode\n"
+            "        control_dt 0.5\n"
+            "        substeps 5\n"
+            "        horizon 90\n"
+            "        terminated when episode.steps > 85\n"
+            "        contact bounce restitution 0.9 friction 0.1\n"
+            "    end\n"
+            "    action push box -1.0 1.0 default 0.0\n"
+            "    observe port dock of one as pa\n"
+            "    observe contact of one as tc\n"
+            "    objective\n"
+            "        reward pa_axial\n"
+            "    end\n"
+            "end\n"
+            "end\n", WORK_DIR, WORK_DIR);
+        rl_write_file_(WORK_DIR "/joinp.kfl", prog);
+        rl_compile_(WORK_DIR "/joinp.kfl", WORK_DIR "/joinp", WORK_DIR);
+        void *jso = rl_dlopen_(WORK_DIR "/joinp.rlenv.so");
+        RlSurface js;
+        rl_resolve_surface_(jso, &js);
+        K26RlEnv *je = NULL;
+        ASSERT(js.create(5u, 1u, &je) == K26RL_OK);
+        uint8_t jb[16384];
+        int32_t jlen = js.spec(je, jb, sizeof jb);
+        ASSERT(jlen > 0);
+        int ja = find_channel_(jb, (uint32_t)jlen, "pa_captured");
+        int jt = find_channel_(jb, (uint32_t)jlen, "tc_hit");
+        ASSERT(ja >= 0 && jt >= 0);
+        double jobs[16], jact[1] = { 0.0 };
+        double before[2 * 6], after2[2 * 6];
+        int cap = -1;
+        for (int k = 0; k < 90; k++) {
+            ASSERT(js.bodies(je, 0u, before, 2 * 6) == 2 * 6);
+            ASSERT(js.step(je, jact) == K26RL_OK);
+            ASSERT(js.obs(je, jobs) == K26RL_OK);
+            if (jobs[jt] != 0.0) {
+                cap = k;
+                ASSERT(js.bodies(je, 0u, after2, 2 * 6) == 2 * 6);
+                break;
+            }
+        }
+        ASSERT(cap >= 0);
+        printf("  contact at step %d, captured %.0f\n", cap, jobs[ja]);
+        ASSERT(jobs[ja] != 0.0);
+        /* The masses are the fixture's own, declared above. */
+        const double m1 = 1000.0, m2 = 3000.0, MT = m1 + m2;
+        for (int c = 0; c < 3; c++) {
+            double p0 = (m1 * before[3 + c] + m2 * before[6 + 3 + c]) / MT;
+            double p1 = (m1 * after2[3 + c] + m2 * after2[6 + 3 + c]) / MT;
+            printf("    axis %d: before %+.12f and %+.12f, after %+.12f "
+                   "and %+.12f, mean %+.12f -> %+.12f\n", c,
+                   before[3 + c], before[6 + 3 + c], after2[3 + c],
+                   after2[6 + 3 + c], p0, p1);
+            /* The pair's momentum is what a capture may not create or
+             * destroy: the mass-weighted mean velocity is the same
+             * before and after. The two craft do not end at that mean
+             * individually, and should not: the capture happened off
+             * the line of centres, so the pair turns, and each craft
+             * carries the rotation's own velocity at its own centre.
+             * What the mean removes is exactly that rotation, since
+             * the mass-weighted offsets from the centre of mass sum
+             * to zero by definition. */
+            /* The bound is not machine precision: the projection
+             * runs again on each sub-advance after the capture, and
+             * the pair's own rotation carries the two centres a
+             * little between them. It is five orders inside what it
+             * has to tell apart, a joint velocity taken from one
+             * craft alone differing from the mean by the mass ratio
+             * times the closing rate, which is 1.75e-2 here. */
+            near_("joint momentum conserved", p1, p0, 1e-7);
+        }
+        /* The pair does turn, so the two craft do not leave at the
+         * same velocity, which is what makes the mean above a
+         * measurement rather than a restatement. */
+        ASSERT(fabs(after2[3] - after2[6 + 3]) > 1e-7);
+        /* And the arm can tell the mean from either craft's own
+         * velocity: they differ by the mass ratio times the closing
+         * rate, which is a thousand times the bound above. */
+        ASSERT(fabs(before[3] - before[6 + 3]) > 0.06);
+        js.destroy(je);
     }
     n_pass++;
 
