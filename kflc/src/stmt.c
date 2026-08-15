@@ -1597,7 +1597,13 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             target_ident  = cur->str;
             advance(L, cur, had_error);
         }
-        if ((strcmp(target_ident, "attitude") == 0 ||
+        /* Not after the relative branch has consumed a target name: a
+         * target that happens to be called `attitude` or `contact` is
+         * a name here, not a form, and re-entering the branch below
+         * would rewrite the target a second time and leave the
+         * diagnostic naming the wrong body. */
+        if (!relative_form &&
+            (strcmp(target_ident, "attitude") == 0 ||
              strcmp(target_ident, "contact") == 0) &&
             is_ident_named(cur, "of"))
         {
@@ -1619,8 +1625,14 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             attitude_form  = 1;
         }
         if (!attitude_form && !is_ident_named(cur, "from")) {
-            kflc_diag_errorf(diag, line0,
-                "observe %s: expected `from` keyword", target_ident);
+            if (relative_form) {
+                kflc_diag_errorf(diag, line0,
+                    "observe relative %s: expected `from` after the "
+                    "target name", target_ident);
+            } else {
+                kflc_diag_errorf(diag, line0,
+                    "observe %s: expected `from` keyword", target_ident);
+            }
             *had_error = 1;
             while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
             if (at_nl(cur)) advance(L, cur, had_error);

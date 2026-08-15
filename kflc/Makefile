@@ -105,22 +105,16 @@ $(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB) $(BIN)
 # is what pulls the compiler into the gates that include it, so the two
 # are named together and the gates that reach it directly name $(BIN)
 # beside their own sources.
-# The sibling archives a gate's compiled artifact links, named through
-# wildcard so that an absent stack leaves the list empty and the gates
-# still build to report their own skip. They are prerequisites for the
-# reason $(BIN) is: a gate built once and left alone while a library
-# under it changed would drive an artifact built against the previous
-# version of that library and report green for code that is no longer
-# there. `make test` re-runs every gate and so recompiles every
-# artifact, but a gate built or run alone - which is what a review or a
-# bisect does - did not.
-RL_STACK_ARCHIVES = $(wildcard ../libk26astro_*/libk26astro_*.a) \
-                    $(wildcard ../libk26rng/libk26rng.a) \
-                    $(wildcard ../libk26compute/libk26compute.a) \
-                    $(wildcard ../libk26tick/libk26tick.a) \
-                    $(wildcard ../libk26m3d/libk26m3d.a)
-
-RL_GATE_DEPS = tests/rl_gate_util.h $(BIN) $(RL_STACK_ARCHIVES)
+# A drive gate links only the episode library; the sibling stack
+# archives are not its prerequisites and must not be added as such. A
+# gate compiles its artifact when it runs, by shelling out to the built
+# kflc with KFLC_LDLIBS naming those archives, so the artifact always
+# links them as they stand on disk at that moment and no build ordering
+# here affects it. Prerequisites were tried and are inert: a library
+# can be changed and rebuilt without the gate binary changing at all,
+# and the next run still catches the change because it recompiles the
+# artifact from scratch.
+RL_GATE_DEPS = tests/rl_gate_util.h $(BIN)
 
 RL_GRAMMAR_TEST = tests/test_rl_grammar
 $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)

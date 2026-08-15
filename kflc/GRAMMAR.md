@@ -568,9 +568,62 @@ channels above cannot tell apart.
 
 The chief must declare a `parent=`, since the frame is built from its
 state relative to the body it orbits; a chief without one is refused.
-Both bodies must be declared in the world, they may not be the same
-body, and this form requires its `as` clause: unlike the line-of-sight
-form it has no printing spelling.
+The target's own `parent=`, if it declares one, has no part in the
+frame. Both bodies must be declared in the world, they may not be the
+same body, and this form requires its `as` clause: unlike the
+line-of-sight form it has no printing spelling.
+
+Two states have no frame and cannot be refused when the program is
+compiled, because they are configurations rather than declarations: a
+chief sitting exactly at the centre of the body it orbits, and a chief
+moving straight towards or away from it. Neither names a direction of
+motion. All six channels read 0.0 there, which a reader cannot tell
+from a genuine zero relative state; a program that can reach either
+configuration should test for it through the line-of-sight range to the
+parent rather than through these channels.
+
+#### Attitude
+
+```
+observe attitude of <body> as <name>
+```
+
+Publishes a body's own orientation and angular velocity. There is no
+observer and no correction of any kind. Seven components:
+
+| Component                                                            | Value                                                    |
+|----------------------------------------------------------------------|----------------------------------------------------------|
+| `<name>_quat_w`, `<name>_quat_x`, `<name>_quat_y`, `<name>_quat_z`   | Orientation quaternion, scalar part first.               |
+| `<name>_omega_x`, `<name>_omega_y`, `<name>_omega_z`                 | Angular velocity in the body frame, radians per second.  |
+
+The body must be declared in the world. Attitude is advanced only for a
+body that binds an `assembly=`, since that is what gives it an inertia
+tensor; a body without one carries no attitude state to publish.
+
+#### Contact
+
+```
+observe contact of <body> as <name>
+```
+
+Publishes what the transition just taken did, rather than where a body
+is. Three components:
+
+| Component            | Value                                                                             |
+|----------------------|-----------------------------------------------------------------------------------|
+| `<name>_hit`         | 1.0 when the transition contained a contact for this body, 0.0 otherwise.         |
+| `<name>_fraction`    | Where in the control period the first contact fell, from 0.0 to 1.0.              |
+| `<name>_speed`       | Closing speed along the contact normal at that moment, metres per second.         |
+
+The latch is cleared at the start of every transition and reports the
+first contact within it. The body must declare an `assembly=`: its
+colliders are the primitives that assembly declares, and a body without
+one carries none and can report no contact, so it is refused rather
+than given three channels that could never be anything but zero.
+
+A contact ends an episode only if the program says so, through an
+ordinary `terminated when` predicate over these channels. It is not a
+fault.
 
 Channel names must be unique within the world and at most 53 bytes
 long (the compiled artifact's spec carries each derived component name

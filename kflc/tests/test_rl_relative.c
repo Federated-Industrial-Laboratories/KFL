@@ -37,6 +37,15 @@
  *   changing state, so the comparison runs over a drive of sixty
  *   steps and is asserted at every one of them.
  *
+ *   Every fixture in the tree gave the two bodies the same parent, so
+ *   an implementation that built the frame about the target's parent
+ *   rather than the chief's produced identical numbers everywhere and
+ *   could not be told apart. The last arm gives the target no parent
+ *   at all and requires the published channels to be unchanged; an
+ *   implementation reaching for the target's parent finds none and
+ *   publishes six zeros. Two sets of zeros would compare equal, so the
+ *   arm also requires the values it compares to be substantial.
+ *
  * Requires the sibling stack archives (skips with 77 otherwise).
  */
 #define _GNU_SOURCE
@@ -84,6 +93,45 @@ static void rl_stage_done_(void) { alarm(0); }
     "    astro_body chief mass=1.0 parent=earth" \
     " pos_x=7.0e6 vel_y=7546.049108166324\n" \
     "    astro_body deputy mass=1.0 parent=earth" \
+    " pos_x=7.0e6 pos_y=30.0 pos_z=12.0 vel_y=7546.049108166324\n" \
+    "    episode\n" \
+    "        control_dt 1.0\n" \
+    "        horizon 400\n" \
+    "        substeps 1\n" \
+    "    end\n" \
+    "    action idle box -1.0 1.0 default 0.0\n" \
+    "    on_step\n" \
+    "        deputy.vel_x = deputy.vel_x + idle * 0.0\n" \
+    "    end\n" \
+    "    observe relative deputy from chief as rel\n" \
+    "    observe deputy from earth mode=geometric as trk\n" \
+    "    objective\n" \
+    "        reward rel_r_y\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+/* The same fixture with the target declaring no parent at all.
+ *
+ * The frame is the chief's, built from the chief's state relative to
+ * the body the chief orbits, and the target's own parent has no part
+ * in it. Nothing in the tree could show that: every relative-observe
+ * fixture gave both bodies the same parent, so building the frame
+ * about the target's parent instead would have produced identical
+ * numbers everywhere and survived every gate.
+ *
+ * Here the two differ. The central body sits at the world origin and
+ * the target's declared position is the same either way, so the state
+ * is identical to the fixture above and the published channels must be
+ * too; an implementation reaching for the target's parent finds none,
+ * gets no frame, and publishes six zeros. */
+#define REL_KFL_NP \
+    "form RL_RELATIVE_NP\n" \
+    "fn world rel_np_world\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body chief mass=1.0 parent=earth" \
+    " pos_x=7.0e6 vel_y=7546.049108166324\n" \
+    "    astro_body deputy mass=1.0" \
     " pos_x=7.0e6 pos_y=30.0 pos_z=12.0 vel_y=7546.049108166324\n" \
     "    episode\n" \
     "        control_dt 1.0\n" \
@@ -377,6 +425,66 @@ int main(void)
     }
     printf("gate 4: a six-wide form leaves the next observe at the"
            " right offset: OK\n");
+
+    /* ---- 5. The frame is the chief's, not the target's ----------- */
+    rl_stage_("compiling the parentless-target artifact", 900u);
+    {
+        double want[REL_OBS];
+        /* A fresh handle on the parented artifact, because the one
+         * above has been stepped and the comparison is between two
+         * runs at the same point of their episodes. */
+        K26RlEnv *envp = NULL;
+        ASSERT(s.create(19u, 1u, &envp) == K26RL_OK);
+        ASSERT(s.obs(envp, want) == K26RL_OK);
+
+        rl_write_file_(WORK_DIR "/relnp.kfl", REL_KFL_NP);
+        rl_compile_(WORK_DIR "/relnp.kfl", WORK_DIR "/relnp", WORK_DIR);
+        ASSERT(rl_file_exists_(WORK_DIR "/relnp.rlenv.so"));
+        rl_stage_("driving the parentless-target artifact", 300u);
+
+        void *so2 = rl_dlopen_(WORK_DIR "/relnp.rlenv.so");
+        RlSurface s2;
+        rl_resolve_surface_(so2, &s2);
+        K26RlEnv *env2 = NULL;
+        ASSERT(s2.create(19u, 1u, &env2) == K26RL_OK);
+
+        double got[REL_OBS];
+        double act[1] = { 0.0 };
+        double worst = 0.0;
+        for (int t = 0; t <= 20; t++) {
+            if (t > 0) {
+                ASSERT(s.step(envp, act) == K26RL_OK);
+                ASSERT(s2.step(env2, act) == K26RL_OK);
+                ASSERT(s.obs(envp, want) == K26RL_OK);
+            }
+            ASSERT(s2.obs(env2, got) == K26RL_OK);
+            for (int k = 0; k < 6; k++) {
+                double e = absd_(got[REL_BASE + k] - want[REL_BASE + k]);
+                if (e > worst) worst = e;
+            }
+        }
+        printf("gate 5: the target declares no parent; worst"
+               " disagreement with the parented fixture over 21 states"
+               " is %.3e\n", worst);
+        /* And the values compared are not zeros, which is what an
+         * implementation reaching for the target's parent would
+         * publish here and would make an equality arm pass for the
+         * wrong reason. */
+        printf("  the channels compared carry r_y = %+.6f m and"
+               " v_x = %+.9f m/s, so the comparison is not of two sets"
+               " of zeros\n", got[REL_BASE + 1], got[REL_BASE + 3]);
+        ASSERT(absd_(got[REL_BASE + 1]) > 1.0);
+        ASSERT(absd_(got[REL_BASE + 3]) > 0.03);
+        ASSERT(worst == 0.0);
+
+        s2.destroy(env2);
+        s.destroy(envp);
+        dlclose(so2);
+        n_pass++;
+    }
+    rl_stage_done_();
+    printf("gate 5: the target's own parent has no part in the frame:"
+           " OK\n");
 
     s.destroy(env);
     dlclose(so);

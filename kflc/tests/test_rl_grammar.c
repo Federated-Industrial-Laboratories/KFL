@@ -600,6 +600,32 @@ static void actuator_cases_(void)
         "end\n",
         1, "requires `as <name>`", NULL);
 
+    /* A relative observe whose target name is followed by anything
+     * other than `from` is refused naming the form and the target it
+     * read. Spelling one of the self-reporting forms after `relative`
+     * is the way to reach it by accident, and the diagnostic must not
+     * fall through to those forms and report a body twice while
+     * mentioning neither the stray keyword nor this form. */
+    expect_("obs_relative_then_of",
+        "form RL_RELO\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body chief gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative attitude of chief as rel\n"
+        "    objective\n"
+        "        reward rel_r_x + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "observe relative attitude: expected `from` after the target "
+           "name", NULL);
+
     /* A body genuinely named `relative` still takes the ordinary
      * form, because `observe relative from earth` has `from` after
      * the name rather than a second body. Without this the form would
