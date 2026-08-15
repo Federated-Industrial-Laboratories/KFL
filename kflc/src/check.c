@@ -373,9 +373,10 @@ static const char *suffixed_(KflcArena *arena, const char *base,
 /* The channel suffixes an observe contributes. A line-of-sight
  * observe publishes five; an attitude observe publishes its body's
  * own orientation and rate, which is seven; a contact observe
- * publishes what the transition did, which is three. The lists live
- * here and at the emitter, and the gates compare the published names
- * against both. */
+ * publishes what the transition did, which is three; a relative
+ * observe publishes a position and a velocity in the chief's frame,
+ * which is six. The lists live here and at the emitter, and the gates
+ * compare the published names against both. */
 static const char *const OBS_SFX_LOS_[] =
     { "_dir_x", "_dir_y", "_dir_z", "_range", "_range_rate", NULL };
 static const char *const OBS_SFX_ATT_[] =
@@ -383,6 +384,8 @@ static const char *const OBS_SFX_ATT_[] =
       "_omega_x", "_omega_y", "_omega_z", NULL };
 static const char *const OBS_SFX_CON_[] =
     { "_hit", "_fraction", "_speed", NULL };
+static const char *const OBS_SFX_REL_[] =
+    { "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z", NULL };
 
 static int observe_marker_(const KflcNode *n, const char *marker)
 {
@@ -397,6 +400,7 @@ static const char *const *observe_suffixes_(const KflcNode *n)
 {
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
     if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;
+    if (observe_marker_(n, "relative")) return OBS_SFX_REL_;
     return OBS_SFX_LOS_;
 }
 
@@ -406,10 +410,11 @@ static const char *const *observe_suffixes_(const KflcNode *n)
  * quietly invalidate. */
 static size_t observe_as_bound_(void)
 {
-    const char *const *lists[3] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
-                                    OBS_SFX_CON_ };
+    const char *const *lists[] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
+                                   OBS_SFX_CON_, OBS_SFX_REL_ };
+    const size_t n_lists = sizeof lists / sizeof lists[0];
     size_t longest = 0;
-    for (int i = 0; i < 3; i++) {
+    for (size_t i = 0; i < n_lists; i++) {
         for (int k = 0; lists[i][k]; k++) {
             size_t n = strlen(lists[i][k]);
             if (n > longest) longest = n;

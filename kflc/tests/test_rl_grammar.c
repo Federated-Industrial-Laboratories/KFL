@@ -443,6 +443,186 @@ static void actuator_cases_(void)
         "end\n",
         0, NULL, "error");
 
+    /* The relative observe form. Six channels carrying a position and
+     * a velocity in the chief's own local-vertical local-horizontal
+     * frame. The positive case runs first for the reason the contact
+     * one does: without it every refusal below would be satisfied by a
+     * build that rejected the form outright. */
+    expect_both_("obs_relative_channels_readable",
+        "form RL_RELR\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body chief gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    astro_body deputy gm=1.0 parent=earth"
+        " pos_x=7.0e6 pos_y=30.0 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "        terminated when rel_r_y < 1.0\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative deputy from chief as rel\n"
+        "    objective\n"
+        "        reward rel_r_x + rel_r_y + rel_r_z + rel_v_x"
+        " + rel_v_y + rel_v_z + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
+    /* The suffix sets do not leak between forms: a line-of-sight
+     * channel name on a relative observe is not a name. */
+    expect_("obs_relative_wrong_channel",
+        "form RL_RELW\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body chief gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    astro_body deputy gm=1.0 parent=earth"
+        " pos_x=7.0e6 pos_y=30.0 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative deputy from chief as rel\n"
+        "    objective\n"
+        "        reward rel_range\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "unknown name `rel_range`", NULL);
+
+    expect_both_("obs_relative_unknown_target",
+        "form RL_RELT\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body chief gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative ghost from chief as rel\n"
+        "    objective\n"
+        "        reward rel_r_x + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "no astro_body of that name is declared", NULL);
+
+    expect_both_("obs_relative_unknown_chief",
+        "form RL_RELC\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body deputy gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative deputy from ghost as rel\n"
+        "    objective\n"
+        "        reward rel_r_x + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "no astro_body of that name is declared", NULL);
+
+    /* The chief's frame is built from its state relative to the body
+     * it orbits, so a chief that names no parent has no frame. A
+     * declaration that cannot produce one is refused where it is
+     * written, rather than publishing six channels of zero. */
+    expect_both_("obs_relative_chief_without_parent",
+        "form RL_RELP\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body chief gm=1.0 pos_x=7.0e6 vel_y=7546.0\n"
+        "    astro_body deputy gm=1.0 parent=earth"
+        " pos_x=7.0e6 pos_y=30.0 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative deputy from chief as rel\n"
+        "    objective\n"
+        "        reward rel_r_x + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "declares no `parent=`", NULL);
+
+    expect_both_("obs_relative_to_itself",
+        "form RL_RELS\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body chief gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative chief from chief as rel\n"
+        "    objective\n"
+        "        reward rel_r_x + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "no relative state with respect to itself", NULL);
+
+    /* Without `as` the form would fall through to the line-of-sight
+     * print and report a different quantity than the one it names,
+     * between two bodies the reader named on purpose. */
+    expect_("obs_relative_without_as",
+        "form RL_RELN\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body chief gm=1.0 parent=earth"
+        " pos_x=7.0e6 vel_y=7546.0\n"
+        "    astro_body deputy gm=1.0 parent=earth"
+        " pos_x=7.0e6 pos_y=30.0 vel_y=7546.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative deputy from chief\n"
+        "    observe deputy from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward trk_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "requires `as <name>`", NULL);
+
+    /* A body genuinely named `relative` still takes the ordinary
+     * form, because `observe relative from earth` has `from` after
+     * the name rather than a second body. Without this the form would
+     * have taken a name away from every program that used it. */
+    expect_both_("obs_relative_is_not_a_keyword",
+        "form RL_RELK\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body relative gm=1.0 parent=earth"
+        " pos_x=8.0e6 vel_y=7000.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action a box -1.0 1.0 default 0.0\n"
+        "    observe relative from earth mode=geometric as trk\n"
+        "    objective\n"
+        "        reward trk_range + a * 0.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
     /* The contact resolution line. One optional line inside the
      * episode, because the resolution is a property of how the
      * episode ends rather than of any one body; absent means arrest,

@@ -39,10 +39,12 @@
  *      is where an implementation that published over a pipe, or that
  *      remapped or allocated per frame, or that waited on a consumer,
  *      would show up.
- *   6. The collision pass, over its own fixture: two collidable bodies
- *      that meet inside every episode, driven at 1, 4 and 16 episodes
- *      with the counters armed across the steps only. All six counters
- *      must read zero at every length.
+ *   6. The collision pass and the relative-state observe, over their
+ *      own fixture: two collidable bodies that meet inside every
+ *      episode, with the second body's state published in the first's
+ *      local-vertical local-horizontal frame, driven at 1, 4 and 16
+ *      episodes with the counters armed across the steps only. All six
+ *      counters must read zero at every length.
  *
  * Batch path: the batch executable shares the stepping machinery
  * with the serve surface by construction, and test_rl_determinism
@@ -250,14 +252,22 @@ static const char *const HP_COLL_KFL =
     "    end\n"
     "    observe contact of beta as hit\n"
     "    observe alpha from earth mode=geometric as trk\n"
+    /* The relative state of the pair, in the chief's own frame. It is
+     * declared here rather than in a fixture of its own because it
+     * runs inside the same per-step observation function the two above
+     * do, and because a pair of collidable craft in proximity is
+     * exactly the program that asks for it. Its cost is measured with
+     * theirs. */
+    "    observe relative beta from alpha as rel\n"
     "    objective\n"
-    "        reward hit_hit + trk_range\n"
+    "        reward hit_hit + trk_range + rel_r_y\n"
     "    end\n"
     "end\n"
     "end\n";
 
-/* Three contact channels then five tracking channels; one action. */
-#define HP_COLL_OBS      8
+/* Three contact channels, five tracking channels, six relative ones;
+ * one action. */
+#define HP_COLL_OBS     14
 #define HP_COLL_HIT      0
 #define HP_COLL_ACT      1
 #define HP_COLL_HORIZON 24
@@ -636,7 +646,8 @@ static int child_main_(void)
 
             unsigned long a = alloc_total_(), w = write_total_();
             printf("gate 6: %2d episode(s), %3d steps x %d envs,"
-                   " two collidable bodies: alloc-family %lu"
+                   " a collidable pair and a relative observe:"
+                   " alloc-family %lu"
                    " (malloc %lu calloc %lu realloc %lu free %lu),"
                    " write-family %lu\n",
                    ceps[k], steps, HP_ENVS, a, counts_[0], counts_[1],
@@ -647,8 +658,8 @@ static int child_main_(void)
         }
         dlclose(cso);
     }
-    printf("gate 6: the collision pass allocates nothing and writes"
-           " nothing: OK\n");
+    printf("gate 6: the collision pass and the relative observe"
+           " allocate nothing and write nothing: OK\n");
 
     dlclose(so);
     fclose(fnull);

@@ -1580,6 +1580,23 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * table entry and not a third copy of the parse. */
         int attitude_form = 0;
         int contact_form  = 0;
+        /* `observe relative <target> from <chief> as <name>` publishes
+         * the target's position and velocity in the chief's own
+         * local-vertical local-horizontal frame, rather than a line of
+         * sight. It names two bodies like the ordinary form, so it is
+         * told apart by the same rule the two above use: what follows
+         * the first name. The ordinary form has `from` there; this one
+         * has the target's name. A body genuinely called `relative` is
+         * therefore still observed by the ordinary form, because
+         * `observe relative from earth` has `from` after the name. */
+        int relative_form = 0;
+        if (strcmp(target_ident, "relative") == 0 &&
+            cur->kind == T_IDENT && !is_ident_named(cur, "from"))
+        {
+            relative_form = 1;
+            target_ident  = cur->str;
+            advance(L, cur, had_error);
+        }
         if ((strcmp(target_ident, "attitude") == 0 ||
              strcmp(target_ident, "contact") == 0) &&
             is_ident_named(cur, "of"))
@@ -1634,13 +1651,14 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         memset(&ov, 0, sizeof ov);
         ov.kind = KFLV_IDENT; ov.u.s = observer_ident;
         stmt_append_attr(arena, n, "observer", ov, line0);
-        if (attitude_form) {
+        if (attitude_form || relative_form) {
             KflcValue kv;
             memset(&kv, 0, sizeof kv);
             kv.kind = KFLV_IDENT;
             kv.u.s  = kflc_arena_strdup(arena, "1");
-            stmt_append_attr(arena, n, contact_form ? "contact" : "attitude",
-                             kv, line0);
+            const char *marker = relative_form ? "relative"
+                               : (contact_form ? "contact" : "attitude");
+            stmt_append_attr(arena, n, marker, kv, line0);
         }
 
         /* Parse trailing `key=value` pairs (whitespace-separated).
@@ -1705,6 +1723,20 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             memset(&v, 0, sizeof v);
             v.kind = KFLV_IDENT; v.u.s = val;
             stmt_append_attr(arena, n, key, v, line0);
+        }
+        /* Reached only when no `as` clause was found; the clause
+         * returns above. The line-of-sight form without one is a print
+         * statement and stays one. The relative form has no print
+         * spelling: without `as` it would fall through to the
+         * line-of-sight print and report a different physical quantity
+         * than the one it names, between two bodies the reader has
+         * named on purpose, so it is refused instead. */
+        if (relative_form) {
+            kflc_diag_errorf(diag, line0,
+                "observe relative %s from %s: this form publishes an "
+                "observation channel and requires `as <name>`",
+                target_ident, observer_ident);
+            *had_error = 1;
         }
         return n;
     }

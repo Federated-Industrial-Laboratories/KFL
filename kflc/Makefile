@@ -105,7 +105,22 @@ $(ASSEMBLY_TEST): tests/test_assembly.c $(LIB) $(RL_LIB) $(BIN)
 # is what pulls the compiler into the gates that include it, so the two
 # are named together and the gates that reach it directly name $(BIN)
 # beside their own sources.
-RL_GATE_DEPS = tests/rl_gate_util.h $(BIN)
+# The sibling archives a gate's compiled artifact links, named through
+# wildcard so that an absent stack leaves the list empty and the gates
+# still build to report their own skip. They are prerequisites for the
+# reason $(BIN) is: a gate built once and left alone while a library
+# under it changed would drive an artifact built against the previous
+# version of that library and report green for code that is no longer
+# there. `make test` re-runs every gate and so recompiles every
+# artifact, but a gate built or run alone - which is what a review or a
+# bisect does - did not.
+RL_STACK_ARCHIVES = $(wildcard ../libk26astro_*/libk26astro_*.a) \
+                    $(wildcard ../libk26rng/libk26rng.a) \
+                    $(wildcard ../libk26compute/libk26compute.a) \
+                    $(wildcard ../libk26tick/libk26tick.a) \
+                    $(wildcard ../libk26m3d/libk26m3d.a)
+
+RL_GATE_DEPS = tests/rl_gate_util.h $(BIN) $(RL_STACK_ARCHIVES)
 
 RL_GRAMMAR_TEST = tests/test_rl_grammar
 $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)
@@ -288,6 +303,16 @@ $(RL_HOTPATH_TEST): tests/test_rl_hotpath.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The relative observe form through the stepping surface: the six
+# channels, the axes they are resolved onto, and the rotating-frame
+# velocity that an inertial difference would get wrong.
+RL_REL_TEST = tests/test_rl_relative
+$(RL_REL_TEST): tests/test_rl_relative.c $(RL_GATE_DEPS) \
+                ../libk26rl/include/k26rl_env.h \
+                ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 # Handles and environments over the life of one process, over a
 # program that binds more than one vehicle, and the buffer spans the
 # two unsized getters write.
@@ -320,7 +345,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -341,7 +366,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
 	          $(RL_BODIES_TEST) $(RL_ATT_TEST) \
 	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) \
-	          $(RL_LIFECYCLE_TEST); do \
+	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -424,6 +449,6 @@ clean:
 	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
 	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \
 	      $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) \
-	      $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) \
+	      $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	      tests/bench_parse
 	rm -rf bin

@@ -526,8 +526,8 @@ observe <target> from <observer> [key=value ...] as <name>
 The `observe` statement of the simulation surface takes a trailing
 `as <name>` clause, which must be the last clause on the line. Instead of
 printing, the observation becomes a named channel recomputed after every
-step. Each channel contributes five components, readable by name in the
-objective and termination expressions:
+step. A line-of-sight observe contributes five components, readable by
+name in the objective and termination expressions:
 
 | Component                                       | Value                                                        |
 |-------------------------------------------------|--------------------------------------------------------------|
@@ -542,6 +542,35 @@ derivative of the corrected range beside it, because an observation mode
 corrects a position and has no corrected velocity to differentiate;
 under `mode=geometric` the two are the same thing. At exactly zero
 separation it reads 0.0.
+
+#### Relative state
+
+```
+observe relative <target> from <chief> as <name>
+```
+
+Publishes the target's position and velocity in the chief's own
+local-vertical local-horizontal frame: the first axis points from the
+body the chief orbits out to the chief, the third along the orbital
+angular momentum, and the second completes the right-handed set along
+the direction of motion. Six components:
+
+| Component                                      | Value                                                       |
+|------------------------------------------------|-------------------------------------------------------------|
+| `<name>_r_x`, `<name>_r_y`, `<name>_r_z`       | Position of the target relative to the chief, in metres, on the three axes above. |
+| `<name>_v_x`, `<name>_v_y`, `<name>_v_z`       | Velocity of the target as seen from the chief's rotating frame, in metres per second. |
+
+The velocity is the rate an observer riding the frame sees, so two
+craft holding station on one orbit read zero however their inertial
+velocities differ. This is what separates an approach along the
+direction of motion from one from below, which the line-of-sight
+channels above cannot tell apart.
+
+The chief must declare a `parent=`, since the frame is built from its
+state relative to the body it orbits; a chief without one is refused.
+Both bodies must be declared in the world, they may not be the same
+body, and this form requires its `as` clause: unlike the line-of-sight
+form it has no printing spelling.
 
 Channel names must be unique within the world and at most 53 bytes
 long (the compiled artifact's spec carries each derived component name

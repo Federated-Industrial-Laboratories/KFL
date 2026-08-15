@@ -76,6 +76,13 @@ static uint16_t rl_observe_mode_(const KflcNode *n)
          * for, and astrometric would assert a correction that is not
          * made. */
         if (strcmp(k->name, "contact") == 0) return 0;
+        /* A relative observe has an observer, the chief, but applies
+         * no light-time correction and no aberration to the state it
+         * publishes: it resolves a state the integrator already
+         * produced onto a set of axes. Geometric is exactly what that
+         * is; astrometric would assert a correction that is not
+         * made. */
+        if (strcmp(k->name, "relative") == 0) return 0;
     }
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "mode") == 0 &&
@@ -124,13 +131,24 @@ static const char *const RL_CON_COMP_[RL_CON_COMPS] = {
     "_hit", "_fraction", "_speed"
 };
 
+/* A relative observe publishes where the target is from the chief and
+ * how fast it is moving there, in the chief's own local-vertical
+ * local-horizontal axes: radial, along-track, cross-track. A target
+ * thirty metres ahead and a target thirty metres below are different
+ * problems, and the line-of-sight channels cannot tell them apart. */
+#define RL_REL_COMPS 6
+static const char *const RL_REL_COMP_[RL_REL_COMPS] = {
+    "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z"
+};
+
 /* Which form an observe is. The marker attribute the parser leaves is
- * what decides it, so the three are told apart in one place and the
+ * what decides it, so the four are told apart in one place and the
  * width and the names cannot drift apart between them. */
 typedef enum {
     RL_OBS_LOS = 0,
     RL_OBS_ATT = 1,
-    RL_OBS_CON = 2
+    RL_OBS_CON = 2,
+    RL_OBS_REL = 3
 } RlObserveForm;
 
 static RlObserveForm rl_observe_form_(const KflcNode *n)
@@ -140,6 +158,7 @@ static RlObserveForm rl_observe_form_(const KflcNode *n)
         if (!a->name) continue;
         if (strcmp(a->name, "attitude") == 0) return RL_OBS_ATT;
         if (strcmp(a->name, "contact") == 0)  return RL_OBS_CON;
+        if (strcmp(a->name, "relative") == 0) return RL_OBS_REL;
     }
     return RL_OBS_LOS;
 }
@@ -149,13 +168,20 @@ static int rl_observe_is_attitude_(const KflcNode *n)
     return rl_observe_form_(n) == RL_OBS_ATT;
 }
 
+/* The two switches below name every form and carry no default, so a
+ * form added to the enum without a width and a name table is a
+ * compiler warning rather than five silent line-of-sight channels. The
+ * return after each switch is what the language requires, not a
+ * fallback the code relies on. */
 static int rl_observe_width_(const KflcNode *n)
 {
     switch (rl_observe_form_(n)) {
     case RL_OBS_ATT: return RL_ATT_COMPS;
     case RL_OBS_CON: return RL_CON_COMPS;
-    default:         return RL_OBS_COMPS;
+    case RL_OBS_REL: return RL_REL_COMPS;
+    case RL_OBS_LOS: return RL_OBS_COMPS;
     }
+    return RL_OBS_COMPS;
 }
 
 static const char *rl_observe_comp_(const KflcNode *n, int c)
@@ -163,8 +189,10 @@ static const char *rl_observe_comp_(const KflcNode *n, int c)
     switch (rl_observe_form_(n)) {
     case RL_OBS_ATT: return RL_ATT_COMP_[c];
     case RL_OBS_CON: return RL_CON_COMP_[c];
-    default:         return RL_OBS_COMP_[c];
+    case RL_OBS_REL: return RL_REL_COMP_[c];
+    case RL_OBS_LOS: return RL_OBS_COMP_[c];
     }
+    return RL_OBS_COMP_[c];
 }
 
 /* The first channel index of observe `i`, and the total width. Both
@@ -1215,6 +1243,17 @@ static int rl_n_vehicles_(const RlModel *m)
     return n;
 }
 
+/* Whether any declared channel is a relative observe. What it gates is
+ * the proximity library's header and its archive: a program that never
+ * asks for a relative state must not acquire the dependency. */
+static int rl_has_relative_observe_(const RlModel *m)
+{
+    for (int i = 0; i < m->n_observes; i++) {
+        if (rl_observe_form_(m->observes[i]) == RL_OBS_REL) return 1;
+    }
+    return 0;
+}
+
 /* The actuator tables and the per-environment block their commands
  * and wheel momenta live in. The tables are what the assemblies
  * declared and never change; the block is state, one per environment,
@@ -1490,6 +1529,12 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         "#include <k26astro_att/att.h>\n", out);
     if (m->n_colliders > 0) {
         fputs("#include <k26astro_coll/coll.h>\n", out);
+    }
+    if (rl_has_relative_observe_(m)) {
+        /* Only a program that declares a relative observe pulls in the
+         * proximity library, for the reason the field model is
+         * conditional below: a dependency follows a declaration. */
+        fputs("#include <k26astro_prox/prox.h>\n", out);
     }
     if (m->n_torquers > 0) {
         /* Only a program that declares a magnetorquer pulls in the
@@ -2360,6 +2405,95 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
                 "    }\n",
                 off, slot, off + 1, slot, off + 2, slot,
                 off, off + 1, off + 2);
+            continue;
+        }
+        if (rl_observe_form_(s) == RL_OBS_REL) {
+            /* Both bodies must be declared here, and the chief must
+             * name a parent, because the chief's frame is built from
+             * its state relative to the body it orbits and there is no
+             * other way to know which body that is. A chief without a
+             * parent is a declaration that cannot produce the frame at
+             * all, so it is refused where it is written rather than
+             * publishing six channels that could only ever be zero. */
+            const char *chief = NULL;
+            for (const KflcAttr *a = s->attrs; a; a = a->next) {
+                if (a->name && strcmp(a->name, "observer") == 0 &&
+                    a->value.kind == KFLV_IDENT) {
+                    chief = a->value.u.s;
+                }
+            }
+            int tgt = rl_body_index_of_(m, s->name);
+            int chf = chief ? rl_body_index_of_(m, chief) : -1;
+            if (tgt < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe relative `%s`: no astro_body of that name "
+                    "is declared in this world", s->name);
+                return 1;
+            }
+            if (chf < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe relative %s from `%s`: no astro_body of "
+                    "that name is declared in this world", s->name,
+                    chief ? chief : "?");
+                return 1;
+            }
+            if (chf == tgt) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe relative %s from `%s`: a body has no "
+                    "relative state with respect to itself", s->name,
+                    chief);
+                return 1;
+            }
+            if (!rl_body_attr_(m->bodies[chf].body, "parent")) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe relative %s from `%s`: `%s` declares no "
+                    "`parent=`, so the body it orbits is unknown and "
+                    "its local-vertical local-horizontal frame cannot "
+                    "be built", s->name, chief, chief);
+                return 1;
+            }
+            fprintf(out,
+                "    {\n"
+                "        K26AstroBody *_kfl_cb = k26astro_world_body_at("
+                "world, kflrl_body_idx_[%d]);\n"
+                "        K26AstroBody *_kfl_tb = k26astro_world_body_at("
+                "world, kflrl_body_idx_[%d]);\n"
+                "        K26AstroBody *_kfl_pb = (_kfl_cb && "
+                "_kfl_cb->parent_body_idx >= 0)\n"
+                "            ? k26astro_world_body_at(world, "
+                "_kfl_cb->parent_body_idx) : NULL;\n"
+                "        K26AstroProxRel _kfl_rr;\n"
+                "        _kfl_rr.r = k26m3d_v3(0.0, 0.0, 0.0);\n"
+                "        _kfl_rr.v = k26m3d_v3(0.0, 0.0, 0.0);\n"
+                /* A state with no frame publishes zeros: the chief
+                 * sitting at its parent's centre, or moving straight
+                 * at it, names no direction of motion. That is a
+                 * configuration and not a declaration, so it cannot be
+                 * refused at compile time and is reported as the
+                 * absence of a measurement. */
+                "        if (_kfl_cb && _kfl_tb && _kfl_pb) {\n"
+                "            K26AstroProxFrame _kfl_f;\n"
+                "            if (k26astro_prox_frame(&_kfl_pb->pos, "
+                "_kfl_pb->vel,\n"
+                "                                    &_kfl_cb->pos, "
+                "_kfl_cb->vel,\n"
+                "                                    &_kfl_f) == "
+                "K26ASTRO_PROX_OK) {\n"
+                "                (void)k26astro_prox_relative(&_kfl_f,\n"
+                "                    &_kfl_cb->pos, _kfl_cb->vel,\n"
+                "                    &_kfl_tb->pos, _kfl_tb->vel, "
+                "&_kfl_rr);\n"
+                "            }\n"
+                "        }\n"
+                "        out_v[%d] = _kfl_rr.r.x;\n"
+                "        out_v[%d] = _kfl_rr.r.y;\n"
+                "        out_v[%d] = _kfl_rr.r.z;\n"
+                "        out_v[%d] = _kfl_rr.v.x;\n"
+                "        out_v[%d] = _kfl_rr.v.y;\n"
+                "        out_v[%d] = _kfl_rr.v.z;\n"
+                "    }\n",
+                chf, tgt, off, off + 1, off + 2, off + 3, off + 4,
+                off + 5);
             continue;
         }
         if (rl_observe_is_attitude_(s)) {
