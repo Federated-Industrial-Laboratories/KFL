@@ -396,12 +396,40 @@ static int observe_marker_(const KflcNode *n, const char *marker)
     return 0;
 }
 
+/* Whether the observe asked for the uncorrupted values beside the
+ * measured ones. A paired observe publishes each component twice, the
+ * second carrying `_truth` before the component, so every name the
+ * program may read is one of two per component. */
+static int observe_has_truth_(const KflcNode *n)
+{
+    return observe_marker_(n, "truth");
+}
+
 static const char *const *observe_suffixes_(const KflcNode *n)
 {
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
     if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;
     if (observe_marker_(n, "relative")) return OBS_SFX_REL_;
     return OBS_SFX_LOS_;
+}
+
+/* Push every channel name one observe publishes: the measured
+ * components, and the paired truth components when it declares them.
+ * Both name sets live here and at the emitter, and the gates compare
+ * the published names against both. */
+static void observe_push_names_(NameList *dst, const KflcNode *n,
+                                const char *base, KflcArena *arena)
+{
+    const char *const *sfx = observe_suffixes_(n);
+    for (int k = 0; sfx[k]; k++) {
+        namelist_push_(dst, suffixed_(arena, base, sfx[k]), arena);
+    }
+    if (!observe_has_truth_(n)) return;
+    for (int k = 0; sfx[k]; k++) {
+        char t[80];
+        snprintf(t, sizeof t, "_truth%s", sfx[k]);
+        namelist_push_(dst, suffixed_(arena, base, t), arena);
+    }
 }
 
 /* The bound on an `as` name is the spec's 64-byte name entry less the
@@ -557,10 +585,7 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
     for (int j = 0; j < st.observes_as.n; j++) {
         const char *base = observe_as_name_(st.observes_as.items[j]);
         if (!base) continue;
-        const char *const *sfx = observe_suffixes_(st.observes_as.items[j]);
-        for (int k = 0; sfx[k]; k++) {
-            namelist_push_(&comps, suffixed_(arena, base, sfx[k]), arena);
-        }
+        observe_push_names_(&comps, st.observes_as.items[j], base, arena);
     }
     for (int i = 0; i < st.actions.n; i++) {
         const char *an = st.actions.items[i]->name;
@@ -659,10 +684,7 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
     for (int i = 0; i < st.observes_as.n; i++) {
         const char *base = observe_as_name_(st.observes_as.items[i]);
         if (!base) continue;
-        const char *const *sfx = observe_suffixes_(st.observes_as.items[i]);
-        for (int c = 0; sfx[c]; c++) {
-            namelist_push_(&allowed, suffixed_(arena, base, sfx[c]), arena);
-        }
+        observe_push_names_(&allowed, st.observes_as.items[i], base, arena);
     }
 
     for (int i = 0; i < st.episodes.n; i++) {

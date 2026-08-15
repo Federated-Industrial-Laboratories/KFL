@@ -35,11 +35,13 @@ _INCLUDE_DIRS = [
     "libk26tick/include", "libk26compute/include",
     "libk26m3d/include", "libk26rl/include",
     "libk26rng/include",
+    "libk26sense/include",
 ]
 
 _LINK_LIBS = [
     "libk26rl/libk26rl.a",
     "libk26rng/libk26rng.a",
+    "libk26sense/libk26sense.a",
     "libk26astro_rt/libk26astro_rt.a",
     "libk26astro_att/libk26astro_att.a",
     "libk26astro_vehicle/libk26astro_vehicle.a",

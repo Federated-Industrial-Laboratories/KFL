@@ -35,6 +35,12 @@
 
 #include "kflc.h"
 #include "internal.h"
+
+/* The imperfection layer's own kinds and channel conventions, so the
+ * emitted tables carry the library's values rather than copies of
+ * them. */
+#include "k26sense.h"
+#include "k26rl_env.h"
 #include "assembly.h"
 
 #include <ctype.h>
@@ -136,6 +142,10 @@ static const char *const RL_CON_COMP_[RL_CON_COMPS] = {
  * local-horizontal axes: radial, along-track, cross-track. A target
  * thirty metres ahead and a target thirty metres below are different
  * problems, and the line-of-sight channels cannot tell them apart. */
+/* The longest component suffix a channel can carry, with room for the
+ * `_truth` a paired channel inserts and the terminator. */
+#define RL_COMP_MAX 32
+
 #define RL_REL_COMPS 6
 static const char *const RL_REL_COMP_[RL_REL_COMPS] = {
     "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z"
@@ -173,7 +183,31 @@ static int rl_observe_is_attitude_(const KflcNode *n)
  * compiler warning rather than five silent line-of-sight channels. The
  * return after each switch is what the language requires, not a
  * fallback the code relies on. */
-static int rl_observe_width_(const KflcNode *n)
+/* Whether the observe declared `through <sensor>`, and whether it
+ * asked for the uncorrupted values beside the measured ones. */
+static const char *rl_observe_through_(const KflcNode *n)
+{
+    if (!n) return NULL;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, "through") == 0 &&
+            a->value.kind == KFLV_IDENT) {
+            return a->value.u.s;
+        }
+    }
+    return NULL;
+}
+
+static int rl_observe_has_truth_(const KflcNode *n)
+{
+    if (!n) return 0;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, "truth") == 0) return 1;
+    }
+    return 1 == 0;
+}
+
+/* The components one form publishes, before any pairing. */
+static int rl_observe_base_width_(const KflcNode *n)
 {
     switch (rl_observe_form_(n)) {
     case RL_OBS_ATT: return RL_ATT_COMPS;
@@ -184,7 +218,19 @@ static int rl_observe_width_(const KflcNode *n)
     return RL_OBS_COMPS;
 }
 
-static const char *rl_observe_comp_(const KflcNode *n, int c)
+/* What the observe contributes to the observation vector. `with truth`
+ * publishes the uncorrupted components as a paired set beside the
+ * measured ones, so the observe is twice as wide: the measured half
+ * first, then the truth half, each in component order. Every offset,
+ * the total, and the base of every write follow from this one
+ * function, so the pairing cannot displace a neighbouring observe. */
+static int rl_observe_width_(const KflcNode *n)
+{
+    int w = rl_observe_base_width_(n);
+    return rl_observe_has_truth_(n) ? 2 * w : w;
+}
+
+static const char *rl_observe_base_comp_(const KflcNode *n, int c)
 {
     switch (rl_observe_form_(n)) {
     case RL_OBS_ATT: return RL_ATT_COMP_[c];
@@ -193,6 +239,20 @@ static const char *rl_observe_comp_(const KflcNode *n, int c)
     case RL_OBS_LOS: return RL_OBS_COMP_[c];
     }
     return RL_OBS_COMP_[c];
+}
+
+/* The suffix of channel `c` of this observe, written into `buf`. A
+ * channel in the truth half carries `_truth` before its component, so
+ * a reader sees `<name>_truth_range` beside `<name>_range`. The buffer
+ * is the caller's because two suffixes are live at once wherever a
+ * pair is emitted. */
+static const char *rl_observe_comp_(const KflcNode *n, int c,
+                                    char *buf, size_t cap)
+{
+    int w = rl_observe_base_width_(n);
+    if (c < w) return rl_observe_base_comp_(n, c);
+    snprintf(buf, cap, "_truth%s", rl_observe_base_comp_(n, c - w));
+    return buf;
 }
 
 /* The first channel index of observe `i`, and the total width. Both
@@ -223,6 +283,31 @@ typedef struct {
  * `body` is the model body index; `name` is what a program commands
  * it by. */
 #define RL_MAX_ACT 64
+/* A declared sensor: its name, and the model terms it applies in the
+ * order they were written. The terms are resolved from the block's
+ * children once, at model build, so the emitter needs no parse tree
+ * afterwards. A term that draws holds the channels the owning layer
+ * allocated to it; one that draws at both cadences holds two, since a
+ * per-episode draw and the first step's draw both take index 0. */
+#define RL_MAX_SENSORS 32
+#define RL_MAX_TERMS   16
+
+typedef struct {
+    int    kind;          /* a K26SenseKind value */
+    double p0, p1, p2;    /* per kind, as k26sense.h documents */
+    int    draws_step;
+    int    draws_ep;
+    int    line;
+} RlSenseTerm;
+
+typedef struct {
+    const KflcNode *node;
+    const char     *name;
+    RlSenseTerm     terms[RL_MAX_TERMS];
+    int             n_terms;
+    int             depth;      /* the declared delay, in steps */
+} RlSensor;
+
 /* Colliders across every collidable body in one program. The
  * assembly reader's own limit is per assembly; this one is the
  * program's total, and it is a fixed size because the per-step
@@ -301,6 +386,11 @@ typedef struct {
 
     const KflcNode *observes[RL_MAX_OBSERVES];   /* observe ... as */
     int             n_observes;
+
+    RlSensor        sensors[RL_MAX_SENSORS];
+    int             n_sensors;
+    /* Per observe, the sensor it declared with `through`, or -1. */
+    int             obs_sensor[RL_MAX_OBSERVES];
 
     const KflcNode *resets[RL_MAX_RESETS];       /* episode reset lines */
     int             n_resets;
@@ -464,8 +554,12 @@ static int rl_scope_name_taken_(const RlModel *m, const char *name)
         size_t bl = strlen(base);
         if (strncmp(name, base, bl) != 0) continue;
         for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
-            if (strcmp(name + bl, rl_observe_comp_(m->observes[i], c)) == 0)
+            char cb[RL_COMP_MAX];
+            if (strcmp(name + bl,
+                       rl_observe_comp_(m->observes[i], c, cb, sizeof cb))
+                == 0) {
                 return 1;
+            }
         }
     }
     return 0;
@@ -522,6 +616,197 @@ static const KflcAttr *rl_body_attr_(const KflcNode *body, const char *name)
         if (a->name && strcmp(a->name, name) == 0) return a;
     }
     return NULL;
+}
+
+/* Read one `sensor` block into the model. Each child is one term; the
+ * operands were parsed as plain numbers and are checked here against
+ * the term's own domain, because a negative standard deviation or a
+ * probability above one is a declaration nobody can mean. */
+static double rl_term_num_(const KflcNode *t, int i, int *have)
+{
+    char key[8];
+    snprintf(key, sizeof key, "n%d", i);
+    for (const KflcAttr *a = t->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, key) == 0) {
+            if (have) *have = 1;
+            return a->value.u.f;
+        }
+    }
+    if (have) *have = 0;
+    return 0.0;
+}
+
+static int rl_collect_sensor_(RlModel *m, const KflcNode *n, KflcDiag *diag)
+{
+    if (m->n_sensors >= RL_MAX_SENSORS) {
+        kflc_diag_errorf(diag, n->line,
+            "more than %d sensors in this program", RL_MAX_SENSORS);
+        return 1;
+    }
+    for (int i = 0; i < m->n_sensors; i++) {
+        if (m->sensors[i].name && n->name &&
+            strcmp(m->sensors[i].name, n->name) == 0) {
+            kflc_diag_errorf(diag, n->line,
+                "sensor `%s` is declared twice", n->name);
+            return 1;
+        }
+    }
+    RlSensor *sn = &m->sensors[m->n_sensors];
+    memset(sn, 0, sizeof *sn);
+    sn->node = n;
+    sn->name = n->name;
+
+    for (const KflcNode *c = n->children; c; c = c->next) {
+        if (c->kind != KFLN_STMT_SENSOR_TERM) continue;
+        if (sn->n_terms >= RL_MAX_TERMS) {
+            kflc_diag_errorf(diag, c->line,
+                "sensor `%s`: more than %d terms", sn->name, RL_MAX_TERMS);
+            return 1;
+        }
+        RlSenseTerm *t = &sn->terms[sn->n_terms];
+        memset(t, 0, sizeof *t);
+        t->line = c->line;
+        const char *kw = c->name ? c->name : "";
+        int h0 = 0, h1 = 0, h2 = 0;
+        double v0 = rl_term_num_(c, 0, &h0);
+        double v1 = rl_term_num_(c, 1, &h1);
+        double v2 = rl_term_num_(c, 2, &h2);
+
+        if (strcmp(kw, "noise") == 0) {
+            const char *dist = NULL;
+            for (const KflcAttr *a = c->attrs; a; a = a->next) {
+                if (a->name && strcmp(a->name, "dist") == 0 &&
+                    a->value.kind == KFLV_IDENT) dist = a->value.u.s;
+            }
+            if (!dist || strcmp(dist, "normal") != 0) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `noise` takes `normal`, the only "
+                    "distribution this layer offers", sn->name);
+                return 1;
+            }
+            if (!h0 || !h1) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `noise normal` takes a mean and a "
+                    "standard deviation", sn->name);
+                return 1;
+            }
+            if (v0 != 0.0) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `noise normal` takes a mean of zero; "
+                    "a constant offset is a bias, not noise", sn->name);
+                return 1;
+            }
+            if (!(v1 >= 0.0)) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: a standard deviation cannot be "
+                    "negative", sn->name);
+                return 1;
+            }
+            t->kind = K26SENSE_ADDITIVE;
+            t->p0 = v1;
+            t->draws_step = 1;
+        } else if (strcmp(kw, "scale") == 0) {
+            if (!h0 || !(v0 >= 0.0)) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `scale` takes one relative standard "
+                    "deviation, not negative", sn->name);
+                return 1;
+            }
+            t->kind = K26SENSE_SCALE;
+            t->p0 = v0;
+            t->draws_step = 1;
+        } else if (strcmp(kw, "bias_walk") == 0) {
+            if (!h0 || !h1 || !h2) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `bias_walk` takes a turn-on standard "
+                    "deviation, a correlation time in seconds, and an "
+                    "in-run standard deviation", sn->name);
+                return 1;
+            }
+            if (!(v0 >= 0.0) || !(v1 > 0.0) || !(v2 >= 0.0)) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `bias_walk` needs a positive "
+                    "correlation time and standard deviations that are "
+                    "not negative", sn->name);
+                return 1;
+            }
+            t->kind = K26SENSE_BIAS_WALK;
+            t->p0 = v0; t->p1 = v1; t->p2 = v2;
+            t->draws_step = 1;
+            t->draws_ep = 1;
+        } else if (strcmp(kw, "latency") == 0) {
+            if (!h0 || v0 < 0.0 || v0 != (double)(int)v0 || v0 > 1024.0) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `latency` takes a whole number of "
+                    "control periods, from 0 to 1024", sn->name);
+                return 1;
+            }
+            t->kind = K26SENSE_LATENCY;
+            t->p0 = v0;
+            if ((int)v0 > sn->depth) sn->depth = (int)v0;
+        } else if (strcmp(kw, "quantise") == 0) {
+            if (!h0 || !(v0 > 0.0)) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `quantise` takes a positive step",
+                    sn->name);
+                return 1;
+            }
+            if (h1 != h2) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `quantise` takes a step alone, or a "
+                    "step with both ends of its range", sn->name);
+                return 1;
+            }
+            if (h1 && !(v1 < v2)) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `quantise` needs a range whose low "
+                    "end is below its high end", sn->name);
+                return 1;
+            }
+            t->kind = K26SENSE_QUANTISE;
+            t->p0 = v0;
+            /* The declared clamp keeps the integer conversion in
+             * range; without one the widest range the conversion can
+             * take is used, which is stated rather than implied. */
+            t->p1 = h1 ? v1 : -1.0e15;
+            t->p2 = h1 ? v2 :  1.0e15;
+        } else if (strcmp(kw, "dropout") == 0) {
+            if (!h0 || !(v0 >= 0.0) || !(v0 < 1.0)) {
+                kflc_diag_errorf(diag, c->line,
+                    "sensor `%s`: `dropout` takes a probability from 0 "
+                    "up to but not including 1", sn->name);
+                return 1;
+            }
+            t->kind = K26SENSE_DROPOUT;
+            t->p0 = v0;
+            t->draws_step = 1;
+        } else {
+            kflc_diag_errorf(diag, c->line,
+                "sensor `%s`: unknown model term `%s`", sn->name, kw);
+            return 1;
+        }
+        sn->n_terms++;
+    }
+
+    if (sn->n_terms == 0) {
+        kflc_diag_errorf(diag, n->line,
+            "sensor `%s` declares no model terms, so it would leave "
+            "every channel it touches unchanged", sn->name);
+        return 1;
+    }
+    int n_bias = 0, n_delay = 0;
+    for (int i = 0; i < sn->n_terms; i++) {
+        if (sn->terms[i].kind == K26SENSE_BIAS_WALK) n_bias++;
+        if (sn->terms[i].kind == K26SENSE_LATENCY)   n_delay++;
+    }
+    if (n_bias > 1 || n_delay > 1) {
+        kflc_diag_errorf(diag, n->line,
+            "sensor `%s`: one bias walk and one latency per sensor, "
+            "since one carries one state of each", sn->name);
+        return 1;
+    }
+    m->n_sensors++;
+    return 0;
 }
 
 static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
@@ -808,6 +1093,9 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
         case KFLN_STMT_OBJECTIVE:
             m->objective = s;
             break;
+        case KFLN_STMT_SENSOR:
+            if (rl_collect_sensor_(m, s, diag)) err = 1;
+            break;
         case KFLN_STMT_OBSERVE:
             if (rl_observe_as_(s)) {
                 if (m->n_observes == RL_MAX_OBSERVES) {
@@ -945,6 +1233,39 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
                 "declares no `assembly=`, so it has no inertia tensor and "
                 "its attitude is never advanced; bind an assembly or drop "
                 "the attitude keys", r->name, rk, r->name);
+            err = 1;
+        }
+    }
+
+    /* Resolve each observe's `through <sensor>` to a declared sensor.
+     * A name that resolves to nothing is refused where it is written:
+     * a program that misspells a sensor would otherwise compile and
+     * silently publish uncorrupted values. */
+    for (int i = 0; i < m->n_observes; i++) {
+        m->obs_sensor[i] = -1;
+        const char *want = rl_observe_through_(m->observes[i]);
+        if (!want) continue;
+        for (int k = 0; k < m->n_sensors; k++) {
+            if (m->sensors[k].name && strcmp(m->sensors[k].name, want) == 0) {
+                m->obs_sensor[i] = k;
+            }
+        }
+        if (m->obs_sensor[i] < 0) {
+            kflc_diag_errorf(diag, m->observes[i]->line,
+                "observe ... through `%s`: no sensor of that name is "
+                "declared in this world", want);
+            err = 1;
+        }
+    }
+    /* `with truth` without a sensor would publish a channel beside an
+     * identical one. It is refused rather than allowed to double an
+     * observation vector for nothing. */
+    for (int i = 0; i < m->n_observes; i++) {
+        if (rl_observe_has_truth_(m->observes[i]) && m->obs_sensor[i] < 0) {
+            kflc_diag_errorf(diag, m->observes[i]->line,
+                "observe ... with truth: this observe declares no "
+                "`through <sensor>`, so its measured and true values "
+                "would be the same numbers");
             err = 1;
         }
     }
@@ -1133,12 +1454,13 @@ static void rl_emit_scope_prelude_(FILE *out, const RlModel *m, int indent)
     for (int i = 0; i < m->n_observes; i++) {
         const char *base = rl_observe_as_(m->observes[i]);
         for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
+            char cb[RL_COMP_MAX];
+            const char *cmp = rl_observe_comp_(m->observes[i], c, cb,
+                                               sizeof cb);
             rl_emit_indent_(out, indent);
             fprintf(out,
                 "const double %s%s = _kfl_obs_v[%d]; (void)%s%s;\n",
-                base, rl_observe_comp_(m->observes[i], c),
-                rl_obs_offset_(m->observes, i) + c,
-                base, rl_observe_comp_(m->observes[i], c));
+                base, cmp, rl_obs_offset_(m->observes, i) + c, base, cmp);
         }
     }
     for (int i = 0; i < m->n_wscal; i++) {
@@ -1166,7 +1488,9 @@ static void rl_scope_bindings_(const RlModel *m, const KflcNode *form,
         const char *base = rl_observe_as_(m->observes[i]);
         if (!base) continue;
         for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
-            const char *cmp = rl_observe_comp_(m->observes[i], c);
+            char cb[RL_COMP_MAX];
+            const char *cmp = rl_observe_comp_(m->observes[i], c, cb,
+                                               sizeof cb);
             size_t bl = strlen(base), sl = strlen(cmp);
             char *nm = (char *)kflc_arena_alloc(arena, bl + sl + 1);
             memcpy(nm, base, bl);
@@ -1501,6 +1825,110 @@ static void rl_emit_actuators_(FILE *out, const RlModel *m)
     }
 }
 
+/* The sensed channels, their model terms, and the draw channels the
+ * owning layer allocates to them.
+ *
+ * One sensed channel is one numeric component of one observe that
+ * declared a sensor. Channels are allocated in source order, one per
+ * term that draws, and a term drawing at both cadences takes two, so
+ * that a per-episode draw at index 0 cannot be the same number as the
+ * first step's draw. Adding a sensor to a program therefore allocates
+ * channels above every channel already allocated and perturbs no
+ * existing draw.
+ *
+ * The rows are emitted as plain numbers and assembled into the
+ * library's typed terms at create, because the artifact is C++11 and
+ * cannot initialise a union member by name, and because the bias
+ * walk's two coefficients are not known until the control period is
+ * read. */
+static int rl_n_sensed_(const RlModel *m)
+{
+    int n = 0;
+    for (int i = 0; i < m->n_observes; i++) {
+        if (m->obs_sensor[i] < 0) continue;
+        n += rl_observe_base_width_(m->observes[i]);
+    }
+    return n;
+}
+
+static void rl_emit_sensors_(FILE *out, const RlModel *m)
+{
+    int n_sensed = rl_n_sensed_(m);
+    int n_terms = 0, depth = 0;
+    for (int i = 0; i < m->n_observes; i++) {
+        int si = m->obs_sensor[i];
+        if (si < 0) continue;
+        n_terms += m->sensors[si].n_terms * rl_observe_base_width_(m->observes[i]);
+        if (m->sensors[si].depth > depth) depth = m->sensors[si].depth;
+    }
+    fprintf(out, "#define KFLRL_N_SENSED %d\n", n_sensed);
+    fprintf(out, "#define KFLRL_N_STERMS %d\n", n_terms);
+    fprintf(out, "#define KFLRL_SENSE_RING %d\n\n", depth);
+    if (n_sensed == 0) return;
+
+    fputs("/* kind, per-step channel, per-episode channel, three\n"
+          " * parameters. The parameters' meaning per kind is\n"
+          " * k26sense.h's. */\n"
+          "static const struct {\n"
+          "    int      kind;\n"
+          "    uint16_t ch, ch_ep;\n"
+          "    double   p0, p1, p2;\n"
+          "} kflrl_sterm_[KFLRL_N_STERMS] = {\n", out);
+    int chan = 0;
+    for (int i = 0; i < m->n_observes; i++) {
+        int si = m->obs_sensor[i];
+        if (si < 0) continue;
+        const RlSensor *sn = &m->sensors[si];
+        int w = rl_observe_base_width_(m->observes[i]);
+        for (int c = 0; c < w; c++) {
+            for (int t = 0; t < sn->n_terms; t++) {
+                const RlSenseTerm *tm = &sn->terms[t];
+                int ch = tm->draws_step ? chan++ : K26SENSE_NO_CHANNEL;
+                int ce = tm->draws_ep   ? chan++ : K26SENSE_NO_CHANNEL;
+                fprintf(out,
+                    "    { %d, %uu, %uu, %.17g, %.17g, %.17g },\n",
+                    tm->kind, (unsigned)ch, (unsigned)ce,
+                    tm->p0, tm->p1, tm->p2);
+            }
+        }
+    }
+    fputs("};\n\n", out);
+
+    fputs("static const int kflrl_sensed_first_[KFLRL_N_SENSED] = {\n", out);
+    int first = 0;
+    for (int i = 0; i < m->n_observes; i++) {
+        int si = m->obs_sensor[i];
+        if (si < 0) continue;
+        int w = rl_observe_base_width_(m->observes[i]);
+        for (int c = 0; c < w; c++) {
+            fprintf(out, "    %d,\n", first);
+            first += m->sensors[si].n_terms;
+        }
+    }
+    fputs("};\n\nstatic const int kflrl_sensed_count_[KFLRL_N_SENSED] = {\n",
+          out);
+    for (int i = 0; i < m->n_observes; i++) {
+        int si = m->obs_sensor[i];
+        if (si < 0) continue;
+        int w = rl_observe_base_width_(m->observes[i]);
+        for (int c = 0; c < w; c++) {
+            fprintf(out, "    %d,\n", m->sensors[si].n_terms);
+        }
+    }
+    /* The observation slot each sensed channel rewrites: the measured
+     * half of its observe, in component order. */
+    fputs("};\n\nstatic const int kflrl_sensed_slot_[KFLRL_N_SENSED] = {\n",
+          out);
+    for (int i = 0; i < m->n_observes; i++) {
+        int si = m->obs_sensor[i];
+        if (si < 0) continue;
+        int off = rl_obs_offset_(m->observes, i);
+        int w = rl_observe_base_width_(m->observes[i]);
+        for (int c = 0; c < w; c++) fprintf(out, "    %d,\n", off + c);
+    }
+    fputs("};\n\n", out);
+}
+
 static int rl_emit_prologue_(FILE *out, const RlModel *m,
                              const KflcNode *form, KflcDiag *diag)
 {
@@ -1535,6 +1963,14 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
          * proximity library, for the reason the field model is
          * conditional below: a dependency follows a declaration. */
         fputs("#include <k26astro_prox/prox.h>\n", out);
+    }
+    if (rl_n_sensed_(m) > 0) {
+        /* Only a program that declares a sensor pulls in the
+         * imperfection layer, for the reason the field model and the
+         * proximity library are conditional: a dependency follows a
+         * declaration, and a program that declares no sensor must not
+         * acquire a new archive on its link line. */
+        fputs("#include <k26sense.h>\n", out);
     }
     if (m->n_torquers > 0) {
         /* Only a program that declares a magnetorquer pulls in the
@@ -1598,8 +2034,10 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         for (int i = 0; i < m->n_observes; i++) {
             const char *base = rl_observe_as_(m->observes[i]);
             for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
+                char cb[RL_COMP_MAX];
                 fprintf(out, "    \"%s%s\",\n", base,
-                        rl_observe_comp_(m->observes[i], c));
+                        rl_observe_comp_(m->observes[i], c, cb,
+                                         sizeof cb));
             }
         }
         fputs("};\n\n", out);
@@ -1613,6 +2051,42 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
             uint16_t md = rl_observe_mode_(m->observes[i]);
             for (int c = 0; c < rl_observe_width_(m->observes[i]); c++) {
                 fprintf(out, "    %u,\n", (unsigned)md);
+            }
+        }
+        fputs("};\n\n", out);
+
+        /* What each channel is, and which channel it is paired with.
+         * A program declaring no sensor publishes every channel as
+         * measured and unpaired, which is what it is: the value the
+         * simulation produced, with nothing between. */
+        fputs("static const uint16_t kflrl_obs_source_"
+              "[KFLRL_OBS_TOTAL] = {\n", out);
+        for (int i = 0; i < m->n_observes; i++) {
+            int w = rl_observe_base_width_(m->observes[i]);
+            int t = rl_observe_has_truth_(m->observes[i]);
+            for (int c = 0; c < w; c++) {
+                fprintf(out, "    %u,\n",
+                        (unsigned)K26RL_OBS_SOURCE_MEASURED);
+            }
+            if (!t) continue;
+            for (int c = 0; c < w; c++) {
+                fprintf(out, "    %u,\n", (unsigned)K26RL_OBS_SOURCE_TRUTH);
+            }
+        }
+        fputs("};\n\nstatic const uint32_t kflrl_obs_pair_"
+              "[KFLRL_OBS_TOTAL] = {\n", out);
+        for (int i = 0; i < m->n_observes; i++) {
+            int off = rl_obs_offset_(m->observes, i);
+            int w   = rl_observe_base_width_(m->observes[i]);
+            int t   = rl_observe_has_truth_(m->observes[i]);
+            for (int c = 0; c < w; c++) {
+                if (t) fprintf(out, "    %uu,\n", (unsigned)(off + w + c));
+                else   fprintf(out, "    %uu,\n",
+                               (unsigned)K26RL_OBS_PAIR_NONE);
+            }
+            if (!t) continue;
+            for (int c = 0; c < w; c++) {
+                fprintf(out, "    %uu,\n", (unsigned)(off + c));
             }
         }
         fputs("};\n\n", out);
@@ -1658,6 +2132,7 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
     /* The contact block is one entry per collidable body, and at
      * least one, so that a program with no vehicles still allocates
      * something a pointer check can be made against. */
+    rl_emit_sensors_(out, m);
     fprintf(out, "#define KFLRL_N_CONTACT %d\n\n",
             m->n_veh > 0 ? m->n_veh : 1);
     fputs(
@@ -1784,6 +2259,25 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
     /* Body indices as add_body returns them; worlds are built by the
      * same code in the same order, so the mapping is identical across
      * environments and captured once. */
+    /* The seed a world's own stateful generator takes for one
+     * environment and episode. It is a counter draw at the
+     * imperfection layer's reserved channel, which that layer never
+     * allocates to a model; the two numbers are the library's own
+     * constants, read at compile time so that a program declaring no
+     * sensor carries no dependency on it, and an artifact gate checks
+     * the emitted seed against the library's function. */
+    fprintf(out,
+        "static uint64_t kflrl_world_seed_(K26RngKey _kfl_key,\n"
+        "                                  uint32_t e, uint32_t ep)\n"
+        "{\n"
+        "    K26RngCoords c;\n"
+        "    c.stream = 0x%04xu; c.channel = 0x%04xu;\n"
+        "    c.environment = e; c.episode = ep; c.draw = 0u;\n"
+        "    return k26rng_u64(_kfl_key, c);\n"
+        "}\n\n",
+        (unsigned)K26SENSE_CLASS_SENSOR,
+        (unsigned)K26SENSE_CHANNEL_WORLD_SEED);
+
     fputs("static int kflrl_body_idx_[KFLRL_N_BODIES > 0 ? "
           "KFLRL_N_BODIES : 1];\n\n", out);
     return 0;
@@ -2111,6 +2605,7 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
         case KFLN_STMT_ACTION:
         case KFLN_STMT_ON_STEP:
         case KFLN_STMT_OBJECTIVE:
+        case KFLN_STMT_SENSOR:
             continue;
         case KFLN_STMT_OBSERVE:
             if (rl_observe_as_(s)) continue;   /* channel, not a print */
@@ -2622,7 +3117,22 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
             "    }\n",
             off, off + 1, off + 2, off + 3, off + 4);
     }
+    /* The truth half. A paired observe publishes each component twice,
+     * and both halves leave this function carrying the same
+     * uncorrupted value; the sensor pass below rewrites the measured
+     * half in place. Copying here rather than computing twice is what
+     * keeps the two halves the same number before any noise, which is
+     * the property `with truth` exists to give a consumer. */
+    for (int i = 0; i < m->n_observes; i++) {
+        if (!rl_observe_has_truth_(m->observes[i])) continue;
+        int off = rl_obs_offset_(m->observes, i);
+        int w   = rl_observe_base_width_(m->observes[i]);
+        fprintf(out,
+            "    for (int k = 0; k < %d; k++) out_v[%d + k] = out_v[%d + k];\n",
+            w, off + w, off);
+    }
     fputs("}\n\n", out);
+
     return 0;
 }
 
@@ -3547,6 +4057,21 @@ static void rl_emit_env_core_(FILE *out)
 "    double   *wscal;             /* n_envs * KFLRL_N_WSCAL, world\n"
 "                                  * scalars captured at create */\n"
 "    double   *scratch;           /* KFLRL_OBS_TOTAL */\n"
+#if 1
+"#if KFLRL_N_SENSED > 0\n"
+"    /* The imperfection layer. `sterm` is the resolved model\n"
+"     * chain, built once at create because the bias walk's two\n"
+"     * coefficients follow from the control period; `sense` is\n"
+"     * one state block per sensed channel per environment, and\n"
+"     * `sense_ring` is the delay storage those blocks point\n"
+"     * into. All three are sized at create, so the step path\n"
+"     * allocates nothing. */\n"
+"    K26SenseTerm  *sterm;\n"
+"    K26SenseState *sense;\n"
+"    double        *sense_ring;\n"
+"#endif\n"
+#endif
+
 "    double    control_dt;\n"
 "    uint32_t  horizon;\n"
 "    /* The declared subdivision of a control period, and the interval\n"
@@ -3580,7 +4105,55 @@ static void rl_emit_env_core_(FILE *out)
 " * surface. */\n"
 "static const void *const kflrl_keep_status_str_\n"
 "    __attribute__((used)) = (const void *)&k26rl_status_str;\n"
+"\n", out);
+
+    /* The imperfection layer's two entries. Both are emitted whatever
+     * the program declares, so the call sites need no conditional; with
+     * no sensor they compile to nothing. */
+    fputs(
+"/* Per-episode setup: the draws a chain takes once, and the state a\n"
+" * step expects to find. The value handed in is the channel's true\n"
+" * value at the boundary, which fills a delay ring and primes a\n"
+" * dropout hold. */\n"
+"static void kflrl_sense_reset_(K26RlEnv *h, uint32_t e, uint32_t ep,\n"
+"                               const double *obs_v)\n"
+"{\n"
+"    (void)h; (void)e; (void)ep; (void)obs_v;\n"
+"#if KFLRL_N_SENSED > 0\n"
+"    for (int c = 0; c < KFLRL_N_SENSED; c++) {\n"
+"        (void)k26sense_chain_reset(\n"
+"            h->sterm + kflrl_sensed_first_[c],\n"
+"            (uint32_t)kflrl_sensed_count_[c],\n"
+"            &h->sense[(size_t)e * KFLRL_N_SENSED + (size_t)c],\n"
+"            h->key, K26SENSE_CLASS_SENSOR, e, ep,\n"
+"            obs_v[kflrl_sensed_slot_[c]]);\n"
+"    }\n"
+"#endif\n"
+"}\n"
 "\n"
+"/* One transition's corruption, in place over the measured half. The\n"
+" * draw index is the transition index within the episode, so any\n"
+" * step's noise is addressable without producing the step before it.\n"
+" * No allocation, no I/O, and a fixed number of draws per term. */\n"
+"static void kflrl_sense_apply_(K26RlEnv *h, uint32_t e, uint32_t ep,\n"
+"                               uint32_t step, double *obs_v)\n"
+"{\n"
+"    (void)h; (void)e; (void)ep; (void)step; (void)obs_v;\n"
+"#if KFLRL_N_SENSED > 0\n"
+"    for (int c = 0; c < KFLRL_N_SENSED; c++) {\n"
+"        double v = obs_v[kflrl_sensed_slot_[c]];\n"
+"        (void)k26sense_chain_apply(\n"
+"            h->sterm + kflrl_sensed_first_[c],\n"
+"            (uint32_t)kflrl_sensed_count_[c],\n"
+"            &h->sense[(size_t)e * KFLRL_N_SENSED + (size_t)c],\n"
+"            h->key, K26SENSE_CLASS_SENSOR, e, ep, step, v, &v);\n"
+"        obs_v[kflrl_sensed_slot_[c]] = v;\n"
+"    }\n"
+"#endif\n"
+"}\n"
+"\n", out);
+
+    fputs(
 "/* Reset one environment in place to episode `ep`: restore the\n"
 " * body-state and epoch baseline captured at create, clear the\n"
 " * integrator transients a step leaves behind, re-seed the world's\n"
@@ -3616,7 +4189,14 @@ static void rl_emit_env_core_(FILE *out)
 "        g->ias15_dt_last = 0.0;\n"
 "        k26astro_grav_ias15_reset(g);\n"
 "    }\n"
-"    (void)k26astro_world_set_seed(w, h->seed);\n"
+"    /* The world's own stateful generator is seeded from a counter\n"
+"     * draw at this environment's and episode's coordinates,\n"
+"     * rather than from the governing seed. Handing every world\n"
+"     * the same seed would correlate any model that drew from\n"
+"     * it across the whole vectorised set, and would repeat the\n"
+"     * same sequence in every episode. */\n"
+"    (void)k26astro_world_set_seed(\n"
+"        w, kflrl_world_seed_(h->key, e, ep));\n"
 "#if KFLRL_N_REC > 0\n"
 "    kflrl_apply_draws_(w, h->key, e, ep,\n"
 "                       h->dr_vals + (size_t)e * KFLRL_N_REC, NULL);\n"
@@ -3630,6 +4210,8 @@ static void rl_emit_env_core_(FILE *out)
 "    h->fault[e]   = 0;\n"
 "    kflrl_observe_(w, h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
 "                   &h->contact[(size_t)e * KFLRL_N_CONTACT]);\n"
+"    kflrl_sense_reset_(h, e, ep,\n"
+"                       h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
 "}\n"
 "\n"
 "", out);
@@ -3739,6 +4321,9 @@ static void rl_emit_env_core_(FILE *out)
 "        kflrl_put_u32_(v, i);\n"
 "        kflrl_put_u16_(v + 4, kflrl_obs_modes_[i]);\n"
 "        total += kflrl_tlv_(&p, K26RL_TAG_OBS_CHANNEL_MODE, 6, v);\n"
+"        kflrl_put_u16_(v + 4, kflrl_obs_source_[i]);\n"
+"        kflrl_put_u32_(v + 6, kflrl_obs_pair_[i]);\n"
+"        total += kflrl_tlv_(&p, K26RL_TAG_OBS_CHANNEL_SOURCE, 10, v);\n"
 "    }\n"
 "#endif\n"
 "", out);
@@ -3824,6 +4409,11 @@ static void rl_emit_env_core_(FILE *out)
 "    free(h->fault);\n"
 "    free(h->dr_vals);\n"
 "    free(h->wscal);\n"
+"#if KFLRL_N_SENSED > 0\n"
+"    free(h->sterm);\n"
+"    free(h->sense);\n"
+"    free(h->sense_ring);\n"
+"#endif\n"
 "    free(h->scratch);\n"
 "    free(h->spec);\n"
 "    free(h->seen_seeds);\n"
@@ -3951,6 +4541,20 @@ static void rl_emit_env_core_(FILE *out)
 "     * would buy nothing but a second shape to keep agreeing. */\n"
 "    h->contact = (KflrlContact *)calloc(\n"
 "        (size_t)n_envs * KFLRL_N_CONTACT, sizeof(KflrlContact));\n"
+"#if KFLRL_N_SENSED > 0\n"
+"    h->sterm = (K26SenseTerm *)calloc(KFLRL_N_STERMS,\n"
+"                                      sizeof(K26SenseTerm));\n"
+"    h->sense = (K26SenseState *)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_SENSED, sizeof(K26SenseState));\n"
+"    h->sense_ring = (double *)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_SENSED *\n"
+"        (KFLRL_SENSE_RING > 0 ? KFLRL_SENSE_RING : 1),\n"
+"        sizeof(double));\n"
+"    if (!h->sterm || !h->sense || !h->sense_ring) {\n"
+"        kflrl_free_handle_(h);\n"
+"        return K26RL_E_INTERNAL;\n"
+"    }\n"
+"#endif\n"
 "    h->scratch = (double *)calloc(\n"
 "        KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1, sizeof(double));\n"
 "    if (!h->seen_seeds || !h->worlds || !h->baseline || !h->baseline_t ||\n"
@@ -3974,7 +4578,8 @@ static void rl_emit_env_core_(FILE *out)
 "            kflrl_free_handle_(h);\n"
 "            return K26RL_E_INTERNAL;\n"
 "        }\n"
-"        (void)k26astro_world_set_seed(h->worlds[e], seed);\n"
+"        (void)k26astro_world_set_seed(\n"
+"            h->worlds[e], kflrl_world_seed_(h->key, e, 0u));\n"
 "#if KFLRL_N_DR > 0\n"
 "        double dr0[KFLRL_N_DR];\n"
 "#else\n"
@@ -4039,6 +4644,54 @@ static void rl_emit_env_core_(FILE *out)
 "    (void)kflrl_spec_write_(h->spec, h);\n"
 "\n", out);
     fputs(
+"#if KFLRL_N_SENSED > 0\n"
+"    /* The declared terms become the library's typed terms\n"
+"     * here: the artifact is C++11 and cannot name a union\n"
+"     * member in an initialiser, and the bias walk's decay and\n"
+"     * driving coefficients follow from the control period,\n"
+"     * which is read once, here, and never on the step path. */\n"
+"    for (int t = 0; t < KFLRL_N_STERMS; t++) {\n"
+"        K26SenseTerm *d = &h->sterm[t];\n"
+"        d->kind       = (K26SenseKind)kflrl_sterm_[t].kind;\n"
+"        d->channel    = kflrl_sterm_[t].ch;\n"
+"        d->channel_ep = kflrl_sterm_[t].ch_ep;\n"
+"        double p0 = kflrl_sterm_[t].p0;\n"
+"        double p1 = kflrl_sterm_[t].p1;\n"
+"        double p2 = kflrl_sterm_[t].p2;\n"
+"        switch (d->kind) {\n"
+"        case K26SENSE_ADDITIVE: d->u.additive.sigma = p0; break;\n"
+"        case K26SENSE_SCALE: d->u.scale.rel_sigma = p0; break;\n"
+"        case K26SENSE_BIAS_WALK:\n"
+"            d->u.bias_walk.sigma0 = p0;\n"
+"            if (k26sense_bias_walk_coeffs(\n"
+"                    p1, h->control_dt, p2,\n"
+"                    &d->u.bias_walk.phi,\n"
+"                    &d->u.bias_walk.q) != K26SENSE_OK) {\n"
+"                kflrl_free_handle_(h);\n"
+"                return K26RL_E_INTERNAL;\n"
+"            }\n"
+"            break;\n"
+"        case K26SENSE_LATENCY:\n"
+"            d->u.latency.depth = (uint32_t)p0; break;\n"
+"        case K26SENSE_QUANTISE:\n"
+"            d->u.quantise.lsb = p0;\n"
+"            d->u.quantise.lo = p1;\n"
+"            d->u.quantise.hi = p2; break;\n"
+"        case K26SENSE_DROPOUT: d->u.dropout.p = p0; break;\n"
+"        default: break;\n"
+"        }\n"
+"    }\n"
+"    for (uint32_t e = 0; e < n_envs; e++) {\n"
+"        for (int c = 0; c < KFLRL_N_SENSED; c++) {\n"
+"            size_t k = (size_t)e * KFLRL_N_SENSED + (size_t)c;\n"
+"            h->sense[k].ring = h->sense_ring + k *\n"
+"                (KFLRL_SENSE_RING > 0 ? KFLRL_SENSE_RING : 1);\n"
+"            h->sense[k].ring_cap = KFLRL_SENSE_RING;\n"
+"        }\n"
+"        kflrl_sense_reset_(h, e, 0u,\n"
+"                           h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
+"    }\n"
+"#endif\n"
 "    h->at_boundary = 1;\n"
 "    h->magic = KFLRL_MAGIC;\n"
 "    *out_env = h;\n"
@@ -4487,6 +5140,12 @@ static void rl_emit_env_core_(FILE *out)
 "\n"
 "        kflrl_observe_(h->worlds[e], h->scratch,\n"
 "                       &h->contact[(size_t)e * KFLRL_N_CONTACT]);\n"
+"        /* The transition index is the draw index every per-step term\n"
+"         * uses, and h->steps[e] is still the count before this\n"
+"         * transition, so the first transition of an episode draws at\n"
+"         * index 0. */\n"
+"        kflrl_sense_apply_(h, e, h->episode[e], h->steps[e],\n"
+"                           h->scratch);\n"
 "        int finite = 1;\n"
 "        for (uint32_t j = 0; j < KFLRL_OBS_TOTAL; j++) {\n"
 "            if (!std::isfinite(h->scratch[j])) finite = 0;\n"

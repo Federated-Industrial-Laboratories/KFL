@@ -571,18 +571,45 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
             if (strcmp(a->name, "observer") == 0) observer = a->value.u.s;
         }
         indent(out, level);
-        fprintf(out, "observe %s from %s",
-                n->name ? n->name : "?",
-                observer ? observer : "?");
+        /* The form the statement was written in is recovered from the
+         * marker the parser left. Without this every form but the line
+         * of sight printed its marker as a `key=value` pair, which
+         * does not parse back: a round trip must reproduce the
+         * spelling, not merely the fields. */
+        const int m_att = find_attr_(n->attrs, "attitude") != NULL;
+        const int m_con = find_attr_(n->attrs, "contact") != NULL;
+        const int m_rel = find_attr_(n->attrs, "relative") != NULL;
+        if (m_att || m_con) {
+            fprintf(out, "observe %s of %s", m_con ? "contact" : "attitude",
+                    n->name ? n->name : "?");
+        } else if (m_rel) {
+            fprintf(out, "observe relative %s from %s",
+                    n->name ? n->name : "?", observer ? observer : "?");
+        } else {
+            fprintf(out, "observe %s from %s",
+                    n->name ? n->name : "?", observer ? observer : "?");
+        }
         for (const KflcAttr *a = n->attrs; a; a = a->next) {
             if (strcmp(a->name, "observer") == 0) continue;
-            /* `as` is a bare trailing clause, not a key=value pair;
-             * the parser guarantees it is the last attr. */
+            /* `as`, `through` and `with truth` are bare trailing
+             * clauses, not `key=value` pairs, and the form markers are
+             * not clauses at all; each is printed in its own spelling
+             * below or not at all. The parser guarantees `as` is last. */
             if (strcmp(a->name, "as") == 0) continue;
+            if (strcmp(a->name, "through") == 0) continue;
+            if (strcmp(a->name, "truth") == 0) continue;
+            if (strcmp(a->name, "attitude") == 0) continue;
+            if (strcmp(a->name, "contact") == 0) continue;
+            if (strcmp(a->name, "relative") == 0) continue;
             const char *v = (a->value.kind == KFLV_IDENT && a->value.u.s)
                             ? a->value.u.s : "?";
             fprintf(out, " %s=%s", a->name, v);
         }
+        const KflcAttr *th_a = find_attr_(n->attrs, "through");
+        if (th_a && th_a->value.kind == KFLV_IDENT && th_a->value.u.s) {
+            fprintf(out, " through %s", th_a->value.u.s);
+        }
+        if (find_attr_(n->attrs, "truth")) fputs(" with truth", out);
         const KflcAttr *as_a = find_attr_(n->attrs, "as");
         if (as_a && as_a->value.kind == KFLV_IDENT && as_a->value.u.s) {
             fprintf(out, " as %s", as_a->value.u.s);
@@ -615,6 +642,37 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
         }
         indent(out, level);
         fputs("end\n", out);
+        break;
+    }
+
+    case KFLN_STMT_SENSOR: {
+        indent(out, level);
+        fprintf(out, "sensor %s\n", n->name ? n->name : "?");
+        for (const KflcNode *c = n->children; c; c = c->next) {
+            emit_node(out, c, level + 1);
+        }
+        indent(out, level);
+        fputs("end\n", out);
+        break;
+    }
+
+    case KFLN_STMT_SENSOR_TERM: {
+        /* The term keyword, then its distribution word when it has
+         * one, then its numbers in the order they were written. The
+         * numbers print at full precision: a sensor's parameters reach
+         * compile-time tables, so a round trip that rounded one would
+         * change the program. */
+        indent(out, level);
+        fputs(n->name ? n->name : "?", out);
+        for (const KflcAttr *a = n->attrs; a; a = a->next) {
+            fputc(' ', out);
+            if (a->value.kind == KFLV_IDENT && a->value.u.s) {
+                fputs(a->value.u.s, out);
+            } else {
+                fprintf(out, "%.17g", a->value.u.f);
+            }
+        }
+        fputc('\n', out);
         break;
     }
 

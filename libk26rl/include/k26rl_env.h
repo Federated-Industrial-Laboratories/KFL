@@ -52,8 +52,9 @@ extern "C" {
 /* Major in the high 16 bits, minor in the low 16. Minor 1 adds
  * k26rl_env_tap, minor 2 adds k26rl_env_bodies, minor 3 adds the two
  * assembly tags, minor 4 adds k26rl_env_attitudes and the subdivision
- * tag; a consumer checks major equality and minor at-least. */
-#define K26RL_ABI_VERSION ((uint32_t)0x00010004u)
+ * tag, minor 5 adds the channel-source tag; a consumer checks major
+ * equality and minor at-least. */
+#define K26RL_ABI_VERSION ((uint32_t)0x00010005u)
 
 /* One handle owns n_envs worlds; layout is private to the artifact. */
 typedef struct K26RlEnv K26RlEnv;
@@ -137,6 +138,22 @@ typedef enum {
  * program's identity and is published; the simulated time a
  * transition advances is control_dt whatever it is. */
 #define K26RL_TAG_SUBSTEPS          ((uint16_t)0x0015) /* uint32, at least 1 */
+/* Added at minor 5. What an observation channel is: a measured value
+ * that passed through a declared sensor, or the uncorrupted value
+ * beside it. A consumer that must build a policy's observation space
+ * from measured channels alone, while a privileged critic reads
+ * everything, needs to tell them apart mechanically rather than by
+ * parsing names; so does a viewer drawing the two as one overlaid
+ * pair. Every channel carries this tag, including in a program that
+ * declares no sensor, where every channel is measured and unpaired. */
+#define K26RL_TAG_OBS_CHANNEL_SOURCE ((uint16_t)0x0016)
+    /* channel u32, source u16, paired channel u32 */
+
+/* Source kinds for K26RL_TAG_OBS_CHANNEL_SOURCE. */
+#define K26RL_OBS_SOURCE_MEASURED ((uint16_t)0)
+#define K26RL_OBS_SOURCE_TRUTH    ((uint16_t)1)
+/* The paired-channel value of a channel that has no pair. */
+#define K26RL_OBS_PAIR_NONE       ((uint32_t)0xFFFFFFFFu)
 
 /* Action kinds for K26RL_TAG_ACT_KIND. */
 #define K26RL_ACT_KIND_BOX      ((uint16_t)0)

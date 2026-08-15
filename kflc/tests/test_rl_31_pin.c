@@ -201,8 +201,16 @@ int main(void)
         ASSERT(strstr(cc, "g->dt_last = 0.0;") != NULL);
         ASSERT(strstr(cc, "g->ias15_dt_last = 0.0;") != NULL);
         ASSERT(strstr(cc, "k26astro_grav_ias15_reset(g);") != NULL);
+        /* The world's own stateful generator is reseeded per episode
+         * from a counter draw at this environment's and episode's
+         * coordinates, not from the governing seed. Handing every
+         * world the same seed would correlate any model drawing from
+         * it across the vectorised set and repeat the same sequence in
+         * every episode; the pin is here so the wiring cannot be
+         * quietly dropped. */
+        ASSERT(strstr(cc, "kflrl_world_seed_(h->key, e, ep)") != NULL);
         ASSERT(strstr(cc, "k26astro_world_set_seed(w, h->seed);")
-               != NULL);
+               == NULL);
         free(cc);
     }
     /* Same technique for the create-time draw handoff: the world

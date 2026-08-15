@@ -466,7 +466,8 @@ void kfl_stmt_set_world_ctx(int in_world)
 static int is_rl_keyword_(const char *s)
 {
     return strcmp(s, "episode")   == 0 || strcmp(s, "action") == 0 ||
-           strcmp(s, "on_step")   == 0 || strcmp(s, "objective") == 0;
+           strcmp(s, "on_step")   == 0 || strcmp(s, "objective") == 0 ||
+           strcmp(s, "sensor")    == 0;
 }
 
 /* Statements the `on_step` body rejects: world construction and
@@ -518,6 +519,154 @@ static void rl_drain_line_(Lexer *L, Token *cur,
     (void)take_line_remainder(L, arena);
     advance(L, cur, had_error);
     if (at_nl(cur)) advance(L, cur, had_error);
+}
+
+/* `sensor <name> ... end`. One model term per line, in the order the
+ * chain applies them:
+ *
+ *   noise normal <mean> <sigma>       additive, one draw per step
+ *   scale <relative sigma>            multiplicative, one draw per step
+ *   bias_walk <sigma0> <tau> <sigma>  turn-on bias plus an in-run walk
+ *   latency <whole control periods>   a fixed-depth delay, no draws
+ *   quantise <lsb> [<lo> <hi>]        a step, with a declared clamp
+ *   dropout <probability>             hold the last delivered value
+ *
+ * Order is load-bearing and is kept: a quantiser declared after a
+ * noise term quantises the noisy value and one declared before it does
+ * not, so the terms are carried as ordered children rather than as
+ * attributes, which have no order a reader can rely on.
+ *
+ * Operands are plain numbers rather than expressions. A sensor's
+ * parameters become compile-time tables and a coefficient the artifact
+ * computes once at create, so there is nothing for an expression to
+ * close over; the assembly reader's rule of a fully consumed number is
+ * used, so a unit suffix is a loud refusal rather than a silent
+ * truncation.
+ *
+ * `cur` is the `sensor` keyword on entry. */
+static KflcNode *parse_sensor_(Lexer *L, Token *cur,
+                               KflcArena *arena, KflcDiag *diag,
+                               int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (cur->kind != T_IDENT) {
+        kflc_diag_errorf(diag, line0, "sensor: expected a name");
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+        return NULL;
+    }
+    KflcNode *n = new_node(arena, KFLN_STMT_SENSOR, line0);
+    n->name = cur->str;
+    advance(L, cur, had_error);
+    if (!at_nl(cur) && !at_eof2(cur)) {
+        kflc_diag_errorf(diag, line0,
+            "sensor `%s`: expected end of line after the name", n->name);
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+    } else if (at_nl(cur)) {
+        advance(L, cur, had_error);
+    }
+
+    for (;;) {
+        skip_newlines(L, cur, had_error);
+        if (at_eof2(cur)) {
+            kflc_diag_errorf(diag, line0,
+                "sensor `%s`: unexpected EOF (missing `end`)", n->name);
+            *had_error = 1;
+            return n;
+        }
+        if (is_ident_named(cur, "end")) {
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            break;
+        }
+        if (cur->kind != T_IDENT) {
+            kflc_diag_errorf(diag, cur->line,
+                "sensor `%s`: expected a model term or `end`", n->name);
+            *had_error = 1;
+            rl_drain_line_(L, cur, arena, had_error);
+            continue;
+        }
+
+        /* The remainder is taken while the cursor still sits on the
+         * keyword, which is the convention the episode block uses:
+         * advancing first would consume the first operand into the
+         * cursor and leave it out of the remainder. */
+        char *kw = cur->str;
+        int lineK = cur->line;
+        char *rest = take_line_remainder(L, arena);
+        advance(L, cur, had_error);
+        if (at_nl(cur)) advance(L, cur, had_error);
+
+        KflcNode *t = new_node(arena, KFLN_STMT_SENSOR_TERM, lineK);
+        t->name = kw;
+
+        char *p = trim(rest);
+        int    n_num = 0, bad = 0;
+        double num[4];
+        char  *dist = NULL;
+
+        if (strcmp(kw, "noise") == 0) {
+            char *w = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            if (*p) { *p = '\0'; p++; }
+            if (*w == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "sensor `%s`: `noise` takes a distribution name",
+                    n->name);
+                *had_error = 1;
+                bad = 1;
+            } else {
+                dist = kflc_arena_strdup(arena, w);
+            }
+        }
+        while (!bad && *p) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            if (n_num == 4) {
+                kflc_diag_errorf(diag, lineK,
+                    "sensor `%s`: `%s` takes at most four values",
+                    n->name, kw);
+                *had_error = 1;
+                bad = 1;
+                break;
+            }
+            char *w = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            char saved = *p;
+            *p = '\0';
+            char *endp = NULL;
+            double v = strtod(w, &endp);
+            if (!endp || *endp != '\0' || endp == w) {
+                kflc_diag_errorf(diag, lineK,
+                    "sensor `%s`: `%s` is not a number", n->name, w);
+                *had_error = 1;
+                bad = 1;
+            } else {
+                num[n_num++] = v;
+            }
+            if (saved) { *p = saved; p++; } else break;
+        }
+        if (bad) { append_child(n, t); continue; }
+
+        if (dist) {
+            KflcValue dv;
+            memset(&dv, 0, sizeof dv);
+            dv.kind = KFLV_IDENT; dv.u.s = dist;
+            stmt_append_attr(arena, t, "dist", dv, lineK);
+        }
+        for (int i = 0; i < n_num; i++) {
+            KflcValue nv;
+            memset(&nv, 0, sizeof nv);
+            nv.kind = KFLV_FLOAT; nv.u.f = num[i];
+            char akey[8];
+            snprintf(akey, sizeof akey, "n%d", i);
+            stmt_append_attr(arena, t, akey, nv, lineK);
+        }
+        append_child(n, t);
+    }
+    return n;
 }
 
 /* `episode ... end`. Body lines, each at most once except `reset`:
@@ -1067,6 +1216,8 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             return parse_on_step_(L, cur, arena, diag, had_error);
         if (strcmp(cur->str, "objective") == 0)
             return parse_objective_(L, cur, arena, diag, had_error);
+        if (strcmp(cur->str, "sensor") == 0)
+            return parse_sensor_(L, cur, arena, diag, had_error);
     }
 
     /* `return [<expr>]` */
@@ -1685,6 +1836,57 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             char *kbeg = p;
             while (*p && *p != '=' && *p != ' ' && *p != '\t') p++;
             if (*p != '=') {
+                /* `through <sensor>` routes the observe's numeric
+                 * components through a declared model chain, and
+                 * `with truth` publishes the uncorrupted components
+                 * beside them. Both are bare words rather than
+                 * `key=value` pairs because that is how the design
+                 * spells them, and both must precede `as`, which
+                 * remains the last clause on the line. */
+                if ((size_t)(p - kbeg) == 7 &&
+                    strncmp(kbeg, "through", 7) == 0) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    char *nbeg = p;
+                    while (*p && *p != ' ' && *p != '\t') p++;
+                    char saved_t = *p;
+                    *p = '\0';
+                    if (nbeg[0] == '\0') {
+                        kflc_diag_errorf(diag, line0,
+                            "observe %s: `through` requires a sensor "
+                            "name", target_ident);
+                        *had_error = 1;
+                        return n;
+                    }
+                    KflcValue tv;
+                    memset(&tv, 0, sizeof tv);
+                    tv.kind = KFLV_IDENT;
+                    tv.u.s  = kflc_arena_strdup(arena, nbeg);
+                    stmt_append_attr(arena, n, "through", tv, line0);
+                    if (saved_t) { *p = saved_t; p++; }
+                    continue;
+                }
+                if ((size_t)(p - kbeg) == 4 &&
+                    strncmp(kbeg, "with", 4) == 0) {
+                    while (*p == ' ' || *p == '\t') p++;
+                    char *nbeg = p;
+                    while (*p && *p != ' ' && *p != '\t') p++;
+                    char saved_w = *p;
+                    *p = '\0';
+                    if (strcmp(nbeg, "truth") != 0) {
+                        kflc_diag_errorf(diag, line0,
+                            "observe %s: `with` takes `truth` and "
+                            "nothing else", target_ident);
+                        *had_error = 1;
+                        return n;
+                    }
+                    KflcValue wv;
+                    memset(&wv, 0, sizeof wv);
+                    wv.kind = KFLV_IDENT;
+                    wv.u.s  = kflc_arena_strdup(arena, "1");
+                    stmt_append_attr(arena, n, "truth", wv, line0);
+                    if (saved_w) { *p = saved_w; p++; }
+                    continue;
+                }
                 if ((size_t)(p - kbeg) == 2 && strncmp(kbeg, "as", 2) == 0) {
                     while (*p == ' ' || *p == '\t') p++;
                     char *nbeg = p;

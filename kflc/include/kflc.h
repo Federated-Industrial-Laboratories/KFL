@@ -190,7 +190,14 @@ typedef enum {
     KFLN_STMT_ON_STEP,
     /* `objective ... end`. Attrs carry `reward` (required) and
      * `terminal`, each with the parsed expression on KflcAttr.expr. */
-    KFLN_STMT_OBJECTIVE
+    KFLN_STMT_OBJECTIVE,
+    /* `sensor <name> ... end`. `name` is the sensor's name; each child
+     * line is one model term, in declaration order, carried as a
+     * KFLN_STMT_SENSOR_TERM child whose `name` is the term keyword and
+     * whose attrs carry that term's numeric operands. Order is
+     * load-bearing: a chain applies its terms in the order declared. */
+    KFLN_STMT_SENSOR,
+    KFLN_STMT_SENSOR_TERM
 } KflcNodeKind;
 
 /* Type system. The base scalar kinds are joined by KFLT_VECTOR /

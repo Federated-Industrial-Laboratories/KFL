@@ -4,7 +4,7 @@ DESTDIR ?=
 
 CFLAGS  ?= -O2 -g
 override CFLAGS += -std=c11 -Wall -Wextra -Wpedantic \
-                   -Iinclude -Isrc -I../libk26rl/include
+                   -Iinclude -Isrc -I../libk26rl/include -I../libk26sense/include -I../libk26rng/include
 # The float-control flags every library in this tree carries, on the
 # compiler itself. They are appended with `override` rather than left
 # to the caller because they are not a tuning choice: the compiler now

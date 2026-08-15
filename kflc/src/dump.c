@@ -41,6 +41,8 @@ static const char *kind_name(KflcNodeKind k)
     case KFLN_STMT_ACTION:        return "STMT_ACTION";
     case KFLN_STMT_ON_STEP:       return "STMT_ON_STEP";
     case KFLN_STMT_OBJECTIVE:     return "STMT_OBJECTIVE";
+    case KFLN_STMT_SENSOR:        return "STMT_SENSOR";
+    case KFLN_STMT_SENSOR_TERM:   return "STMT_SENSOR_TERM";
     }
     return "?";
 }

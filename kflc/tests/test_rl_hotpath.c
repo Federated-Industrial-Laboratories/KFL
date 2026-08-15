@@ -250,8 +250,24 @@ static const char *const HP_COLL_KFL =
     "    on_step\n"
     "        alpha.omega_x = alpha.omega_x + push * 0.0\n"
     "    end\n"
+    /* A sensor chain on the tracking observe, so noise applied per
+     * channel per step sits inside the armed window rather than beside
+     * it. Every drawing kind is declared, because the counts are
+     * compile-time constants: a chain without a bias walk compiles the
+     * state advance out, and one without a dropout compiles the
+     * uniform draw out. `with truth` doubles the observe, so the
+     * paired copy is measured too. */
+    "    sensor hp_sensor\n"
+    "        noise normal 0.0 5.0\n"
+    "        scale 0.001\n"
+    "        bias_walk 2.0 30.0 0.5\n"
+    "        latency 2\n"
+    "        quantise 0.5\n"
+    "        dropout 0.02\n"
+    "    end\n"
     "    observe contact of beta as hit\n"
-    "    observe alpha from earth mode=geometric as trk\n"
+    "    observe alpha from earth mode=geometric"
+    " through hp_sensor with truth as trk\n"
     /* The relative state of the pair, in the chief's own frame. It is
      * declared here rather than in a fixture of its own because it
      * runs inside the same per-step observation function the two above
@@ -265,9 +281,9 @@ static const char *const HP_COLL_KFL =
     "end\n"
     "end\n";
 
-/* Three contact channels, five tracking channels, six relative ones;
- * one action. */
-#define HP_COLL_OBS     14
+/* Three contact channels, five tracking channels and their five
+ * paired truth channels, six relative ones; one action. */
+#define HP_COLL_OBS     19
 #define HP_COLL_HIT      0
 #define HP_COLL_ACT      1
 #define HP_COLL_HORIZON 24
@@ -646,7 +662,8 @@ static int child_main_(void)
 
             unsigned long a = alloc_total_(), w = write_total_();
             printf("gate 6: %2d episode(s), %3d steps x %d envs,"
-                   " a collidable pair and a relative observe:"
+                   " a collidable pair, a relative observe and a"
+                   " sensor chain:"
                    " alloc-family %lu"
                    " (malloc %lu calloc %lu realloc %lu free %lu),"
                    " write-family %lu\n",
@@ -658,8 +675,8 @@ static int child_main_(void)
         }
         dlclose(cso);
     }
-    printf("gate 6: the collision pass and the relative observe"
-           " allocate nothing and write nothing: OK\n");
+    printf("gate 6: the collision pass, the relative observe and the"
+           " sensor chain allocate nothing and write nothing: OK\n");
 
     dlclose(so);
     fclose(fnull);
