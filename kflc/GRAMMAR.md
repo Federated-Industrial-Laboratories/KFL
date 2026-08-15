@@ -405,6 +405,28 @@ existing programs that use them as names keep compiling. (`episode`,
 `action`, and `objective` sit on the compiler's reserved-name list, so a
 `let`, `const`, or `arg` that binds one of them draws a warning.)
 
+`agent`, `sensor`, and `on_step` are not reserved, and inside a
+`fn world` body each opens its block only when what follows it is what
+that block form requires: an identifier for `agent` and `sensor`, the
+end of the line for `on_step`. Written any other way they stay ordinary
+identifiers, so a program that binds one of them as a name keeps
+compiling:
+
+```
+fn world w
+    let sensor: double = 3.0
+    sensor = sensor + 1.0              # the binding, not a block
+    sensor rf                          # a sensor block
+        noise normal 0.0 1.0
+    end
+end
+```
+
+No statement form in the language has the shape
+`<identifier> <identifier>`, so the two readings never overlap for
+`agent` and `sensor`. For `on_step` they overlap on one shape, a bare
+`on_step` alone on a line, which the block form takes.
+
 A program that uses any of these constructs, or a distribution-valued
 `astro_body` attribute (below), is a reinforcement learning program. Such
 a program must declare an `episode` block, admits exactly one `fn world`,

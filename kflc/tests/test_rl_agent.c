@@ -11,7 +11,13 @@
  *   2. Published names. With more than one agent a channel publishes
  *      as `<agent>.<channel>`; with one it publishes the name it was
  *      declared with, which is what makes a single-agent program's
- *      spec identical to the one it had before agents existed.
+ *      spec identical to the one it had before agents existed. The
+ *      one-agent case is held by a program that declares exactly one
+ *      `agent` block as well as by one that declares none, since
+ *      publication turns on the count rather than on a block being
+ *      absent and those two conditions come apart only there.
+ *   2a. An agent with no `objective` publishes an all-zero reward
+ *      stream for its own agent, beside one that declares a reward.
  *   3. The agent-name bound. A name of exactly 31 bytes compiles and
  *      one of 32 is refused naming the bound; a combination that
  *      overflows the 96-byte entry is refused naming both parts and
@@ -181,6 +187,59 @@ static const char *const APPLY_KFL =
     "    on_step\n"
     "        alpha_craft.vel_z = alpha.push\n"
     "        beta_craft.vel_z = beta.push\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* Exactly one `agent` block. Publication is conditioned on the agent
+ * count and not on the absence of a block, and this is the only shape
+ * where those two conditions come apart: one block is agent count 1,
+ * so its channels publish bare and its whole-vector slices are the
+ * ones a program with no block would have had. */
+static const char *const ONE_BLOCK_KFL =
+    "form ONEBLOCK\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft gm=1.0 parent=earth pos_x=7.0e6 vel_y=7546.0\n"
+    "    episode\n"
+    "        control_dt 10.0\n"
+    "        horizon 4\n"
+    "    end\n"
+    "    agent pilot\n"
+    "        action thrust box -1.0 1.0 default 0.0\n"
+    "        observe craft from earth mode=geometric as trk\n"
+    "        objective\n"
+    "            reward 0.0 - trk_range\n"
+    "        end\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* One agent with an objective beside one without. The second agent
+ * publishes an all-zero reward stream, which is the rule a program
+ * with no objective already follows; a defect handing it its
+ * neighbour's reward would be invisible to every fixture in which
+ * both agents declare one. The first agent's reward is a constant, so
+ * the two streams are told apart by value and not by coincidence. */
+static const char *const HALF_OBJECTIVE_KFL =
+    "form HALFOBJ\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft gm=1.0 parent=earth pos_x=7.0e6 vel_y=7546.0\n"
+    "    episode\n"
+    "        control_dt 10.0\n"
+    "        horizon 4\n"
+    "    end\n"
+    "    agent paid\n"
+    "        action thrust box -1.0 1.0 default 0.0\n"
+    "        observe craft from earth mode=geometric as trk\n"
+    "        objective\n"
+    "            reward 5.0\n"
+    "        end\n"
+    "    end\n"
+    "    agent unpaid\n"
+    "        action brake box -1.0 1.0 default 0.0\n"
+    "        observe craft from earth mode=geometric as look\n"
     "    end\n"
     "end\n"
     "end\n";
@@ -415,6 +474,87 @@ static void gate_observation_only_(void)
     g_arms++;
     printf("  observation-only agent: act slice [1,1), obs [5,10)\n");
     dlclose(d);
+}
+
+/* One block is agent count 1, which is the case that tells a rule
+ * conditioned on the count from one conditioned on a block being
+ * absent. */
+static void gate_one_block_(void)
+{
+    RlSpecView v;
+    RlSurface  s;
+    void *d = build_and_open_(ONE_BLOCK_KFL, "oneblock", &v, &s);
+    ASSERT(v.agent_count == 1);
+    ASSERT(v.n_obs_slices == 1 && v.n_act_slices == 1);
+    assert_partition_("one-block observation", v.obs_slice, 1,
+                      v.obs_total);
+    assert_partition_("one-block action", v.act_slice, 1, v.act_total);
+    /* Bare, not `pilot.trk_range`: with one agent there is nothing for
+     * a qualifier to tell apart, and this is what keeps a one-agent
+     * program's names the names it declared. */
+    ASSERT(v.n_chan_names == 5);
+    ASSERT(strcmp(v.chan_names[3], "trk_range") == 0);
+    g_arms++;
+    printf("  one agent block: count 1, names bare, slices whole\n");
+    dlclose(d);
+}
+
+/* An agent with no `objective` publishes an all-zero reward stream for
+ * its own agent, and its neighbour's reward is unaffected. */
+static void gate_missing_objective_(void)
+{
+    RlSpecView v;
+    RlSurface  s;
+    void *dso = build_and_open_(HALF_OBJECTIVE_KFL, "halfobj", &v, &s);
+    ASSERT(v.agent_count == 2);
+
+    K26RlEnv *h = NULL;
+    ASSERT(s.create(19u, 1u, &h) == K26RL_OK);
+    double act[2] = { 0.0, 0.0 };
+    double rew[2] = { -1.0, -1.0 };
+    for (int t = 0; t < 3; t++) {
+        ASSERT(s.step(h, act) == K26RL_OK);
+        ASSERT(s.reward(h, rew) == K26RL_OK);
+        if (rew[0] != 5.0 || rew[1] != 0.0) {
+            fprintf(stderr, "FAIL missing objective: step %d rewards "
+                    "%.17g and %.17g, expected 5 and 0\n", t, rew[0],
+                    rew[1]);
+            exit(1);
+        }
+    }
+    g_arms++;
+    printf("  an agent with no objective: rewards %g and %g\n",
+           rew[0], rew[1]);
+    s.destroy(h);
+    dlclose(dso);
+}
+
+/* The emitted source is part of what the compiler produces, and a
+ * reader of a two-agent artifact meets both its geometry macro and
+ * the reward buffer's own description. They have to agree: the
+ * description said "agent count 1" while the macro beside it said 2
+ * and the allocation multiplied by it, which is a statement the
+ * artifact contradicts three lines later. */
+static void gate_emitted_text_(void)
+{
+    rl_write_file_(WORK_DIR "/text.kfl", TWO_KFL);
+    rl_run_or_die_("./bin/kflc --emit " WORK_DIR "/text.kfl > "
+                   WORK_DIR "/text.cc 2> " WORK_DIR "/text.err");
+    FILE *f = fopen(WORK_DIR "/text.cc", "rb");
+    ASSERT(f != NULL);
+    static char cc[1 << 20];
+    size_t n = fread(cc, 1, sizeof cc - 1, f);
+    cc[n] = '\0';
+    fclose(f);
+    ASSERT(strstr(cc, "#define KFLRL_N_AGENTS 2") != NULL);
+    if (strstr(cc, "agent count 1") != NULL) {
+        fprintf(stderr, "FAIL emitted text: a two-agent artifact "
+                "describes something in it as agent count 1\n");
+        exit(1);
+    }
+    g_arms++;
+    printf("  emitted text: nothing in a two-agent artifact claims "
+           "agent count 1\n");
 }
 
 static void gate_name_bound_(void)
@@ -927,7 +1067,10 @@ int main(void)
 
     printf("test_rl_agent: the agent block\n");
     gate_slices_and_names_();
+    gate_one_block_();
     gate_observation_only_();
+    gate_missing_objective_();
+    gate_emitted_text_();
     gate_name_bound_();
     gate_mixing_and_collisions_();
     gate_block_contents_();

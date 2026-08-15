@@ -394,9 +394,9 @@ $(RL_AGENT_TEST): tests/test_rl_agent.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
-# A programme with no agent block publishes the spec it published
+# A program with no agent block publishes the spec it published
 # before the block existed. Builds the compiler at the base commit
-# from history, compiles every reinforcement learning programme in the
+# from history, compiles every reinforcement learning program in the
 # tree with both, and compares the two spec blobs byte for byte. Its
 # own binary so that "history unavailable" is the harness's skip code
 # (77) rather than a silent pass.
@@ -406,6 +406,17 @@ $(RL_AGENT_ID_TEST): tests/test_rl_agent_identity.c $(RL_GATE_DEPS) \
                      ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
+
+# The construct words are still names: `agent`, `sensor` and
+# `on_step` open their blocks only where the block form is written,
+# so a Grammar 3.1 program that binds one of them as an identifier
+# keeps compiling. One arm per word per shape, both readings, because
+# a fixture holding only the block form cannot tell a disambiguating
+# parser from a greedy one.
+RL_CTXKW_TEST = tests/test_rl_contextual_keywords
+$(RL_CTXKW_TEST): tests/test_rl_contextual_keywords.c $(RL_GATE_DEPS) \
+                  ../libk26rl/include/k26rl_env.h
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< -ldl -lm
 
 # Grammar 3.1 pins: the 3.1 `step` statement still lowers to the
 # clamped stepping entry (the exact-dt entry belongs to the episode
@@ -434,7 +445,7 @@ else
 RL_DRIVE_GATES =
 endif
 
-test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_PURITY_TEST) $(RL_DRIVE_GATES) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
+test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_PURITY_TEST) $(RL_DRIVE_GATES) $(RL_CTXKW_TEST) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
@@ -454,7 +465,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
-	          $(RL_AGENT_TEST) $(RL_AGENT_ID_TEST); do \
+	          $(RL_AGENT_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -466,6 +477,23 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	         exit $$rc; \
 	     fi; \
 	 done
+	./$(RL_CTXKW_TEST)
+# The identity gate has two skip conditions, the stack archives and
+# the presence of the base commit in history, and its own message says
+# which one it hit. Running it through the loop above would print an
+# accurate line from the test and then a Makefile line asserting a
+# different cause, so it is driven here beside the baseline gate,
+# which has the same shape.
+	@if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $(RL_AGENT_ID_TEST) ]; then \
+	     echo 'test_rl_agent_identity: SKIP (stack libraries not built)'; \
+	 else \
+	     ./$(RL_AGENT_ID_TEST); rc=$$?; \
+	     if [ $$rc -eq 77 ]; then \
+	         echo 'test_rl_agent_identity: SKIP (reason above)'; \
+	     elif [ $$rc -ne 0 ]; then \
+	         exit $$rc; \
+	     fi; \
+	 fi
 	./$(RL_31_PIN_TEST)
 	@./$(RL_31_BASE_TEST); rc=$$?; \
 	 if [ $$rc -eq 77 ]; then \

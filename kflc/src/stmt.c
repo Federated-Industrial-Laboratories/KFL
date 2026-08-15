@@ -448,12 +448,13 @@ static void append_child(KflcNode *parent, KflcNode *child)
 
 /* Statement-parse context. `g_rl_world_ctx` is raised by parser.c
  * around `fn world` body parses (kfl_stmt_set_world_ctx); the RL
- * statement keywords (episode / action / on_step / objective) bind as
- * constructs only while it is set, so those words keep their
- * ordinary-identifier reading (and the reserved-future warning) in
- * every other fn body. `g_rl_on_step_depth` tracks nesting inside
- * `on_step` bodies so the statements the per-step body rejects can be
- * diagnosed at parse time. */
+ * statement keywords bind as constructs only while it is set, so those
+ * words keep their ordinary-identifier reading (and the reserved-future
+ * warning) in every other fn body. Inside a `fn world` body three of
+ * them are decided by what follows as well, which
+ * rl_word_is_construct_ below states. `g_rl_on_step_depth` tracks
+ * nesting inside `on_step` bodies so the statements the per-step body
+ * rejects can be diagnosed at parse time. */
 static int g_rl_world_ctx     = 0;
 static int g_rl_on_step_depth = 0;
 
@@ -463,21 +464,77 @@ void kfl_stmt_set_world_ctx(int in_world)
     if (!in_world) g_rl_on_step_depth = 0;
 }
 
-static int is_rl_keyword_(const char *s)
+/* The kind of the token after the current one, without consuming it.
+ * The lexer's whole state is restored, and its diagnostic sink is
+ * detached for the duration, so a speculative look at a character the
+ * lexer would refuse reports nothing and leaves nothing behind. The
+ * arena bytes a speculative identifier takes are not reclaimed, which
+ * costs one word per statement that begins with one of the words
+ * below and buys back the programs the alternative gives up.
+ *
+ * Returns the lexer's own success, which is what tells the end of the
+ * input from a character the lexer will not read: both leave T_EOF in
+ * the token, and the expression sub-parser reads several characters
+ * this lexer refuses, so treating a refusal as an end of line would
+ * make `on_step = 2.0` open a block. */
+static int peek_kind_(Lexer *L, TokenKind *out)
 {
-    return strcmp(s, "episode")   == 0 || strcmp(s, "action") == 0 ||
-           strcmp(s, "on_step")   == 0 || strcmp(s, "objective") == 0 ||
-           strcmp(s, "sensor")    == 0 || strcmp(s, "agent") == 0;
+    Lexer save = *L;
+    Token next;
+    memset(&next, 0, sizeof next);
+    L->diag = NULL;
+    int ok = lex_next(L, &next);
+    *out = next.kind;
+    *L = save;
+    return ok;
 }
 
-/* Statements the `on_step` body rejects: world construction and
- * stepping (the episode machinery owns stepping in these programs),
- * observation, and any nested RL construct. */
-static int is_on_step_forbidden_(const char *s)
+/* Whether a word at statement position inside a `fn world` body is a
+ * Grammar 3.2 construct keyword here, or an ordinary identifier.
+ *
+ * Three of the words are decided by what follows them rather than by
+ * the word alone, so that a Grammar 3.1 program which binds one of
+ * them as a name keeps compiling: `agent alpha` and `sensor rf` open
+ * their blocks, while `agent = 2.0`, `agent(3.0)`, `agent[0]` and a
+ * bare `agent` stay what they were. The discrimination is exact
+ * rather than a heuristic. A name-led block is followed by an
+ * identifier, and no statement form in this language has the shape
+ * `<identifier> <identifier>`: an assignment, an index assignment and
+ * a call all put punctuation there, and juxtaposition is not
+ * application in any expression. A body-led block is followed by the
+ * end of its line, which is the one shape the ordinary reading also
+ * has, and that shape is refused by the grammar these words joined,
+ * so nothing that compiled before is lost to it.
+ *
+ * `episode`, `action` and `objective` are not treated this way. They
+ * were placed on the reserved-name table before the constructs
+ * landed, so a program binding one of them has been warned that the
+ * word was going to be taken. */
+static int rl_word_is_construct_(Lexer *L, const char *s)
+{
+    if (strcmp(s, "episode") == 0 || strcmp(s, "action") == 0 ||
+        strcmp(s, "objective") == 0) {
+        return 1;
+    }
+    TokenKind k = T_EOF;
+    if (strcmp(s, "on_step") == 0) {
+        return peek_kind_(L, &k) && (k == T_NEWLINE || k == T_EOF);
+    }
+    if (strcmp(s, "sensor") == 0 || strcmp(s, "agent") == 0) {
+        return peek_kind_(L, &k) && k == T_IDENT;
+    }
+    return 0;
+}
+
+/* World construction, stepping and observation, which the `on_step`
+ * body rejects because the episode machinery owns them in these
+ * programs. The nested constructs it also rejects are decided by
+ * rl_word_is_construct_ beside this, so a word that is an ordinary
+ * identifier there is not reported as a construct. */
+static int is_on_step_world_stmt_(const char *s)
 {
     return strcmp(s, "astro_body") == 0 || strcmp(s, "step") == 0 ||
-           strcmp(s, "propagate")  == 0 || strcmp(s, "observe") == 0 ||
-           is_rl_keyword_(s);
+           strcmp(s, "propagate")  == 0 || strcmp(s, "observe") == 0;
 }
 
 static const KflcAttr *stmt_find_attr_(const KflcNode *n, const char *key)
@@ -1246,7 +1303,9 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
      * constructs are rejected here so the diagnostic names the
      * offending keyword. */
     if (g_rl_world_ctx && cur->kind == T_IDENT && cur->str) {
-        if (g_rl_on_step_depth > 0 && is_on_step_forbidden_(cur->str)) {
+        int construct = rl_word_is_construct_(L, cur->str);
+        if (g_rl_on_step_depth > 0 &&
+            (construct || is_on_step_world_stmt_(cur->str))) {
             kflc_diag_errorf(diag, line,
                 "on_step: `%s` is not allowed inside an on_step block; "
                 "the per-step body admits only ordinary statements",
@@ -1255,18 +1314,20 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             rl_drain_line_(L, cur, arena, had_error);
             return NULL;
         }
-        if (strcmp(cur->str, "episode") == 0)
-            return parse_episode_(L, cur, arena, diag, had_error);
-        if (strcmp(cur->str, "action") == 0)
-            return parse_action_(L, cur, arena, diag, had_error);
-        if (strcmp(cur->str, "on_step") == 0)
-            return parse_on_step_(L, cur, arena, diag, had_error);
-        if (strcmp(cur->str, "objective") == 0)
-            return parse_objective_(L, cur, arena, diag, had_error);
-        if (strcmp(cur->str, "sensor") == 0)
-            return parse_sensor_(L, cur, arena, diag, had_error);
-        if (strcmp(cur->str, "agent") == 0)
-            return parse_agent_(L, cur, arena, diag, had_error);
+        if (construct) {
+            if (strcmp(cur->str, "episode") == 0)
+                return parse_episode_(L, cur, arena, diag, had_error);
+            if (strcmp(cur->str, "action") == 0)
+                return parse_action_(L, cur, arena, diag, had_error);
+            if (strcmp(cur->str, "on_step") == 0)
+                return parse_on_step_(L, cur, arena, diag, had_error);
+            if (strcmp(cur->str, "objective") == 0)
+                return parse_objective_(L, cur, arena, diag, had_error);
+            if (strcmp(cur->str, "sensor") == 0)
+                return parse_sensor_(L, cur, arena, diag, had_error);
+            if (strcmp(cur->str, "agent") == 0)
+                return parse_agent_(L, cur, arena, diag, had_error);
+        }
     }
 
     /* `return [<expr>]` */

@@ -1285,6 +1285,80 @@ int main(void)
         "end\n",
         1, "on_step: `step` is not allowed inside an on_step block", NULL);
 
+    /* on_step rejects nested constructs, and one case per word rather
+     * than one case: the predicate that decides which words are
+     * constructs there is shared with the one that decides whether a
+     * word opens a block at all, and a fixture holding one word cannot
+     * tell a predicate that lost the others from one that kept them. */
+    expect_("onstepobjective",
+        "form P\n"
+        "fn world w\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        terminated when episode.steps > 10\n"
+        "    end\n"
+        "    on_step\n"
+        "        objective\n"
+        "            reward 1.0\n"
+        "        end\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "on_step: `objective` is not allowed inside an on_step block",
+        NULL);
+
+    expect_("onstepagent",
+        "form P\n"
+        "fn world w\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        terminated when episode.steps > 10\n"
+        "    end\n"
+        "    on_step\n"
+        "        agent pilot\n"
+        "            action thrust box -1.0 1.0\n"
+        "        end\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "on_step: `agent` is not allowed inside an on_step block",
+        NULL);
+
+    expect_("onstepsensor",
+        "form P\n"
+        "fn world w\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        terminated when episode.steps > 10\n"
+        "    end\n"
+        "    on_step\n"
+        "        sensor rf\n"
+        "            noise normal 0.0 1.0\n"
+        "        end\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        1, "on_step: `sensor` is not allowed inside an on_step block",
+        NULL);
+
+    /* And the other half of the same predicate: a word bound as an
+     * ordinary name inside on_step is not a construct there, so the
+     * refusal above does not fire on it. */
+    expect_("onstepnameok",
+        "form P\n"
+        "fn world w\n"
+        "    episode\n"
+        "        control_dt 0.1\n"
+        "        terminated when episode.steps > 10\n"
+        "    end\n"
+        "    on_step\n"
+        "        let agent: double = 1.0\n"
+        "        agent = agent + 1.0\n"
+        "    end\n"
+        "end\n"
+        "end\n",
+        0, NULL, "error");
+
     /* Grammar 3.1 compatibility: a program with its own function
      * named `uniform` (used in an astro_body value and in an
      * ordinary call) is not an RL program and stays clean. */

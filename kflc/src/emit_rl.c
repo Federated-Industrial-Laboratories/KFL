@@ -5584,7 +5584,7 @@ static void rl_emit_env_core_(FILE *out)
 "    uint32_t *steps;             /* transitions in the current episode */\n"
 "    uint8_t  *ended;\n"
 "    double   *obs;               /* n_envs * KFLRL_OBS_TOTAL */\n"
-"    double   *rew;               /* n_envs (agent count 1) */\n"
+"    double   *rew;               /* n_envs * KFLRL_N_AGENTS, env major */\n"
 "    uint32_t *flags;\n"
 "    uint16_t *fault;\n"
 "    double   *dr_vals;           /* n_envs * KFLRL_N_REC */\n"

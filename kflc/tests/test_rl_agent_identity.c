@@ -5,7 +5,7 @@
  * means for a program that declares no `agent` block is this: it is
  * agent count 1, and its published environment spec is the same bytes
  * the compiler produced before the block existed. This gate builds
- * every reinforcement learning programme in the tree twice, once with
+ * every reinforcement learning program in the tree twice, once with
  * the compiler at the base commit and once with today's, drives each
  * artifact through the frozen surface, and compares the two spec blobs
  * byte for byte.
@@ -37,8 +37,8 @@
 /* The commit the `agent` block landed on. */
 #define BASE_COMMIT "932839a"
 
-/* Every reinforcement learning programme in the tree. The count is
- * pinned below so that a programme dropping out of this list fails the
+/* Every reinforcement learning program in the tree. The count is
+ * pinned below so that a program dropping out of this list fails the
  * gate rather than shrinking it in silence. */
 static const char *const RL_PROGRAMS[] = {
     "integration_tests/rl_pointing.kfl",
@@ -61,7 +61,7 @@ static int run_(const char *cmd)
  * is the one thing rl_compile_ fixes. The flags are the gate helper's
  * with the optimisation level dropped: the compiler computes the
  * emitted constants itself, so the C++ optimiser cannot move a byte of
- * the spec, and eight builds of the docking programme at -O2 would buy
+ * the spec, and eight builds of the docking program at -O2 would buy
  * nothing for the wait. */
 static void compile_with_(const char *kflc, const char *kfl_path,
                           const char *out_path)
@@ -173,7 +173,7 @@ int main(void)
 
         if (ag_old != 1 || ag_new != 1) {
             fprintf(stderr, "FAIL %s: agent count %u (base) vs %u (now); "
-                    "a programme with no agent block is agent count 1\n",
+                    "a program with no agent block is agent count 1\n",
                     kfl, ag_old, ag_new);
             exit(1);
         }
@@ -196,11 +196,11 @@ int main(void)
         n_checked++;
     }
 
-    /* The fixture set does not shrink. A programme removed from the
+    /* The fixture set does not shrink. A program removed from the
      * list above would otherwise leave this gate green while measuring
      * less than it was written to measure. */
     ASSERT(n_checked == RL_PROGRAM_COUNT);
-    printf("test_rl_agent_identity: %d programme(s) byte-identical "
+    printf("test_rl_agent_identity: %d program(s) byte-identical "
            "against " BASE_COMMIT ": OK\n", n_checked);
     return 0;
 }
