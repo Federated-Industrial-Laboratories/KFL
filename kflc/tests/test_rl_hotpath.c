@@ -39,6 +39,10 @@
  *      is where an implementation that published over a pipe, or that
  *      remapped or allocated per frame, or that waited on a consumer,
  *      would show up.
+ *   6. The collision pass, over its own fixture: two collidable bodies
+ *      that meet inside every episode, driven at 1, 4 and 16 episodes
+ *      with the counters armed across the steps only. All six counters
+ *      must read zero at every length.
  *
  * Batch path: the batch executable shares the stepping machinery
  * with the serve surface by construction, and test_rl_determinism
@@ -91,16 +95,12 @@
  * of each are declared, since a loop over one unit and a loop over
  * many are not the same loop.
  *
- * The collision pass is NOT covered here, and the reason is recorded
- * rather than left as an omission. Covering it needs a second
- * collidable body, and a program carrying two bodies that each bind
- * an assembly corrupts the heap on the third environment handle
- * created in one process. That was measured with the collision pass
- * compiled out of the same program, so it is neither the sweep nor
- * the resolution, and this gate creates more handles than that limit
- * allows. The obligation stands and is reported unmet; it is not
- * satisfied by a fixture that quietly omits the code it is meant to
- * measure. */
+ * The collision pass needs two collidable bodies, which is one more
+ * vehicle than the fixture above carries, so it has a fixture of its
+ * own below rather than a third body bolted onto this one: this
+ * fixture randomises its craft's position at every reset, and a second
+ * body placed a few metres from a position drawn over two hundred
+ * kilometres could not be made to meet it. */
 static const char *const HP_ASM =
     "assembly hotpath_box\n"
     "    frame x_to_port\n"
@@ -197,6 +197,70 @@ static const char *const HP_KFL =
     "    end\n"
     "end\n"
     "end\n";
+
+/* The collision fixture. Two bodies bind the same assembly, so the
+ * pass has a pair to test and the broadphase, the sweep and the
+ * resolution are all compiled in; a program with one collidable body
+ * compiles the pair loop to nothing and would measure an empty pass.
+ *
+ * The geometry is arranged so a contact happens inside every episode
+ * rather than once at the start of the drive. The two start four
+ * metres apart along the approach and close at 2.5 m/s, so their
+ * centres reach the contact separation of one metre after 1.2 s, step
+ * 12 of a 24-step episode; the resolution then removes the closing
+ * rate and the pair stays in contact for the rest of the episode, and
+ * truncation at the horizon returns them to their declared separation
+ * for the next one. Nothing here is randomised, which is what lets a
+ * fixed separation survive a reset.
+ *
+ * The approach is slow relative to the subdivision on purpose: a
+ * sub-advance is 12.5 ms, in which the pair closes 31 mm against a
+ * contact separation of one metre, so the fixture sits well inside the
+ * separation precondition the pass requires rather than at its edge. */
+static const char *const HP_COLL_ASM =
+    "assembly hotpath_coll\n"
+    "    frame x_to_port\n"
+    "    provenance mass \"calibration shape, not a craft\" computed\n"
+    "    component hull\n"
+    "        mass 1000.0\n"
+    "        at 0 0 0\n"
+    "        collider box 1.0 0.5 0.5\n"
+    "    end\n"
+    "end\n";
+
+static const char *const HP_COLL_KFL =
+    "form RL_HOTPATH_COLL\n"
+    "fn world hpc_world\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24"
+    " ephem_naif_id=399\n"
+    "    astro_body alpha assembly=\"hpcoll.k26asm\" parent=earth"
+    " pos_x=7.0e6 vel_y=7546.0"
+    " quat_w=1.0 omega_x=0.01 omega_y=0.02 omega_z=0.03\n"
+    "    astro_body beta assembly=\"hpcoll.k26asm\" parent=earth"
+    " pos_x=7.0e6 pos_z=-4.0 vel_y=7546.0 vel_z=2.5"
+    " quat_w=1.0 omega_x=-0.02 omega_y=0.01 omega_z=0.02\n"
+    "    episode\n"
+    "        control_dt 0.1\n"
+    "        horizon 24\n"
+    "        substeps 8\n"
+    "    end\n"
+    "    action push box -1.0 1.0 default 0.0\n"
+    "    on_step\n"
+    "        alpha.omega_x = alpha.omega_x + push * 0.0\n"
+    "    end\n"
+    "    observe contact of beta as hit\n"
+    "    observe alpha from earth mode=geometric as trk\n"
+    "    objective\n"
+    "        reward hit_hit + trk_range\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* Three contact channels then five tracking channels; one action. */
+#define HP_COLL_OBS      8
+#define HP_COLL_HIT      0
+#define HP_COLL_ACT      1
+#define HP_COLL_HORIZON 24
 
 /* The interposer, compiled into WORK_DIR/interpose.so at gate time.
  * Allocation calls forward to the glibc-internal entry points;
@@ -512,10 +576,84 @@ static int child_main_(void)
     }
     printf("gate 5: an attached consumer changes neither count: OK\n");
 
+    /* Gate 6: the collision pass inside the measured window.
+     *
+     * The pass runs between the sub-advances, so it is inside the
+     * stepping hot loop and the fixed requirement binds it exactly as
+     * it binds the attitude advance beside it. */
+    {
+        void *cso = rl_dlopen_(WORK_DIR "/hpcoll.rlenv.so");
+        RlSurface cs;
+        rl_resolve_surface_(cso, &cs);
+        ASSERT(cs.abi_version() == K26RL_ABI_VERSION);
+
+        static double cact[HP_ENVS * HP_COLL_ACT];
+        for (int e = 0; e < HP_ENVS * HP_COLL_ACT; e++) cact[e] = 0.0;
+
+        /* Contacts are proved before anything is measured over them.
+         * A window in which the pair never meets would measure the
+         * broadphase rejecting a distant pair and nothing else, and
+         * would read zero for an implementation whose resolution
+         * allocated on every contact. The proof drive is unarmed, from
+         * its own handle, over the same seed and the same actions as
+         * the armed drives below. */
+        {
+            K26RlEnv *env = NULL;
+            static double cobs[HP_ENVS * HP_COLL_OBS];
+            int contacts = 0, first = -1;
+
+            ASSERT(cs.create(42, HP_ENVS, &env) == K26RL_OK);
+            ASSERT(cs.reset(env) == K26RL_OK);
+            for (int t = 0; t < HP_STEPS; t++) {
+                ASSERT(cs.step(env, cact) == K26RL_OK);
+                ASSERT(cs.obs(env, cobs) == K26RL_OK);
+                if (cobs[HP_COLL_HIT] > 0.5) {
+                    contacts++;
+                    if (first < 0) first = t + 1;
+                }
+            }
+            printf("gate 6: fixture check: %d of %d steps carried a"
+                   " contact, first at step %d\n",
+                   contacts, HP_STEPS, first);
+            ASSERT(contacts > 0);
+            ASSERT(first > 0);
+            cs.destroy(env);
+        }
+
+        static const int ceps[] = { 1, 4, 16 };
+        for (int k = 0; k < 3; k++) {
+            K26RlEnv *env = NULL;
+            int steps = ceps[k] * HP_COLL_HORIZON;
+
+            ASSERT(cs.create(42, HP_ENVS, &env) == K26RL_OK);
+            ASSERT(cs.reset(env) == K26RL_OK);
+            counters_clear_();
+            *armed_ = 1;
+            for (int t = 0; t < steps; t++) {
+                ASSERT(cs.step(env, cact) == K26RL_OK);
+            }
+            *armed_ = 0;
+
+            unsigned long a = alloc_total_(), w = write_total_();
+            printf("gate 6: %2d episode(s), %3d steps x %d envs,"
+                   " two collidable bodies: alloc-family %lu"
+                   " (malloc %lu calloc %lu realloc %lu free %lu),"
+                   " write-family %lu\n",
+                   ceps[k], steps, HP_ENVS, a, counts_[0], counts_[1],
+                   counts_[2], counts_[3], w);
+            ASSERT(a == 0);
+            ASSERT(w == 0);
+            cs.destroy(env);
+        }
+        dlclose(cso);
+    }
+    printf("gate 6: the collision pass allocates nothing and writes"
+           " nothing: OK\n");
+
     dlclose(so);
     fclose(fnull);
     close(devnull);
-    printf("test_rl_hotpath: 5 gates passed\n");
+    printf("test_rl_hotpath: 6 gates passed\n");
     return 0;
 }
 
@@ -532,6 +670,11 @@ int main(void)
     rl_write_file_(WORK_DIR "/hp.kfl", HP_KFL);
     rl_compile_(WORK_DIR "/hp.kfl", WORK_DIR "/hp", WORK_DIR);
     ASSERT(rl_file_exists_(WORK_DIR "/hp.rlenv.so"));
+
+    rl_write_file_(WORK_DIR "/hpcoll.k26asm", HP_COLL_ASM);
+    rl_write_file_(WORK_DIR "/hpcoll.kfl", HP_COLL_KFL);
+    rl_compile_(WORK_DIR "/hpcoll.kfl", WORK_DIR "/hpcoll", WORK_DIR);
+    ASSERT(rl_file_exists_(WORK_DIR "/hpcoll.rlenv.so"));
 
     rl_write_file_(WORK_DIR "/interpose.c", HP_INTERPOSE_C);
     rl_run_or_die_("cc -O2 -fPIC -shared -o " WORK_DIR "/interpose.so "
