@@ -18,10 +18,15 @@
  * refusals carry precise diagnostics.
  *
  * Purity gates: an expression that has to reproduce on replay is
- * refused when it reaches a builtin that is not marked pure, in a
- * body state assignment and in all three objective-side positions
- * (`reward`, `terminal`, `terminated when`), directly or through a
- * user fn, while pure builtins stay admitted in every one of them.
+ * refused when it reaches a builtin that is not marked pure. The
+ * impure builtin these use is `astro_world_snapshot_load`, which
+ * reads a file, chosen because the reason it is impure is legible
+ * from its name; the read-only world queries are declared pure by
+ * their manifest and are admitted here, which is the difference these
+ * gates measure. The refusal is asserted in a body state assignment
+ * and in all three objective-side positions (`reward`, `terminal`,
+ * `terminated when`), directly or through a user fn, while pure
+ * builtins stay admitted in every one of them.
  *
  * Mode gates: the two refusals that guard published bytes, an
  * over-long channel name and a body named `episode`, are asserted on
@@ -1649,14 +1654,14 @@ int main(void)
      * directly or through a fn. */
     expect_("state_impure_builtin",
         STATE_WORLD("",
-            "        craft.vel_x = a + astro_world_body_count(world)\n",
+            "        craft.vel_x = a + astro_world_snapshot_load(world)\n",
             "0.0"),
         1, "is not a pure builtin", NULL);
 
     expect_("state_impure_through_fn",
         "form RL_STATE_P\n"
         "fn double reach(world w)\n"
-        "    return astro_world_body_count(w)\n"
+        "    return astro_world_snapshot_load(w)\n"
         "end\n"
         "fn world w\n"
         "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
@@ -1708,19 +1713,19 @@ int main(void)
 
     expect_("reward_impure_builtin",
         OBJ_WORLD("",
-            "        reward 0.0 - astro_world_body_count(trk_range)\n"),
+            "        reward 0.0 - astro_world_snapshot_load(trk_range)\n"),
         1, "the `reward` expression must be side-effect free", NULL);
 
     expect_("terminal_impure_builtin",
         OBJ_WORLD("",
             "        reward 0.0\n"
-            "        terminal astro_world_body_count(trk_range)\n"),
+            "        terminal astro_world_snapshot_load(trk_range)\n"),
         1, "the `terminal` expression must be side-effect free", NULL);
 
     expect_("terminated_when_impure_builtin",
         OBJ_WORLD(
             "        terminated when"
-            " astro_world_body_count(trk_range) > 0.0\n",
+            " astro_world_snapshot_load(trk_range) > 0.0\n",
             "        reward 0.0\n"),
         1, "the `terminated when` expression must be side-effect free",
         NULL);
@@ -1730,7 +1735,7 @@ int main(void)
     expect_("reward_impure_through_fn",
         "form RL_OBJ_P\n"
         "    fn double reach(double x)\n"
-        "        return astro_world_body_count(x)\n"
+        "        return astro_world_snapshot_load(x)\n"
         "    end\n"
         "fn world w\n"
         "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"

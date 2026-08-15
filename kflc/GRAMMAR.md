@@ -513,24 +513,45 @@ position key means metres from the world origin, the same meaning it
 carries as an `astro_body` attribute and as a `reset` target; the
 velocity keys are metres per second.
 
-**Purity.** Every expression the block evaluates must be side-effect free,
-in every position it can occupy: an assignment, a `let` or `const`
-initialiser, an expression statement, an `if` or `while` condition, an
-argument to another call, and anything inside a `for_each` body. The block
-runs once per control step of every environment, so a call that allocates,
-performs input or output, or changes the world is a call the stepping path
-cannot carry, and an episode replayed from its recorded inputs would not
-reproduce it.
+**What the block may reach.** The block runs once per control step of
+every environment, so nothing it reaches may allocate, perform input or
+output, or change the world. The rule covers everything the block reaches,
+not the assigned expression alone, and it follows calls into `fn` bodies
+to any depth: a statement is judged where it runs, not where it is
+written.
 
-A side-effect-free expression may call the scalar maths built-ins and the
-string helpers that only read their arguments (`strlen`, `streq`,
-`starts_with`, `ends_with`). `concat`, which allocates, is rejected, and so
-is every library built-in whose manifest did not declare it `pure`,
-whether it is called directly or through a `fn`. The refusal names the
-position, the line and the built-in it found. Because an initialiser is a
-position like any other, a name bound to a rejected call is rejected where
-it is bound, and no later read of that name can carry the call past the
-check.
+Every expression the block evaluates must be side-effect free, in every
+position it can occupy: an assignment, a `let` or `const` initialiser, an
+expression statement, an `if` or `while` condition, an index expression, a
+returned expression, an argument to another call, and anything nested
+inside a block. A side-effect-free expression may call the scalar maths
+built-ins, the string helpers that only read their arguments (`strlen`,
+`streq`, `starts_with`, `ends_with`), and any library built-in whose
+manifest declares it `pure`. `concat` is rejected, not because it
+allocates but because its result is a pointer into a per-callsite buffer
+that the next call at that site overwrites, so a second evaluation
+invalidates the first. A built-in whose manifest declares nothing is
+rejected for the same practical reason: nothing has established that it
+can be evaluated twice.
+
+These statements are rejected wherever the block reaches them, including
+inside a `fn` it calls: `astro_body`, which adds a body to the world;
+`step` and `propagate`, which advance it; `observe`, which runs its
+observer pipeline; and `print`, because the stepping path performs no
+input or output.
+
+A `vector` or `matrix` binding is rejected in the block, and so is a call
+to a `fn` that returns one, because the storage behind those values is
+heap allocated. A call the compiler can classify as neither a built-in nor
+a `fn` in the same form is rejected too, since some of the forms it lowers
+itself allocate.
+
+The refusal names the position, the line, the thing it found, and the
+chain of functions it went through to reach it. Because an initialiser is
+a position like any other, a name bound to a rejected call is rejected
+where it is bound, and no later read of that name can carry the call past
+the check. The compiler follows a bounded number of nested calls; a chain
+deeper than that is rejected rather than assumed clean.
 
 Outside `on_step` the dotted form is not a name at all, and an objective or
 termination expression that names body state is told to read it through an

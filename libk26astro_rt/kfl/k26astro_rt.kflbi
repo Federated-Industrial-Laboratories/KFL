@@ -18,8 +18,15 @@ opaque  rng                            K26CRng *
 builtin astro_world_open               k26astro_world_create               2
 builtin astro_world_close              k26astro_world_destroy              1
 builtin astro_world_add_body           k26astro_world_add_body             2
-builtin astro_world_body_count         k26astro_world_body_count           1
-builtin astro_world_find_body          k26astro_world_find_body            2
+# The two read-only queries, declared pure: each reads a const world,
+# writes nothing, allocates nothing, performs no I/O, and returns an
+# int by value rather than a pointer a later call can invalidate. That
+# is what admits them to an expression the runtime has to re-evaluate,
+# the per-step block included. Every other line here is undeclared and
+# therefore impure, which is the safe answer for a surface nobody has
+# proved.
+builtin astro_world_body_count         k26astro_world_body_count           1 pure
+builtin astro_world_find_body          k26astro_world_find_body            2 pure
 builtin astro_world_step               k26astro_world_step                 2
 builtin astro_world_observe            k26astro_world_observe              5
 builtin astro_world_snapshot_save      k26astro_world_snapshot_save        2

@@ -143,12 +143,15 @@ RL_GRAMMAR_TEST = tests/test_rl_grammar
 $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS) -lm
 
-# What a stepping path may reach: the registry's purity property and
-# one program per expression position inside the per-step block. Links
-# libkflc.a for the registry half and drives the built kflc for the
-# position half.
+# What a stepping path may reach: the registry's purity property, one
+# program per expression position inside the per-step block, and the
+# statements the block may not reach through a call. Links libkflc.a
+# for the registry half and drives the built kflc for the rest. The
+# refusal arms need no sibling archives; the positive arms use them to
+# build a real artifact and say so when they are absent, so the gate
+# runs everywhere and reports what it could not check.
 RL_PURITY_TEST = tests/test_rl_purity
-$(RL_PURITY_TEST): tests/test_rl_purity.c $(LIB) $(RL_LIB) $(BIN)
+$(RL_PURITY_TEST): tests/test_rl_purity.c tests/rl_gate_util.h $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS) -lm
 
 # Gate for the Grammar 3.2 dual-mode artifact: kflc -o on an RL

@@ -42,10 +42,15 @@
  * allocation. Callers that must be able to re-evaluate an expression
  * and get the same program back consult it through
  * kflc_builtin_is_pure, and so does every expression position on a
- * stepping path. Only `concat` is impure in the static table, because
- * it allocates its result; in the dynamic registry the property is
- * whatever the registering library declared, and an entry that
- * declared nothing is impure. */
+ * stepping path. Only `concat` is impure in the static table, and not
+ * because it allocates: k26_str_concat writes into a caller-supplied
+ * buffer, and the emitter below supplies a per-callsite
+ * `static char[256]` and returns a pointer to it, so the next
+ * evaluation at that callsite overwrites the previous result. A value
+ * the next call invalidates cannot be re-evaluated, which is what the
+ * flag is about. In the dynamic registry the property is whatever the
+ * registering library declared, and an entry that declared nothing is
+ * impure. */
 typedef struct {
     const char *kfl_name;
     const char *cxx_name;

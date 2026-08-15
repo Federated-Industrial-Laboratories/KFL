@@ -3548,28 +3548,51 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
     return 0;
 }
 
-/* ---- Statements and calls the stepping path forbids ----------------- */
+/* ---- What a stepping path may reach ---------------------------------- */
 
-/* A sweep follows calls into user fn bodies, so a forbidden statement
- * cannot reach the stepping path one indirection away. Two sweeps
- * share the walk: RL_SWEEP_PRINT for I/O, RL_SWEEP_IMPURE for a call
- * to a builtin that is not marked pure. */
-#define RL_SWEEP_PRINT   0
-#define RL_SWEEP_IMPURE  1
+/* One sweep answers the whole question, because reaching is reaching
+ * whether the last hop is an expression or a statement. From an
+ * expression that runs on the stepping path it follows operands, call
+ * arguments, and calls into user function bodies to any depth; inside
+ * those bodies it judges every statement as well as every expression.
+ * A forbidden statement one indirection away is the same defect as a
+ * forbidden call written in place, and an earlier form of this walk
+ * judged expressions only, so `astro_body` inside a called function
+ * added a body to the world on every step of every environment and
+ * checked clean.
+ *
+ * Three things end a sweep, and each is reported with what was
+ * reached and the chain of functions that got there:
+ *   - a builtin the registry does not declare pure;
+ *   - a statement or binding the stepping path may not carry;
+ *   - a call the compiler cannot classify at all.
+ *
+ * The walk fails closed on all three counts. A call name that is
+ * neither a registered builtin nor a user function is a form the
+ * compiler lowers itself, and some of those allocate, so it is
+ * refused rather than passed over. A statement kind that is neither
+ * admitted nor named below is refused for the same reason. And a
+ * chain deeper than the walk can follow is refused rather than
+ * assumed pure, because a limit that returns "clean" when it runs out
+ * of room is a limit an author can step over. */
+
 #define RL_SWEEP_MAX_FNS 64
 
 typedef struct {
     const KflcNode *form;
-    int             kind;              /* RL_SWEEP_* */
-    const char     *found;             /* offending name, when found */
-    const char     *via;               /* user fn it was reached through */
-    int             line;              /* line of the offending statement */
-    const char     *seen[RL_SWEEP_MAX_FNS];
+    const char     *found;      /* the name that ended the sweep */
+    const char     *why;        /* why it may not be reached; NULL for
+                                 * an undeclared builtin, whose wording
+                                 * is fixed */
+    int             depth;      /* the sweep ran out of room */
+    int             line;       /* line of the offending statement */
+    const char     *chain[RL_SWEEP_MAX_FNS];   /* fns entered, in order */
+    int             n_chain;
+    const char     *seen[RL_SWEEP_MAX_FNS];    /* fns already walked */
     int             n_seen;
 } RlSweep;
 
-static int rl_sweep_stmts_(RlSweep *sw, const KflcNode *stmts,
-                           const char *via);
+static int rl_sweep_stmts_(RlSweep *sw, const KflcNode *stmts);
 
 static const KflcNode *rl_find_user_fn_(const KflcNode *form,
                                         const char *name)
@@ -3583,144 +3606,328 @@ static const KflcNode *rl_find_user_fn_(const KflcNode *form,
     return NULL;
 }
 
-static int rl_sweep_expr_(RlSweep *sw, const KflcExpr *e, const char *via)
+/* A vector or matrix value owns heap storage: every way of making one
+ * (a literal, `zeros`, `ones`, `linspace`, `arange`) lowers to
+ * k26c_vec_alloc, k26c_mat_alloc or k26c_vec_from, and all three
+ * allocate. The type is therefore judged rather than the constructor,
+ * so no list of constructor names has to be kept in step with the
+ * emitter's. */
+static int rl_type_allocates_(KflcType t)
+{
+    return t == KFLT_VECTOR || t == KFLT_MATRIX;
+}
+
+/* Statements the stepping path may carry, and the reason each of the
+ * rest may not. The admissible set is closed: a kind that is neither
+ * admitted here nor named with a reason is refused, because the
+ * compiler cannot show it is free of effects and admitting the
+ * unfamiliar by default is exactly how this surface was left open.
+ *
+ * A statement form whose effect is declared and bounded joins the
+ * admitted group, which is an addition to this rule rather than an
+ * exception to it. Returns NULL when `s` is admissible, otherwise the
+ * reason, with *what set to the name to report. */
+static const char *rl_step_stmt_why_(const KflcNode *s, const char **what)
+{
+    /* A binding whose storage is heap allocated is refused whatever
+     * its initialiser, since the allocation is the binding's. */
+    if ((s->kind == KFLN_STMT_LET || s->kind == KFLN_STMT_CONST ||
+         s->kind == KFLN_FN_ARG) && rl_type_allocates_(s->type)) {
+        *what = s->name ? s->name : "?";
+        return "a vector or matrix binding owns heap storage, and the "
+               "stepping path allocates nothing";
+    }
+
+    switch (s->kind) {
+    /* Pure computation, control flow, and the function plumbing that
+     * carries them. */
+    case KFLN_STMT_LET:
+    case KFLN_STMT_CONST:
+    case KFLN_STMT_ASSIGN:
+    case KFLN_STMT_INDEX_ASSIGN:
+    case KFLN_STMT_LVALUE_ASSIGN:
+    case KFLN_STMT_RETURN:
+    case KFLN_STMT_EXPR:
+    case KFLN_STMT_IF:
+    case KFLN_STMT_WHILE:
+    case KFLN_STMT_FOR_EACH:
+    case KFLN_FN_ARG:
+        return NULL;
+
+    case KFLN_STMT_PRINT:
+        *what = "print";
+        return "the stepping path performs no I/O";
+    case KFLN_STMT_ASTRO_BODY:
+        *what = "astro_body";
+        return "it adds a body to the world, which allocates and can "
+               "move every body already in it";
+    case KFLN_STMT_STEP:
+        *what = "step";
+        return "it advances the world, and the episode machinery owns "
+               "stepping in these programs";
+    case KFLN_STMT_PROPAGATE:
+        *what = "propagate";
+        return "it advances a body, and the episode machinery owns "
+               "stepping in these programs";
+    case KFLN_STMT_OBSERVE:
+        *what = "observe";
+        return "it runs the world's observer pipeline and sets the "
+               "world's observer mode";
+    case KFLN_STMT_SERIES:
+        *what = "series";
+        return "it packages plot data, which is not something a step "
+               "produces";
+    case KFLN_ALLOCATOR_BIND:
+        *what = "allocator";
+        return "it binds an arena, and the stepping path allocates "
+               "nothing";
+    case KFLN_STMT_EPISODE:
+    case KFLN_STMT_EPISODE_RESET:
+    case KFLN_STMT_ACTION:
+    case KFLN_STMT_ON_STEP:
+    case KFLN_STMT_OBJECTIVE:
+    case KFLN_STMT_SENSOR:
+    case KFLN_STMT_SENSOR_TERM:
+        *what = "a reinforcement learning construct";
+        return "these are declarations of the environment, not acts of "
+               "a step";
+    default:
+        *what = "this statement";
+        return "the compiler cannot show that it is free of effects";
+    }
+}
+
+static int rl_sweep_expr_(RlSweep *sw, const KflcExpr *e)
 {
     if (!e) return 0;
     switch (e->kind) {
     case KFLE_UNARY:
-        return rl_sweep_expr_(sw, e->u.un.operand, via);
+        return rl_sweep_expr_(sw, e->u.un.operand);
     case KFLE_BINARY:
-        return rl_sweep_expr_(sw, e->u.bin.lhs, via) ||
-               rl_sweep_expr_(sw, e->u.bin.rhs, via);
+        return rl_sweep_expr_(sw, e->u.bin.lhs) ||
+               rl_sweep_expr_(sw, e->u.bin.rhs);
     case KFLE_INDEX:
-        return rl_sweep_expr_(sw, e->u.index.base, via) ||
-               rl_sweep_expr_(sw, e->u.index.idx, via);
+        return rl_sweep_expr_(sw, e->u.index.base) ||
+               rl_sweep_expr_(sw, e->u.index.idx);
     case KFLE_VEC_LIT:
+        /* The elements are swept even though a literal in a scalar
+         * context is already an error, so that the walk does not
+         * depend on another pass having run first. */
         for (int i = 0; i < e->u.vec.n_elems; i++) {
-            if (rl_sweep_expr_(sw, e->u.vec.elems[i], via)) return 1;
+            if (rl_sweep_expr_(sw, e->u.vec.elems[i])) return 1;
         }
         return 0;
     case KFLE_CALL: {
         for (int i = 0; i < e->u.call.n_args; i++) {
-            if (rl_sweep_expr_(sw, e->u.call.args[i], via)) return 1;
+            if (rl_sweep_expr_(sw, e->u.call.args[i])) return 1;
         }
         const char *nm = e->u.call.name;
         if (!nm) return 0;
-        if (sw->kind == RL_SWEEP_IMPURE && kflc_builtin_known(nm) &&
-            !kflc_builtin_is_pure(nm)) {
+        if (kflc_builtin_known(nm)) {
+            if (kflc_builtin_is_pure(nm)) return 0;
             sw->found = nm;
-            sw->via   = via;
+            sw->why   = NULL;
             return 1;
         }
         const KflcNode *fn = rl_find_user_fn_(sw->form, nm);
-        if (!fn) return 0;
-        for (int i = 0; i < sw->n_seen; i++) {
-            if (strcmp(sw->seen[i], nm) == 0) return 0;   /* recursion */
+        if (!fn) {
+            /* Neither a builtin nor a user function: a form the
+             * compiler lowers itself, such as the vector builders,
+             * which allocate. Nothing here can show it is free of
+             * effects, so it is refused by name. */
+            sw->found = nm;
+            sw->why   = "the compiler cannot show that this call is free "
+                        "of effects, and the forms it lowers itself "
+                        "include ones that allocate";
+            return 1;
         }
-        if (sw->n_seen >= RL_SWEEP_MAX_FNS) return 0;
-        sw->seen[sw->n_seen++] = nm;
-        return rl_sweep_stmts_(sw, fn->children, via ? via : nm);
+        for (int i = 0; i < sw->n_seen; i++) {
+            if (strcmp(sw->seen[i], nm) == 0) return 0;   /* walked */
+        }
+        if (sw->n_seen >= RL_SWEEP_MAX_FNS ||
+            sw->n_chain >= RL_SWEEP_MAX_FNS) {
+            sw->found = nm;
+            sw->depth = 1;
+            return 1;
+        }
+        if (rl_type_allocates_(fn->type)) {
+            sw->found = nm;
+            sw->why   = "it returns a vector or matrix, which owns heap "
+                        "storage, and the stepping path allocates nothing";
+            return 1;
+        }
+        sw->seen[sw->n_seen++]   = nm;
+        sw->chain[sw->n_chain++] = nm;
+        if (rl_sweep_stmts_(sw, fn->children)) return 1;
+        sw->n_chain--;
+        return 0;
     }
     default:
         return 0;
     }
 }
 
-static int rl_sweep_stmts_(RlSweep *sw, const KflcNode *stmts,
-                           const char *via)
+static int rl_sweep_stmts_(RlSweep *sw, const KflcNode *stmts)
 {
     for (const KflcNode *s = stmts; s; s = s->next) {
-        if (sw->kind == RL_SWEEP_PRINT && s->kind == KFLN_STMT_PRINT) {
-            sw->found = "print";
-            sw->via   = via;
-            sw->line  = s->line;
+        const char *what = NULL;
+        const char *why  = rl_step_stmt_why_(s, &what);
+        sw->line = s->line;
+        if (why) {
+            sw->found = what;
+            sw->why   = why;
             return 1;
         }
-        sw->line = s->line;
-        if (rl_sweep_expr_(sw, s->expr, via)) return 1;
-        if (rl_sweep_expr_(sw, s->expr2, via)) return 1;
-        if (rl_sweep_stmts_(sw, s->children, via)) return 1;
-        if (rl_sweep_stmts_(sw, s->else_children, via)) return 1;
+        if (rl_sweep_expr_(sw, s->expr)) return 1;
+        if (rl_sweep_expr_(sw, s->expr2)) return 1;
+        if (rl_sweep_stmts_(sw, s->children)) return 1;
+        if (rl_sweep_stmts_(sw, s->else_children)) return 1;
     }
     return 0;
 }
 
-static void rl_sweep_init_(RlSweep *sw, const KflcNode *form, int kind)
+static void rl_sweep_init_(RlSweep *sw, const KflcNode *form)
 {
     memset(sw, 0, sizeof *sw);
     sw->form = form;
-    sw->kind = kind;
 }
 
-/* The stepping hot path performs no I/O; print anywhere the on_step
- * body reaches, nested blocks and called fns included, is rejected. */
-static int rl_reject_print_(const KflcNode *form, const KflcNode *stmts,
-                            KflcDiag *diag)
+/* "`fn a`" for one, "`fn a` -> `fn b`" for a chain, so a reader is
+ * told the whole route rather than its first step. */
+static void rl_sweep_chain_(const RlSweep *sw, char *buf, size_t n)
 {
-    RlSweep sw;
-    rl_sweep_init_(&sw, form, RL_SWEEP_PRINT);
-    if (!rl_sweep_stmts_(&sw, stmts, NULL)) return 0;
-    if (sw.via) {
-        kflc_diag_errorf(diag, sw.line,
-            "print is not allowed in on_step: the stepping hot path "
-            "performs no I/O, and `fn %s` called from here prints",
-            sw.via);
-    } else {
-        kflc_diag_errorf(diag, sw.line,
-            "print is not allowed in on_step: the stepping hot "
-            "path performs no I/O");
+    size_t off = 0;
+    buf[0] = '\0';
+    for (int i = 0; i < sw->n_chain && off + 1 < n; i++) {
+        int k = snprintf(buf + off, n - off, "%s`fn %s`",
+                         i ? " -> " : "", sw->chain[i]);
+        if (k < 0 || (size_t)k >= n - off) break;
+        off += (size_t)k;
     }
-    return 1;
+}
+
+/* Reports the finding `sw` holds. `what` names the position and
+ * completes the sentence "<what> must be side-effect free"; `line` is
+ * the position's own line, used when the reach ended there rather
+ * than inside a called function. */
+static void rl_sweep_report_(const RlSweep *sw, const char *what, int line,
+                             KflcDiag *diag)
+{
+    char chain[512];
+    rl_sweep_chain_(sw, chain, sizeof chain);
+    /* Always reported at the position's own line, which is the line
+     * the author edits; when the reach ended inside a called function
+     * the message carries that function's line as well, so neither
+     * end of the route has to be hunted for. */
+    int at = line;
+
+    if (sw->depth) {
+        kflc_diag_errorf(diag, at,
+            "%s must be side-effect free, and the compiler follows at "
+            "most %d nested user functions from a position; this one "
+            "goes deeper at `fn %s`, so nothing here can show it is, "
+            "and it is refused rather than assumed",
+            what, RL_SWEEP_MAX_FNS, sw->found);
+        return;
+    }
+
+    if (sw->n_chain == 0) {
+        if (sw->why) {
+            kflc_diag_errorf(diag, at,
+                "%s must be side-effect free, and `%s` is not allowed on "
+                "the stepping path: %s", what, sw->found, sw->why);
+        } else {
+            kflc_diag_errorf(diag, at,
+                "%s must be side-effect free, and `%s` is not a pure "
+                "builtin", what, sw->found);
+        }
+        return;
+    }
+
+    if (sw->n_chain == 1) {
+        if (sw->why) {
+            kflc_diag_errorf(diag, at,
+                "%s must be side-effect free, and %s called here reaches "
+                "`%s` at line %d, which is not allowed on the stepping "
+                "path: %s", what, chain, sw->found, sw->line, sw->why);
+        } else {
+            kflc_diag_errorf(diag, at,
+                "%s must be side-effect free, and %s called here reaches "
+                "`%s` at line %d, which is not pure",
+                what, chain, sw->found, sw->line);
+        }
+        return;
+    }
+
+    if (sw->why) {
+        kflc_diag_errorf(diag, at,
+            "%s must be side-effect free, and the call chain %s from here "
+            "reaches `%s` at line %d, which is not allowed on the stepping "
+            "path: %s", what, chain, sw->found, sw->line, sw->why);
+    } else {
+        kflc_diag_errorf(diag, at,
+            "%s must be side-effect free, and the call chain %s from here "
+            "reaches `%s` at line %d, which is not pure",
+            what, chain, sw->found, sw->line);
+    }
 }
 
 /* An expression the runtime has to be able to re-evaluate is refused
- * when it reaches a builtin that is not marked pure, calls into user
- * fns followed. `what` names the position and completes the sentence
- * "<what> must be side-effect free". Every position that replays,
- * whether by re-simulation or by being evaluated once per step, uses
- * this: an impure call there would make a recorded episode
- * irreproducible from its recorded inputs. */
+ * when it reaches anything the stepping path may not carry, calls into
+ * user fns followed to any depth. `what` names the position and
+ * completes the sentence "<what> must be side-effect free". Every
+ * position that replays, whether by re-simulation or by being
+ * evaluated once per step, uses this: a reach there would make a
+ * recorded episode irreproducible from its recorded inputs. */
 static int rl_reject_impure_(const KflcNode *form, const KflcExpr *e,
                              const char *what, int line, KflcDiag *diag)
 {
     RlSweep sw;
-    rl_sweep_init_(&sw, form, RL_SWEEP_IMPURE);
-    if (!rl_sweep_expr_(&sw, e, NULL)) return 0;
-    if (sw.via) {
-        kflc_diag_errorf(diag, line,
-            "%s must be side-effect free, and `fn %s` called here "
-            "reaches `%s`, which is not pure", what, sw.via, sw.found);
+    rl_sweep_init_(&sw, form);
+    if (!rl_sweep_expr_(&sw, e)) return 0;
+    rl_sweep_report_(&sw, what, line, diag);
+    return 1;
+}
+
+/* A statement written directly in the block, judged by the same rule
+ * that judges one reached through a call. `block` names the enclosing
+ * block for the diagnostic, or is NULL at the top of the body. */
+static int rl_reject_stmt_(const KflcNode *s, const char *block,
+                           KflcDiag *diag)
+{
+    const char *what = NULL;
+    const char *why  = rl_step_stmt_why_(s, &what);
+    if (!why) return 0;
+    if (block) {
+        kflc_diag_errorf(diag, s->line,
+            "on_step: `%s` is not allowed on the stepping path in %s: %s",
+            what, block, why);
     } else {
-        kflc_diag_errorf(diag, line,
-            "%s must be side-effect free, and `%s` is not a pure "
-            "builtin", what, sw.found);
+        kflc_diag_errorf(diag, s->line,
+            "on_step: `%s` is not allowed on the stepping path: %s",
+            what, why);
     }
     return 1;
 }
 
-/* ---- What a stepping path may reach ---------------------------------- */
+/* ---- The positions inside the per-step block ------------------------- */
 
-/* Every expression the on_step body evaluates is side-effect free, in
- * every position it can occupy. The block runs once per external step
- * of every environment, so a call to an impure builtin anywhere in it
- * puts an allocation, an input or output, or a world mutation on the
- * path whose contract is that it does none of those, and a recorded
- * episode replayed from its recorded inputs would not reproduce it.
- * Enforcing this on the assigned expression alone left a `let`, a
- * bare expression statement and a condition able to reach the same
- * builtins, so the rule is a property of the block.
+/* The rule above, applied to every position an expression can occupy
+ * in the on_step body: assignments, initialisers, expression
+ * statements, conditions, index expressions, attribute expressions,
+ * and anything nested inside a block. Enforcing it on the assigned
+ * expression alone left a `let`, a bare expression statement and a
+ * condition able to reach the same builtins, so it is a property of
+ * the block rather than of one statement form in it.
  *
  * Following an initialiser is what follows the dataflow into a
- * binding: a name bound to an impure call is refused where it is
+ * binding: a name bound to a rejected call is refused where it is
  * bound, so no later read of it has to be traced.
  *
- * The rule is over expressions rather than over statements, and the
- * distinction is load bearing. A statement form whose effect is
- * declared and bounded is admissible in the block on the strength of
- * that declaration; what it may not do is evaluate an expression that
- * reaches an undeclared one. Such a form joins the position table
- * below by naming the expression slots it evaluates, which is an
- * addition to this rule rather than an exception to it.
+ * Each statement is judged as a statement first and then for the
+ * expressions it evaluates, which is the same order the walk above
+ * uses inside a called function, so a form written here and a form
+ * reached through a call get the same answer.
  *
  * Positions are named in the diagnostic because they fail in
  * different-looking ways, and a reader told only that the block is
@@ -3788,19 +3995,25 @@ static void rl_step_position_(char *buf, size_t n, const KflcNode *s,
     else        snprintf(buf, n, "on_step: %s", base);
 }
 
-/* Walks the block, refusing the first impure reach it finds. Every
- * expression slot a statement carries is checked, its attribute
- * expressions included, and nested blocks are walked with the name of
- * the block they sit in. Arguments need no case of their own: the
- * sweep this calls descends through a call's arguments before it
- * judges the call, so an impure builtin passed to a pure one is found
- * wherever the outer call sits. */
+/* Walks the block, refusing the first reach it finds. Each statement
+ * is judged as a statement, then both of its expression slots are
+ * judged with the name of the position each occupies, and nested
+ * blocks are walked with the name of the block they sit in.
+ *
+ * Arguments need no case of their own: the sweep this calls descends
+ * through a call's arguments before it judges the call, so an impure
+ * builtin passed to a pure one is found wherever the outer call sits.
+ * Attributes need none either: no statement kind the stepping path
+ * admits carries an attribute expression, and the closed admissible
+ * list above is what keeps that true, since a kind that is not
+ * admitted is refused before its attributes are reached. */
 static int rl_reject_impure_block_(const KflcNode *form,
                                    const KflcNode *stmts,
                                    const char *inside, KflcDiag *diag)
 {
     for (const KflcNode *s = stmts; s; s = s->next) {
         char pos[RL_STEP_POS_MAX];
+        if (rl_reject_stmt_(s, inside, diag)) return 1;
         if (s->expr) {
             rl_step_position_(pos, sizeof pos, s, 0, inside);
             if (rl_reject_impure_(form, s->expr, pos, s->line, diag)) return 1;
@@ -3810,17 +4023,6 @@ static int rl_reject_impure_block_(const KflcNode *form,
             if (rl_reject_impure_(form, s->expr2, pos, s->line, diag)) {
                 return 1;
             }
-        }
-        for (const KflcAttr *a = s->attrs; a; a = a->next) {
-            if (!a->expr) continue;
-            if (inside) {
-                snprintf(pos, sizeof pos, "on_step: the `%s` attribute in %s",
-                         a->name ? a->name : "?", inside);
-            } else {
-                snprintf(pos, sizeof pos, "on_step: the `%s` attribute",
-                         a->name ? a->name : "?");
-            }
-            if (rl_reject_impure_(form, a->expr, pos, a->line, diag)) return 1;
         }
         const char *body = rl_step_block_(s, inside);
         if (rl_reject_impure_block_(form, s->children, body, diag)) return 1;
@@ -4245,13 +4447,11 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
     int n_fns = n_user_fns;
 
     if (m->on_step) {
-        /* The stepping hot path performs no I/O, so a print here, or
-         * in anything this body calls, would falsify the artifact's
-         * contract. */
-        if (rl_reject_print_(form, m->on_step->children, diag)) return 1;
         /* Before the rewrite below, so that the positions the
          * diagnostic names are the ones the source wrote rather than
-         * the accessor calls they lower to. */
+         * the accessor calls they lower to: after it a body state
+         * assignment is an expression statement calling an accessor,
+         * and the diagnostic would name that instead of the source. */
         if (rl_reject_impure_block_(form, m->on_step->children, NULL,
                                     diag)) {
             return 1;

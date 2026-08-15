@@ -39,10 +39,25 @@ void kflc_register_astro_builtins(void)
                                 "k26astro_world_destroy",             1);
     (void)kflc_register_builtin("astro_world_add_body",
                                 "k26astro_world_add_body",            2);
-    (void)kflc_register_builtin("astro_world_body_count",
-                                "k26astro_world_body_count",          1);
-    (void)kflc_register_builtin("astro_world_find_body",
-                                "k26astro_world_find_body",           2);
+    /* The two read-only world queries, declared pure. Each takes a
+     * `const K26AstroWorld *`, reads without writing, allocates
+     * nothing, performs no I/O, and returns an int by value rather
+     * than a pointer into anything a later call can move:
+     * k26astro_world_body_count returns the body count and
+     * k26astro_world_find_body walks the names and returns an index
+     * or -1. Two evaluations at one state give one answer and the
+     * second does not disturb the first, so an expression that has to
+     * replay may call them.
+     *
+     * The accessors that hand back a pointer, astro_world_body_at and
+     * astro_body_name, are deliberately not declared: both return a
+     * pointer into the world's body array, which add_body reallocates,
+     * and a result the next call can invalidate is not re-evaluable
+     * however little the call itself writes. */
+    (void)kflc_register_builtin_pure("astro_world_body_count",
+                                     "k26astro_world_body_count",     1, 1);
+    (void)kflc_register_builtin_pure("astro_world_find_body",
+                                     "k26astro_world_find_body",      2, 1);
     (void)kflc_register_builtin("astro_world_step",
                                 "k26astro_world_step",                2);
     (void)kflc_register_builtin("astro_world_observe",
