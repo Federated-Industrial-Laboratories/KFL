@@ -89,16 +89,13 @@ static void rl_stage_done_(void)
 
 /* Run an arm in a child process and require it to succeed.
  *
- * The arms below need a live handle, and a program carrying two
- * bodies that each bind an assembly faults on the third environment
- * handle created in one process, whatever the seeds. That defect was
- * measured with the collision pass compiled out of the same program,
- * so it is neither the sweep nor the resolution, and it has its own
- * item; what it means here is that an arm's correctness must not
- * depend on how many arms ran before it. A child process per arm
- * gives each one the first handle in its own process, which is both
- * a way around the defect and better isolation than counting on an
- * ordering. */
+ * Each arm drives its own artifact against its own fixture, and an
+ * arm's correctness must not depend on how many arms ran before it. A
+ * child process per arm gives each one a fresh process and the first
+ * handle in it, which is stronger isolation than counting on an
+ * ordering. What happens to the handles after the first is measured
+ * deliberately, in the lifecycle gate, rather than incidentally
+ * here. */
 #define IN_CHILD(...) do {                                            \
     fflush(stdout);                                                   \
     pid_t _p = fork();                                                \

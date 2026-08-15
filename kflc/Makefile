@@ -288,6 +288,16 @@ $(RL_HOTPATH_TEST): tests/test_rl_hotpath.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# Handles and environments over the life of one process, over a
+# program that binds more than one vehicle, and the buffer spans the
+# two unsized getters write.
+RL_LIFECYCLE_TEST = tests/test_rl_lifecycle
+$(RL_LIFECYCLE_TEST): tests/test_rl_lifecycle.c $(RL_GATE_DEPS) \
+                      ../libk26rl/include/k26rl_env.h \
+                      ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 # Grammar 3.1 pins: the 3.1 `step` statement still lowers to the
 # clamped stepping entry (the exact-dt entry belongs to the episode
 # machinery alone), and a reinforcement learning program stripped of
@@ -310,7 +320,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -330,7 +340,8 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
 	          $(RL_BODIES_TEST) $(RL_ATT_TEST) \
-	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST); do \
+	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) \
+	          $(RL_LIFECYCLE_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -412,6 +423,7 @@ clean:
 	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
 	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
 	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \
-	      $(RL_VIEW_TEST) $(RL_BODIES_TEST) \
+	      $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) \
+	      $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) \
 	      tests/bench_parse
 	rm -rf bin

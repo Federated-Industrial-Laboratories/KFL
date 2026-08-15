@@ -1963,6 +1963,23 @@ static int rl_emit_params_(FILE *out, const RlModel *m,
     return 0;
 }
 
+/* One vehicle's emission data, captured while its body is emitted and
+ * spent once every body has been added.
+ *
+ * A vehicle binds a `K26AstroBody *` taken from the world, and that
+ * pointer is stable across everything the world does except a further
+ * `k26astro_world_add_body`, which reallocates the body array
+ * (k26astro_rt/world.h). Binding while bodies are still arriving
+ * therefore leaves every earlier vehicle pointing into freed memory,
+ * so the binds are deferred to a second pass and the derived constants
+ * are carried here across the assembly arena's release. */
+typedef struct {
+    const char *body_name;
+    double      mass;
+    double      com[3];
+    double      inertia[6];
+} RlVehEmit;
+
 /* World construction: the fn world prefix statements in source order.
  * astro_body declarations are emitted here (with the six scalar state
  * keys mapped onto the compound fields and distribution values drawn
@@ -2042,6 +2059,7 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
 
     int body_i = 0;
     int veh_i  = 0;
+    RlVehEmit veh[RL_MAX_ACT];
     for (const KflcNode *s = m->world->children; s; s = s->next) {
         switch (s->kind) {
         case KFLN_STMT_EPISODE:
@@ -2139,42 +2157,18 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                 "        kflrl_body_idx_[%d] = _kfl_body_%s_idx;\n",
                 s->name, s->name, body_i, s->name);
             if (asmb) {
-                /* The vehicle carries the derived inertia tensor and
-                 * the centre-of-mass offset, and binds the body the
-                 * world now owns. The world's registry is
-                 * non-owning, so the handle owns the vehicle and
-                 * destroys it; this is the one place that knows both
-                 * when a world appears and when it goes. */
-                fprintf(out,
-                "        K26AstroVehicle *_kfl_v = k26astro_vehicle_new();\n"
-                "        if (!_kfl_v) return -1;\n"
-                "        k26astro_vehicle_set_dry_mass(_kfl_v, %.17g);\n"
-                "        k26astro_vehicle_set_com_offset(_kfl_v, "
-                "%.17g, %.17g, %.17g);\n",
-                        asmb->mass, asmb->com[0], asmb->com[1],
-                        asmb->com[2]);
-                fprintf(out,
-                "        K26M3 _kfl_I;\n"
-                "        _kfl_I.m[0][0] = %.17g; _kfl_I.m[0][1] = %.17g; "
-                "_kfl_I.m[0][2] = %.17g;\n"
-                "        _kfl_I.m[1][0] = %.17g; _kfl_I.m[1][1] = %.17g; "
-                "_kfl_I.m[1][2] = %.17g;\n"
-                "        _kfl_I.m[2][0] = %.17g; _kfl_I.m[2][1] = %.17g; "
-                "_kfl_I.m[2][2] = %.17g;\n"
-                "        k26astro_vehicle_set_inertia_full(_kfl_v, _kfl_I);\n",
-                        asmb->inertia[0], asmb->inertia[3], asmb->inertia[4],
-                        asmb->inertia[3], asmb->inertia[1], asmb->inertia[5],
-                        asmb->inertia[4], asmb->inertia[5], asmb->inertia[2]);
-                fprintf(out,
-                "        k26astro_vehicle_bind_body(_kfl_v, "
-                "k26astro_world_body_at(world, _kfl_body_%s_idx));\n"
-                "        if (k26astro_world_register_vehicle(world, "
-                "_kfl_v) != 0) {\n"
-                "            k26astro_vehicle_destroy(_kfl_v);\n"
-                "            return -1;\n"
-                "        }\n"
-                "        if (_kfl_veh) _kfl_veh[%d] = _kfl_v;\n",
-                        s->name, veh_i);
+                if (veh_i >= RL_MAX_ACT) {
+                    kflc_diag_errorf(diag, s->line,
+                        "more than %d bodies carry an assembly",
+                        RL_MAX_ACT);
+                    kflc_arena_release(asm_a);
+                    return 1;
+                }
+                veh[veh_i].body_name = s->name;
+                veh[veh_i].mass      = asmb->mass;
+                memcpy(veh[veh_i].com, asmb->com, sizeof veh[veh_i].com);
+                memcpy(veh[veh_i].inertia, asmb->inertia,
+                       sizeof veh[veh_i].inertia);
                 veh_i++;
             }
             fputs("    }\n", out);
@@ -2188,6 +2182,50 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
         }
     }
     kfl_emit_stmt_drain_root(out, 4);
+
+    /* The vehicles, after the last body has been added. Each carries
+     * the derived inertia tensor and the centre-of-mass offset, and
+     * binds the body the world now owns; the bind is only valid here,
+     * for the reason RlVehEmit states. The world's registry is
+     * non-owning, so the handle owns the vehicle and destroys it; this
+     * is the one place that knows both when a world appears and when
+     * it goes. Slot order is body declaration order, which is the
+     * order every per-vehicle table in this artifact is written in. */
+    for (int i = 0; i < veh_i; i++) {
+        const RlVehEmit *ve = &veh[i];
+        fprintf(out,
+            "    {\n"
+            "        K26AstroVehicle *_kfl_v = k26astro_vehicle_new();\n"
+            "        if (!_kfl_v) return -1;\n"
+            "        k26astro_vehicle_set_dry_mass(_kfl_v, %.17g);\n"
+            "        k26astro_vehicle_set_com_offset(_kfl_v, "
+            "%.17g, %.17g, %.17g);\n",
+                ve->mass, ve->com[0], ve->com[1], ve->com[2]);
+        fprintf(out,
+            "        K26M3 _kfl_I;\n"
+            "        _kfl_I.m[0][0] = %.17g; _kfl_I.m[0][1] = %.17g; "
+            "_kfl_I.m[0][2] = %.17g;\n"
+            "        _kfl_I.m[1][0] = %.17g; _kfl_I.m[1][1] = %.17g; "
+            "_kfl_I.m[1][2] = %.17g;\n"
+            "        _kfl_I.m[2][0] = %.17g; _kfl_I.m[2][1] = %.17g; "
+            "_kfl_I.m[2][2] = %.17g;\n"
+            "        k26astro_vehicle_set_inertia_full(_kfl_v, _kfl_I);\n",
+                ve->inertia[0], ve->inertia[3], ve->inertia[4],
+                ve->inertia[3], ve->inertia[1], ve->inertia[5],
+                ve->inertia[4], ve->inertia[5], ve->inertia[2]);
+        fprintf(out,
+            "        k26astro_vehicle_bind_body(_kfl_v, "
+            "k26astro_world_body_at(world, _kfl_body_%s_idx));\n"
+            "        if (k26astro_world_register_vehicle(world, "
+            "_kfl_v) != 0) {\n"
+            "            k26astro_vehicle_destroy(_kfl_v);\n"
+            "            return -1;\n"
+            "        }\n"
+            "        if (_kfl_veh) _kfl_veh[%d] = _kfl_v;\n"
+            "    }\n",
+                ve->body_name, i);
+    }
+
     /* Capture the world scalars for the objective and termination
      * evaluators: the prefix runs once per environment at create, and
      * these are its final values. */
