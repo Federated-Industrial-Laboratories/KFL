@@ -406,6 +406,49 @@ def main():
                        "step %d: the %s observation changed after the "
                        "steps that followed it" % (t, agent))
 
+    # ---- the recorded stream is the artifact's, not this shape's -----
+    # The same seed and the same actions, recorded once through the
+    # dictionary interface and once through a raw handle fed the
+    # concatenated vector directly: the two episode files must be
+    # byte-identical, or this shape is adding something to or taking
+    # something from the stream it marshals.
+    py_file = g.WORK / "gate13_py.episode"
+    raw_file = g.WORK / "gate13_raw.episode"
+    for path in (py_file, raw_file):
+        if path.exists():
+            path.unlink()
+
+    recorded = K26RlParallelEnv(pair, seed=SEED)
+    recorded.set_output(str(py_file))
+    arms.check(recorded.output_path == str(py_file),
+               "the recorded run reports output path %r"
+               % (recorded.output_path,))
+    recorded.reset()
+    for t in range(T):
+        recorded.step(
+            {"leader": np.array(act_alpha(t), dtype=np.float64),
+             "follower": np.array(act_beta(t), dtype=np.float64)})
+    recorded.close()
+
+    handle = art.create(SEED, 1)
+    art.output(handle, str(raw_file))
+    for t in range(T):
+        alpha = act_alpha(t)
+        flat = np.array([alpha[0], alpha[1], act_beta(t)[0]],
+                        dtype=np.float64)
+        art.step(handle, flat.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_double)))
+    art.destroy(handle)
+
+    arms.check(py_file.exists() and py_file.stat().st_size > 0,
+               "the recorded episode file is missing or empty")
+    arms.check(py_file.read_bytes() == raw_file.read_bytes(),
+               "the recorded episode files differ: %d bytes through "
+               "this shape against %d through the raw handle"
+               % (py_file.stat().st_size, raw_file.stat().st_size))
+    print("%s: episode file %d bytes, identical through both drivers"
+          % (GATE, py_file.stat().st_size))
+
     # ---- the action dictionary is load-bearing -----------------------
     # The same values with the agents exchanged must produce a
     # different stream; if it did not, the comparison above would be
