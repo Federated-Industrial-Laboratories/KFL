@@ -509,7 +509,15 @@ static int peek_kind_(Lexer *L, TokenKind *out)
  * `episode`, `action` and `objective` are not treated this way. They
  * were placed on the reserved-name table before the constructs
  * landed, so a program binding one of them has been warned that the
- * word was going to be taken. */
+ * word was going to be taken.
+ *
+ * `engage` joins the name-led group: `engage beam at mover` is the
+ * statement and `engage = 1.0`, `engage(2.0)`, `engage[0]` and a bare
+ * `engage` stay the identifier they were. It is the only word here
+ * that is a construct in one block and not in another, which the
+ * dispatch below decides rather than this function: what is a
+ * construct is a property of the word and what follows it, and where
+ * it is admissible is a property of the block. */
 static int rl_word_is_construct_(Lexer *L, const char *s)
 {
     if (strcmp(s, "episode") == 0 || strcmp(s, "action") == 0 ||
@@ -521,7 +529,7 @@ static int rl_word_is_construct_(Lexer *L, const char *s)
         return peek_kind_(L, &k) && (k == T_NEWLINE || k == T_EOF);
     }
     if (strcmp(s, "sensor") == 0 || strcmp(s, "agent") == 0 ||
-        strcmp(s, "astro_payload") == 0) {
+        strcmp(s, "astro_payload") == 0 || strcmp(s, "engage") == 0) {
         return peek_kind_(L, &k) && k == T_IDENT;
     }
     return 0;
@@ -1352,6 +1360,67 @@ static KflcNode *parse_astro_payload_(Lexer *L, Token *cur,
     return n;
 }
 
+/* `engage <payload> at <target>`.
+ *
+ * Three identifiers and one connective, with nothing else admitted on
+ * the line: an engagement names what fires and what it fires at, and
+ * every other quantity it needs is already declared on the payload or
+ * derived from the two bodies' state. `at` is read as a connective
+ * here alone, so a body or a binding called `at` keeps its name
+ * everywhere else. */
+static KflcNode *parse_engage_(Lexer *L, Token *cur,
+                               KflcArena *arena, KflcDiag *diag,
+                               int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (cur->kind != T_IDENT) {
+        kflc_diag_errorf(diag, line0,
+            "engage: expected the name of a payload to engage");
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+        return NULL;
+    }
+    char *pay = cur->str;
+    advance(L, cur, had_error);
+    if (!is_ident_named(cur, "at")) {
+        kflc_diag_errorf(diag, line0,
+            "engage %s: expected `at` and the name of the body engaged",
+            pay);
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+        return NULL;
+    }
+    advance(L, cur, had_error);
+    if (cur->kind != T_IDENT) {
+        kflc_diag_errorf(diag, line0,
+            "engage %s at: expected the name of a body", pay);
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+        return NULL;
+    }
+    char *tgt = cur->str;
+    advance(L, cur, had_error);
+    if (!at_nl(cur) && !at_eof2(cur)) {
+        kflc_diag_errorf(diag, line0,
+            "engage %s at %s: the statement takes a payload and a body "
+            "and nothing else", pay, tgt);
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+        return NULL;
+    }
+    if (at_nl(cur)) advance(L, cur, had_error);
+
+    KflcNode *n = new_node(arena, KFLN_STMT_ENGAGE, line0);
+    n->name = pay;
+    KflcValue v;
+    memset(&v, 0, sizeof v);
+    v.kind = KFLV_IDENT;
+    v.u.s  = tgt;
+    stmt_append_attr(arena, n, "at", v, line0);
+    return n;
+}
+
 /* Parse a single statement on the current line. Consumes the trailing
  * newline. Returns NULL on parse error.
  *
@@ -1376,7 +1445,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
      * offending keyword. */
     if (g_rl_world_ctx && cur->kind == T_IDENT && cur->str) {
         int construct = rl_word_is_construct_(L, cur->str);
-        if (g_rl_on_step_depth > 0 &&
+        /* `engage` runs the other way from every word beside it: it is
+         * an act of a step, so the per-step body is the one block that
+         * admits it and the world prefix is where it is refused. */
+        int engaging = construct && strcmp(cur->str, "engage") == 0;
+        if (g_rl_on_step_depth > 0 && !engaging &&
             (construct || is_on_step_world_stmt_(cur->str))) {
             kflc_diag_errorf(diag, line,
                 "on_step: `%s` is not allowed inside an on_step block; "
@@ -1386,7 +1459,17 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             rl_drain_line_(L, cur, arena, had_error);
             return NULL;
         }
+        if (engaging && g_rl_on_step_depth == 0) {
+            kflc_diag_errorf(diag, line,
+                "engage: an engagement is an act of a step and is "
+                "admissible inside an `on_step` block only");
+            *had_error = 1;
+            rl_drain_line_(L, cur, arena, had_error);
+            return NULL;
+        }
         if (construct) {
+            if (engaging)
+                return parse_engage_(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "episode") == 0)
                 return parse_episode_(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "action") == 0)
@@ -1987,9 +2070,28 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * or `track` still takes the line-of-sight form, because
          * `observe detect from earth` has `from` where these forms have
          * a payload name. */
-        int         defense_form = 0;   /* 1 detect, 2 track */
+        int         defense_form = 0;   /* 1 detect, 2 track, 3 effect */
         const char *payload_ident = NULL;
+        /* `observe effect <payload> as <name>` names a payload and no
+         * body: an effector's result belongs to the effector, and the
+         * body it was aimed at was named by the `engage` that produced
+         * it. A body genuinely called `effect` keeps its line-of-sight
+         * form, which puts `from` or `as` where this form has a
+         * payload name. */
         if (!relative_form && !port_form &&
+            strcmp(target_ident, "effect") == 0 &&
+            cur->kind == T_IDENT && !is_ident_named(cur, "from") &&
+            !is_ident_named(cur, "as"))
+        {
+            defense_form  = 3;
+            payload_ident = cur->str;
+            /* The cursor stays on the payload name, which is where the
+             * trailing-clause scan takes the remainder of the line
+             * from: this form's only clause is `as`. */
+            target_ident  = cur->str;
+            attitude_form = 1;
+        }
+        if (!relative_form && !port_form && !defense_form &&
             (strcmp(target_ident, "detect") == 0 ||
              strcmp(target_ident, "track") == 0) &&
             cur->kind == T_IDENT && !is_ident_named(cur, "from"))
@@ -2107,6 +2209,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                                : port_form       ? "port"
                                : defense_form == 1 ? "detect"
                                : defense_form == 2 ? "track"
+                               : defense_form == 3 ? "effect"
                                : contact_form    ? "contact" : "attitude";
             stmt_append_attr(arena, n, marker, kv, line0);
         }
@@ -2496,6 +2599,20 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
 {
     if (!s) return 0;
     switch (s->kind) {
+    case KFLN_STMT_ENGAGE: {
+        /* The environment emitter resolved this statement to one
+         * engagement helper and left its index on the node, so the
+         * payload, the target and every table index they need are
+         * compile-time constants and nothing is looked up here. The
+         * statement is admissible in an `on_step` body alone, which is
+         * the one place these names are in scope. */
+        emit_indent(out, indent);
+        fprintf(out, "kflrl_engage_%ld_(world, _kfl_pay, _kfl_payp, "
+                     "_kfl_dt, _kfl_eng);\n",
+                s->position.kind == KFLV_INT ? s->position.u.i : 0L);
+        return 0;
+    }
+
     case KFLN_STMT_LET:
     case KFLN_STMT_CONST: {
         /* Register heap-typed lets with the unified scope tracker

@@ -446,6 +446,19 @@ static const char *const OBS_SFX_DETECT_[] =
 static const char *const OBS_SFX_TRACK_[] =
     { "_valid", "_pos_x", "_pos_y", "_pos_z", "_vel_x", "_vel_y",
       "_vel_z", "_range", "_age", NULL };
+/* An effector observe publishes what the last engagement of its
+ * payload did. Two suffixes are common to every effector kind,
+ * `_engaged` and `_effect`; the rest are the kind's own, because an
+ * ablation event and an impact event share no fields. The set is
+ * therefore a function of the payload's `kind=`, which is why the
+ * lookup below reads the world rather than the statement alone. */
+static const char *const OBS_SFX_EFF_LASER_[] =
+    { "_engaged", "_effect", "_dv", "_mass_loss", "_range", "_spot",
+      "_encircled", "_fluence", "_transmissivity", "_ignited", NULL };
+static const char *const OBS_SFX_EFF_IMPACTOR_[] =
+    { "_engaged", "_effect", "_hit", "_closing_speed", "_t_close",
+      "_miss", "_fraction", "_cos_angle", "_penetrates",
+      "_critical_diameter", "_penetration", "_energy", NULL };
 
 static int observe_marker_(const KflcNode *n, const char *marker)
 {
@@ -465,10 +478,46 @@ static int observe_has_truth_(const KflcNode *n)
     return observe_marker_(n, "truth");
 }
 
-static const char *const *observe_suffixes_(const KflcNode *n)
+/* The value of an attribute carried as an identifier. */
+static const char *attr_ident_(const KflcNode *n, const char *key)
+{
+    for (const KflcAttr *a = n ? n->attrs : NULL; a; a = a->next) {
+        if (a->name && strcmp(a->name, key) == 0 &&
+            a->value.kind == KFLV_IDENT) {
+            return a->value.u.s;
+        }
+    }
+    return NULL;
+}
+
+/* The `kind=` of the payload an effect observe names, read straight
+ * off the `astro_payload` statement that declares it. The emitter
+ * resolves the same thing for the channel widths; this pass needs it
+ * so that the names it accepts are the names the build will publish,
+ * and a program the checker accepts is one that builds. */
+static const char *effect_payload_kind_(const KflcNode *world,
+                                        const KflcNode *n)
+{
+    const char *pn = attr_ident_(n, "effect");
+    if (!pn) return NULL;
+    for (const KflcNode *s = world ? world->children : NULL; s; s = s->next) {
+        if (s->kind != KFLN_STMT_ASTRO_PAYLOAD) continue;
+        if (!s->name || strcmp(s->name, pn) != 0) continue;
+        return attr_ident_(s, "kind");
+    }
+    return NULL;
+}
+
+static const char *const *observe_suffixes_(const KflcNode *world,
+                                            const KflcNode *n)
 {
     if (observe_marker_(n, "detect"))   return OBS_SFX_DETECT_;
     if (observe_marker_(n, "track"))    return OBS_SFX_TRACK_;
+    if (observe_marker_(n, "effect")) {
+        const char *k = effect_payload_kind_(world, n);
+        return (k && strcmp(k, "impactor") == 0)
+               ? OBS_SFX_EFF_IMPACTOR_ : OBS_SFX_EFF_LASER_;
+    }
     if (observe_marker_(n, "port"))     return OBS_SFX_PORT_;
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
     if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;
@@ -480,10 +529,11 @@ static const char *const *observe_suffixes_(const KflcNode *n)
  * components, and the paired truth components when it declares them.
  * Both name sets live here and at the emitter, and the gates compare
  * the published names against both. */
-static void observe_push_names_(NameList *dst, const KflcNode *n,
+static void observe_push_names_(NameList *dst, const KflcNode *world,
+                                const KflcNode *n,
                                 const char *base, KflcArena *arena)
 {
-    const char *const *sfx = observe_suffixes_(n);
+    const char *const *sfx = observe_suffixes_(world, n);
     for (int k = 0; sfx[k]; k++) {
         namelist_push_(dst, suffixed_(arena, base, sfx[k]), arena);
     }
@@ -512,7 +562,9 @@ static size_t observe_as_bound_(void)
     size_t longest = 0;
     const char *const *lists[] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
                                    OBS_SFX_CON_, OBS_SFX_REL_,
-                                   OBS_SFX_PORT_ };
+                                   OBS_SFX_PORT_, OBS_SFX_DETECT_,
+                                   OBS_SFX_TRACK_, OBS_SFX_EFF_LASER_,
+                                   OBS_SFX_EFF_IMPACTOR_ };
     for (size_t i = 0; i < sizeof lists / sizeof lists[0]; i++) {
         for (int k = 0; lists[i][k]; k++) {
             /* `_truth` is what a paired channel inserts, so the
@@ -675,7 +727,8 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
     for (int j = 0; j < st.observes_as.n; j++) {
         const char *base = observe_as_name_(st.observes_as.items[j]);
         if (!base) continue;
-        observe_push_names_(&comps, st.observes_as.items[j], base, arena);
+        observe_push_names_(&comps, world, st.observes_as.items[j], base,
+                            arena);
     }
     /* An action and an observation component share a scope only when
      * one owner declares both, since it is the owner's own names that
@@ -689,7 +742,8 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
             if (!base) continue;
             NameList own;
             memset(&own, 0, sizeof own);
-            observe_push_names_(&own, st.observes_as.items[j], base, arena);
+            observe_push_names_(&own, world, st.observes_as.items[j], base,
+                                arena);
             for (int k = 0; k < own.n; k++) {
                 if (strcmp(an, own.names[k]) != 0) continue;
                 kflc_diag_errorf(diag, st.actions.items[i]->line,
@@ -784,7 +838,8 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
     for (int i = 0; i < st.observes_as.n; i++) {
         const char *base = observe_as_name_(st.observes_as.items[i]);
         if (!base) continue;
-        observe_push_names_(&allowed, st.observes_as.items[i], base, arena);
+        observe_push_names_(&allowed, world, st.observes_as.items[i], base,
+                            arena);
     }
     /* The qualified forms, `<agent>.<channel>`, which are dotted names
      * that are not body state. Which of the two forms an expression in
@@ -804,8 +859,8 @@ static void check_world_(const KflcNode *world, const KflcNode *form,
         if (!own || !own->name || !base) continue;
         NameList own_comps;
         memset(&own_comps, 0, sizeof own_comps);
-        observe_push_names_(&own_comps, st.observes_as.items[i], base,
-                            arena);
+        observe_push_names_(&own_comps, world, st.observes_as.items[i],
+                            base, arena);
         for (int k = 0; k < own_comps.n; k++) {
             namelist_push_(&allowed,
                            qualified_(arena, own->name, own_comps.names[k]),

@@ -173,12 +173,14 @@ void        kflc_emit_body_state_read(FILE *out, const char *lv,
  * which is what it has always been and what every program compiling
  * today was written against; lowering it would refuse those programs
  * and raising it would change a refusal for no gain. The longest
- * suffix a channel can carry is `_truth_range_rate` at 17 bytes: the
- * longest component suffix, `_range_rate`, with the `_truth` that a
- * paired channel inserts before it. 53 + 17 + 1 for the terminator is
- * 71, and the entry is 96, so a suffix may grow by another 26 bytes
- * before this constant has to move again. The point of a bound is that
- * the next suffix does not force a change. */
+ * suffix a channel can carry is `_truth_critical_diameter` at 24
+ * bytes: the longest component suffix, the kinetic effector's
+ * `_critical_diameter`, with the `_truth` that a paired channel
+ * inserts before it. 53 + 24 + 1 for the terminator is 78, and the
+ * entry is 96, so a suffix may grow by another 18 bytes before this
+ * constant has to move again. The point of a bound is that the next
+ * suffix does not force a change, and the effector suffixes are the
+ * second set to arrive inside it. */
 #define KFLC_OBS_AS_MAX   53
 #define KFLC_OBS_NAME_MAX 96
 

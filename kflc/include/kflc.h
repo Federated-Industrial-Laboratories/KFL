@@ -214,7 +214,12 @@ typedef enum {
      * libraries share one payload slot and one kind-tag registry, so a
      * further payload kind is a new `kind=` value rather than a new
      * statement. */
-    KFLN_STMT_ASTRO_PAYLOAD
+    KFLN_STMT_ASTRO_PAYLOAD,
+    /* `engage <payload> at <target>`. `name` is the payload engaged;
+     * the `at` attr names the body it is aimed at. An engagement is an
+     * act rather than a declaration, so the statement is admissible
+     * inside an `on_step` block and nowhere else. */
+    KFLN_STMT_ENGAGE
 } KflcNodeKind;
 
 /* Type system. The base scalar kinds are joined by KFLT_VECTOR /

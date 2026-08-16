@@ -543,6 +543,15 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
         break;
     }
 
+    case KFLN_STMT_ENGAGE: {
+        const KflcAttr *at = find_attr_(n->attrs, "at");
+        indent(out, level);
+        fprintf(out, "engage %s at %s\n", n->name ? n->name : "?",
+                (at && at->value.kind == KFLV_IDENT && at->value.u.s)
+                    ? at->value.u.s : "?");
+        break;
+    }
+
     case KFLN_STMT_STEP: {
         indent(out, level);
         fputs("step ", out);
@@ -597,7 +606,15 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
          * marker carries the port's. */
         const KflcAttr *m_det = find_attr_(n->attrs, "detect");
         const KflcAttr *m_trk = find_attr_(n->attrs, "track");
-        if (m_det || m_trk) {
+        /* The effector form names a payload and no body, so its
+         * marker is the whole of what the statement said before the
+         * `as` clause. */
+        const KflcAttr *m_eff = find_attr_(n->attrs, "effect");
+        if (m_eff) {
+            fprintf(out, "observe effect %s",
+                    (m_eff->value.kind == KFLV_IDENT && m_eff->value.u.s)
+                        ? m_eff->value.u.s : "?");
+        } else if (m_det || m_trk) {
             const KflcAttr *mk = m_det ? m_det : m_trk;
             fprintf(out, "observe %s %s of %s", m_det ? "detect" : "track",
                     (mk->value.kind == KFLV_IDENT && mk->value.u.s)
@@ -633,6 +650,11 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
             if (strcmp(a->name, "port") == 0) continue;
             if (strcmp(a->name, "detect") == 0) continue;
             if (strcmp(a->name, "track") == 0) continue;
+            if (strcmp(a->name, "effect") == 0) continue;
+            /* Resolved during emission rather than written by the
+             * author: the effector kind an effect observe publishes
+             * the channels of. It is not part of the spelling. */
+            if (strcmp(a->name, "effect_kind") == 0) continue;
             const char *v = (a->value.kind == KFLV_IDENT && a->value.u.s)
                             ? a->value.u.s : "?";
             fprintf(out, " %s=%s", a->name, v);

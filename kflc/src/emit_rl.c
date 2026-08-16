@@ -71,10 +71,14 @@
 /* The longest an agent name may be, in bytes, and the arithmetic it
  * comes out of. A published channel name entry holds KFLC_OBS_NAME_MAX
  * bytes; a declared `as` base name may be KFLC_OBS_AS_MAX of them; the
- * longest component suffix is `_range_rate` at 11; and a qualified
- * name spends one more byte on the separating dot. What is left is the
- * agent name's, and neither declarable bound moves, because a name
- * that compiles today must keep compiling.
+ * suffix figure below is 11, which was `_range_rate` when this bound
+ * was set; and a qualified name spends one more byte on the separating
+ * dot. What is left is the agent name's, and neither declarable bound
+ * moves, because a name that compiles today must keep compiling. The
+ * suffix figure does not move either, for the same reason: it is what
+ * this bound was published at. Later forms have brought longer
+ * suffixes, the kinetic effector's `_critical_diameter` at 18 being
+ * the longest, and the combination test below is what holds for them.
  *
  * This is a bound on the name alone and not on the combination. A
  * paired channel inserts `_truth` before its component suffix, so a
@@ -118,6 +122,11 @@ static uint16_t rl_observe_mode_(const KflcNode *n)
          * against another, both of which the integrator already
          * produced. No correction of any kind is applied to it. */
         if (strcmp(k->name, "port") == 0) return 0;
+        /* An effector observe reports what an engagement did, from the
+         * two craft's current state and the declared payload. There is
+         * no observer and no light time, so geometric is the only true
+         * answer among the published modes. */
+        if (strcmp(k->name, "effect") == 0) return 0;
     }
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "mode") == 0 &&
@@ -223,6 +232,37 @@ static const char *const RL_TRK_COMP_[RL_TRK_COMPS] = {
     "_vel_z", "_range", "_age"
 };
 
+/* An effector observe publishes what the last engagement of its
+ * payload did. Two channels are common to every effector kind:
+ * `_engaged`, which says whether the payload was engaged on this step,
+ * and `_effect`, the scalar magnitude the kind's event reports as its
+ * principal result. The rest are the kind's own, because an ablation
+ * event and an impact event share no fields.
+ *
+ * Every channel here can be moved by a program a reader can write, and
+ * three quantities the event structs carry are deliberately absent for
+ * the opposite reason. The laser's threshold fluence is a constant of
+ * the declared material; its effective dwell is the control period;
+ * and its on-target intensity is the published fluence divided by that
+ * period. None of the three can move within an episode, and a channel
+ * that cannot move is a channel nothing can be gated on. */
+#define RL_EFF_LAS_COMPS 10
+static const char *const RL_EFF_LAS_COMP_[RL_EFF_LAS_COMPS] = {
+    "_engaged", "_effect", "_dv", "_mass_loss", "_range", "_spot",
+    "_encircled", "_fluence", "_transmissivity", "_ignited"
+};
+
+#define RL_EFF_IMP_COMPS 12
+static const char *const RL_EFF_IMP_COMP_[RL_EFF_IMP_COMPS] = {
+    "_engaged", "_effect", "_hit", "_closing_speed", "_t_close",
+    "_miss", "_fraction", "_cos_angle", "_penetrates",
+    "_critical_diameter", "_penetration", "_energy"
+};
+
+/* The widest effector channel set, which is the per-payload stride of
+ * the store the step writes and the observation reads. */
+#define RL_EFF_MAX_COMPS RL_EFF_IMP_COMPS
+
 /* Which form an observe is. The marker attribute the parser leaves is
  * what decides it, so the four are told apart in one place and the
  * width and the names cannot drift apart between them. */
@@ -233,7 +273,8 @@ typedef enum {
     RL_OBS_REL  = 3,
     RL_OBS_PORT = 4,
     RL_OBS_DET  = 5,
-    RL_OBS_TRK  = 6
+    RL_OBS_TRK  = 6,
+    RL_OBS_EFF  = 7
 } RlObserveForm;
 
 static RlObserveForm rl_observe_form_(const KflcNode *n)
@@ -243,6 +284,7 @@ static RlObserveForm rl_observe_form_(const KflcNode *n)
         if (!a->name) continue;
         if (strcmp(a->name, "detect") == 0)   return RL_OBS_DET;
         if (strcmp(a->name, "track") == 0)    return RL_OBS_TRK;
+        if (strcmp(a->name, "effect") == 0)   return RL_OBS_EFF;
         if (strcmp(a->name, "attitude") == 0) return RL_OBS_ATT;
         if (strcmp(a->name, "contact") == 0)  return RL_OBS_CON;
         if (strcmp(a->name, "relative") == 0) return RL_OBS_REL;
@@ -251,19 +293,39 @@ static RlObserveForm rl_observe_form_(const KflcNode *n)
     return RL_OBS_LOS;
 }
 
-/* The payload an `observe detect`/`observe track` names, which its
- * marker attribute carries for the same reason the port marker
- * carries the port's own name. */
+/* The payload a defense observe names, which its marker attribute
+ * carries for the same reason the port marker carries the port's own
+ * name. */
 static const char *rl_observe_payload_(const KflcNode *n)
 {
     if (!n) return NULL;
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (!a->name || a->value.kind != KFLV_IDENT) continue;
-        if (strcmp(a->name, "detect") == 0 || strcmp(a->name, "track") == 0) {
+        if (strcmp(a->name, "detect") == 0 ||
+            strcmp(a->name, "track")  == 0 ||
+            strcmp(a->name, "effect") == 0) {
             return a->value.u.s;
         }
     }
     return NULL;
+}
+
+/* Whether an effect observe publishes the impactor channel set. The
+ * kind is resolved onto the statement during collection, before the
+ * agent slices are computed, because the width of this form is its
+ * payload's kind's and the slices are a function of the widths. An
+ * unstamped statement is one whose payload did not resolve, which is
+ * an error already reported; the laser set is returned so the widths
+ * stay consistent while the diagnostics are collected. */
+static int rl_observe_eff_is_impactor_(const KflcNode *n)
+{
+    if (!n) return 0;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (!a->name || strcmp(a->name, "effect_kind") != 0) continue;
+        if (a->value.kind != KFLV_IDENT || !a->value.u.s) return 0;
+        return strcmp(a->value.u.s, "impactor") == 0;
+    }
+    return 0;
 }
 
 static int rl_observe_is_attitude_(const KflcNode *n)
@@ -309,6 +371,8 @@ static int rl_observe_base_width_(const KflcNode *n)
     case RL_OBS_PORT: return RL_PORT_COMPS;
     case RL_OBS_DET: return RL_DET_COMPS;
     case RL_OBS_TRK: return RL_TRK_COMPS;
+    case RL_OBS_EFF: return rl_observe_eff_is_impactor_(n)
+                          ? RL_EFF_IMP_COMPS : RL_EFF_LAS_COMPS;
     case RL_OBS_LOS: return RL_OBS_COMPS;
     }
     return RL_OBS_COMPS;
@@ -335,6 +399,8 @@ static const char *rl_observe_base_comp_(const KflcNode *n, int c)
     case RL_OBS_PORT: return RL_PORT_COMP_[c];
     case RL_OBS_DET: return RL_DET_COMP_[c];
     case RL_OBS_TRK: return RL_TRK_COMP_[c];
+    case RL_OBS_EFF: return rl_observe_eff_is_impactor_(n)
+                          ? RL_EFF_IMP_COMP_[c] : RL_EFF_LAS_COMP_[c];
     case RL_OBS_LOS: return RL_OBS_COMP_[c];
     }
     return RL_OBS_COMP_[c];
@@ -464,62 +530,169 @@ typedef enum {
     RL_PAY_DETECT_IR    = 0,
     RL_PAY_DETECT_RADAR = 1,
     RL_PAY_DETECT_LIDAR = 2,
-    RL_PAY_INFOSTATE    = 3
+    RL_PAY_INFOSTATE    = 3,
+    RL_PAY_IMPACTOR     = 4,
+    RL_PAY_LASER        = 5
 } RlPayloadKind;
 
-#define RL_PAY_KINDS     4
-#define RL_PAY_MAXP     10
+#define RL_PAY_KINDS     6
+#define RL_PAY_MAXP     16
 #define RL_MAX_PAYLOADS 32
+
+/* A key whose value is a word rather than a number, and the constant
+ * the word stands for. Two of the tier's constructor parameters are
+ * enumerations, and a program that wrote the number would be depending
+ * on a library's internal numbering that no document promises it. */
+typedef struct {
+    const char *word;
+    const char *code;
+} RlPayWord;
 
 typedef struct {
     const char *key;
     int         required;
     const char *dflt;      /* emitted verbatim when the key is absent */
+    /* NULL for a numeric key; otherwise the admissible words, and the
+     * key takes one of them and no distribution form. */
+    const RlPayWord *words;
+    int              n_words;
 } RlPayKey;
 
 static const RlPayKey RL_PAY_IR_[] = {
-    { "aperture_m",        1, "0.0" },
-    { "integration_s",     1, "0.0" },
-    { "passband_lo_um",    1, "0.0" },
-    { "passband_hi_um",    1, "0.0" },
-    { "throughput",        1, "0.0" },
-    { "snr_threshold",     1, "0.0" },
-    { "target_temp_k",     1, "0.0" },
-    { "target_emissivity", 1, "0.0" },
+    { "aperture_m",        1, "0.0", NULL, 0 },
+    { "integration_s",     1, "0.0", NULL, 0 },
+    { "passband_lo_um",    1, "0.0", NULL, 0 },
+    { "passband_hi_um",    1, "0.0", NULL, 0 },
+    { "throughput",        1, "0.0", NULL, 0 },
+    { "snr_threshold",     1, "0.0", NULL, 0 },
+    { "target_temp_k",     1, "0.0", NULL, 0 },
+    { "target_emissivity", 1, "0.0", NULL, 0 },
     /* Optional, and zero by default, which is what the library
      * documents as recovering its cosmic-background-only behaviour.
      * They are offered because that behaviour is background free for
      * a warm instrument looking in its own emission band, and the
      * library says so; a program that wants the honest noise floor
      * declares its optics rather than rebuilding the model. */
-    { "t_optics_k",        0, "0.0" },
-    { "optics_emissivity", 0, "0.0" }
+    { "t_optics_k",        0, "0.0", NULL, 0 },
+    { "optics_emissivity", 0, "0.0", NULL, 0 }
 };
 
 static const RlPayKey RL_PAY_RADAR_[] = {
-    { "p_tx_w",        1, "0.0" },
-    { "g_tx_db",       1, "0.0" },
-    { "g_rx_db",       1, "0.0" },
-    { "freq_hz",       1, "0.0" },
-    { "loss_sys_db",   1, "0.0" },
-    { "bandwidth_hz",  1, "0.0" },
-    { "t_sys_k",       1, "0.0" },
-    { "noise_figure",  1, "0.0" },
-    { "snr_threshold", 1, "0.0" }
+    { "p_tx_w",        1, "0.0", NULL, 0 },
+    { "g_tx_db",       1, "0.0", NULL, 0 },
+    { "g_rx_db",       1, "0.0", NULL, 0 },
+    { "freq_hz",       1, "0.0", NULL, 0 },
+    { "loss_sys_db",   1, "0.0", NULL, 0 },
+    { "bandwidth_hz",  1, "0.0", NULL, 0 },
+    { "t_sys_k",       1, "0.0", NULL, 0 },
+    { "noise_figure",  1, "0.0", NULL, 0 },
+    { "snr_threshold", 1, "0.0", NULL, 0 }
 };
 
 static const RlPayKey RL_PAY_LIDAR_[] = {
-    { "pulse_energy_j",      1, "0.0" },
-    { "wavelength_nm",       1, "0.0" },
-    { "aperture_rx_m",       1, "0.0" },
-    { "atmospheric_tx",      1, "0.0" },
-    { "detector_efficiency", 1, "0.0" },
-    { "snr_threshold",       1, "0.0" },
-    { "target_albedo",       1, "0.0" }
+    { "pulse_energy_j",      1, "0.0", NULL, 0 },
+    { "wavelength_nm",       1, "0.0", NULL, 0 },
+    { "aperture_rx_m",       1, "0.0", NULL, 0 },
+    { "atmospheric_tx",      1, "0.0", NULL, 0 },
+    { "detector_efficiency", 1, "0.0", NULL, 0 },
+    { "snr_threshold",       1, "0.0", NULL, 0 },
+    { "target_albedo",       1, "0.0", NULL, 0 }
 };
 
 static const RlPayKey RL_PAY_INFO_[] = {
-    { "history", 0, "1024" }
+    { "history", 0, "1024", NULL, 0 }
+};
+
+/* The release pattern, which decides whether the swarm keys below are
+ * required or refused and whether a spread footprint is computed at
+ * all. It is a word rather than a number because the enumeration's
+ * values are the library's own numbering. */
+static const RlPayWord RL_PAY_PATTERN_[] = {
+    { "single", "K26ASTRO_IMPACTOR_PATTERN_SINGLE" },
+    { "swarm",  "K26ASTRO_IMPACTOR_PATTERN_SWARM" }
+};
+
+/* The kinetic impactor.
+ *
+ * The first four keys and the two swarm keys are the constructor's own
+ * parameters of the same name. The nine `target_` keys describe the
+ * structure of what is being hit rather than the projectile, and they
+ * are optional: the library's own analysis skips the Whipple branch
+ * unless a wall thickness is declared and the monolithic branch unless
+ * a hardness, a density and a speed of sound are, and this grammar
+ * mirrors that rather than inventing required keys. The penetration
+ * channels read zero where the analysis was skipped, and the effect on
+ * the target's motion needs none of them: momentum transfer is a
+ * function of the projectile and the closing geometry alone.
+ *
+ * Seven of the nine are `k26astro_impactor_analyse_impact`'s own
+ * parameters, spelled as it spells them. The remaining two are fields
+ * of the target-structure specification the delivered-energy routine
+ * takes, prefixed `target_` for consistency with the seven beside
+ * them: the wall the Whipple stand-off protects, and the thickness the
+ * monolithic penetration depth is judged against. */
+static const RlPayKey RL_PAY_IMPACTOR_[] = {
+    { "pattern",                      1, "0.0",
+      RL_PAY_PATTERN_,
+      (int)(sizeof RL_PAY_PATTERN_ / sizeof RL_PAY_PATTERN_[0]) },
+    { "projectile_mass_kg",           1, "0.0", NULL, 0 },
+    { "projectile_density_kg_per_m3", 1, "0.0", NULL, 0 },
+    { "projectile_diameter_m",        1, "0.0", NULL, 0 },
+    /* Required when `pattern=swarm` and refused when `pattern=single`,
+     * which the resolution below applies: the requirement is a
+     * function of another key's value and not of the kind. */
+    { "swarm_count",                  0, "0.0", NULL, 0 },
+    { "swarm_half_angle_rad",         0, "0.0", NULL, 0 },
+    { "target_wall_thickness_m",         0, "0.0", NULL, 0 },
+    { "target_bumper_density_kg_per_m3", 0, "0.0", NULL, 0 },
+    { "target_bumper_spacing_m",         0, "0.0", NULL, 0 },
+    { "target_wall_yield_stress_ksi",    0, "0.0", NULL, 0 },
+    { "target_brinell_hardness",         0, "0.0", NULL, 0 },
+    { "target_density_kg_per_m3",        0, "0.0", NULL, 0 },
+    { "target_speed_of_sound_m_per_s",   0, "0.0", NULL, 0 },
+    { "target_inner_thickness_m",        0, "0.0", NULL, 0 },
+    { "target_monolithic_thickness_m",   0, "0.0", NULL, 0 }
+};
+
+/* The target material, which selects the coupling coefficient, the
+ * plasma-ignition threshold and the specific ablation energy the
+ * ablation chain uses.
+ *
+ * The library's own enumeration carries a seventh entry, `NONE`, whose
+ * documented meaning is a conservative generic-metal anchor rather
+ * than an absence of material. This grammar does not admit it: a
+ * program that wrote `target_material=none` would reasonably expect no
+ * ablation and would get steel's numbers, so the six materials are
+ * named and the anchor is written as the material it actually is. The
+ * words are the enumeration's own names, including its spelling of
+ * aluminium, because they name that enumeration's entries. */
+static const RlPayWord RL_PAY_MATERIAL_[] = {
+    { "aluminum",     "K26ASTRO_LASER_MAT_ALUMINUM" },
+    { "steel",        "K26ASTRO_LASER_MAT_STEEL" },
+    { "titanium",     "K26ASTRO_LASER_MAT_TITANIUM" },
+    { "copper",       "K26ASTRO_LASER_MAT_COPPER" },
+    { "composite",    "K26ASTRO_LASER_MAT_COMPOSITE" },
+    { "fused_silica", "K26ASTRO_LASER_MAT_FUSED_SILICA" }
+};
+
+/* The directed-energy emitter. The first seven keys are the
+ * constructor's own parameters of the same name; the two `target_`
+ * keys are the evaluator's, and they describe what is being fired at
+ * rather than the emitter, which is why no constructor carries them.
+ * As with the detection kinds, one laser payload models one target
+ * class. */
+static const RlPayKey RL_PAY_LASER_[] = {
+    { "primary_diam_m",      1, "0.0", NULL, 0 },
+    { "wavelength_nm",       1, "0.0", NULL, 0 },
+    { "p_output_w",          1, "0.0", NULL, 0 },
+    { "m_squared",           1, "0.0", NULL, 0 },
+    { "pointing_jitter_rad", 1, "0.0", NULL, 0 },
+    { "rms_wavefront_m",     1, "0.0", NULL, 0 },
+    { "plasma_attn_k",       1, "0.0", NULL, 0 },
+    { "target_material",     1, "0.0",
+      RL_PAY_MATERIAL_,
+      (int)(sizeof RL_PAY_MATERIAL_ / sizeof RL_PAY_MATERIAL_[0]) },
+    { "target_reflectivity", 1, "0.0", NULL, 0 }
 };
 
 typedef struct {
@@ -528,18 +701,58 @@ typedef struct {
     const RlPayKey *keys;
     int             n_keys;
     int             is_detect;
+    int             is_effector;  /* the registry's effector class */
 } RlPayKindDesc;
 
 static const RlPayKindDesc RL_PAY_KIND_[RL_PAY_KINDS] = {
     { "detect_ir",    "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
-      RL_PAY_IR_,    (int)(sizeof RL_PAY_IR_    / sizeof RL_PAY_IR_[0]),    1 },
+      RL_PAY_IR_,    (int)(sizeof RL_PAY_IR_    / sizeof RL_PAY_IR_[0]),
+      1, 0 },
     { "detect_radar", "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
-      RL_PAY_RADAR_, (int)(sizeof RL_PAY_RADAR_ / sizeof RL_PAY_RADAR_[0]), 1 },
+      RL_PAY_RADAR_, (int)(sizeof RL_PAY_RADAR_ / sizeof RL_PAY_RADAR_[0]),
+      1, 0 },
     { "detect_lidar", "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
-      RL_PAY_LIDAR_, (int)(sizeof RL_PAY_LIDAR_ / sizeof RL_PAY_LIDAR_[0]), 1 },
+      RL_PAY_LIDAR_, (int)(sizeof RL_PAY_LIDAR_ / sizeof RL_PAY_LIDAR_[0]),
+      1, 0 },
     { "infostate",    "K26ASTRO_DEFENSE_KIND_INFOSTATE",
-      RL_PAY_INFO_,  (int)(sizeof RL_PAY_INFO_  / sizeof RL_PAY_INFO_[0]),  0 }
+      RL_PAY_INFO_,  (int)(sizeof RL_PAY_INFO_  / sizeof RL_PAY_INFO_[0]),
+      0, 0 },
+    { "impactor",     "K26ASTRO_DEFENSE_KIND_IMPACTOR",
+      RL_PAY_IMPACTOR_,
+      (int)(sizeof RL_PAY_IMPACTOR_ / sizeof RL_PAY_IMPACTOR_[0]), 0, 1 },
+    { "laser",        "K26ASTRO_DEFENSE_KIND_LASER",
+      RL_PAY_LASER_,
+      (int)(sizeof RL_PAY_LASER_ / sizeof RL_PAY_LASER_[0]), 0, 1 }
 };
+
+/* The library type a payload handle points at, and the function that
+ * frees it. One place, so the construction and the teardown of a kind
+ * cannot name different types. */
+static const char *rl_pay_ctype_(int kind)
+{
+    switch (kind) {
+    case RL_PAY_INFOSTATE: return "K26AstroInfostate";
+    case RL_PAY_IMPACTOR:  return "K26AstroImpactor";
+    case RL_PAY_LASER:     return "K26AstroLaser";
+    default:               return "K26AstroDetectSensor";
+    }
+}
+
+static const char *rl_pay_dtor_(int kind)
+{
+    switch (kind) {
+    case RL_PAY_INFOSTATE: return "k26astro_infostate_destroy";
+    case RL_PAY_IMPACTOR:  return "k26astro_impactor_destroy";
+    case RL_PAY_LASER:     return "k26astro_laser_destroy";
+    default:               return "k26astro_detect_sensor_destroy";
+    }
+}
+
+/* The kinds this grammar binds, for the diagnostics that list them.
+ * One string rather than a sentence per refusal, so a kind added to
+ * the table above cannot be missing from half the messages. */
+#define RL_PAY_KIND_LIST \
+    "detect_ir, detect_radar, detect_lidar, infostate, impactor and laser"
 
 typedef struct {
     const KflcNode *node;
@@ -552,6 +765,21 @@ typedef struct {
     int             dr[RL_PAY_MAXP];      /* draw slot, or -1 */
     int             line;
 } RlPayload;
+
+/* One `engage <payload> at <target>` inside the step body, resolved to
+ * the payload it fires and the body it is aimed at. The statements are
+ * collected in source order over the whole block, including the
+ * branches of any conditional in it, and the emitted helper for each
+ * carries that index: an engagement's geometry is a function of two
+ * bodies that are fixed at compile time, so nothing about it is looked
+ * up while stepping. */
+#define RL_MAX_ENGAGE 32
+typedef struct {
+    KflcNode *node;
+    int       payload;
+    int       target;
+    int       line;
+} RlEngage;
 
 /* One primitive of a detection target's silhouette, in that body's own
  * frame. The projected area of the set along the line of sight is the
@@ -738,6 +966,8 @@ typedef struct {
      * are -1 for every other form. */
     int         obs_payload[RL_MAX_OBSERVES];
     int         obs_target[RL_MAX_OBSERVES];
+    RlEngage    engages[RL_MAX_ENGAGE];
+    int         n_engages;
     RlSigPrim   sig[RL_MAX_SIG];
     int         n_sig;
     int         pay_nparam;         /* widest parameter set in use */
@@ -1792,8 +2022,7 @@ static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
         if (!kind_s) {
             kflc_diag_errorf(diag, py->line,
                 "astro_payload `%s`: missing required `kind=`; the kinds "
-                "this grammar binds are detect_ir, detect_radar, "
-                "detect_lidar and infostate", py->name);
+                "this grammar binds are " RL_PAY_KIND_LIST, py->name);
             err = 1;
         } else {
             for (int k = 0; k < RL_PAY_KINDS; k++) {
@@ -1802,8 +2031,7 @@ static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
             if (py->kind < 0) {
                 kflc_diag_errorf(diag, py->line,
                     "astro_payload `%s`: unknown kind `%s`; the kinds this "
-                    "grammar binds are detect_ir, detect_radar, "
-                    "detect_lidar and infostate", py->name, kind_s);
+                    "grammar binds are " RL_PAY_KIND_LIST, py->name, kind_s);
                 err = 1;
             }
         }
@@ -1866,6 +2094,41 @@ static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
                 continue;
             }
             py->attr[slot] = a;
+            /* A keyword-valued key takes one of its own words and no
+             * distribution: the value stands for a library constant,
+             * so there is nothing between two of them to draw from,
+             * and a number there would be a program depending on an
+             * internal numbering no document promises it. */
+            if (kd->keys[slot].words) {
+                const char *v = rl_pay_attr_text_(a);
+                int known = 0;
+                for (int w = 0; w < kd->keys[slot].n_words; w++) {
+                    if (v && strcmp(kd->keys[slot].words[w].word, v) == 0) {
+                        known = 1;
+                    }
+                }
+                if (!known) {
+                    char list[256];
+                    size_t used = 0;
+                    list[0] = '\0';
+                    for (int w = 0; w < kd->keys[slot].n_words; w++) {
+                        int wrote = snprintf(list + used, sizeof list - used,
+                                             "%s%s", w ? ", " : "",
+                                             kd->keys[slot].words[w].word);
+                        if (wrote < 0 || (size_t)wrote >= sizeof list - used) {
+                            break;
+                        }
+                        used += (size_t)wrote;
+                    }
+                    kflc_diag_errorf(diag, a->line,
+                        "astro_payload `%s`: `%s=%s` is not one of the "
+                        "words this key takes, which are %s; the value "
+                        "names a library constant rather than a number",
+                        py->name, a->name, v ? v : "?", list);
+                    err = 1;
+                }
+                continue;
+            }
             int derr = 0;
             KflcExpr *d = rl_attr_dist_(a, form, arena, diag, &derr);
             if (derr) err = 1;
@@ -1893,6 +2156,36 @@ static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
             }
         }
         if (kd->n_keys > m->pay_nparam) m->pay_nparam = kd->n_keys;
+
+        /* The impactor's two swarm keys are required by the release
+         * pattern rather than by the kind: a swarm without a count and
+         * a cone angle has no footprint, and a single projectile has
+         * no use for either, so declaring one there would be a number
+         * nothing reads. The constructor refuses the first case by
+         * returning null, which would surface as a world that failed
+         * to build; refusing here names the key instead. */
+        if (py->kind == RL_PAY_IMPACTOR && py->attr[0]) {
+            const char *pat = rl_pay_attr_text_(py->attr[0]);
+            int swarm = pat && strcmp(pat, "swarm") == 0;
+            for (int k = 4; k <= 5; k++) {
+                if (swarm && !py->attr[k]) {
+                    kflc_diag_errorf(diag, py->line,
+                        "astro_payload `%s`: `pattern=swarm` requires "
+                        "`%s=`, which a single projectile has no use for "
+                        "and a swarm has no footprint without",
+                        py->name, kd->keys[k].key);
+                    err = 1;
+                }
+                if (!swarm && py->attr[k]) {
+                    kflc_diag_errorf(diag, py->attr[k]->line,
+                        "astro_payload `%s`: `%s=` belongs to "
+                        "`pattern=swarm` and this payload declares "
+                        "`pattern=%s`, where nothing would read it",
+                        py->name, kd->keys[k].key, pat ? pat : "?");
+                    err = 1;
+                }
+            }
+        }
 
         /* At most one information state per body. It binds through the
          * vehicle's singleton payload slot, so a second evicts the
@@ -1963,15 +2256,139 @@ static int rl_track_modality_(const KflcNode *n, const char **out_bad)
     return -1;
 }
 
-/* Resolve the two defense observation forms and derive the silhouette
- * of every detection target. Runs after the actuator pass, which is
- * what puts the assemblies' colliders in the model. */
+/* Append one identifier-valued attribute to a statement. The parser's
+ * own helper is private to it, and this pass adds an attribute the
+ * author did not write: the effector kind an effect observe publishes
+ * the channels of. */
+static void rl_node_add_ident_(KflcArena *arena, KflcNode *n,
+                               const char *key, const char *value)
+{
+    KflcAttr *a = (KflcAttr *)kflc_arena_alloc(arena, sizeof *a);
+    if (!a) return;
+    memset(a, 0, sizeof *a);
+    a->name       = kflc_arena_strdup(arena, key);
+    a->value.kind = KFLV_IDENT;
+    a->value.u.s  = kflc_arena_strdup(arena, value);
+    a->line       = n->line;
+    if (!n->attrs) { n->attrs = a; return; }
+    KflcAttr *t = n->attrs;
+    while (t->next) t = t->next;
+    t->next = a;
+}
+
+/* Resolve each effect observe's payload kind onto the statement.
+ *
+ * The two effector kinds publish different channel sets, so this
+ * form's width is a function of its payload's kind. The agent slices
+ * are computed from the widths and are computed before the payloads
+ * are resolved, so the kind is read straight off the `astro_payload`
+ * statement here and stamped where the width function can see it. A
+ * payload that does not resolve is left unstamped and is refused with
+ * its own diagnostic further down. */
+static void rl_stamp_effect_kind_(RlModel *m, KflcNode *o, KflcArena *arena)
+{
+    if (o->kind != KFLN_STMT_OBSERVE) return;
+    if (rl_observe_form_(o) != RL_OBS_EFF) return;
+    const char *pn = rl_observe_payload_(o);
+    if (!pn) return;
+    for (int p = 0; p < m->n_payloads; p++) {
+        if (!m->payloads[p].name) continue;
+        if (strcmp(m->payloads[p].name, pn) != 0) continue;
+        const char *kind_s =
+            rl_pay_attr_text_(rl_attr_(m->payloads[p].node, "kind"));
+        if (kind_s) rl_node_add_ident_(arena, o, "effect_kind", kind_s);
+        return;
+    }
+}
+
+static void rl_stamp_effect_kinds_(RlModel *m, KflcArena *arena)
+{
+    for (KflcNode *s = m->world ? m->world->children : NULL; s; s = s->next) {
+        if (s->kind == KFLN_STMT_AGENT) {
+            for (KflcNode *o = s->children; o; o = o->next) {
+                rl_stamp_effect_kind_(m, o, arena);
+            }
+            continue;
+        }
+        rl_stamp_effect_kind_(m, s, arena);
+    }
+}
+
+/* Collect every `engage` in the step body, in source order over the
+ * whole block including the branches of any conditional in it. Source
+ * order is the order the statements run in and therefore the order the
+ * effects apply in, which is already the rule for a body state write.
+ * Returns non-zero when the block holds more than the fixed limit. */
+static int rl_collect_engages_(RlModel *m, KflcNode *stmts, KflcDiag *diag)
+{
+    for (KflcNode *s = stmts; s; s = s->next) {
+        if (s->kind == KFLN_STMT_ENGAGE) {
+            if (m->n_engages == RL_MAX_ENGAGE) {
+                kflc_diag_errorf(diag, s->line,
+                    "too many `engage` statements in one step body "
+                    "(limit %d)", RL_MAX_ENGAGE);
+                return 1;
+            }
+            RlEngage *e = &m->engages[m->n_engages++];
+            e->node    = s;
+            e->payload = -1;
+            e->target  = -1;
+            e->line    = s->line;
+            continue;
+        }
+        if (rl_collect_engages_(m, s->children, diag)) return 1;
+        if (rl_collect_engages_(m, s->else_children, diag)) return 1;
+    }
+    return 0;
+}
+
+/* Resolve the three defense observation forms and every engagement,
+ * and derive the silhouette of every body either needs. Runs after the
+ * actuator pass, which is what puts the assemblies' colliders in the
+ * model. */
 static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
 {
     int err = 0;
     for (int i = 0; i < m->n_observes; i++) {
         m->obs_payload[i] = -1;
         m->obs_target[i]  = -1;
+    }
+    /* The effect form names a payload and no body: an effector's
+     * result belongs to the effector, and the body it was aimed at was
+     * named by the `engage` that produced it. */
+    for (int i = 0; i < m->n_observes; i++) {
+        const KflcNode *s = m->observes[i];
+        if (rl_observe_form_(s) != RL_OBS_EFF) continue;
+        const char *pn = rl_observe_payload_(s);
+        int p = -1;
+        for (int q = 0; q < m->n_payloads; q++) {
+            if (m->payloads[q].name && pn &&
+                strcmp(m->payloads[q].name, pn) == 0) p = q;
+        }
+        if (p < 0) {
+            kflc_diag_errorf(diag, s->line,
+                "observe effect %s: no astro_payload of that name is "
+                "declared in this world", pn ? pn : "?");
+            err = 1;
+            continue;
+        }
+        if (m->payloads[p].kind < 0) { err = 1; continue; }
+        const RlPayKindDesc *kd = &RL_PAY_KIND_[m->payloads[p].kind];
+        if (!kd->is_effector) {
+            kflc_diag_errorf(diag, s->line,
+                "observe effect %s: `%s` is of kind `%s`, which produces "
+                "no engagement event; this form takes an effector "
+                "payload", pn, pn, kd->name);
+            err = 1;
+            continue;
+        }
+        if (rl_attr_(s, "modality")) {
+            kflc_diag_errorf(diag, s->line,
+                "observe effect %s: `modality=` belongs to the "
+                "`observe track` form", pn);
+            err = 1;
+        }
+        m->obs_payload[i] = p;
     }
     for (int i = 0; i < m->n_observes; i++) {
         const KflcNode *s = m->observes[i];
@@ -2084,15 +2501,111 @@ static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
         }
     }
 
-    /* The silhouette of every detection target, taken from the
-     * colliders its assembly declares. Bodies are walked in
-     * declaration order so the emitted table's order is the program's
-     * own and not an accident of which observe was written first. */
+    /* Every engagement, resolved to the payload it fires and the body
+     * it is aimed at. */
+    if (m->on_step &&
+        rl_collect_engages_(m, m->on_step->children, diag)) {
+        return 1;
+    }
+    for (int e = 0; e < m->n_engages; e++) {
+        RlEngage *en = &m->engages[e];
+        const char *pn = en->node->name;
+        const KflcAttr *at = rl_attr_(en->node, "at");
+        const char *tn = rl_pay_attr_text_(at);
+        for (int q = 0; q < m->n_payloads; q++) {
+            if (m->payloads[q].name && pn &&
+                strcmp(m->payloads[q].name, pn) == 0) en->payload = q;
+        }
+        if (en->payload < 0) {
+            kflc_diag_errorf(diag, en->line,
+                "engage %s at %s: no astro_payload of that name is "
+                "declared in this world", pn ? pn : "?", tn ? tn : "?");
+            err = 1;
+            continue;
+        }
+        if (m->payloads[en->payload].kind < 0) { err = 1; continue; }
+        const RlPayKindDesc *kd =
+            &RL_PAY_KIND_[m->payloads[en->payload].kind];
+        if (!kd->is_effector) {
+            kflc_diag_errorf(diag, en->line,
+                "engage %s at %s: `%s` is of kind `%s`, which is not an "
+                "effector; only an effector payload is engaged",
+                pn, tn ? tn : "?", pn, kd->name);
+            err = 1;
+            continue;
+        }
+        /* At most one engagement of a payload per step. Two would make
+         * the published result depend on statement order with no
+         * channel reporting which one it came from, and both would
+         * have applied their effect to the world. Refused here when
+         * both statements name the payload directly; the emitted
+         * artifact faults on the second call for the cases this test
+         * cannot see, such as one inside a loop. */
+        for (int q = 0; q < e; q++) {
+            if (m->engages[q].payload != en->payload) continue;
+            kflc_diag_errorf(diag, en->line,
+                "engage %s at %s: `%s` is already engaged at line %d in "
+                "this step body, and a payload is engaged at most once "
+                "per step: the published result would depend on which "
+                "statement ran last with nothing reporting it",
+                pn, tn ? tn : "?", pn, m->engages[q].line);
+            err = 1;
+            break;
+        }
+        en->target = rl_body_index_of_(m, tn);
+        if (en->target < 0) {
+            kflc_diag_errorf(diag, en->line,
+                "engage %s at `%s`: no astro_body of that name is "
+                "declared in this world", pn, tn ? tn : "?");
+            err = 1;
+            continue;
+        }
+        if (!rl_body_has_assembly_(m, en->target)) {
+            kflc_diag_errorf(diag, en->line,
+                "engage %s at `%s`: `%s` declares no `assembly=`, so it "
+                "presents no geometry for an effector to act on", pn,
+                tn, tn);
+            err = 1;
+            continue;
+        }
+        if (en->target == m->payloads[en->payload].body) {
+            kflc_diag_errorf(diag, en->line,
+                "engage %s at `%s`: `%s` is carried by `%s` itself, and "
+                "an effector does not engage its own platform", pn, tn,
+                pn, tn);
+            err = 1;
+            continue;
+        }
+    }
+
+    /* Every effector payload's result is published or it is not
+     * computed at all. A payload engaged with no `observe effect` on it
+     * still changes the world, so the engagement is not a decoration;
+     * but the channels the design fixes would be written where nothing
+     * reads them, and a reader who wrote the statement expecting to see
+     * a result would see nothing. It is not an error, and nothing here
+     * refuses it: the effect is the point and the channels are how it
+     * is watched. */
+
+    /* The silhouette of every body a defense form takes an area of:
+     * every detection target, and every body engaged. Both use the same
+     * projected-area helper, since a laser spot and a detection
+     * signature are the same silhouette along the same line of sight,
+     * and an engagement's hit test is that silhouette's own radius.
+     * Bodies are walked in declaration order so the emitted table's
+     * order is the program's own and not an accident of which statement
+     * was written first. */
     for (int b = 0; b < m->n_bodies; b++) {
         int wanted = 0;
+        const char *why = "observe detect ... of";
         for (int i = 0; i < m->n_observes; i++) {
             if (rl_observe_form_(m->observes[i]) != RL_OBS_DET) continue;
             if (m->obs_target[i] == b) wanted = 1;
+        }
+        for (int e = 0; e < m->n_engages; e++) {
+            if (m->engages[e].target != b) continue;
+            if (!wanted) why = "engage ... at";
+            wanted = 1;
         }
         if (!wanted) continue;
         int have = 0;
@@ -2112,12 +2625,12 @@ static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
                 snprintf(path, sizeof path, "%s", raw ? raw : "?");
             }
             kflc_diag_errorf(diag, m->bodies[b].body->line,
-                "observe detect ... of `%s`: the assembly `%s` declares "
-                "no `collider`, so `%s` presents no area along a line of "
-                "sight and its signature would be zero at every aspect; "
-                "a detection target needs at least one collision "
-                "primitive", m->bodies[b].body->name, path,
-                m->bodies[b].body->name);
+                "%s `%s`: the assembly `%s` declares no `collider`, so "
+                "`%s` presents no area along a line of sight and its "
+                "silhouette would be zero at every aspect; a body a "
+                "defense payload is pointed at needs at least one "
+                "collision primitive", why, m->bodies[b].body->name,
+                path, m->bodies[b].body->name);
             err = 1;
             continue;
         }
@@ -2319,6 +2832,11 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
             "episode: missing required `control_dt <expr>`");
         return 1;
     }
+    /* Before the agent pass, which computes each agent's slice from
+     * the channel widths: an effect observe's width is its payload's
+     * kind's, so the kind has to be on the statement before any width
+     * is asked for. */
+    rl_stamp_effect_kinds_(m, arena);
     if (rl_finish_agents_(m, diag)) return 1;
     if (rl_finish_payloads_(m, form, arena, diag)) err = 1;
 
@@ -2973,6 +3491,16 @@ static int rl_n_detect_(const RlModel *m)
     return n;
 }
 
+static int rl_n_effector_(const RlModel *m)
+{
+    int n = 0;
+    for (int p = 0; p < m->n_payloads; p++) {
+        if (m->payloads[p].kind >= 0 &&
+            RL_PAY_KIND_[m->payloads[p].kind].is_effector) n++;
+    }
+    return n;
+}
+
 /* The (information state, target) pairs the binding pushes a sample
  * for. One pair per distinct target of each infostate payload, taken
  * in observe declaration order, so the push order is the program's own
@@ -3278,7 +3806,10 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
     int n_pairs = rl_track_pairs_(m, tpay, tveh,
                                   (int)(sizeof tpay / sizeof tpay[0]));
     fprintf(out, "#define KFLRL_N_TRACKPAIR %d\n", n_pairs);
-    fprintf(out, "#define KFLRL_N_SIG %d\n\n", m->n_sig);
+    fprintf(out, "#define KFLRL_N_SIG %d\n", m->n_sig);
+    fprintf(out, "#define KFLRL_N_EFFECTOR %d\n", rl_n_effector_(m));
+    fprintf(out, "#define KFLRL_N_ENGAGE %d\n", m->n_engages);
+    fprintf(out, "#define KFLRL_EFF_STRIDE %d\n\n", RL_EFF_MAX_COMPS);
     fputs(
 "/* This environment's slice of the payload handle array and of the\n"
 " * parameter store. Both are macros so a program with no payload\n"
@@ -3300,7 +3831,40 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
 "#define KFLRL_VEHS(h, e) ((h)->vehicles + (size_t)(e) * KFLRL_N_VEHICLES)\n"
 "#else\n"
 "#define KFLRL_VEHS(h, e) ((K26AstroVehicle **)0)\n"
+"#endif\n"
+"#if KFLRL_N_EFFECTOR > 0\n"
+"#define KFLRL_ENG(h, e) (&(h)->eng[(e)])\n"
+"#else\n"
+"#define KFLRL_ENG(h, e) ((KflrlEng *)0)\n"
 "#endif\n\n", out);
+    fputs(
+"/* One environment's engagement block: the channels every effector\n"
+" * payload published on this step, and the record of which payloads\n"
+" * were engaged.\n"
+" *\n"
+" * `ch` is indexed by payload slot and channel, at the widest\n"
+" * effector channel set's stride, so a payload's channels sit where\n"
+" * the observation reads them without a per-kind offset table. The\n"
+" * whole block is cleared at the top of every step, which is what\n"
+" * makes `_engaged` read 0.0 and the rest zero-fill on a step whose\n"
+" * body engaged nothing.\n"
+" *\n"
+" * `fault` is raised by a second engagement of one payload inside one\n"
+" * step. The compiler refuses that where both statements name the\n"
+" * payload directly; this catches the cases it cannot see statically,\n"
+" * such as a statement inside a loop or inside a function called\n"
+" * twice, and the step reports it as a fault rather than publishing a\n"
+" * result whose value depends on which call ran last.\n"
+" *\n"
+" * The type is declared whatever the program carries, so the step\n"
+" * body's signature has one shape; a program with no effector passes\n"
+" * a null pointer through it and its handle carries no block. */\n"
+"typedef struct {\n"
+"    double  ch[KFLRL_N_PAYLOAD > 0\n"
+"               ? KFLRL_N_PAYLOAD * KFLRL_EFF_STRIDE : 1];\n"
+"    uint8_t used[KFLRL_N_PAYLOAD > 0 ? KFLRL_N_PAYLOAD : 1];\n"
+"    uint8_t fault;\n"
+"} KflrlEng;\n\n", out);
     if (m->n_payloads == 0) return 0;
 
     if (rl_n_pay_kind_(m, RL_PAY_INFOSTATE) > 0) {
@@ -3346,11 +3910,8 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
           "    switch (slot) {\n", out);
     for (int p = 0; p < m->n_payloads; p++) {
         fprintf(out, "    case %d: %s((%s *)p); break;\n", p,
-                m->payloads[p].kind == RL_PAY_INFOSTATE
-                    ? "k26astro_infostate_destroy"
-                    : "k26astro_detect_sensor_destroy",
-                m->payloads[p].kind == RL_PAY_INFOSTATE
-                    ? "K26AstroInfostate" : "K26AstroDetectSensor");
+                rl_pay_dtor_(m->payloads[p].kind),
+                rl_pay_ctype_(m->payloads[p].kind));
     }
     fputs("    default: break;\n    }\n}\n\n", out);
 
@@ -3630,8 +4191,21 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
               "#include <k26astro_core/epoch.h>\n", out);
     }
     if (rl_n_detect_(m) > 0) {
-        fputs("#include <k26astro_detect/detect.h>\n"
-              "#include <k26astro_core/consts.h>\n", out);
+        fputs("#include <k26astro_detect/detect.h>\n", out);
+    }
+    if (rl_n_pay_kind_(m, RL_PAY_IMPACTOR) > 0) {
+        fputs("#include <k26astro_impactor/impactor.h>\n"
+              "#include <k26astro_impactor/energy_coupling.h>\n"
+              "#include <k26astro_impactor/swarm.h>\n"
+              "#include <k26astro_impactor/terminal_phase.h>\n", out);
+    }
+    if (rl_n_pay_kind_(m, RL_PAY_LASER) > 0) {
+        fputs("#include <k26astro_laser/laser.h>\n", out);
+    }
+    /* The mathematical constants the three closed-form models read,
+     * pulled in once for whichever of them the program declares. */
+    if (rl_n_detect_(m) > 0 || rl_n_effector_(m) > 0) {
+        fputs("#include <k26astro_core/consts.h>\n", out);
     }
     if (m->n_payloads > 0) {
         fputs("#include <k26astro_defense/defense_kinds.h>\n"
@@ -4375,6 +4949,21 @@ static int rl_emit_payload_build_(FILE *out, const RlModel *m,
                              "_kfl_v;\n", py->dr[k]);
                 fprintf(out, "            _kfl_pp[%d] = _kfl_v;\n", k);
                 fputs("        }\n", out);
+            } else if (kd->keys[k].words) {
+                /* A keyword-valued key stores the library constant the
+                 * declared word names, so the store carries one number
+                 * per key however the key was spelled and the
+                 * constructor call below indexes it like any other. */
+                const char *v = py->attr[k] ? rl_pay_attr_text_(py->attr[k])
+                                            : NULL;
+                const char *code = NULL;
+                for (int w = 0; w < kd->keys[k].n_words; w++) {
+                    if (v && strcmp(kd->keys[k].words[w].word, v) == 0) {
+                        code = kd->keys[k].words[w].code;
+                    }
+                }
+                fprintf(out, "        _kfl_pp[%d] = (double)(%s);\n",
+                        k, code ? code : kd->keys[k].dflt);
             } else {
                 const char *v = py->attr[k] ? rl_pay_attr_text_(py->attr[k])
                                             : kd->keys[k].dflt;
@@ -4393,6 +4982,37 @@ static int rl_emit_payload_build_(FILE *out, const RlModel *m,
             "        if (!_kfl_h) return -1;\n"
             "        if (k26astro_infostate_attach(_kfl_h) != 0) {\n"
             "            k26astro_infostate_destroy(_kfl_h);\n"
+            "            return -1;\n"
+            "        }\n", out);
+        } else if (py->kind == RL_PAY_IMPACTOR) {
+            /* The constructor takes the pattern, the three projectile
+             * parameters and the two swarm ones; the nine target
+             * parameters sit above them in the store and are read by
+             * the impact analysis at engagement. A single-pattern
+             * payload passes the library's own ignored values for the
+             * two swarm arguments, which its header names as ignored
+             * for that pattern. */
+            fputs(
+            "        K26AstroImpactor *_kfl_h = k26astro_impactor_new(\n"
+            "            (K26AstroImpactorPattern)(int)_kfl_pp[0],\n"
+            "            _kfl_pp[1], _kfl_pp[2], _kfl_pp[3],\n"
+            "            (int)_kfl_pp[4], _kfl_pp[5]);\n"
+            "        if (!_kfl_h) return -1;\n"
+            "        if (k26astro_impactor_bind(_kfl_h, _kfl_ov) != 0) {\n"
+            "            k26astro_impactor_destroy(_kfl_h);\n"
+            "            return -1;\n"
+            "        }\n", out);
+        } else if (py->kind == RL_PAY_LASER) {
+            /* The constructor takes the seven emitter parameters; the
+             * material and the reflectivity describe the target and are
+             * read by the evaluator at engagement. */
+            fputs(
+            "        K26AstroLaser *_kfl_h = k26astro_laser_new(\n"
+            "            _kfl_pp[0], _kfl_pp[1], _kfl_pp[2], _kfl_pp[3],\n"
+            "            _kfl_pp[4], _kfl_pp[5], _kfl_pp[6]);\n"
+            "        if (!_kfl_h) return -1;\n"
+            "        if (k26astro_laser_bind(_kfl_h, _kfl_ov) != 0) {\n"
+            "            k26astro_laser_destroy(_kfl_h);\n"
             "            return -1;\n"
             "        }\n", out);
         } else {
@@ -4427,9 +5047,7 @@ static int rl_emit_payload_build_(FILE *out, const RlModel *m,
             "(const K26AstroPayload *)_kfl_h) != kflrl_pay_tag_[%d]) {\n",
             p);
         fprintf(out, "            %s(_kfl_h);\n            return -1;\n"
-                     "        }\n",
-                py->kind == RL_PAY_INFOSTATE ? "k26astro_infostate_destroy"
-                                             : "k26astro_detect_sensor_destroy");
+                     "        }\n", rl_pay_dtor_(py->kind));
         fprintf(out, "        _kfl_pay[%d] = (void *)_kfl_h;\n"
                      "    }\n", p);
     }
@@ -4782,7 +5400,7 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
  * channels each. The range channel is the magnitude of the relative
  * position vector between the corrected target position and the
  * observer, in metres. */
-/* The two defense observation forms.
+/* The three defense observation forms.
  *
  * Detection is closed form over the two bodies' current state: no
  * integration, no draw, no iteration, and no light-time correction.
@@ -4796,8 +5414,14 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
  * the area the target presents is computed along the line of sight in
  * the target's own frame, so a craft that turns changes what its
  * observer sees. The published aspect channel is the cosine between
- * the line of sight and the target's velocity, which is what a
- * velocity-forward craft's own attitude follows. */
+ * the line of sight and the target's own first body axis, which is the
+ * axis that silhouette is taken against.
+ *
+ * The effector form reads rather than computes: the engagement itself
+ * ran in the step body, before the world advanced, and left its
+ * channels in the environment's engagement block. Reading them here
+ * puts an effector's result in the same vector, at the same step
+ * boundary, as every other observation. */
 static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
                                      int i, int off)
 {
@@ -4805,6 +5429,20 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
     int p   = m->obs_payload[i];
     int tgt = m->obs_target[i];
     const RlPayload *py = &m->payloads[p];
+
+    if (rl_observe_form_(s) == RL_OBS_EFF) {
+        int w = rl_observe_base_width_(s);
+        fprintf(out, "    {\n"
+                     "        const double *_kfl_ec = eng\n"
+                     "            ? eng->ch + %d * KFLRL_EFF_STRIDE : NULL;\n",
+                p);
+        for (int c = 0; c < w; c++) {
+            fprintf(out, "        out_v[%d] = _kfl_ec ? _kfl_ec[%d] : 0.0;\n",
+                    off + c, c);
+        }
+        fputs("    }\n", out);
+        return;
+    }
 
     if (rl_observe_form_(s) == RL_OBS_TRK) {
         const char *bad = NULL;
@@ -4986,7 +5624,11 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
           " * environment's latched contact block, which a contact\n"
           " * observe reads: contact is a fact about the transition\n"
           " * just taken rather than about where a body is, so it is\n"
-          " * passed in rather than read back out of the world. */\n"
+          " * passed in rather than read back out of the world.\n"
+          " * `eng` is the environment's engagement block, read by an\n"
+          " * effector observe for the same reason: an engagement is a\n"
+          " * fact about the act the step took, not about where a body\n"
+          " * is. */\n"
           "static void kflrl_observe_(K26AstroWorld *world, "
           "double *out_v,\n"
           "                           const KflrlContact *ct,\n"
@@ -4994,16 +5636,19 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
           "                           void *const *pay,\n"
           "                           const double *payp,\n"
           "                           K26AstroVehicle *const *veh,\n"
-          "                           int64_t t_day, double t_info)\n"
+          "                           int64_t t_day, double t_info,\n"
+          "                           const KflrlEng *eng)\n"
           "{\n"
           "    (void)world; (void)out_v; (void)ct; (void)jn;\n"
           "    (void)pay; (void)payp; (void)veh; (void)t_day; "
-          "(void)t_info;\n", out);
+          "(void)t_info;\n"
+          "    (void)eng;\n", out);
     for (int i = 0; i < m->n_observes; i++) {
         const KflcNode *s = m->observes[i];
         int off = rl_obs_offset_(m->observes, i);
         if (rl_observe_form_(s) == RL_OBS_DET ||
-            rl_observe_form_(s) == RL_OBS_TRK) {
+            rl_observe_form_(s) == RL_OBS_TRK ||
+            rl_observe_form_(s) == RL_OBS_EFF) {
             rl_emit_observe_defense_(out, m, i, off);
             continue;
         }
@@ -5514,6 +6159,13 @@ static const char *rl_step_stmt_why_(const KflcNode *s, const char **what)
     case KFLN_STMT_WHILE:
     case KFLN_STMT_FOR_EACH:
     case KFLN_FN_ARG:
+        return NULL;
+
+    /* An engagement is an act of a step by construction: it lowers to
+     * one call over compile-time indices, it reads no heap storage and
+     * takes none, and its effect on the world is the point of the
+     * statement rather than a side effect of one. */
+    case KFLN_STMT_ENGAGE:
         return NULL;
 
     case KFLN_STMT_PRINT:
@@ -6426,6 +7078,234 @@ static int rl_agent_scan_stmts_(const RlModel *m, KflcNode *stmts,
     return 0;
 }
 
+/* One engagement, as a function of the two bodies' current state.
+ *
+ * The whole of an engagement's geometry is derived here rather than
+ * declared: the range is the distance between the payload's own body
+ * and the target, the dwell is the control period, and the area the
+ * target presents is the projected area of its collision primitives
+ * along the line the effector acts on. That last is the same helper
+ * and the same silhouette the detection channels take, because a laser
+ * spot and an infrared signature are the same projection of the same
+ * craft; nothing here is a second description of the geometry.
+ *
+ * The effect on the world is the substance of the statement. An
+ * effector that published a result and changed nothing would be a
+ * decoration, so each kind's principal result is applied to the target
+ * before this returns, and the step's own advance is what integrates
+ * it: `on_step` runs before the world moves, which is the same
+ * relation a body state write has.
+ *
+ * Both kinds are closed form over the declared parameters and the
+ * current state, with no draw and no iteration, and both are handed no
+ * generator: an imperfection on an effector channel arrives through
+ * the declared sensor layer, at the coordinates a replay reproduces.
+ */
+static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
+{
+    const RlEngage  *en = &m->engages[e];
+    const RlPayload *py = &m->payloads[en->payload];
+    int p   = en->payload;
+    int eb  = py->body;
+    int tb  = en->target;
+    int imp = py->kind == RL_PAY_IMPACTOR;
+
+    fprintf(out,
+        "/* `engage %s at %s`, line %d. */\n"
+        "static void kflrl_engage_%d_(K26AstroWorld *world,\n"
+        "                             void *const *pay,\n"
+        "                             const double *payp, double dt,\n"
+        "                             KflrlEng *eng)\n"
+        "{\n"
+        "    if (!eng) return;\n"
+        /* The runtime half of the one-engagement-per-step rule. The
+         * compiler refuses two statements naming one payload; this
+         * catches a single statement reached twice, which is the shape
+         * a loop or a twice-called function produces and which no
+         * static test can see. */
+        "    if (eng->used[%d]) { eng->fault = 1; return; }\n"
+        "    eng->used[%d] = 1;\n"
+        "    double *ch = eng->ch + %d * KFLRL_EFF_STRIDE;\n"
+        "    ch[0] = 1.0;\n"
+        "    K26AstroBody *_kfl_eb = k26astro_world_body_at(\n"
+        "        world, kflrl_body_idx_[%d]);\n"
+        "    K26AstroBody *_kfl_tb = k26astro_world_body_at(\n"
+        "        world, kflrl_body_idx_[%d]);\n"
+        "    %s *_kfl_h = pay ? (%s *)pay[%d] : NULL;\n"
+        "    const double *pp = payp ? payp + %d * KFLRL_PAY_NPARAM\n"
+        "                            : NULL;\n"
+        "    if (!_kfl_eb || !_kfl_tb || !_kfl_h || !pp) return;\n"
+        "    K26V3 _kfl_d = k26astro_pos_sub(&_kfl_tb->pos, &_kfl_eb->pos);\n"
+        "    double _kfl_rng = k26m3d_v3_len(_kfl_d);\n"
+        "    if (!(_kfl_rng > 0.0)) return;\n"
+        "    double _kfl_mass = _kfl_tb->mass;\n",
+        en->node->name ? en->node->name : "?",
+        m->bodies[tb].body->name, en->line, e, p, p, p,
+        eb, tb, rl_pay_ctype_(py->kind), rl_pay_ctype_(py->kind), p, p);
+
+    if (!imp) {
+        fputs(
+        "    K26V3 _kfl_u = k26m3d_v3(_kfl_d.x / _kfl_rng,\n"
+        "                             _kfl_d.y / _kfl_rng,\n"
+        "                             _kfl_d.z / _kfl_rng);\n"
+        /* The silhouette is taken in the target's own frame along the
+         * line the beam travels, which is what makes the spot's
+         * encircled fraction and the fluence aspect dependent. */
+        "    K26V3 _kfl_look = k26m3d_quat_rotate_v3(\n"
+        "        k26m3d_quat_conj(_kfl_tb->attitude), _kfl_u);\n"
+        "    double _kfl_area = kflrl_sig_area_(", out);
+        fprintf(out, "%d, _kfl_look);\n", tb);
+        fputs(
+        "    if (!(_kfl_area > 0.0)) return;\n"
+        "    K26AstroLaserAblationEvent ev = k26astro_laser_engage(\n"
+        "        _kfl_h, (K26AstroLaserMaterial)(int)pp[7], _kfl_area,\n"
+        "        pp[8], _kfl_rng, dt);\n"
+        /* The ablation plume leaves along the beam, so the recoil
+         * pushes the target away from the emitter: the impulse acts
+         * along the unit vector from emitter to target. The velocity
+         * increment is taken against the mass the target had when the
+         * light arrived, and the ablated mass is removed after it. */
+        "    double _kfl_dv = (_kfl_mass > 0.0)\n"
+        "                   ? ev.impulse_N_s / _kfl_mass : 0.0;\n"
+        "    _kfl_tb->vel.x += _kfl_dv * _kfl_u.x;\n"
+        "    _kfl_tb->vel.y += _kfl_dv * _kfl_u.y;\n"
+        "    _kfl_tb->vel.z += _kfl_dv * _kfl_u.z;\n"
+        /* The published mass loss is the mass actually removed. A step
+         * that would ablate the whole body is outside this model's
+         * range, and removing all of it would leave a massless body in
+         * the integrator, so the removal is bounded and the channel
+         * reports what was applied rather than what was predicted. */
+        "    double _kfl_loss = ev.mass_loss_kg;\n"
+        "    if (_kfl_loss < 0.0) _kfl_loss = 0.0;\n"
+        "    if (_kfl_loss >= _kfl_mass) _kfl_loss = 0.0;\n"
+        "    if (_kfl_loss > 0.0) {\n"
+        "        k26astro_body_set_mass(_kfl_tb, _kfl_mass - _kfl_loss);\n"
+        "    }\n"
+        "    ch[1] = ev.impulse_N_s;\n"
+        "    ch[2] = _kfl_dv;\n"
+        "    ch[3] = _kfl_loss;\n"
+        "    ch[4] = ev.range_m;\n"
+        "    ch[5] = ev.spot_diameter_m;\n"
+        "    ch[6] = ev.encircled_fraction;\n"
+        "    ch[7] = ev.fluence_J_per_m2;\n"
+        "    ch[8] = ev.plasma_transmissivity;\n"
+        "    ch[9] = ev.plasma_ignited ? 1.0 : 0.0;\n"
+        "}\n\n", out);
+        return;
+    }
+
+    fprintf(out,
+        /* The intercept prediction, from the relative state of the two
+         * bodies. Positions travel as an exact difference rather than
+         * as flattened coordinates, because a position here is a sector
+         * index and a bounded offset and flattening throws away the
+         * precision the sector grid exists to keep. */
+        "    K26V3 _kfl_rp = k26astro_pos_sub(&_kfl_eb->pos,\n"
+        "                                     &_kfl_tb->pos);\n"
+        "    K26V3 _kfl_rt = k26m3d_v3(0.0, 0.0, 0.0);\n"
+        "    K26V3 _kfl_vp = _kfl_eb->vel;\n"
+        "    K26V3 _kfl_vt = _kfl_tb->vel;\n"
+        "    double _kfl_vc = k26astro_impactor_closing_speed(_kfl_vp,\n"
+        "                                                     _kfl_vt);\n"
+        "    double _kfl_tca = k26astro_impactor_time_to_closest_approach(\n"
+        "        _kfl_rp, _kfl_vp, _kfl_rt, _kfl_vt);\n"
+        "    double _kfl_miss = k26astro_impactor_closest_approach_distance(\n"
+        "        _kfl_rp, _kfl_vp, _kfl_rt, _kfl_vt);\n"
+        /* The projectile is released with its launcher's own state and
+         * flies ballistically, so the direction it arrives from is the
+         * closing velocity. The area the target presents to it is the
+         * projection along that direction in the target's own frame,
+         * which is the same silhouette a detector would see from the
+         * same direction. */
+        "    K26V3 _kfl_w = k26m3d_v3_sub(_kfl_vp, _kfl_vt);\n"
+        "    if (_kfl_vc > 0.0) {\n"
+        "        _kfl_w = k26m3d_v3(_kfl_w.x / _kfl_vc,\n"
+        "                           _kfl_w.y / _kfl_vc,\n"
+        "                           _kfl_w.z / _kfl_vc);\n"
+        "    }\n"
+        "    K26V3 _kfl_look = k26m3d_quat_rotate_v3(\n"
+        "        k26m3d_quat_conj(_kfl_tb->attitude), _kfl_w);\n"
+        "    double _kfl_area = kflrl_sig_area_(%d, _kfl_look);\n"
+        "    if (!(_kfl_area > 0.0)) return;\n"
+        /* The hit test. The target's effective silhouette radius is the
+         * radius of a disc of the projected area, and the intercept
+         * lands when the predicted closest approach falls inside it
+         * with the approach still ahead: a negative time to closest
+         * approach is a target already receding, which is a miss
+         * however small the predicted separation. */
+        "    double _kfl_rad = sqrt(_kfl_area / K26A_PI);\n"
+        "    int _kfl_hit = (_kfl_tca > 0.0 && _kfl_miss <= _kfl_rad)\n"
+        "                 ? 1 : 0;\n"
+        /* The first body axis is the axis the assembly format runs
+         * along the craft, and the axis the projected area's own first
+         * term is taken against. */
+        "    K26V3 _kfl_n = k26m3d_quat_rotate_v3(_kfl_tb->attitude,\n"
+        "                                         k26m3d_v3(1.0, 0.0, 0.0));\n"
+        "    double _kfl_cos = k26astro_impactor_impact_cos_angle(_kfl_w,\n"
+        "                                                         _kfl_n);\n"
+        /* A swarm and a single projectile differ in what reaches the
+         * target. The cone's footprint at the engagement range is the
+         * area the released units are spread over, and the fraction of
+         * them that land is the target's silhouette over that
+         * footprint, capped at one. The fraction is a function of the
+         * declared cone and the geometry alone: no direction is
+         * sampled, because sampling would put a second generator on
+         * this path. */
+        "    double _kfl_frac = 1.0;\n"
+        "    if ((int)pp[0] == (int)K26ASTRO_IMPACTOR_PATTERN_SWARM) {\n"
+        "        double _kfl_fp = k26astro_swarm_footprint_m2(_kfl_rng,\n"
+        "                                                     pp[5]);\n"
+        "        _kfl_frac = (_kfl_fp > 0.0) ? (_kfl_area / _kfl_fp) : 1.0;\n"
+        "        if (_kfl_frac > 1.0) _kfl_frac = 1.0;\n"
+        "    }\n"
+        "    ch[3] = _kfl_vc;\n"
+        "    ch[4] = _kfl_tca;\n"
+        "    ch[5] = _kfl_miss;\n"
+        "    ch[6] = _kfl_frac;\n"
+        "    ch[7] = _kfl_cos;\n"
+        "    ch[2] = _kfl_hit ? 1.0 : 0.0;\n"
+        "    if (!_kfl_hit) return;\n"
+        /* Momentum transfer, and nothing beyond it. The projectile
+         * arrives carrying its mass times the closing speed in the
+         * target's frame, and the target takes that momentum along the
+         * closing direction. The transferred momentum is scaled by the
+         * fraction that landed. No ejecta enhancement is claimed: the
+         * momentum enhancement factor here is exactly one, where the
+         * published deflection literature reports it above one for a
+         * cratering impact into a rubble body, and this model does not
+         * carry the ejecta mass and speed that figure comes from. */
+        "    double _kfl_dv = (_kfl_mass > 0.0)\n"
+        "        ? (_kfl_frac * pp[1] * _kfl_vc / _kfl_mass) : 0.0;\n"
+        "    _kfl_tb->vel.x += _kfl_dv * _kfl_w.x;\n"
+        "    _kfl_tb->vel.y += _kfl_dv * _kfl_w.y;\n"
+        "    _kfl_tb->vel.z += _kfl_dv * _kfl_w.z;\n"
+        "    ch[1] = _kfl_dv;\n"
+        /* The penetration analysis. Its own header documents which
+         * branch runs on which parameters and skips the rest, so the
+         * declared target keys are passed straight through and an
+         * undeclared branch leaves its channels at zero. */
+        "    K26AstroImpactEvent ev = k26astro_impactor_analyse_impact(\n"
+        "        _kfl_h, _kfl_vc, _kfl_cos,\n"
+        "        pp[6], pp[7], pp[8], pp[9], pp[10], pp[11], pp[12]);\n"
+        "    K26AstroTargetStructureSpec spec;\n"
+        "    memset(&spec, 0, sizeof spec);\n"
+        "    spec.outer_thickness_m               = pp[6];\n"
+        "    spec.bumper_density_kg_per_m3        = pp[7];\n"
+        "    spec.bumper_gap_m                    = pp[8];\n"
+        "    spec.outer_yield_stress_ksi          = pp[9];\n"
+        "    spec.monolithic_brinell_hardness     = pp[10];\n"
+        "    spec.monolithic_density_kg_per_m3    = pp[11];\n"
+        "    spec.monolithic_speed_of_sound_m_per_s = pp[12];\n"
+        "    spec.inner_thickness_m               = pp[13];\n"
+        "    spec.monolithic_thickness_m          = pp[14];\n"
+        "    ch[8]  = ev.penetrates ? 1.0 : 0.0;\n"
+        "    ch[9]  = ev.critical_diameter_m;\n"
+        "    ch[10] = ev.monolithic_penetration_m;\n"
+        "    ch[11] = k26astro_impactor_energy_delivered_j(_kfl_h, &ev,\n"
+        "                                                  &spec);\n"
+        "}\n\n", tb);
+}
+
 /* The on_step body: action names in scope as read-only scalars, body
  * state readable and assignable by dotted name, run once per external
  * step before the world advances, identically in both modes. */
@@ -6460,6 +7340,15 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
         /* After the rewrite above, which is what populates the
          * actuator reference table this emits accessors for. */
         rl_emit_actuators_(out, m);
+        /* One helper per engagement, and the index of each left on the
+         * statement so the shared statement emitter calls the right
+         * one. Engagements were collected in source order, which is
+         * the order they run in. */
+        for (int i = 0; i < m->n_engages; i++) {
+            m->engages[i].node->position.kind = KFLV_INT;
+            m->engages[i].node->position.u.i  = (long)i;
+            rl_emit_engage_one_(out, m, i);
+        }
 
         /* The accessors resolve as ordinary calls in this body alone:
          * they are emitted in this translation unit and named only
@@ -6508,11 +7397,22 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
         rl_emit_actuators_(out, m);
     }
 
+    /* The payload handles, the parameter store, the control period and
+     * the engagement block travel into the step body because an
+     * `engage` statement reads all four: the period is the dwell an
+     * engagement lasts, and the block is where its result is recorded
+     * for the observation to publish. A program with no effector passes
+     * nulls through and the block is never touched. */
     fputs("static void kflrl_on_step_(K26AstroWorld *world, "
           "const double *_kfl_act_v,\n"
-          "                           KflrlAct *_kfl_a)\n"
+          "                           KflrlAct *_kfl_a, "
+          "void *const *_kfl_pay,\n"
+          "                           const double *_kfl_payp,\n"
+          "                           double _kfl_dt, KflrlEng *_kfl_eng)\n"
           "{\n"
-          "    (void)world; (void)_kfl_act_v; (void)_kfl_a;\n", out);
+          "    (void)world; (void)_kfl_act_v; (void)_kfl_a;\n"
+          "    (void)_kfl_pay; (void)_kfl_payp; (void)_kfl_dt;\n"
+          "    (void)_kfl_eng;\n", out);
     if (m->on_step) {
         /* Every agent's action channels are in scope. A name unique
          * across the blocks is bound unqualified as well as
@@ -6945,6 +7845,15 @@ static void rl_emit_env_core_(FILE *out)
 "    double  *info_t;\n"
 "    int64_t *info_day;\n"
 "#endif\n"
+"#if KFLRL_N_EFFECTOR > 0\n"
+"    /* One engagement block per environment, holding the channels\n"
+"     * this step's engagements published and the record of which\n"
+"     * payloads were engaged. Sized at create like every other\n"
+"     * per-environment store, so the stepping path writes into\n"
+"     * memory that already exists; clearing it at the top of a step\n"
+"     * is what makes an unengaged step read zero. */\n"
+"    KflrlEng *eng;\n"
+"#endif\n"
 #endif
 
 "    double    control_dt;\n"
@@ -7364,11 +8273,16 @@ static void rl_emit_env_core_(FILE *out)
 "        h->rew[(size_t)e * KFLRL_N_AGENTS + a] = 0.0;\n"
 "    }\n"
 "    h->fault[e]   = 0;\n"
+"#if KFLRL_N_EFFECTOR > 0\n"
+"    /* Nothing has been engaged in the new episode, so every effector\n"
+"     * channel reads zero in its initial observation. */\n"
+"    memset(&h->eng[e], 0, sizeof h->eng[e]);\n"
+"#endif\n"
 "    kflrl_observe_(w, h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
 "                   &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
 "                   &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
 "                   KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
-"                   KFLRL_INFOT(h, e));\n"
+"                   KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
 "    kflrl_sense_reset_(h, e, ep,\n"
 "                       h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
 "}\n"
@@ -7555,6 +8469,9 @@ static void rl_emit_env_core_(FILE *out)
 "    free(h->payp);\n"
 "    free(h->info_t);\n"
 "    free(h->info_day);\n"
+"#endif\n"
+"#if KFLRL_N_EFFECTOR > 0\n"
+"    free(h->eng);\n"
 "#endif\n"
 "#if KFLRL_N_VEHICLES > 0\n"
 "    /* Vehicles first: a vehicle's teardown notifies its subsystems\n"
@@ -7756,6 +8673,13 @@ static void rl_emit_env_core_(FILE *out)
 "        return K26RL_E_INTERNAL;\n"
 "    }\n"
 "#endif\n"
+"#if KFLRL_N_EFFECTOR > 0\n"
+"    h->eng = (KflrlEng *)calloc(n_envs, sizeof(KflrlEng));\n"
+"    if (!h->eng) {\n"
+"        kflrl_free_handle_(h);\n"
+"        return K26RL_E_INTERNAL;\n"
+"    }\n"
+"#endif\n"
 "    h->scratch = (double *)calloc(\n"
 "        KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1, sizeof(double));\n"
 "    if (!h->seen_seeds || !h->worlds || !h->baseline || !h->baseline_t ||\n"
@@ -7853,7 +8777,7 @@ static void rl_emit_env_core_(FILE *out)
 "                       &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
 "                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
 "                       KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
-"                       KFLRL_INFOT(h, e));\n"
+"                       KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
 "    }\n"
 "\n"
 "    h->spec_len = kflrl_spec_write_(NULL, h);\n", out);
@@ -8107,7 +9031,30 @@ static void rl_emit_env_core_(FILE *out)
 "\n"
 "", out);
     fputs(
-"        kflrl_on_step_(h->worlds[e], aslice, &h->act[e]);\n"
+"#if KFLRL_N_EFFECTOR > 0\n"
+"        /* An engagement is an act of this step alone, so the block\n"
+"         * is cleared before the body runs: on a step that engages\n"
+"         * nothing every effector channel reads zero, and the\n"
+"         * one-engagement-per-payload record starts empty. */\n"
+"        memset(&h->eng[e], 0, sizeof h->eng[e]);\n"
+"#endif\n"
+"        kflrl_on_step_(h->worlds[e], aslice, &h->act[e],\n"
+"                       KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
+"                       h->control_dt, KFLRL_ENG(h, e));\n"
+"#if KFLRL_N_EFFECTOR > 0\n"
+"        /* A payload engaged twice inside one step. The compiler\n"
+"         * refuses the statically visible case; this is the one it\n"
+"         * cannot see, and the environment faults rather than\n"
+"         * publishing a result whose value depends on which call ran\n"
+"         * last. Both engagements have already reached the world, so\n"
+"         * the transition is abandoned rather than committed. */\n"
+"        if (h->eng[e].fault) {\n"
+"            K26RlStatus fst = kflrl_fault_(\n"
+"                h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);\n"
+"            if (fst != K26RL_OK) return fst;\n"
+"            continue;\n"
+"        }\n"
+"#endif\n"
 "        /* A contact is a fact about one transition, so the latch is\n"
 "         * cleared here and whatever the sub-advances below find is\n"
 "         * what this step reports. */\n"
@@ -8491,7 +9438,7 @@ static void rl_emit_env_core_(FILE *out)
 "                       &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
 "                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
 "                       KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
-"                       KFLRL_INFOT(h, e));\n"
+"                       KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
 "        /* The transition index is the draw index every per-step term\n"
 "         * uses, and h->steps[e] is still the count before this\n"
 "         * transition, so the first transition of an episode draws at\n"
