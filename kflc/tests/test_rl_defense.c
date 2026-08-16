@@ -103,7 +103,11 @@ static int g_arms;
     " vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0" \
     " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=" spin "\n"
 
-#define DEF_PAYLOADS \
+/* The radar payload takes an extra key string, so the fixture that
+ * carries the whole tier can declare a chaff cloud around its target
+ * while the aspect arms, whose predictions are geometric, keep the
+ * cross-section the geometry alone gives. */
+#define DEF_PAYLOADS_X(rfx) \
     "    astro_payload eye body=watcher kind=detect_ir aperture_m=1.0" \
     " integration_s=0.5 passband_lo_um=3.0 passband_hi_um=12.0" \
     " throughput=0.5 snr_threshold=5.0 target_temp_k=300.0" \
@@ -112,7 +116,7 @@ static int g_arms;
     "    astro_payload rf body=watcher kind=detect_radar p_tx_w=2000.0" \
     " g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10 loss_sys_db=3.0" \
     " bandwidth_hz=1.0e6 t_sys_k=290.0 noise_figure=2.0" \
-    " snr_threshold=10.0\n" \
+    " snr_threshold=10.0" rfx "\n" \
     "    astro_payload beam body=watcher kind=detect_lidar" \
     " pulse_energy_j=0.1 wavelength_nm=1064.0 aperture_rx_m=0.5" \
     " atmospheric_tx=1.0 detector_efficiency=0.3 snr_threshold=5.0" \
@@ -124,6 +128,8 @@ static int g_arms;
     " target_emissivity=0.9 t_optics_k=280.0" \
     " optics_emissivity=0.05\n" \
     "    astro_payload picture body=watcher kind=infostate history=256\n"
+
+#define DEF_PAYLOADS DEF_PAYLOADS_X("")
 
 #define DEF_EPISODE \
     "    episode\n" \
@@ -228,7 +234,8 @@ static const char *const BOX_KFL =
 
 static const char *const ALL_KFL =
     DEF_HEAD DEF_MOVER("calibration_box.k26asm", "0.05")
-    DEF_PAYLOADS DEF_EFFECTORS DEF_EPISODE DEF_AGENTS_ALL;
+    DEF_PAYLOADS_X(" target_chaff_n_strips=2.0e6")
+    DEF_EFFECTORS DEF_EPISODE DEF_AGENTS_ALL;
 
 /* The same world with a spherical target and the same rotation. A
  * sphere presents its great circle at every aspect, so every

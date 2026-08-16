@@ -848,6 +848,28 @@ static const char *const DEC_ONLY_KFL =
     "end\n"
     "end\n";
 
+/* Two decoys against one observer, otherwise the same world. A fixture
+ * holding one decoy cannot tell the composition the library's own
+ * discrimination model uses from a plain assignment: with one of a
+ * thing the two agree. */
+static const char *const DEC_TWO_KFL =
+    "form SKDEC2\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+    SK_RADAR("rf", "ir_only", "")
+    SK_DECOY("flare", "active", "0.8")
+    SK_DECOY("flare2", "active", "0.8")
+    SK_EPISODE SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    observe effect flare as dec\n"
+    "    on_step\n"
+    "        engage flare at watcher\n"
+    "        engage flare2 at watcher\n"
+    "    end\n"
+    "    objective\n        reward radar_snr + dec_effect\n    end\n"
+    "end\n"
+    "end\n";
+
 static const char *const DEC_CTRL_KFL =
     "form SKDECC\n"
     "fn world w\n"
@@ -1034,6 +1056,48 @@ static void gate_channels_(void)
     }
     g_arms++;
     printf("  the decoy publishes 7 components in order\n");
+
+    /* And the checker's own name table agrees with the emitter's. The
+     * two live in different files and the arms above read the spec blob,
+     * which only the emitter writes, so a drift between them is
+     * invisible to those arms and visible here: a program whose
+     * objective reads every published component is accepted only if the
+     * checker knows all sixteen names. */
+    {
+        char src[16384];
+        int n = snprintf(src, sizeof src,
+            "form SKNAMES\n"
+            "fn world w\n"
+            SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+            SK_RADAR("rf", "ir_only", "")
+            SK_JAMMER("jam", "200.0")
+            SK_DECOY("flare", "active", "0.8")
+            SK_EPISODE SK_ACTION
+            "    observe detect rf of mover as radar\n"
+            "    observe effect jam as ew\n"
+            "    observe effect flare as dec\n"
+            "    on_step\n"
+            "        engage jam at watcher\n"
+            "        engage flare at watcher\n"
+            "    end\n"
+            "    objective\n"
+            "        reward 0.0");
+        for (int i = 0; JAM_C[i]; i++) {
+            n += snprintf(src + n, sizeof src - (size_t)n, " + %s",
+                          JAM_C[i]);
+        }
+        for (int i = 0; DEC_C[i]; i++) {
+            n += snprintf(src + n, sizeof src - (size_t)n, " + %s",
+                          DEC_C[i]);
+        }
+        n += snprintf(src + n, sizeof src - (size_t)n,
+                      "\n    end\n"
+                      "end\n"
+                      "end\n");
+        ASSERT((size_t)n < sizeof src);
+        must_accept_check_("an objective reading all 16 published "
+                           "components of the two kinds", src);
+    }
 }
 
 /* ---- Gate 4: the jammer changes a payload's capability --------------- */
@@ -1090,8 +1154,8 @@ static void gate_jammer_capability_(void)
      * sees nothing: the arm above must fail on it. */
     emit_("jamon");
     mutate_("jamon", "jamon_mut",
-            "s/eng->deg\\[0 \\* KFLRL_DEG_STRIDE + 2\\].js += _kfl_js;//",
-            "js += _kfl_js", 1, 0);
+            "s/eng->deg\\[0 \\* KFLRL_DEG_STRIDE + 2\\].js += [^;]*;//",
+            "\\.js += ", 1, 0);
     char so_mut[512];
     snprintf(so_mut, sizeof so_mut, WORK_DIR "/jamon_mut.so");
     build_emitted_(WORK_DIR "/jamon_mut.cc", so_mut);
@@ -1153,6 +1217,37 @@ static void gate_decoy_capability_(void)
     printf("  the decoy derates the two victims by %.10g and %.10g, the "
            "regime deciding which\n", r1, r2);
 
+    /* Two decoys against one observer. The observer has to see through
+     * both, so the probabilities of not seeing through each multiply,
+     * and the statistic falls by the second factor again. A fixture
+     * holding one decoy cannot tell that composition from a plain
+     * assignment of the last one's degradation.
+     *
+     * It runs before the mutation below rather than after it, so that a
+     * defect in the composition is caught by an arm that measures it
+     * rather than by the mutation harness failing to find its needle in
+     * a line the defect has already changed. */
+    build_(DEC_TWO_KFL, "dectwo");
+    char so_two[512];
+    so_path_(so_two, sizeof so_two, "dectwo");
+    RlSpecView vt;
+    spec_of_(so_two, &vt);
+    int j1 = chan_(&vt, "radar_snr");
+    double two[256];
+    run_obs_(so_two, 3, 0.0, two, 256);
+    double one_ratio = on[i1] / off[i1];
+    double two_ratio = two[j1] / off[i1];
+    if (!(two_ratio < one_ratio * 0.02)) {
+        fprintf(stderr, "FAIL: two decoys derated by %.10g against one "
+                "decoy's %.10g; the second is not composing\n",
+                two_ratio, one_ratio);
+        exit(1);
+    }
+    g_arms++;
+    printf("  two decoys derate by %.10g where one derates by %.10g, "
+           "which is the composition and not the last one\n",
+           two_ratio, one_ratio);
+
     /* The mutation. Deleting the derate write cannot be judged against
      * the control bit for bit the way the jammer's was: a decoy also
      * deploys, and the deploy moves the host, so the geometry the two
@@ -1163,10 +1258,14 @@ static void gate_decoy_capability_(void)
      * back together exactly, and must leave each of them within the
      * deploy's own perturbation of the control rather than at the
      * hundredfold and twofold derates above. */
+    /* The perturbation targets the statement rather than its exact
+     * text, so a defect that has already changed that line does not
+     * leave this harness reporting a missing needle instead of the
+     * arm above reporting the defect. */
     emit_("decon");
     mutate_("decon", "decon_mut",
-            "s/\\*_kfl_sl = \\*_kfl_sl + (1.0 - \\*_kfl_sl) \\* _kfl_dg;//",
-            "1.0 - \\*_kfl_sl", 2, 0);
+            "s/^\\( *\\)\\*_kfl_sl = .*;$//",
+            "^ *\\*_kfl_sl = ", 2, 0);
     char so_mut[512];
     snprintf(so_mut, sizeof so_mut, WORK_DIR "/decon_mut.so");
     build_emitted_(WORK_DIR "/decon_mut.cc", so_mut);
@@ -1278,8 +1377,8 @@ static void deploy_routes_(const char *src, const char *stem,
 
     char out[128];
     snprintf(out, sizeof out, "%s_v", stem);
-    mutate_(stem, out, "s/_kfl_eb->vel.x -= _kfl_dv \\* _kfl_u.x;//",
-            "vel.x -= _kfl_dv", 1, 0);
+    mutate_(stem, out, "s/_kfl_eb->vel.x [-+]= [^;]*;//",
+            "vel.x [-+]= _kfl_dv", 1, 0);
     snprintf(mut, sizeof mut, WORK_DIR "/%s.so", out);
     {
         char cc[512];
@@ -1291,7 +1390,7 @@ static void deploy_routes_(const char *src, const char *stem,
 
     snprintf(out, sizeof out, "%s_m", stem);
     mutate_(stem, out,
-            "s/k26astro_body_set_mass(_kfl_eb, _kfl_hm - _kfl_loss);//",
+            "s/k26astro_body_set_mass(_kfl_eb[^;]*;//",
             "set_mass(_kfl_eb", 1, 0);
     snprintf(mut, sizeof mut, WORK_DIR "/%s.so", out);
     {
@@ -1304,9 +1403,9 @@ static void deploy_routes_(const char *src, const char *stem,
 
     snprintf(out, sizeof out, "%s_b", stem);
     mutate_(stem, out,
-            "s/_kfl_eb->vel.x -= _kfl_dv \\* _kfl_u.x;//;"
-            "s/k26astro_body_set_mass(_kfl_eb, _kfl_hm - _kfl_loss);//",
-            "vel.x -= _kfl_dv", 1, 0);
+            "s/_kfl_eb->vel.x [-+]= [^;]*;//;"
+            "s/k26astro_body_set_mass(_kfl_eb[^;]*;//",
+            "vel.x [-+]= _kfl_dv", 1, 0);
     snprintf(mut, sizeof mut, WORK_DIR "/%s.so", out);
     {
         char cc[512];
@@ -1366,6 +1465,35 @@ static void gate_decoy_body_(void)
     printf("  the deploy moves the host by %.10g in its own state, at an "
            "increment of %.10g m/s and a mass loss of %.10g kg\n",
            d, o[i_dv], o[i_ml]);
+
+    /* And a magnitude cannot see a sign. The decoy is placed between
+     * the host and the observer it is meant to fool, so the host
+     * recoils away from that observer; a recoil reversed leaves every
+     * published component bit-identical and moves the host the wrong
+     * way, which the distance above cannot tell. */
+    {
+        double wv[6];
+        run_body_(so_on, 6, 1, wv);
+        double dir[3];
+        for (int k = 0; k < 3; k++) dir[k] = wv[k] - on[k];
+        double n2 = sqrt(dir[0] * dir[0] + dir[1] * dir[1] +
+                         dir[2] * dir[2]);
+        ASSERT(n2 > 0.0);
+        double proj = 0.0;
+        for (int k = 0; k < 3; k++) {
+            proj += (on[3 + k] - off[3 + k]) * dir[k] / n2;
+        }
+        if (!(proj < 0.0)) {
+            fprintf(stderr, "FAIL: the host's change in velocity projects "
+                    "%.10g onto the line towards the victim; the recoil "
+                    "must be away from it\n", proj);
+            exit(1);
+        }
+        g_arms++;
+        printf("  and it recoils away from the victim: the change in "
+               "velocity projects %.10g m/s onto the line towards it\n",
+               proj);
+    }
 
     double fv, fm, fb, nv, nm, nb;
     deploy_routes_(DEPLOY_FAR_KFL, "dpfar", &fv, &fm, &fb);
