@@ -387,7 +387,7 @@ caller sets each step, what that caller observes, and what the reward is.
 The compiler then produces an artifact an outside training loop can drive
 step by step (see *The compiled artifact* below).
 
-Eight constructs carry the surface, all of them statements inside a
+Nine constructs carry the surface, all of them statements inside a
 `fn world` body:
 
 | Construct                     | Purpose                                                    |
@@ -399,7 +399,8 @@ Eight constructs carry the surface, all of them statements inside a
 | `objective` ... `end`         | The reward, and an optional terminal adjustment.            |
 | `agent <name>` ... `end`      | A scope owning actions, observation channels, and an objective. |
 | `sensor <name>` ... `end`     | An imperfection model bound to observation channels with `through`. |
-| `astro_payload <name> ...`    | A detection sensor or information state carried by one craft. |
+| `astro_payload <name> ...`    | A defense payload carried by one craft: a detection sensor, an information state, or an effector. |
+| `engage <payload> at <target>`| Fire an effector at a body. Inside `on_step` only. |
 
 These words bind as keywords only at statement position inside a
 `fn world` body. Everywhere else they stay ordinary identifiers, so
@@ -407,12 +408,13 @@ existing programs that use them as names keep compiling. (`episode`,
 `action`, and `objective` sit on the compiler's reserved-name list, so a
 `let`, `const`, or `arg` that binds one of them draws a warning.)
 
-`agent`, `sensor`, `astro_payload`, and `on_step` are not reserved, and
-inside a `fn world` body each opens its construct only when what follows
-it is what that construct's form requires: an identifier for `agent`,
-`sensor`, and `astro_payload`, the end of the line for `on_step`.
-Written any other way they stay ordinary identifiers, so a program that
-binds one of them as a name keeps compiling:
+`agent`, `sensor`, `astro_payload`, `engage`, and `on_step` are not
+reserved, and inside a `fn world` body each opens its construct only
+when what follows it is what that construct's form requires: an
+identifier for `agent`, `sensor`, `astro_payload`, and `engage`, the end
+of the line for `on_step`. Written any other way they stay ordinary
+identifiers, so a program that binds one of them as a name keeps
+compiling:
 
 ```
 fn world w
@@ -426,8 +428,11 @@ end
 
 No statement form in the language has the shape
 `<identifier> <identifier>`, so the two readings never overlap for
-`agent` and `sensor`. For `on_step` they overlap on one shape, a bare
-`on_step` alone on a line, which the block form takes.
+`agent`, `sensor`, `astro_payload`, or `engage`. For `on_step` they
+overlap on one shape, a bare `on_step` alone on a line, which the block
+form takes. `at` and `effect` are read as connectives inside `engage`
+and `observe effect` alone, and are ordinary identifiers everywhere
+else, including as body names.
 
 A program that uses any of these constructs, or a distribution-valued
 `astro_body` attribute (below), is a reinforcement learning program. Such
@@ -512,6 +517,10 @@ ordinary statements only: world construction (`astro_body`), stepping
 constructs, and `print` are all rejected; the stepping path performs no
 I/O. A `print` inside a `fn` the body calls is rejected too, for the
 same reason.
+
+One construct runs the other way. `engage` is an act of a step, so this
+block is the one place it is admissible and the world prefix is where it
+is refused (see *Effectors*).
 
 **Body state.** Inside `on_step`, and nowhere else, a body's state is
 read and written by dotted name:
@@ -982,6 +991,8 @@ constructed and a per-episode draw could not reach it.
 | `detect_radar` | `p_tx_w`, `g_tx_db`, `g_rx_db`, `freq_hz`, `loss_sys_db`, `bandwidth_hz`, `t_sys_k`, `noise_figure`, `snr_threshold` |
 | `detect_lidar` | `pulse_energy_j`, `wavelength_nm`, `aperture_rx_m`, `atmospheric_tx`, `detector_efficiency`, `snr_threshold`, `target_albedo` |
 | `infostate` | `history`, optional, 1024 by default; fixed when the payload is constructed, so it takes no distribution, and refused below 2, which is the fewest samples an interpolation needs |
+| `impactor` | See *Effectors* below |
+| `laser` | See *Effectors* below |
 
 Every key naming the instrument is a parameter of the library function
 that consumes it, spelled the same way: the constructor's for the six
@@ -1129,6 +1140,179 @@ is the library's own per-observer limit; a program that names more is
 refused naming the payload, the count, and the limit. And at most one
 information state is carried by one body, for the reason given with the
 statement above.
+
+#### Effectors
+
+```
+engage <payload> at <target>
+observe effect <payload> as <name>
+```
+
+`engage` fires an effector payload at a body. It is an act rather than
+a declaration, so it is admissible **inside an `on_step` block and
+nowhere else**, and it is refused elsewhere naming the block it belongs
+in. `<payload>` names an `astro_payload` of an effector kind, and
+`<target>` an `astro_body` of the same world that binds an `assembly=`
+declaring at least one `collider`, since the effector acts on the area
+the target presents and a body with none would present none. An
+effector does not engage the craft that carries it.
+
+`on_step` runs before the world advances, so an engagement lands on the
+state the immediately following advance integrates, and the
+observation, reward and termination the step reports are computed after
+that advance. That is the same relation a body state write has.
+
+**A payload is engaged at most once per step.** Two statements naming
+one payload are refused where they are written. One statement reached
+twice, from a loop or a function called twice, faults the environment
+instead: the published result would otherwise depend on which call ran
+last, with no channel saying so, and both engagements would already
+have reached the world.
+
+`observe effect` publishes what the last engagement of that payload
+did. Two components are common to every effector kind: `<name>_engaged`
+is 1.0 on a step where the payload was engaged and 0.0 otherwise, and
+`<name>_effect` is the scalar magnitude that kind reports as its
+principal result. On a step with no engagement `_engaged` reads 0.0 and
+every other component reads 0.0. The rest of the set is the kind's own,
+because an ablation event and an impact event share no fields.
+
+| `kind=` | Required keys |
+|---|---|
+| `impactor` | `pattern`, one of `single` or `swarm`; `projectile_mass_kg`, `projectile_density_kg_per_m3`, `projectile_diameter_m`; `swarm_count` and `swarm_half_angle_rad`, required for `swarm` and refused for `single`; optional target-structure keys, below |
+| `laser` | `primary_diam_m`, `wavelength_nm`, `p_output_w`, `m_squared`, `pointing_jitter_rad`, `rms_wavefront_m`, `plasma_attn_k`, `target_material`, `target_reflectivity` |
+
+`pattern` and `target_material` take a word rather than a number,
+because each names a library constant and a program that wrote the
+number would depend on an internal numbering nothing promises it.
+`target_material` takes `aluminum`, `steel`, `titanium`, `copper`,
+`composite` or `fused_silica`, spelled as the library's own table
+spells them. The library also offers a seventh value whose documented
+meaning is a conservative generic-metal anchor rather than an absence
+of material; this grammar does not admit it, because a program writing
+it would reasonably expect no ablation and would get steel's numbers.
+Neither keyword key takes a distribution form.
+
+As with the detection kinds, the `target_` keys describe what is being
+fired at rather than the payload, so **one effector payload models one
+target class**. Every other key is the library constructor's own
+parameter of the same name.
+
+##### The kinetic impactor
+
+Twelve components:
+
+| Component | Value |
+|---|---|
+| `<name>_engaged` | 1.0 on a step where the payload was engaged. |
+| `<name>_effect` | The velocity increment imparted to the target on a hit, in metres per second; 0.0 on a miss. |
+| `<name>_hit` | 1.0 when the predicted intercept lands on the target. |
+| `<name>_closing_speed` | The magnitude of the relative velocity, in metres per second. |
+| `<name>_t_close` | Predicted time to closest approach, in seconds; negative when the target is already receding. |
+| `<name>_miss` | Predicted closest-approach distance, in metres. |
+| `<name>_fraction` | The fraction of the released projectile mass that lands on the target: 1.0 for `single`, and the target's silhouette over the cone's footprint for `swarm`. |
+| `<name>_cos_angle` | Cosine of the impact angle between the closing direction and the target's first body axis, in [0, 1]. |
+| `<name>_penetrates` | 1.0 when the projectile diameter exceeds the Whipple critical diameter. |
+| `<name>_critical_diameter` | That critical diameter, in metres. |
+| `<name>_penetration` | Monolithic penetration depth, in metres. |
+| `<name>_energy` | Energy delivered to the target's interior, in joules. |
+
+The first eight are published whenever the payload is engaged, because
+they describe the intercept the engagement set up. The last four
+describe an impact and read 0.0 on a miss, as does `_effect`.
+
+**The hit test.** The projectile is released carrying its launcher's
+own state and flies ballistically, so the engagement is resolved from
+the relative state of the two craft rather than by adding a body to the
+world. The intercept lands when the predicted closest approach falls
+within the target's effective silhouette radius, which is the radius of
+a disc of the projected area the target presents along the closing
+direction, **and** the time to closest approach is positive. A negative
+time to closest approach is a target already past its nearest point,
+which is a miss however small the predicted separation.
+
+**The effect.** Momentum transfer, and nothing beyond it. The
+projectile arrives carrying its mass times the closing speed in the
+target's frame, and the target takes that momentum along the closing
+direction, scaled by the fraction that landed. The momentum
+enhancement factor is therefore exactly 1. The published deflection
+literature reports it above 1 for a cratering impact into a rubble
+body, because the ejecta thrown back off the surface carries momentum
+of its own; this model does not carry the ejecta mass and speed that
+figure comes from, and does not claim it.
+
+**The target-structure keys are optional**, and each is the parameter
+of the same name that the library's impact analysis or its
+delivered-energy routine takes:
+
+| Key | What it feeds |
+|---|---|
+| `target_wall_thickness_m`, `target_bumper_density_kg_per_m3`, `target_bumper_spacing_m`, `target_wall_yield_stress_ksi` | The Whipple analysis, which runs when the wall thickness is positive and is skipped otherwise. |
+| `target_brinell_hardness`, `target_density_kg_per_m3`, `target_speed_of_sound_m_per_s` | The monolithic-plate analysis, which runs when all three are positive and is skipped otherwise. |
+| `target_inner_thickness_m` | The inner structural wall behind a Whipple stand-off, which lowers the coupled energy from full penetration to partial. |
+| `target_monolithic_thickness_m` | The thickness the monolithic penetration depth is judged against. |
+
+A skipped branch leaves its components at 0.0, which is the library's
+own documented behaviour and not a failure. `_energy` is the exception
+and is published whatever is declared: with no target geometry at all
+the library returns its documented worst case, the full-penetration
+fraction of the impact energy.
+
+##### The directed-energy laser
+
+Ten components:
+
+| Component | Value |
+|---|---|
+| `<name>_engaged` | 1.0 on a step where the payload was engaged. |
+| `<name>_effect` | The impulse delivered to the target, in newton seconds. |
+| `<name>_dv` | The velocity increment that impulse imparted, in metres per second. |
+| `<name>_mass_loss` | The target mass ablated and removed, in kilograms. |
+| `<name>_range` | Emitter-to-target distance, in metres. |
+| `<name>_spot` | Spot diameter at the target, in metres. |
+| `<name>_encircled` | Fraction of the beam's energy falling inside the target's projected area. |
+| `<name>_fluence` | Fluence at the target, in joules per square metre. |
+| `<name>_transmissivity` | Plasma-plug transmissivity, in [0, 1]. |
+| `<name>_ignited` | 1.0 when the fluence reached the material's plasma-ignition threshold. |
+
+**The effect.** The ablation plume leaves along the beam, so the recoil
+pushes the target away from the emitter: the impulse acts along the
+unit vector from emitter to target, and the velocity increment is taken
+against the mass the target had when the light arrived. The ablated
+mass is then removed from the target. `_mass_loss` reports the mass
+actually removed: a step that would ablate the whole body is outside
+this model's range and removes nothing, since a massless body in the
+integrator is not a state this layer will produce.
+
+The engagement's **dwell is the step's own control period**, and its
+**range** is the distance between the payload's body and the target,
+both derived rather than declared. The **area** is the target's
+silhouette along the line of sight, which is the same projected area
+the detection channels take, in the target's own frame: a craft that
+turns changes both what a detector sees and what a beam lands on, and
+there is one description of that geometry rather than two.
+
+Three quantities the library's ablation event carries are deliberately
+not published. The threshold fluence is a constant of the declared
+material; the effective dwell is the control period; and the on-target
+intensity is the published fluence divided by that period. None of the
+three can move within an episode, and a component nothing can move is a
+component nothing can be shaped against.
+
+##### Both kinds
+
+Each payload is constructed once per environment when the world is
+built, exactly as a detection payload is, and an engagement calls the
+library's evaluator only: both return a value struct and allocate
+nothing.
+
+**These components carry no imperfection of their own**, on the same
+rule as the detection channels: the models compute a noise-free
+quantity, the libraries' own optional generators are not used, and the
+swarm's direction sampler, which takes one, is not called. A program
+that wants a noisy effector channel binds a declared `sensor` to it,
+which puts the draws on this capability's own generator at the
+coordinates a replay reproduces.
 
 ### The `objective` block
 
