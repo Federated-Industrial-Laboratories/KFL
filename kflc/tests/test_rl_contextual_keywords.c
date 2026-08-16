@@ -1,10 +1,12 @@
 /* test_rl_contextual_keywords.c: a construct word is still a name.
  *
- * `agent`, `sensor`, `on_step` and `astro_payload` introduce
- * constructs at statement position inside a `fn world` body. They are not reserved
- * words: a Grammar 3.1 program that binds one of them as an ordinary
- * identifier compiles and behaves as it always did, because each opens
- * its block only when what follows is what that block form requires.
+ * `agent`, `sensor`, `on_step`, `astro_payload` and `engage` introduce
+ * constructs at statement position inside a `fn world` body, and `at`
+ * and `effect` are read as connectives inside two of those statements.
+ * None of the seven is a reserved word: a Grammar 3.1 program that
+ * binds one of them as an ordinary identifier compiles and behaves as
+ * it always did, because each opens its construct only when what
+ * follows is what that construct's form requires.
  *
  * Gates, one arm per keyword per shape:
  *   1. The identifier readings. `<word> = 2.0`, `<word>(3.0)` as a
@@ -12,9 +14,17 @@
  *      compile, and the value the program computes through the name is
  *      the value it should be, so the word is not merely tolerated but
  *      read as the binding it names.
+ *   1b. The same readings inside an `on_step` body, which is the block
+ *      `engage` is live in and therefore the block where a greedy
+ *      reading of it would bite. A world-prefix arm alone could not
+ *      see that, because `engage` is not a construct there at all.
  *   2. The construct readings. `agent <name>`, `sensor <name>`,
- *      `astro_payload <name> ...` and a bare `on_step` still open
- *      their constructs in a program that uses them.
+ *      `astro_payload <name> ...`, `engage <payload> at <target>`,
+ *      `observe effect <payload> as <name>` and a bare `on_step` still
+ *      open their constructs in a program that uses them.
+ *   2b. The two connectives. A body called `at` is engaged by name,
+ *      and a body called `effect` keeps its line-of-sight observe,
+ *      which is the shape the effector form is told apart from.
  *
  * Both halves are needed and neither is sufficient. A fixture holding
  * only the block form cannot tell a disambiguating parser from a
@@ -43,11 +53,15 @@
 
 #define WORK_DIR "/tmp/kflc_rl_ctxkw_test"
 
-/* The three words this gate is about. */
+/* The words this gate is about. The first four open blocks in the
+ * world prefix; `engage` opens a statement inside `on_step`; `at` and
+ * `effect` are connectives inside two statements and are here because
+ * a word read anywhere is a word that can be lost everywhere. */
 static const char *const WORDS[] = {
-    "agent", "sensor", "on_step", "astro_payload", NULL
+    "agent", "sensor", "on_step", "astro_payload", "engage", "at",
+    "effect", NULL
 };
-#define WORD_COUNT 4
+#define WORD_COUNT 7
 
 static int g_arms;
 
@@ -183,6 +197,122 @@ static void arm_declaration_(const char *w)
     must_compile_(what, src);
 }
 
+/* Build a program, drive one step, and return the published range.
+ * The step arms compare two artifacts that differ only in the value a
+ * binding holds, so a parser that swallowed the binding would make the
+ * two agree. */
+static double step_range_(const char *src, const char *stem)
+{
+    char path[512], out[512], so[512];
+    snprintf(path, sizeof path, WORK_DIR "/%s.kfl", stem);
+    snprintf(out, sizeof out, WORK_DIR "/%s", stem);
+    rl_write_file_(path, src);
+    rl_compile_(path, out, WORK_DIR);
+    snprintf(so, sizeof so, WORK_DIR "/%s.rlenv.so", stem);
+    void *h = rl_dlopen_(so);
+    RlSurface s;
+    rl_resolve_surface_(h, &s);
+    K26RlEnv *env = NULL;
+    ASSERT(s.create(11u, 1u, &env) == K26RL_OK);
+    double act[4] = { 0.0, 0.0, 0.0, 0.0 };
+    ASSERT(s.step(env, act) == K26RL_OK);
+    double o[32];
+    ASSERT(s.obs(env, o) == K26RL_OK);
+    double range = o[3];
+    s.destroy(env);
+    dlclose(h);
+    return range;
+}
+
+/* ---- The identifier readings inside a step body ---------------------- */
+
+/* The world an `on_step` arm is built on. The step body is where
+ * `engage` is a construct, so it is where a greedy reading of the word
+ * would take a binding away, and the world-prefix arms above cannot
+ * see that at all. */
+#define CTX_STEP_HEAD \
+    "form CTXSTEP\n" \
+    "fn double %s(double x)\n" \
+    "    return x + 1.0\n" \
+    "end\n" \
+    "fn world w\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body craft assembly=\"calibration_box.k26asm\"" \
+    " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n" \
+    "    episode\n" \
+    "        control_dt 0.5\n" \
+    "        horizon 8\n" \
+    "    end\n" \
+    "    action thrust box -1.0 1.0 default 0.0\n" \
+    "    observe craft from earth mode=geometric as los\n"
+
+#define CTX_STEP_TAIL \
+    "    objective\n" \
+    "        reward los_range\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+/* The identifier shapes, inside the step body. The bound value is
+ * written into a body's velocity, so a run arm can tell a binding that
+ * was read from one that was parsed away: the two artifacts differ only
+ * in the number the binding holds. */
+static void arm_step_shapes_(const char *w, int run)
+{
+    /* Three shapes, not four. A vector binding is refused on the
+     * stepping path whatever it is called, because it owns heap
+     * storage, so the index shape has no reading here to lose; the
+     * world-prefix arm above is where it is covered. The call shape
+     * takes its place, since an identifier followed by `(` is the
+     * shape a greedy word would swallow. */
+    static const char *const SHAPES[] = {
+        "    let %s: double = 1.0\n"
+        "    %s = %s + 2.0\n"
+        "    craft.vel_x = craft.vel_x + %s\n",
+        "    let %s: double = 3.0\n"
+        "    craft.vel_x = craft.vel_x + %s\n",
+        "    craft.vel_x = craft.vel_x + %s(2.0)\n",
+        NULL
+    };
+    static const char *const NAMES[] = {
+        "assigned as a name", "bound and read", "called as a function",
+        NULL
+    };
+    for (int k = 0; SHAPES[k]; k++) {
+        char body[1024], src[4096], what[160];
+        snprintf(body, sizeof body, SHAPES[k], w, w, w, w);
+        char head[2048];
+        snprintf(head, sizeof head, CTX_STEP_HEAD, w);
+        snprintf(src, sizeof src, "%s    on_step\n%s    end\n%s",
+                 head, body, CTX_STEP_TAIL);
+        snprintf(what, sizeof what, "`%s` %s inside on_step", w, NAMES[k]);
+        must_compile_(what, src);
+        if (!run) continue;
+        /* The run half. The same program with the bound value at zero
+         * must give a different range, which is what says the binding
+         * reached the world rather than being parsed away. */
+        char zero_body[1024], zero_src[4096];
+        snprintf(zero_body, sizeof zero_body, SHAPES[k], w, w, w, w);
+        char *p3 = strstr(zero_body, "3.0");
+        char *p2 = strstr(zero_body, "2.0");
+        if (p3) memcpy(p3, "0.0", 3);
+        if (p2) memcpy(p2, "0.0", 3);
+        snprintf(zero_src, sizeof zero_src,
+                 "%s    on_step\n%s    end\n%s",
+                 head, zero_body, CTX_STEP_TAIL);
+        double live = step_range_(src, "ctxlive");
+        double dead = step_range_(zero_src, "ctxdead");
+        if (live == dead) {
+            fprintf(stderr, "FAIL %s: the binding did not reach the "
+                    "world (both ranges %.17g)\n", what, live);
+            exit(1);
+        }
+        g_arms++;
+        printf("  reaches the world: %s (%.9g against %.9g)\n", what,
+               live, dead);
+    }
+}
+
 /* ---- The block readings --------------------------------------------- */
 
 /* Each word still opens its block where the block form is written.
@@ -271,6 +401,78 @@ static void arm_both_readings_(void)
                   SRC);
 }
 
+/* The two statements this phase adds, in one program that also binds
+ * `engage`, `at` and `effect` as ordinary names, so the construct
+ * readings and the identifier readings are shown to coexist. `at` is
+ * also a body name here and is engaged by that name, which is the one
+ * position where the word is read as a connective. */
+static void arm_effector_forms_(void)
+{
+    static const char *const SRC =
+        "form CTXEFF\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    astro_body at assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 pos_y=2.0e3 vel_y=7546.0"
+        " quat_w=1.0\n"
+        "    astro_payload beam body=craft kind=laser"
+        " primary_diam_m=1.5 wavelength_nm=1064.0 p_output_w=1.0e6"
+        " m_squared=1.2 pointing_jitter_rad=1.0e-7"
+        " rms_wavefront_m=5.0e-8 plasma_attn_k=1.0"
+        " target_material=aluminum target_reflectivity=0.2\n"
+        "    let engage: double = 3.0\n"
+        "    engage = engage + 1.0\n"
+        "    let effect: double = 5.0\n"
+        "    effect = effect + 1.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 8\n"
+        "    end\n"
+        "    action thrust box -1.0 1.0 default 0.0\n"
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage beam at at\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n";
+    must_compile_("the effector statements beside bindings of their own "
+                  "words, with a body called `at` engaged by name", SRC);
+}
+
+/* A body genuinely called `effect` keeps its line-of-sight observe.
+ * That is the shape the effector form is told apart from: `observe
+ * effect <payload> as` has a payload name where this has `from`. */
+static void arm_effect_as_body_(void)
+{
+    static const char *const SRC =
+        "form CTXEFFBODY\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body effect assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 8\n"
+        "    end\n"
+        "    action thrust box -1.0 1.0 default 0.0\n"
+        "    observe effect from earth mode=geometric as los\n"
+        "    on_step\n"
+        "        effect.vel_x = effect.vel_x + thrust\n"
+        "    end\n"
+        "    objective\n"
+        "        reward los_range\n"
+        "    end\n"
+        "end\n"
+        "end\n";
+    must_compile_("a body called `effect` keeps its line-of-sight "
+                  "observe", SRC);
+}
+
 int main(void)
 {
     rl_run_or_die_("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
@@ -292,9 +494,12 @@ int main(void)
         arm_call_(WORDS[i], run);
         arm_index_(WORDS[i], run);
         arm_declaration_(WORDS[i]);
+        arm_step_shapes_(WORDS[i], run);
     }
     arm_blocks_();
     arm_both_readings_();
+    arm_effector_forms_();
+    arm_effect_as_body_();
 
     printf("test_rl_contextual_keywords: %d arm(s) passed over %d "
            "word(s), run arms %s\n", g_arms, WORD_COUNT,

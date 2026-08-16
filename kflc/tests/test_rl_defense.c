@@ -162,6 +162,60 @@ static const char *const BOX_KFL =
     DEF_HEAD DEF_MOVER("calibration_box.k26asm", "0.05")
     DEF_PAYLOADS DEF_EPISODE DEF_AGENTS;
 
+/* The same world carrying every payload kind this grammar binds, the
+ * two effectors included, with an engagement of each in the step body.
+ * The two arms that ask a question about the whole tier, the
+ * single-generator rule and the determinism of the compiled artifact,
+ * are driven against this rather than against the detection-only
+ * fixture: a claim about the tier that leaves two of its kinds out is
+ * a claim about part of it. */
+#define DEF_EFFECTORS \
+    "    astro_payload gun body=watcher kind=impactor pattern=swarm" \
+    " swarm_count=12 swarm_half_angle_rad=0.01" \
+    " projectile_mass_kg=5.0 projectile_density_kg_per_m3=7800.0" \
+    " projectile_diameter_m=0.05 target_wall_thickness_m=0.002" \
+    " target_bumper_density_kg_per_m3=2700.0" \
+    " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0\n" \
+    "    astro_payload torch body=watcher kind=laser primary_diam_m=1.0" \
+    " wavelength_nm=1064.0 p_output_w=1.0e5 m_squared=1.2" \
+    " pointing_jitter_rad=1.0e-6 rms_wavefront_m=5.0e-8" \
+    " plasma_attn_k=1.0 target_material=aluminum" \
+    " target_reflectivity=0.2\n"
+
+#define DEF_AGENTS_ALL \
+    "    agent hunter\n" \
+    "        action nudge box -1.0 1.0 default 0.0\n" \
+    "        observe detect eye of mover as ir\n" \
+    "        observe detect rf of mover as radar\n" \
+    "        observe detect beam of mover as lidar\n" \
+    "        observe detect eye_wide of mover as ir2\n" \
+    "        observe track picture of mover modality=radar as trk\n" \
+    "        observe effect gun as kin\n" \
+    "        observe effect torch as las\n" \
+    "        objective\n" \
+    "            reward hunter.ir_snr + hunter.kin_effect\n" \
+    "        end\n" \
+    "    end\n" \
+    "    agent quarry\n" \
+    "        action dodge box -1.0 1.0 default 0.0\n" \
+    "        observe mover from watcher mode=geometric as los\n" \
+    "        objective\n" \
+    "            reward 0.0 - hunter.ir_snr\n" \
+    "        end\n" \
+    "    end\n" \
+    "    on_step\n" \
+    "        watcher.vel_x = watcher.vel_x + nudge\n" \
+    "        mover.vel_x = mover.vel_x + dodge\n" \
+    "        engage gun at mover\n" \
+    "        engage torch at mover\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+static const char *const ALL_KFL =
+    DEF_HEAD DEF_MOVER("calibration_box.k26asm", "0.05")
+    DEF_PAYLOADS DEF_EFFECTORS DEF_EPISODE DEF_AGENTS_ALL;
+
 /* The same world with a spherical target and the same rotation. A
  * sphere presents its great circle at every aspect, so every
  * detection channel must sit still while the box's move: this is the
@@ -1393,6 +1447,33 @@ static const char *const TIER_EVALS[] = {
     NULL
 };
 
+/* The tier entry points that take a generator and are therefore not
+ * this layer's route. The three detection evaluators above take one as
+ * their last argument and are handed a null; the swarm's direction
+ * sampler takes one as its only source of randomness and has no null
+ * reading that would be a spread cone, so it is not called at all and
+ * the footprint helper beside it is what the impactor uses. An arm
+ * that only inspected the last argument of the calls that are made
+ * could not see a call that should not have been made. */
+static const char *const TIER_RNG_ENTRIES[] = {
+    "k26astro_swarm_sample_direction",
+    NULL
+};
+
+/* Whether the emitted source calls a tier entry point that takes a
+ * generator. Returns the number of such names inspected through
+ * `out_seen`, so an arm that inspected none cannot read as clean. */
+static int no_rng_entry_(const char *src, int *out_seen)
+{
+    int seen = 0, ok = 1;
+    for (int i = 0; TIER_RNG_ENTRIES[i]; i++) {
+        seen++;
+        if (count_(src, TIER_RNG_ENTRIES[i]) > 0) ok = 0;
+    }
+    *out_seen = seen;
+    return ok;
+}
+
 /* Whether the emitted source names the tier's generator anywhere. */
 static int names_generator_(const char *src)
 {
@@ -1450,7 +1531,7 @@ static void run_or_die_(const char *cmd)
 
 static void gate_one_generator_(void)
 {
-    rl_write_file_(WORK_DIR "/gen.kfl", BOX_KFL);
+    rl_write_file_(WORK_DIR "/gen.kfl", ALL_KFL);
     run_or_die_("./bin/kflc --emit " WORK_DIR "/gen.kfl > "
                 WORK_DIR "/gen.cc 2> " WORK_DIR "/gen.err");
     char *src = slurp_(WORK_DIR "/gen.cc");
@@ -1475,6 +1556,22 @@ static void gate_one_generator_(void)
     }
     g_arms++;
     printf("  all %d tier evaluator calls pass a null generator\n", seen);
+
+    /* Arm 2b: the tier's generator-taking entry points are not called
+     * at all. The swarm sampler is the one an impactor could
+     * plausibly reach for, and a null generator there is not a spread
+     * cone but the cone axis, so the rule for it is that it is not
+     * called rather than that it is called with a null. */
+    int rng_seen = 0;
+    if (!no_rng_entry_(src, &rng_seen) || rng_seen != 1) {
+        fprintf(stderr, "FAIL: %d generator-taking tier entry point(s) "
+                "inspected, expected 1, and the artifact calls one of "
+                "them\n", rng_seen);
+        exit(1);
+    }
+    g_arms++;
+    printf("  the artifact calls none of the %d generator-taking tier "
+           "entry points\n", rng_seen);
 
     /* Arm 3: the compiled unit leaves no undefined reference to the
      * generator, which is what a direct call would produce. */
@@ -1523,6 +1620,22 @@ static void gate_one_generator_(void)
            "caught\n");
     free(p2);
 
+    run_or_die_("sed 's/^    double _kfl_frac = 1.0;$/"
+                "    double _kfl_frac = 1.0;\\n    (void)"
+                "k26astro_swarm_sample_direction;/' " WORK_DIR
+                "/gen.cc > " WORK_DIR "/p4.cc");
+    char *p4 = slurp_(WORK_DIR "/p4.cc");
+    ASSERT(count_(p4, "k26astro_swarm_sample_direction") == 1);
+    if (no_rng_entry_(p4, &rng_seen)) {
+        fprintf(stderr, "FAIL: a generator-taking tier entry point named "
+                "by the artifact was not caught\n");
+        exit(1);
+    }
+    free(p4);
+    g_arms++;
+    printf("  perturbation: a generator-taking tier entry point named by "
+           "the artifact is caught\n");
+
     run_or_die_("sed 's/^    double area = 0.0;$/"
                 "    double area = 0.0;\\n    { K26CRng r; "
                 "k26c_rng_init(\\&r, 1u); area += 0.0 * "
@@ -1545,7 +1658,7 @@ static void gate_one_generator_(void)
 
 static void gate_determinism_(void)
 {
-    rl_write_file_(WORK_DIR "/det.kfl", BOX_KFL);
+    rl_write_file_(WORK_DIR "/det.kfl", ALL_KFL);
     rl_compile_(WORK_DIR "/det.kfl", WORK_DIR "/det", WORK_DIR);
     for (int i = 0; i < 2; i++) {
         char cmd[512];

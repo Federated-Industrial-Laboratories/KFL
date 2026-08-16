@@ -285,13 +285,19 @@ static const char *const HP_COLL_ASM =
     "    end\n"
     "end\n";
 
-/* Every payload kind this surface binds, over two craft that carry
- * vehicles. The information state is what this gate is about: its
- * push is the tier's one function that allocates outside a
- * constructor, and it runs once per sub-advance of every step inside
- * the window. Four sub-advances at a horizon of 12 puts five boundary
- * resets inside a sixty-step window at two environments, so the
- * reset path is measured rather than merely the steady step. */
+/* Every payload kind this surface binds, over craft that carry
+ * vehicles, with an engagement of each effector inside the step body.
+ * The information state is what this gate began as: its push is the
+ * tier's one function that allocates outside a constructor, and it
+ * runs once per sub-advance of every step inside the window. The
+ * effectors join it because an engagement is a call the step makes on
+ * a payload, and because the two engagements here are aimed at
+ * different bodies, so a per-engagement table indexed wrongly would
+ * be reaching the wrong craft.
+ *
+ * The horizon is short against the window on purpose, so boundary
+ * resets fall inside it; how many actually did is counted from the
+ * artifact rather than divided out of the configuration. */
 static const char *const HP_PAY_KFL =
     "form RL_HOTPATH_PAY\n"
     "fn world hpp_world\n"
@@ -321,6 +327,22 @@ static const char *const HP_PAY_KFL =
     " atmospheric_tx=1.0 detector_efficiency=0.3 snr_threshold=5.0"
     " target_albedo=0.2\n"
     "    astro_payload picture body=watcher kind=infostate history=64\n"
+    /* The two effector kinds, and an engagement of each inside the
+     * step body. Their evaluators return a value struct and are the
+     * only tier call the step makes for them, so what this measures is
+     * that an engagement is on the same footing as an observation: a
+     * call over preallocated state and no allocation of its own. */
+    "    astro_payload gun body=watcher kind=impactor pattern=swarm"
+    " swarm_count=12 swarm_half_angle_rad=0.01"
+    " projectile_mass_kg=5.0 projectile_density_kg_per_m3=7800.0"
+    " projectile_diameter_m=0.05 target_wall_thickness_m=0.002"
+    " target_bumper_density_kg_per_m3=2700.0"
+    " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0\n"
+    "    astro_payload torch body=watcher kind=laser primary_diam_m=1.0"
+    " wavelength_nm=1064.0 p_output_w=1.0e5 m_squared=1.2"
+    " pointing_jitter_rad=1.0e-6 rms_wavefront_m=5.0e-8"
+    " plasma_attn_k=1.0 target_material=aluminum"
+    " target_reflectivity=0.2\n"
     "    episode\n"
     "        control_dt 0.5\n"
     "        horizon 12\n"
@@ -333,6 +355,8 @@ static const char *const HP_PAY_KFL =
     "        observe detect beam of mover as lidar\n"
     "        observe track picture of mover modality=radar as trk\n"
     "        observe track picture of drifter modality=ir as trk2\n"
+    "        observe effect gun as kin\n"
+    "        observe effect torch as las\n"
     "    end\n"
     "    agent quarry\n"
     "        action dodge box -1.0 1.0 default 0.0\n"
@@ -341,6 +365,8 @@ static const char *const HP_PAY_KFL =
     "    on_step\n"
     "        watcher.vel_x = watcher.vel_x + nudge\n"
     "        mover.vel_x = mover.vel_x + dodge\n"
+    "        engage gun at mover\n"
+    "        engage torch at drifter\n"
     "    end\n"
     "end\n"
     "end\n";

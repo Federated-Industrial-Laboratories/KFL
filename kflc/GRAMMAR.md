@@ -1163,11 +1163,14 @@ observation, reward and termination the step reports are computed after
 that advance. That is the same relation a body state write has.
 
 **A payload is engaged at most once per step.** Two statements naming
-one payload are refused where they are written. One statement reached
-twice, from a loop or a function called twice, faults the environment
-instead: the published result would otherwise depend on which call ran
-last, with no channel saying so, and both engagements would already
-have reached the world.
+one payload are refused where they are written, including when the
+second is inside a conditional. One statement reached twice, which
+today means a statement inside a loop, faults the environment instead:
+the published result would otherwise depend on which call ran last,
+with no channel saying so, and both engagements would already have
+reached the world. A `fn` the step body calls cannot hold the
+statement at all, since `engage` is a statement of this block and an
+ordinary identifier everywhere else.
 
 `observe effect` publishes what the last engagement of that payload
 did. Two components are common to every effector kind: `<name>_engaged`
@@ -1211,15 +1214,24 @@ Twelve components:
 | `<name>_t_close` | Predicted time to closest approach, in seconds; negative when the target is already receding. |
 | `<name>_miss` | Predicted closest-approach distance, in metres. |
 | `<name>_fraction` | The fraction of the released projectile mass that lands on the target: 1.0 for `single`, and the target's silhouette over the cone's footprint for `swarm`. |
-| `<name>_cos_angle` | Cosine of the impact angle between the closing direction and the target's first body axis, in [0, 1]. |
+| `<name>_cos_angle` | Cosine of the impact angle between the closing direction and the target's first body axis, in [0, 1]; 0.0 when that axis points away from the projectile, since a surface is not struck from behind. |
 | `<name>_penetrates` | 1.0 when the projectile diameter exceeds the Whipple critical diameter. |
 | `<name>_critical_diameter` | That critical diameter, in metres. |
 | `<name>_penetration` | Monolithic penetration depth, in metres. |
 | `<name>_energy` | Energy delivered to the target's interior, in joules. |
 
-The first eight are published whenever the payload is engaged, because
-they describe the intercept the engagement set up. The last four
-describe an impact and read 0.0 on a miss, as does `_effect`.
+Seven of the twelve are published whenever the payload is engaged,
+because they describe the intercept the engagement set up: `_engaged`,
+`_hit`, `_closing_speed`, `_t_close`, `_miss`, `_fraction` and
+`_cos_angle`. The other five describe an impact and read 0.0 on a
+miss: `_effect`, `_penetrates`, `_critical_diameter`, `_penetration`
+and `_energy`.
+
+Because the impact cosine is clamped at zero, a target presenting its
+back to the projectile reports zero for it, and the two components the
+Whipple analysis derives from it go to zero with it. That is the
+library's own convention and is stated here because a reader who does
+not know it would read a zero critical diameter as a defect.
 
 **The hit test.** The projectile is released carrying its launcher's
 own state and flies ballistically, so the engagement is resolved from

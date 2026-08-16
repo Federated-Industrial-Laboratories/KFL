@@ -3808,7 +3808,6 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
     fprintf(out, "#define KFLRL_N_TRACKPAIR %d\n", n_pairs);
     fprintf(out, "#define KFLRL_N_SIG %d\n", m->n_sig);
     fprintf(out, "#define KFLRL_N_EFFECTOR %d\n", rl_n_effector_(m));
-    fprintf(out, "#define KFLRL_N_ENGAGE %d\n", m->n_engages);
     fprintf(out, "#define KFLRL_EFF_STRIDE %d\n\n", RL_EFF_MAX_COMPS);
     fputs(
 "/* This environment's slice of the payload handle array and of the\n"

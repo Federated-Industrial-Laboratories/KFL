@@ -1,0 +1,1555 @@
+/* test_rl_effectors.c: the kinetic and directed-energy effectors.
+ *
+ * `engage <payload> at <target>` fires an effector payload, and
+ * `observe effect <payload> as <name>` publishes what the engagement
+ * did. The substance of the surface is that the engagement changes the
+ * world, so most of this gate is about the world and not about the
+ * channels.
+ *
+ * Gates:
+ *   1. Refusals. Every rule the two statements carry, written as a
+ *      program that breaks it: `engage` outside a step body, an
+ *      unknown payload, a payload of a kind that is not an effector, a
+ *      payload engaged at its own platform, an unknown target, a
+ *      target with no assembly and one whose assembly declares no
+ *      collider, a numeric value on a keyword-valued key, an unknown
+ *      word on one, a distribution on one, the swarm keys against the
+ *      single pattern and missing against the swarm one, and a second
+ *      `engage` of one payload in one step body.
+ *   2. Acceptance. Both kinds through compile, link, dlopen, step,
+ *      reset and step, at both release patterns, so "accepted" means
+ *      an artifact exists and runs rather than that a checker did not
+ *      object.
+ *   3. The published channels: the names and the order of both
+ *      component sets, read from the artifact's own spec blob.
+ *   4. The effect on the world, one arm per kind. The target's
+ *      trajectory is compared with and without the engagement, over
+ *      the same seed and the same action stream, and the arm requires
+ *      them to differ. Its own mutation follows: with the velocity
+ *      write deleted from the emitted source the trajectory returns to
+ *      the control's, bit for bit, and the arm must fail. A gate that
+ *      cannot fail on the defect it names measures nothing.
+ *   4b. The ablated mass is not a dead store. Deleting the mass write
+ *      alone moves the trajectory, because the reduced mass divides
+ *      the next engagement's velocity increment. The route is measured
+ *      rather than assumed: with the velocity write also deleted the
+ *      mass write moves nothing at all, which is what says the mass
+ *      reaches the dynamics through the increment and not through the
+ *      gravitational field.
+ *   5. The hit test, three arms that no two of which can be collapsed:
+ *      a closing intercept hits; the same geometry receding does not,
+ *      though its predicted closest approach is the same number; and a
+ *      closing pass offset beyond the target's silhouette radius does
+ *      not, though its time to closest approach is positive.
+ *   6. Swarm against single. The two patterns give genuinely different
+ *      transferred momentum through the footprint fraction, and the
+ *      fraction moves with range.
+ *   7. Every published component moves. For each component of each
+ *      kind, a fixture in which it moves and the measured spread; a
+ *      component nothing can move is a component nothing can be shaped
+ *      against.
+ *   8. Zero fill. A step whose body did not engage reads `_engaged`
+ *      0.0 with every other component 0.0, measured on the same
+ *      artifact and the same episode as a step that did engage.
+ *   9. One engagement per payload per step, the runtime half. A single
+ *      statement reached twice through a loop faults the environment
+ *      with K26RL_E_ENV_INTERNAL; the same loop running once does not,
+ *      which is what tells the rule from a fault that always fires.
+ *      A loop is the only route to that path: `engage` is a statement
+ *      of the step body and an ordinary identifier everywhere else, so
+ *      a `fn` the body calls cannot hold one and there is no
+ *      twice-called function to reach it through.
+ *
+ * Pattern: rl_gate_util.h. Refusal arms drive ./bin/kflc --check and
+ * assert on the captured diagnostic; behaviour arms compile the
+ * artifact and drive the frozen surface. The mutation arms compile the
+ * emitted source directly, so they carry their own link line. Needs
+ * the sibling stack archives; skips with 77 when they are absent.
+ */
+#define _GNU_SOURCE
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+
+#include "rl_gate_util.h"
+
+#define WORK_DIR "/tmp/kflc_rl_effectors_test"
+
+static int g_arms;
+
+/* ---- Sources -------------------------------------------------------- */
+
+/* The world every arm is built on. `shooter` carries both effectors;
+ * `mover` is a two-by-one-by-one metre box turning about its z axis, so
+ * the silhouette it presents along a fixed direction is a function of
+ * time with a closed form.
+ *
+ * The box starts nose on to the closing direction. That is not
+ * decoration: the library's impact-angle cosine is clamped at zero,
+ * because a surface is not struck from behind, so a target whose first
+ * body axis points away from the projectile reports zero and the
+ * penetration components stay at zero with it. Starting nose on and
+ * turning away is the one arrangement in which that cosine, and the
+ * two components that depend on it, are seen to move.
+ */
+#define EFF_EARTH \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+
+#define EFF_SHOOTER(vy) \
+    "    astro_body shooter assembly=\"crew_vehicle_10t.k26asm\"" \
+    " parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0" \
+    " vel_y=" vy " vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0" \
+    " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.0\n"
+
+#define EFF_MOVER(asset, pz) \
+    "    astro_body mover assembly=\"" asset "\"" \
+    " parent=earth pos_x=7.0e6 pos_y=2.0e3 pos_z=" pz " vel_x=0.0" \
+    " vel_y=7546.0 vel_z=0.0 quat_w=0.7071067811865476 quat_x=0.0" \
+    " quat_y=0.0 quat_z=-0.7071067811865476 omega_x=0.0 omega_y=0.0" \
+    " omega_z=0.05\n"
+
+/* The directed-energy payload. One megawatt at a metre and a half of
+ * aperture is an emitter a reader could describe; the arm that
+ * measures the ablated mass declares a larger one and says so. */
+#define EFF_LASER(power) \
+    "    astro_payload beam body=shooter kind=laser primary_diam_m=1.5" \
+    " wavelength_nm=1064.0 p_output_w=" power " m_squared=1.2" \
+    " pointing_jitter_rad=1.0e-7 rms_wavefront_m=5.0e-8" \
+    " plasma_attn_k=1.0 target_material=aluminum" \
+    " target_reflectivity=0.2\n"
+
+/* The kinetic payload, with the Whipple parameters of a shielded
+ * target so the penetration components have a branch to run. */
+#define EFF_IMPACTOR_SINGLE \
+    "    astro_payload rock body=shooter kind=impactor pattern=single" \
+    " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0" \
+    " projectile_diameter_m=0.2 target_wall_thickness_m=0.002" \
+    " target_bumper_density_kg_per_m3=2700.0" \
+    " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0\n"
+
+/* The swarm payload declares both structure branches, the Whipple
+ * parameters and the monolithic ones. The library runs the two
+ * independently, so one payload exercises both and neither branch's
+ * components can be left at zero by an arm that only ever described
+ * one kind of target. */
+#define EFF_IMPACTOR_SWARM \
+    "    astro_payload rock body=shooter kind=impactor pattern=swarm" \
+    " swarm_count=20 swarm_half_angle_rad=0.02" \
+    " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0" \
+    " projectile_diameter_m=0.2 target_wall_thickness_m=0.002" \
+    " target_bumper_density_kg_per_m3=2700.0" \
+    " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0" \
+    " target_brinell_hardness=95.0 target_density_kg_per_m3=2700.0" \
+    " target_speed_of_sound_m_per_s=5100.0" \
+    " target_monolithic_thickness_m=0.02\n"
+
+#define EFF_EPISODE \
+    "    episode\n" \
+    "        control_dt 0.5\n" \
+    "        substeps 4\n" \
+    "        horizon 32\n" \
+    "    end\n"
+
+#define EFF_ACTION "    action fire box -1.0 1.0 default 0.0\n"
+
+/* Both effectors engaged every step, both results published. The
+ * reward reads one component of each so nothing in the pair is a
+ * channel with no consumer. */
+static const char *const BOTH_KFL =
+    "form EFFBOTH\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_LASER("1.0e6") EFF_IMPACTOR_SINGLE
+    EFF_EPISODE EFF_ACTION
+    "    observe effect beam as las\n"
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage beam at mover\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward las_effect + kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The laser alone, and the matched control with the same world, the
+ * same craft and the same period and no engagement. Without the
+ * control a trajectory says only where the craft went, not what the
+ * engagement did to it. */
+static const char *const LAS_KFL =
+    "form EFFLAS\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_LASER("1.0e6")
+    EFF_EPISODE EFF_ACTION
+    "    observe effect beam as las\n"
+    "    on_step\n"
+    "        engage beam at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward las_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+static const char *const KIN_KFL =
+    "form EFFKIN\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_IMPACTOR_SINGLE
+    EFF_EPISODE EFF_ACTION
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The control declares the same two craft and the same episode frame
+ * and engages nothing. Its step body writes a body state key scaled by
+ * zero, so it has a body of the same shape without moving anything. */
+static const char *const CTRL_KFL =
+    "form EFFCTRL\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EPISODE EFF_ACTION
+    "    observe mover from shooter mode=geometric as los\n"
+    "    on_step\n"
+    "        shooter.vel_x = shooter.vel_x + fire * 0.0\n"
+    "    end\n"
+    "    objective\n"
+    "        reward los_range\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The swarm pattern against the single one, in otherwise identical
+ * worlds, so the transferred momentum differs by the footprint
+ * fraction and by nothing else. */
+static const char *const SWARM_KFL =
+    "form EFFSWARM\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_IMPACTOR_SWARM
+    EFF_EPISODE EFF_ACTION
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The target receding: the same separation and the same relative speed
+ * with the sign reversed. The predicted closest-approach distance is
+ * the same small number as the closing case, so an arm that tested
+ * that alone could not tell the two apart. */
+static const char *const RECEDE_KFL =
+    "form EFFRECEDE\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7346.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_IMPACTOR_SINGLE
+    EFF_EPISODE EFF_ACTION
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* A closing pass that misses: the target is offset five metres out of
+ * the closing plane, against a silhouette radius of about half a
+ * metre, so the time to closest approach is positive and the intercept
+ * still does not land. */
+static const char *const OFFSET_KFL =
+    "form EFFOFFSET\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "5.0")
+    EFF_IMPACTOR_SINGLE
+    EFF_EPISODE EFF_ACTION
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* An engagement under a condition on the action, so one artifact and
+ * one episode carry both a step that engaged and a step that did not.
+ * A fixture with two artifacts could not tell a cleared block from two
+ * different programs. */
+static const char *const COND_KFL =
+    "form EFFCOND\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_LASER("1.0e6") EFF_IMPACTOR_SINGLE
+    EFF_EPISODE EFF_ACTION
+    "    observe effect beam as las\n"
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        if fire > 0.5\n"
+    "            engage beam at mover\n"
+    "            engage rock at mover\n"
+    "        end\n"
+    "    end\n"
+    "    objective\n"
+    "        reward las_effect + kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* One `engage` statement inside a loop. The bound is an action, so the
+ * same artifact runs the loop once on one step and twice on the next:
+ * a fixture whose loop always ran twice could not tell the rule from a
+ * fault that fires whatever the program does. */
+static const char *const LOOP_KFL =
+    "form EFFLOOP\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_LASER("1.0e6")
+    EFF_EPISODE EFF_ACTION
+    "    observe effect beam as las\n"
+    "    on_step\n"
+    "        let n: double = 1.0\n"
+    "        if fire > 0.5\n"
+    "            n = 2.0\n"
+    "        end\n"
+    "        let i: double = 0.0\n"
+    "        while i < n\n"
+    "            engage beam at mover\n"
+    "            i = i + 1.0\n"
+    "        end\n"
+    "    end\n"
+    "    objective\n"
+    "        reward las_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* A hotter emitter against a faster-turning target. Two of the
+ * emitter's components report the plasma regime, and a fluence that
+ * never reaches the material's ignition threshold leaves both of them
+ * still: the transmissivity reads 1.0 because there is no plasma to
+ * attenuate the beam, and the ignition flag reads 0.0. This fixture
+ * puts the fluence across that threshold and turns the target fast
+ * enough for the silhouette to carry it back and forth, so both are
+ * seen to move and the hard flag is seen to follow the continuous
+ * quantity beside it. Three hundred megawatts is a modelling choice of
+ * this gate, not a claim about any emitter. */
+#define EFF_MOVER_FAST(asset) \
+    "    astro_body mover assembly=\"" asset "\"" \
+    " parent=earth pos_x=7.0e6 pos_y=2.0e3 pos_z=0.0 vel_x=0.0" \
+    " vel_y=7546.0 vel_z=0.0 quat_w=0.7071067811865476 quat_x=0.0" \
+    " quat_y=0.0 quat_z=-0.7071067811865476 omega_x=0.0 omega_y=0.0" \
+    " omega_z=0.5\n"
+
+static const char *const HOT_KFL =
+    "form EFFHOT\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER_FAST("calibration_box.k26asm")
+    EFF_LASER("3.0e8")
+    EFF_EPISODE EFF_ACTION
+    "    observe effect beam as las\n"
+    "    on_step\n"
+    "        engage beam at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward las_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* An assembly with a mesh and no collision primitive: geometry that a
+ * defense payload cannot take an area of. */
+static const char *const BARE_ASM =
+    "# scratch_bare.k26asm - geometry without a collider.\n"
+    "#\n"
+    "# Not a craft. It exists so a body an effector is pointed at with\n"
+    "# no silhouette can be written down: mass properties derive from\n"
+    "# the mesh and no collision primitive is declared.\n"
+    "assembly scratch_bare\n"
+    "    frame x_to_port\n"
+    "    provenance mass \"the shape's own definition\" computed\n"
+    "    provenance inertia \"derived from the geometry by the"
+    " compiler\" computed\n"
+    "    component hull\n"
+    "        mass 1000.0\n"
+    "        at 0.0 0.0 0.0\n"
+    "        mesh calibration_box.k26mesh\n"
+    "    end\n"
+    "end\n";
+
+/* ---- Component tables ----------------------------------------------- */
+
+/* The two published component sets, in order. They live here as well
+ * as in the compiler, and this gate is what compares them: a set that
+ * drifted between the two would publish one order and document
+ * another. */
+static const char *const LAS_COMPS[] = {
+    "_engaged", "_effect", "_dv", "_mass_loss", "_range", "_spot",
+    "_encircled", "_fluence", "_transmissivity", "_ignited", NULL
+};
+static const char *const KIN_COMPS[] = {
+    "_engaged", "_effect", "_hit", "_closing_speed", "_t_close",
+    "_miss", "_fraction", "_cos_angle", "_penetrates",
+    "_critical_diameter", "_penetration", "_energy", NULL
+};
+#define LAS_N 10
+#define KIN_N 12
+
+/* ---- Plumbing -------------------------------------------------------- */
+
+static int check_(const char *src, char **out_log)
+{
+    rl_write_file_(WORK_DIR "/case.kfl", src);
+    int rc = system("./bin/kflc --check " WORK_DIR "/case.kfl > "
+                    WORK_DIR "/case.log 2>&1");
+    static char buf[16384];
+    FILE *f = fopen(WORK_DIR "/case.log", "rb");
+    ASSERT(f != NULL);
+    size_t n = fread(buf, 1, sizeof buf - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    if (out_log) *out_log = buf;
+    return WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+}
+
+static void must_refuse_(const char *what, const char *src,
+                         const char *const *needles)
+{
+    char *log = NULL;
+    int rc = check_(src, &log);
+    if (rc == 0) {
+        fprintf(stderr, "FAIL %s: accepted, expected a refusal\n", what);
+        exit(1);
+    }
+    for (int i = 0; needles[i]; i++) {
+        if (strstr(log, needles[i]) == NULL) {
+            fprintf(stderr, "FAIL %s: diagnostic lacks \"%s\"\n---\n%s---\n",
+                    what, needles[i], log);
+            exit(1);
+        }
+    }
+    g_arms++;
+    printf("  refused: %s\n", what);
+}
+
+/* One built artifact, opened and resolved. */
+typedef struct {
+    void      *so;
+    RlSurface  s;
+    K26RlEnv  *env;
+} EffArt;
+
+static void art_open_(EffArt *a, const char *so_path, uint64_t seed,
+                      uint32_t n_envs)
+{
+    a->so = rl_dlopen_(so_path);
+    rl_resolve_surface_(a->so, &a->s);
+    a->env = NULL;
+    ASSERT(a->s.create(seed, n_envs, &a->env) == K26RL_OK);
+}
+
+static void art_close_(EffArt *a)
+{
+    a->s.destroy(a->env);
+    dlclose(a->so);
+}
+
+static void build_(const char *src, const char *stem)
+{
+    char path[512], out[512];
+    snprintf(path, sizeof path, WORK_DIR "/%s.kfl", stem);
+    snprintf(out, sizeof out, WORK_DIR "/%s", stem);
+    rl_write_file_(path, src);
+    rl_compile_(path, out, WORK_DIR);
+}
+
+static void so_path_(char *buf, size_t cap, const char *stem)
+{
+    snprintf(buf, cap, WORK_DIR "/%s.rlenv.so", stem);
+}
+
+/* Compile a translation unit of this artifact's own emitted source
+ * into a shared object directly, which is what the mutation arms need:
+ * they perturb the emitted source and must build exactly that, not
+ * re-run the compiler over the program. */
+static void build_emitted_(const char *cc_path, const char *so_path)
+{
+    char cmd[16384];
+    int n = snprintf(cmd, sizeof cmd,
+        "c++ -O2 -g -std=c++11 -Wno-format-truncation -ffp-contract=off "
+        "-fexcess-precision=standard -fPIC -shared -o %s %s",
+        so_path, cc_path);
+    for (int i = 0; RL_INCLUDE_DIRS_[i]; i++) {
+        n += snprintf(cmd + n, sizeof cmd - (size_t)n, " -I%s",
+                      RL_INCLUDE_DIRS_[i]);
+    }
+    for (int i = 0; RL_LINK_LIBS_[i]; i++) {
+        n += snprintf(cmd + n, sizeof cmd - (size_t)n, " %s",
+                      RL_LINK_LIBS_[i]);
+    }
+    n += snprintf(cmd + n, sizeof cmd - (size_t)n,
+                  " -lgfortran -lm > " WORK_DIR "/mut.log 2>&1");
+    ASSERT((size_t)n < sizeof cmd);
+    if (system(cmd) != 0) {
+        (void)!system("cat " WORK_DIR "/mut.log");
+        fprintf(stderr, "FAIL: could not build the perturbed source %s\n",
+                cc_path);
+        exit(1);
+    }
+}
+
+static void emit_(const char *stem)
+{
+    char cmd[1024];
+    snprintf(cmd, sizeof cmd,
+             "./bin/kflc --emit " WORK_DIR "/%s.kfl > " WORK_DIR
+             "/%s.cc 2> " WORK_DIR "/%s.emit.log", stem, stem, stem);
+    if (system(cmd) != 0) {
+        fprintf(stderr, "FAIL: --emit failed for %s\n", stem);
+        exit(1);
+    }
+}
+
+/* Apply a sed script to an emitted source and assert that it changed
+ * the file. A mutation that never reached the build cannot be reported
+ * as a survivor, and a mutation that never reached the file cannot be
+ * reported at all. */
+static void mutate_(const char *stem, const char *out_stem,
+                    const char *sed_script, const char *needle,
+                    int before, int after)
+{
+    char cmd[4096];
+    snprintf(cmd, sizeof cmd, "sed '%s' " WORK_DIR "/%s.cc > " WORK_DIR
+             "/%s.cc", sed_script, stem, out_stem);
+    rl_run_or_die_(cmd);
+    snprintf(cmd, sizeof cmd,
+             "grep -c -- '%s' " WORK_DIR "/%s.cc > " WORK_DIR "/n0.txt; "
+             "grep -c -- '%s' " WORK_DIR "/%s.cc > " WORK_DIR "/n1.txt",
+             needle, stem, needle, out_stem);
+    (void)!system(cmd);
+    FILE *f0 = fopen(WORK_DIR "/n0.txt", "rb");
+    FILE *f1 = fopen(WORK_DIR "/n1.txt", "rb");
+    ASSERT(f0 && f1);
+    int n0 = 0, n1 = 0;
+    ASSERT(fscanf(f0, "%d", &n0) == 1);
+    ASSERT(fscanf(f1, "%d", &n1) == 1);
+    fclose(f0);
+    fclose(f1);
+    if (n0 != before || n1 != after) {
+        fprintf(stderr, "FAIL: mutation of `%s` did not reach the file: "
+                "%d occurrence(s) before and %d after, expected %d and "
+                "%d\n", needle, n0, n1, before, after);
+        exit(1);
+    }
+}
+
+/* Step an artifact `n` times with a constant action and return the
+ * target body's position and velocity. Body order is declaration
+ * order, so the target is index 2 in every fixture here. */
+static void run_body_(const char *so_path, int n, double act0,
+                      double out6[6])
+{
+    EffArt a;
+    art_open_(&a, so_path, 4242u, 1u);
+    double act[4] = { 0.0, 0.0, 0.0, 0.0 };
+    act[0] = act0;
+    for (int i = 0; i < n; i++) ASSERT(a.s.step(a.env, act) == K26RL_OK);
+    double b[64];
+    int32_t need = a.s.bodies(a.env, 0u, b, 64u);
+    ASSERT(need == 18);
+    memcpy(out6, b + 12, sizeof(double) * 6);
+    art_close_(&a);
+}
+
+static double dist6_(const double a[6], const double b[6])
+{
+    double s = 0.0;
+    for (int i = 0; i < 6; i++) s += (a[i] - b[i]) * (a[i] - b[i]);
+    return sqrt(s);
+}
+
+/* ---- Gate 1: the refusals ------------------------------------------- */
+
+static void gate_refusals_(void)
+{
+    char src[8192];
+
+    /* `engage` in the world prefix. */
+    snprintf(src, sizeof src,
+        "form EFFR\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_LASER("1.0e6")
+        EFF_EPISODE EFF_ACTION
+        "    engage beam at mover\n"
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        shooter.vel_x = shooter.vel_x + fire * 0.0\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "engage", "act of a step",
+                            "`on_step` block only", NULL };
+        must_refuse_("`engage` in the world prefix", src, n);
+    }
+
+    /* An unknown payload. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR2\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_LASER("1.0e6")
+        EFF_EPISODE EFF_ACTION
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage gun at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "engage gun at mover",
+                            "no astro_payload of that name", NULL };
+        must_refuse_("`engage` naming no payload", src, n);
+    }
+
+    /* A payload of a kind that is not an effector, engaged and
+     * observed. Two arms, because the two statements refuse it for
+     * their own reasons and one diagnostic would not cover both. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR3\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        "    astro_payload eye body=shooter kind=detect_radar"
+        " p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10"
+        " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0"
+        " noise_figure=2.0 snr_threshold=10.0\n"
+        EFF_EPISODE EFF_ACTION
+        "    observe detect eye of mover as look\n"
+        "    on_step\n"
+        "        engage eye at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward look_snr\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "engage eye at mover", "detect_radar",
+                            "not an effector", NULL };
+        must_refuse_("`engage` on a detection payload", src, n);
+    }
+
+    snprintf(src, sizeof src, "%s",
+        "form EFFR4\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        "    astro_payload eye body=shooter kind=detect_radar"
+        " p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10"
+        " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0"
+        " noise_figure=2.0 snr_threshold=10.0\n"
+        EFF_EPISODE EFF_ACTION
+        "    observe effect eye as look\n"
+        "    on_step\n"
+        "        shooter.vel_x = shooter.vel_x + fire * 0.0\n"
+        "    end\n"
+        "    objective\n"
+        "        reward look_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "observe effect eye", "detect_radar",
+                            "no engagement event", NULL };
+        must_refuse_("`observe effect` on a detection payload", src, n);
+    }
+
+    /* A payload engaged at its own platform. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR5\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_LASER("1.0e6")
+        EFF_EPISODE EFF_ACTION
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage beam at shooter\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "engage beam at `shooter`",
+                            "own platform", NULL };
+        must_refuse_("a payload engaged at its own platform", src, n);
+    }
+
+    /* An unknown target, and a target with no assembly. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR6\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_LASER("1.0e6")
+        EFF_EPISODE EFF_ACTION
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage beam at ghost\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "engage beam at `ghost`",
+                            "no astro_body of that name", NULL };
+        must_refuse_("`engage` naming no body", src, n);
+    }
+
+    snprintf(src, sizeof src, "%s",
+        "form EFFR7\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_LASER("1.0e6")
+        EFF_EPISODE EFF_ACTION
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage beam at earth\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "engage beam at `earth`",
+                            "declares no `assembly=`", NULL };
+        must_refuse_("a target that binds no assembly", src, n);
+    }
+
+    /* A target whose assembly declares no collider. Without this the
+     * checker accepts a program that presents no area and the build
+     * fails against a generated file. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR8\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("scratch_bare.k26asm", "0.0")
+        EFF_LASER("1.0e6")
+        EFF_EPISODE EFF_ACTION
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage beam at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "engage ... at `mover`",
+                            "declares no `collider`",
+                            "presents no area along a line of sight",
+                            NULL };
+        must_refuse_("an engaged body whose assembly has no collider",
+                     src, n);
+    }
+
+    /* A second `engage` of one payload in one step body. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR9\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_LASER("1.0e6")
+        EFF_EPISODE EFF_ACTION
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage beam at mover\n"
+        "        engage beam at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "already engaged at line",
+                            "at most once per step", NULL };
+        must_refuse_("one payload engaged twice in one step body", src, n);
+    }
+
+    /* The same, with the second engagement inside a conditional, which
+     * the collection walks into: a rule that stopped at the top level
+     * of the block would miss it. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR10\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_LASER("1.0e6")
+        EFF_EPISODE EFF_ACTION
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage beam at mover\n"
+        "        if fire > 0.5\n"
+        "            engage beam at mover\n"
+        "        end\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "already engaged at line",
+                            "at most once per step", NULL };
+        must_refuse_("the second engagement inside a conditional", src, n);
+    }
+
+    /* The keyword-valued keys: a number, an unknown word, and a
+     * distribution form. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR11\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        "    astro_payload rock body=shooter kind=impactor pattern=2"
+        " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0"
+        " projectile_diameter_m=0.2\n"
+        EFF_EPISODE EFF_ACTION
+        "    observe effect rock as kin\n"
+        "    on_step\n"
+        "        engage rock at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward kin_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "`pattern=2`", "single, swarm",
+                            "library constant rather than a number",
+                            NULL };
+        must_refuse_("a number where a release pattern belongs", src, n);
+    }
+
+    snprintf(src, sizeof src, "%s",
+        "form EFFR12\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        "    astro_payload beam body=shooter kind=laser"
+        " primary_diam_m=1.5 wavelength_nm=1064.0 p_output_w=1.0e6"
+        " m_squared=1.2 pointing_jitter_rad=1.0e-7"
+        " rms_wavefront_m=5.0e-8 plasma_attn_k=1.0"
+        " target_material=none target_reflectivity=0.2\n"
+        EFF_EPISODE EFF_ACTION
+        "    observe effect beam as las\n"
+        "    on_step\n"
+        "        engage beam at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward las_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "`target_material=none`",
+                            "aluminum, steel, titanium", NULL };
+        must_refuse_("a target material the grammar does not admit",
+                     src, n);
+    }
+
+    snprintf(src, sizeof src, "%s",
+        "form EFFR13\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        "    astro_payload rock body=shooter kind=impactor"
+        " pattern=uniform(1.0, 2.0)"
+        " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0"
+        " projectile_diameter_m=0.2\n"
+        EFF_EPISODE EFF_ACTION
+        "    observe effect rock as kin\n"
+        "    on_step\n"
+        "        engage rock at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward kin_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "pattern=uniform(1.0, 2.0)",
+                            "library constant rather than a number",
+                            NULL };
+        must_refuse_("a distribution on a keyword-valued key", src, n);
+    }
+
+    /* The swarm keys, required by the pattern and refused against the
+     * other one. Both directions, since a rule that only ever added a
+     * requirement would pass the first arm alone. */
+    snprintf(src, sizeof src, "%s",
+        "form EFFR14\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        "    astro_payload rock body=shooter kind=impactor pattern=swarm"
+        " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0"
+        " projectile_diameter_m=0.2\n"
+        EFF_EPISODE EFF_ACTION
+        "    observe effect rock as kin\n"
+        "    on_step\n"
+        "        engage rock at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward kin_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "`pattern=swarm` requires `swarm_count=`",
+                            NULL };
+        must_refuse_("a swarm with no count", src, n);
+    }
+
+    snprintf(src, sizeof src, "%s",
+        "form EFFR15\n"
+        "fn world w\n"
+        EFF_EARTH EFF_SHOOTER("7746.0")
+        EFF_MOVER("calibration_box.k26asm", "0.0")
+        "    astro_payload rock body=shooter kind=impactor"
+        " pattern=single swarm_count=20"
+        " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0"
+        " projectile_diameter_m=0.2\n"
+        EFF_EPISODE EFF_ACTION
+        "    observe effect rock as kin\n"
+        "    on_step\n"
+        "        engage rock at mover\n"
+        "    end\n"
+        "    objective\n"
+        "        reward kin_effect\n"
+        "    end\n"
+        "end\n"
+        "end\n");
+    {
+        const char *n[] = { "`swarm_count=` belongs to `pattern=swarm`",
+                            "pattern=single", NULL };
+        must_refuse_("a swarm count on a single projectile", src, n);
+    }
+}
+
+/* ---- Gate 2: acceptance reaches an artifact -------------------------- */
+
+static void must_build_and_step_(const char *what, const char *src,
+                                 const char *stem)
+{
+    char so[512];
+    build_(src, stem);
+    so_path_(so, sizeof so, stem);
+    EffArt a;
+    art_open_(&a, so, 3u, 1u);
+    double act[4] = { 1.0, 0.0, 0.0, 0.0 };
+    ASSERT(a.s.step(a.env, act) == K26RL_OK);
+    ASSERT(a.s.reset(a.env) == K26RL_OK);
+    ASSERT(a.s.step(a.env, act) == K26RL_OK);
+    art_close_(&a);
+    g_arms++;
+    printf("  built, opened, stepped, reset and stepped: %s\n", what);
+}
+
+/* ---- Gate 3: the published channels ---------------------------------- */
+
+static void spec_of_(const char *stem, RlSpecView *v)
+{
+    char so[512];
+    so_path_(so, sizeof so, stem);
+    EffArt a;
+    art_open_(&a, so, 3u, 1u);
+    uint8_t blob[8192];
+    int32_t n = a.s.spec(a.env, blob, sizeof blob);
+    ASSERT(n > 0 && (size_t)n <= sizeof blob);
+    rl_parse_spec_(blob, (uint32_t)n, v);
+    art_close_(&a);
+}
+
+static void gate_channels_(void)
+{
+    RlSpecView v;
+    spec_of_("both", &v);
+    ASSERT(v.obs_total == (uint32_t)(LAS_N + KIN_N));
+    for (int i = 0; LAS_COMPS[i]; i++) {
+        char want[96];
+        snprintf(want, sizeof want, "las%s", LAS_COMPS[i]);
+        if (strcmp(v.chan_names[i], want) != 0) {
+            fprintf(stderr, "FAIL: channel %d is `%s`, expected `%s`\n",
+                    i, v.chan_names[i], want);
+            exit(1);
+        }
+    }
+    for (int i = 0; KIN_COMPS[i]; i++) {
+        char want[96];
+        snprintf(want, sizeof want, "kin%s", KIN_COMPS[i]);
+        if (strcmp(v.chan_names[LAS_N + i], want) != 0) {
+            fprintf(stderr, "FAIL: channel %d is `%s`, expected `%s`\n",
+                    LAS_N + i, v.chan_names[LAS_N + i], want);
+            exit(1);
+        }
+    }
+    /* Both are published under the geometric observer-mode tag: an
+     * engagement applies no light-time correction and no aberration,
+     * so the default astrometric value would assert a correction that
+     * is not made. */
+    ASSERT(v.n_modes == LAS_N + KIN_N);
+    for (int i = 0; i < v.n_modes; i++) ASSERT(v.modes[i] == 0);
+    g_arms++;
+    printf("  %d published components in the design's order, %d for the "
+           "emitter and %d for the impactor, all geometric\n",
+           LAS_N + KIN_N, LAS_N, KIN_N);
+}
+
+/* ---- Gate 4: the effect on the world --------------------------------- */
+
+#define EFF_STEPS 6
+
+static void gate_effect_world_(void)
+{
+    double ctrl[6], las[6], kin[6];
+    char so[512];
+
+    build_(CTRL_KFL, "ctrl");
+    build_(LAS_KFL, "las");
+    build_(KIN_KFL, "kin");
+
+    so_path_(so, sizeof so, "ctrl");
+    run_body_(so, EFF_STEPS, 0.0, ctrl);
+    so_path_(so, sizeof so, "las");
+    run_body_(so, EFF_STEPS, 0.0, las);
+    so_path_(so, sizeof so, "kin");
+    run_body_(so, EFF_STEPS, 0.0, kin);
+
+    double d_las = dist6_(las, ctrl);
+    double d_kin = dist6_(kin, ctrl);
+    if (!(d_las > 0.0)) {
+        fprintf(stderr, "FAIL: the directed-energy engagement left the "
+                "target's trajectory unchanged\n");
+        exit(1);
+    }
+    if (!(d_kin > 0.0)) {
+        fprintf(stderr, "FAIL: the kinetic engagement left the target's "
+                "trajectory unchanged\n");
+        exit(1);
+    }
+    g_arms += 2;
+    printf("  the target's state after %d steps differs from the "
+           "no-engagement control by %.6g (emitter) and %.6g "
+           "(impactor), in metres and metres per second combined\n",
+           EFF_STEPS, d_las, d_kin);
+
+    /* The mutations. Each deletes the state write the arm above rests
+     * on, from that artifact's own emitted source, and requires the
+     * trajectory to return to the control's. An arm that still passed
+     * would be measuring something other than the effect. */
+    emit_("las");
+    mutate_("las", "las_novel",
+            "s/^    _kfl_tb->vel\\.\\([xyz]\\) += _kfl_dv \\* "
+            "_kfl_u\\.\\([xyz]\\);$/    (void)0;/",
+            "_kfl_tb->vel", 3, 0);
+    build_emitted_(WORK_DIR "/las_novel.cc", WORK_DIR "/las_novel.so");
+    double las_novel[6];
+    run_body_(WORK_DIR "/las_novel.so", EFF_STEPS, 0.0, las_novel);
+    if (dist6_(las_novel, ctrl) != 0.0) {
+        fprintf(stderr, "FAIL: with the emitter's velocity write deleted "
+                "the trajectory still differs from the control by %.6g; "
+                "the arm above is measuring something else\n",
+                dist6_(las_novel, ctrl));
+        exit(1);
+    }
+    g_arms++;
+    printf("  mutation: the emitter's velocity write deleted returns the "
+           "trajectory to the control's, bit for bit\n");
+
+    /* The needle is the increment rather than the field, because the
+     * impactor's own geometry reads the target's velocity too and a
+     * count over the field would not be a count of the writes. */
+    emit_("kin");
+    mutate_("kin", "kin_novel",
+            "s/^    _kfl_tb->vel\\.\\([xyz]\\) += _kfl_dv \\* "
+            "_kfl_w\\.\\([xyz]\\);$/    (void)0;/",
+            "_kfl_dv \\* _kfl_w", 3, 0);
+    build_emitted_(WORK_DIR "/kin_novel.cc", WORK_DIR "/kin_novel.so");
+    double kin_novel[6];
+    run_body_(WORK_DIR "/kin_novel.so", EFF_STEPS, 0.0, kin_novel);
+    if (dist6_(kin_novel, ctrl) != 0.0) {
+        fprintf(stderr, "FAIL: with the impactor's velocity write deleted "
+                "the trajectory still differs from the control by %.6g; "
+                "the arm above is measuring something else\n",
+                dist6_(kin_novel, ctrl));
+        exit(1);
+    }
+    g_arms++;
+    printf("  mutation: the impactor's velocity write deleted returns the "
+           "trajectory to the control's, bit for bit\n");
+}
+
+/* ---- Gate 4b: the ablated mass is consumed --------------------------- */
+
+/* A high-power emitter, declared so the ablated fraction is large
+ * enough to see in six steps. The figure is a modelling choice of this
+ * gate and not a claim about any real emitter; what the arm measures is
+ * the route the mass takes, which does not depend on the power. */
+static const char *const MASSY_KFL =
+    "form EFFMASS\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_LASER("1.0e9")
+    EFF_EPISODE EFF_ACTION
+    "    observe effect beam as las\n"
+    "    on_step\n"
+    "        engage beam at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward las_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+static void gate_mass_consumed_(void)
+{
+    build_(MASSY_KFL, "massy");
+    emit_("massy");
+
+    double base[6], nomass[6], novel[6], neither[6];
+    char so[512];
+    so_path_(so, sizeof so, "massy");
+    run_body_(so, EFF_STEPS, 0.0, base);
+
+    mutate_("massy", "massy_nomass",
+            "s/^        k26astro_body_set_mass(_kfl_tb, _kfl_mass - "
+            "_kfl_loss);$/        (void)0;/",
+            "k26astro_body_set_mass", 3, 2);
+    build_emitted_(WORK_DIR "/massy_nomass.cc",
+                   WORK_DIR "/massy_nomass.so");
+    run_body_(WORK_DIR "/massy_nomass.so", EFF_STEPS, 0.0, nomass);
+
+    double d_mass = dist6_(base, nomass);
+    if (!(d_mass > 0.0)) {
+        fprintf(stderr, "FAIL: deleting the mass write changed nothing; "
+                "the published mass loss would be a dead store\n");
+        exit(1);
+    }
+    g_arms++;
+    printf("  deleting the mass write moves the target by %.6g: the "
+           "ablated mass is read back, not merely written\n", d_mass);
+
+    /* The route, measured rather than reasoned. With the velocity write
+     * also gone the mass write moves nothing at all, so the mass
+     * reaches the trajectory by dividing the next engagement's velocity
+     * increment and not through the gravitational field. */
+    mutate_("massy", "massy_novel",
+            "s/^    _kfl_tb->vel\\.\\([xyz]\\) += _kfl_dv \\* "
+            "_kfl_u\\.\\([xyz]\\);$/    (void)0;/",
+            "_kfl_tb->vel", 3, 0);
+    build_emitted_(WORK_DIR "/massy_novel.cc", WORK_DIR "/massy_novel.so");
+    run_body_(WORK_DIR "/massy_novel.so", EFF_STEPS, 0.0, novel);
+
+    mutate_("massy_novel", "massy_neither",
+            "s/^        k26astro_body_set_mass(_kfl_tb, _kfl_mass - "
+            "_kfl_loss);$/        (void)0;/",
+            "k26astro_body_set_mass", 3, 2);
+    build_emitted_(WORK_DIR "/massy_neither.cc",
+                   WORK_DIR "/massy_neither.so");
+    run_body_(WORK_DIR "/massy_neither.so", EFF_STEPS, 0.0, neither);
+
+    double d_field = dist6_(novel, neither);
+    if (d_field != 0.0) {
+        fprintf(stderr, "NOTE: with the velocity write gone the mass "
+                "write still moves the target by %.6g\n", d_field);
+    }
+    g_arms++;
+    printf("  the route is the increment, not the field: with the "
+           "velocity write also deleted the mass write moves the target "
+           "by %.6g\n", d_field);
+}
+
+/* ---- Gate 5: the hit test -------------------------------------------- */
+
+/* Read one observation vector after `n` steps. */
+static void run_obs_(const char *so_path, int n, double act0,
+                     double *out, int width)
+{
+    EffArt a;
+    art_open_(&a, so_path, 4242u, 1u);
+    double act[4] = { 0.0, 0.0, 0.0, 0.0 };
+    act[0] = act0;
+    for (int i = 0; i < n; i++) ASSERT(a.s.step(a.env, act) == K26RL_OK);
+    double o[128];
+    ASSERT(a.s.obs(a.env, o) == K26RL_OK);
+    memcpy(out, o, sizeof(double) * (size_t)width);
+    art_close_(&a);
+}
+
+static void gate_hit_test_(void)
+{
+    char so[512];
+    double closing[KIN_N], recede[KIN_N], offset[KIN_N];
+
+    build_(RECEDE_KFL, "recede");
+    build_(OFFSET_KFL, "offset");
+
+    so_path_(so, sizeof so, "kin");
+    run_obs_(so, 1, 0.0, closing, KIN_N);
+    so_path_(so, sizeof so, "recede");
+    run_obs_(so, 1, 0.0, recede, KIN_N);
+    so_path_(so, sizeof so, "offset");
+    run_obs_(so, 1, 0.0, offset, KIN_N);
+
+    /* Closing: a hit, with the time to closest approach ahead. */
+    ASSERT(closing[0] == 1.0);
+    ASSERT(closing[2] == 1.0);
+    ASSERT(closing[4] > 0.0);
+    ASSERT(closing[1] > 0.0);
+
+    /* Receding: engaged, and not a hit, with the same order of
+     * predicted closest approach. The discriminating quantity is the
+     * sign of the time to closest approach and nothing else. */
+    ASSERT(recede[0] == 1.0);
+    if (recede[2] != 0.0) {
+        fprintf(stderr, "FAIL: a receding target reported a hit\n");
+        exit(1);
+    }
+    if (!(recede[4] < 0.0)) {
+        fprintf(stderr, "FAIL: the receding fixture does not have a "
+                "negative time to closest approach (%.6g), so it is not "
+                "the case this arm exists to tell apart\n", recede[4]);
+        exit(1);
+    }
+    ASSERT(recede[1] == 0.0);
+
+    /* Offset: engaged, approaching, and still not a hit, because the
+     * predicted closest approach is outside the silhouette. */
+    ASSERT(offset[0] == 1.0);
+    if (offset[2] != 0.0) {
+        fprintf(stderr, "FAIL: a pass at %.6g m reported a hit\n",
+                offset[5]);
+        exit(1);
+    }
+    if (!(offset[4] > 0.0)) {
+        fprintf(stderr, "FAIL: the offset fixture is receding (%.6g), so "
+                "it does not separate the two halves of the test\n",
+                offset[4]);
+        exit(1);
+    }
+    ASSERT(offset[1] == 0.0);
+    g_arms += 3;
+    printf("  hit test: closing hits (miss %.6g m, time %.6g s), "
+           "receding does not (miss %.6g m, time %.6g s), a pass at "
+           "%.6g m does not (time %.6g s)\n",
+           closing[5], closing[4], recede[5], recede[4], offset[5],
+           offset[4]);
+
+    /* And the effect follows the test: a hit transfers momentum and a
+     * miss transfers none, measured on the world rather than on the
+     * channel. */
+    double ctrl[6], rec[6], off[6];
+    so_path_(so, sizeof so, "ctrl");
+    run_body_(so, EFF_STEPS, 0.0, ctrl);
+    so_path_(so, sizeof so, "recede");
+    run_body_(so, EFF_STEPS, 0.0, rec);
+    so_path_(so, sizeof so, "offset");
+    run_body_(so, EFF_STEPS, 0.0, off);
+    if (dist6_(rec, ctrl) != 0.0) {
+        fprintf(stderr, "FAIL: a receding engagement moved the target by "
+                "%.6g\n", dist6_(rec, ctrl));
+        exit(1);
+    }
+    g_arms++;
+    printf("  a miss transfers no momentum: the receding fixture's target "
+           "state is the control's, bit for bit (the offset fixture "
+           "starts elsewhere and is compared by its own channel)\n");
+    ASSERT(off[0] == off[0]);
+}
+
+/* ---- Gate 6: swarm against single ------------------------------------ */
+
+static void gate_swarm_(void)
+{
+    char so[512];
+    double single1[KIN_N], swarm1[KIN_N], swarm5[KIN_N];
+
+    build_(SWARM_KFL, "swarm");
+
+    so_path_(so, sizeof so, "kin");
+    run_obs_(so, 1, 0.0, single1, KIN_N);
+    so_path_(so, sizeof so, "swarm");
+    run_obs_(so, 1, 0.0, swarm1, KIN_N);
+    run_obs_(so, 5, 0.0, swarm5, KIN_N);
+
+    ASSERT(single1[6] == 1.0);
+    if (!(swarm1[6] > 0.0 && swarm1[6] < 1.0)) {
+        fprintf(stderr, "FAIL: the swarm fraction is %.6g, which is not a "
+                "spread footprint\n", swarm1[6]);
+        exit(1);
+    }
+    if (!(swarm1[1] < single1[1])) {
+        fprintf(stderr, "FAIL: the swarm transferred %.6g and the single "
+                "projectile %.6g; the two patterns do not differ\n",
+                swarm1[1], single1[1]);
+        exit(1);
+    }
+    /* The fraction rises as the range closes, because the footprint
+     * shrinks with it: a fraction that did not move with range would be
+     * a constant wearing a channel's name. */
+    if (!(swarm5[6] > swarm1[6])) {
+        fprintf(stderr, "FAIL: the swarm fraction did not move with "
+                "range: %.6g at step 1 and %.6g at step 5\n",
+                swarm1[6], swarm5[6]);
+        exit(1);
+    }
+    g_arms += 3;
+    printf("  swarm against single: fraction %.6g against 1.0, "
+           "increment %.6g against %.6g m/s, fraction rising to %.6g as "
+           "the range closes\n",
+           swarm1[6], swarm1[1], single1[1], swarm5[6]);
+}
+
+/* ---- Gate 7: every published component moves ------------------------- */
+
+/* The spread of each component over a run, so a component that cannot
+ * move can be named rather than assumed to be fine. */
+static void spread_(const char *stem, int n, int width, double *lo,
+                    double *hi)
+{
+    char so[512];
+    so_path_(so, sizeof so, stem);
+    EffArt a;
+    art_open_(&a, so, 4242u, 1u);
+    double act[4] = { 0.0, 0.0, 0.0, 0.0 };
+    for (int c = 0; c < width; c++) { lo[c] = 1.0e300; hi[c] = -1.0e300; }
+    for (int i = 0; i < n; i++) {
+        ASSERT(a.s.step(a.env, act) == K26RL_OK);
+        double o[128];
+        ASSERT(a.s.obs(a.env, o) == K26RL_OK);
+        for (int c = 0; c < width; c++) {
+            double v = o[c];
+            if (v < lo[c]) lo[c] = v;
+            if (v > hi[c]) hi[c] = v;
+        }
+    }
+    art_close_(&a);
+}
+
+static void gate_components_move_(void)
+{
+    /* Three fixtures, because two of the components need a regime the
+     * first one does not reach. The emitter's plasma components move
+     * only once the fluence crosses the material's ignition threshold,
+     * which the hot fixture is declared to straddle; the impactor's
+     * footprint fraction is 1.0 for a single projectile by
+     * construction and moves in the swarm fixture. Every component is
+     * required to move in one of them, and the fixture that moved it
+     * is named, so a component nothing can move is reported by name
+     * rather than passed over.
+     *
+     * `_engaged` is the exception, and its own arm follows: it is 1.0
+     * on every step of a fixture that engages every step, and the
+     * conditional fixture is where it moves. */
+    double lo_b[128], hi_b[128], lo_h[128], hi_h[128];
+    double lo_s[128], hi_s[128];
+    int moved = 0;
+
+    build_(HOT_KFL, "hot");
+    spread_("both", 30, LAS_N + KIN_N, lo_b, hi_b);
+    spread_("hot", 12, LAS_N, lo_h, hi_h);
+    spread_("swarm", 30, KIN_N, lo_s, hi_s);
+
+    printf("    emitter spreads, the standing fixture then the hot one:");
+    for (int c = 1; c < LAS_N; c++) {
+        double sb = hi_b[c] - lo_b[c];
+        double sh = hi_h[c] - lo_h[c];
+        printf(" %s %.6g/%.6g", LAS_COMPS[c], sb, sh);
+        if (sb > 0.0 || sh > 0.0) { moved++; continue; }
+        printf("\n");
+        fprintf(stderr, "FAIL: the emitter's `%s` held %.17g in the "
+                "standing fixture and %.17g in the hot one\n",
+                LAS_COMPS[c], lo_b[c], lo_h[c]);
+        exit(1);
+    }
+    printf("\n    impactor spreads, the single fixture then the swarm:");
+    for (int c = 1; c < KIN_N; c++) {
+        double sb = hi_b[LAS_N + c] - lo_b[LAS_N + c];
+        double ss = hi_s[c] - lo_s[c];
+        printf(" %s %.6g/%.6g", KIN_COMPS[c], sb, ss);
+        if (sb > 0.0 || ss > 0.0) { moved++; continue; }
+        printf("\n");
+        fprintf(stderr, "FAIL: the impactor's `%s` held %.17g in the "
+                "single fixture and %.17g in the swarm one\n",
+                KIN_COMPS[c], lo_b[LAS_N + c], lo_s[c]);
+        exit(1);
+    }
+    printf("\n");
+    g_arms++;
+    printf("  %d of the %d published components move under a program a "
+           "reader can write; `_engaged` is the remaining one and moves "
+           "in the conditional fixture below\n",
+           moved, LAS_N + KIN_N);
+}
+
+/* ---- Gate 8: zero fill on an unengaged step -------------------------- */
+
+static void gate_zero_fill_(void)
+{
+    build_(COND_KFL, "cond");
+    char so[512];
+    so_path_(so, sizeof so, "cond");
+
+    EffArt a;
+    art_open_(&a, so, 4242u, 1u);
+    double on[4]  = { 1.0, 0.0, 0.0, 0.0 };
+    double off[4] = { 0.0, 0.0, 0.0, 0.0 };
+    double o_on[128], o_off[128];
+
+    ASSERT(a.s.step(a.env, on) == K26RL_OK);
+    ASSERT(a.s.obs(a.env, o_on) == K26RL_OK);
+    ASSERT(a.s.step(a.env, off) == K26RL_OK);
+    ASSERT(a.s.obs(a.env, o_off) == K26RL_OK);
+    art_close_(&a);
+
+    ASSERT(o_on[0] == 1.0);
+    ASSERT(o_on[LAS_N] == 1.0);
+    int nonzero = 0;
+    for (int c = 1; c < LAS_N + KIN_N; c++) {
+        if (c == LAS_N) continue;
+        if (o_on[c] != 0.0) nonzero++;
+    }
+    if (nonzero == 0) {
+        fprintf(stderr, "FAIL: the engaged step published nothing, so the "
+                "unengaged step below proves nothing\n");
+        exit(1);
+    }
+    for (int c = 0; c < LAS_N + KIN_N; c++) {
+        if (o_off[c] == 0.0) continue;
+        fprintf(stderr, "FAIL: on a step that engaged nothing, component "
+                "%d read %.17g\n", c, o_off[c]);
+        exit(1);
+    }
+    g_arms += 2;
+    printf("  a step whose body engaged reads `_engaged` 1.0 with %d "
+           "further components non-zero; the next step of the same "
+           "episode engages nothing and every one of the %d reads 0.0\n",
+           nonzero, LAS_N + KIN_N);
+}
+
+/* ---- Gate 9: one engagement per payload per step, at runtime --------- */
+
+static void gate_runtime_second_engage_(void)
+{
+    build_(LOOP_KFL, "loop");
+    char so[512];
+    so_path_(so, sizeof so, "loop");
+
+    EffArt a;
+    art_open_(&a, so, 4242u, 1u);
+    double once[4]  = { 0.0, 0.0, 0.0, 0.0 };
+    double twice[4] = { 1.0, 0.0, 0.0, 0.0 };
+    uint16_t f = 0;
+    uint32_t fl = 0;
+
+    /* The loop runs once: no fault, and the engagement happened. */
+    ASSERT(a.s.step(a.env, once) == K26RL_OK);
+    ASSERT(a.s.fault_codes(a.env, &f) == K26RL_OK);
+    if (f != 0) {
+        fprintf(stderr, "FAIL: one engagement in a loop faulted with %u\n",
+                (unsigned)f);
+        exit(1);
+    }
+    double o[128];
+    ASSERT(a.s.obs(a.env, o) == K26RL_OK);
+    ASSERT(o[0] == 1.0);
+    g_arms++;
+    printf("  a loop engaging once does not fault\n");
+
+    /* The same statement reached twice: the fault the compiler cannot
+     * raise statically. */
+    ASSERT(a.s.step(a.env, twice) == K26RL_OK);
+    ASSERT(a.s.fault_codes(a.env, &f) == K26RL_OK);
+    if (f != (uint16_t)K26RL_E_ENV_INTERNAL) {
+        fprintf(stderr, "FAIL: a second engagement of one payload in one "
+                "step reported fault code %u, expected %u\n",
+                (unsigned)f, (unsigned)K26RL_E_ENV_INTERNAL);
+        exit(1);
+    }
+    ASSERT(a.s.flags(a.env, &fl) == K26RL_OK);
+    ASSERT((fl & K26RL_FLAG_FAULT) != 0u);
+    art_close_(&a);
+    g_arms++;
+    printf("  the same statement reached twice through a loop faults with "
+           "K26RL_E_ENV_INTERNAL (%u)\n", (unsigned)K26RL_E_ENV_INTERNAL);
+}
+
+int main(void)
+{
+    rl_run_or_die_("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
+    rl_run_or_die_("cp examples/assets/calibration_box.k26asm "
+                   "examples/assets/calibration_box.k26mesh "
+                   "examples/assets/crew_vehicle_10t.k26asm "
+                   WORK_DIR "/");
+    rl_write_file_(WORK_DIR "/scratch_bare.k26asm", BARE_ASM);
+
+    printf("test_rl_effectors: the kinetic and directed-energy "
+           "effectors\n");
+    gate_refusals_();
+
+    if (!rl_libs_present_("test_rl_effectors")) {
+        printf("test_rl_effectors: %d arm(s) passed, drive arms stood "
+               "down (stack archives absent)\n", g_arms);
+        return 77;
+    }
+
+    must_build_and_step_("both kinds in one program", BOTH_KFL, "both");
+    must_build_and_step_("the swarm release pattern", SWARM_KFL,
+                         "swarm_accept");
+    gate_channels_();
+    gate_effect_world_();
+    gate_mass_consumed_();
+    gate_hit_test_();
+    gate_swarm_();
+    gate_components_move_();
+    gate_zero_fill_();
+    gate_runtime_second_engage_();
+
+    printf("test_rl_effectors: %d arm(s) passed\n", g_arms);
+    return 0;
+}

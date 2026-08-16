@@ -5,13 +5,19 @@
 # in the world prefix, which is where they are constructed: the stepping
 # path calls the libraries' evaluators and constructs nothing.
 #
-# The two observation forms are both here. `observe detect` publishes
+# The same craft carries an effector of each kind, fired at the second
+# by `engage`. An engagement is an act rather than a declaration, so it
+# sits in the step body, and its result is published by
+# `observe effect`.
+#
+# The three observation forms are all here. `observe detect` publishes
 # whether the target was seen, the continuous quantity that decision was
 # taken on, and the geometry it was taken from, with no light-time
 # correction. `observe track` publishes where the target was when the
 # light left it, with an explicit validity channel, because a history
 # that does not reach back to the retarded time produces no observation
-# at all.
+# at all. `observe effect` publishes what the last engagement of its
+# payload did, and reads zero on a step that engaged nothing.
 #
 # The two agents deliberately declare different numbers of channels, so
 # the published slices tell a correct partition from one that has
@@ -19,7 +25,7 @@
 # one agent is what makes its name survive compilation.
 #
 # Exercised by the round-trip harness; the behaviour of everything here
-# is gated by tests/test_rl_defense.
+# is gated by tests/test_rl_defense and tests/test_rl_effectors.
 
 form RL_DEFENSE
 title "Defense payload grammar round-trip fixture"
@@ -33,6 +39,8 @@ fn world watch_world
     astro_payload rf body=watcher kind=detect_radar p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10 loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0 noise_figure=2.0 snr_threshold=10.0
     astro_payload beam body=watcher kind=detect_lidar pulse_energy_j=0.1 wavelength_nm=1064.0 aperture_rx_m=0.5 atmospheric_tx=1.0 detector_efficiency=0.3 snr_threshold=5.0 target_albedo=uniform(0.1,0.3)
     astro_payload picture body=watcher kind=infostate history=256
+    astro_payload gun body=watcher kind=impactor pattern=swarm swarm_count=12 swarm_half_angle_rad=0.01 projectile_mass_kg=5.0 projectile_density_kg_per_m3=7800.0 projectile_diameter_m=0.05 target_wall_thickness_m=0.002 target_bumper_density_kg_per_m3=2700.0 target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0
+    astro_payload torch body=watcher kind=laser primary_diam_m=1.0 wavelength_nm=1064.0 p_output_w=1.0e5 m_squared=1.2 pointing_jitter_rad=1.0e-6 rms_wavefront_m=5.0e-8 plasma_attn_k=1.0 target_material=aluminum target_reflectivity=uniform(0.1,0.3)
 
     episode
         control_dt 0.5
@@ -46,8 +54,10 @@ fn world watch_world
         observe detect rf of target as radar
         observe detect beam of target as lidar
         observe track picture of target modality=radar as trk
+        observe effect gun as kin
+        observe effect torch as las
         objective
-            reward hunter.ir_snr
+            reward hunter.ir_snr + hunter.kin_effect + hunter.las_effect
         end
     end
 
@@ -62,6 +72,8 @@ fn world watch_world
     on_step
         watcher.vel_x = watcher.vel_x + nudge
         target.vel_x = target.vel_x + dodge
+        engage gun at target
+        engage torch at target
     end
 end
 
