@@ -11,11 +11,14 @@ the typed raise with the negation undone and the message equal to the
 artifact's own decode.
 
 From synthetic blobs: the validation refusals (endian probe, ABI
-version echo, environment-count echo, agent count above 1, slice
+version echo, environment-count echo, agent count below 1, slice
 overrun, slice under-coverage, unknown action kind, action total 0,
-episode auto-reset bit clear), each naming what it found, and the
-four action-space branches: all box, single discrete, all discrete,
-and mixed declarations yield Box, Discrete, MultiDiscrete, and Tuple.
+episode auto-reset bit clear), each naming what it found; the
+single-agent shapes' own refusal of an artifact declaring more than
+one agent, which is the shape's question rather than the blob's; and
+the four action-space branches: all box, single discrete, all
+discrete, and mixed declarations yield Box, Discrete, MultiDiscrete,
+and Tuple.
 
 Skips (77) when the built compiler, the stack archives, or gymnasium
 are absent.
@@ -200,7 +203,24 @@ def main():
 
     expect_refusal(make_blob(episode_flags=0), "auto-reset",
                    "auto-reset bit clear")
-    expect_refusal(make_blob(agent_count=2), "2", "agent count 2")
+    expect_refusal(make_blob(agent_count=0), "agent count 0",
+                   "agent count 0")
+
+    # Above one agent the refusal belongs to the API shape rather than
+    # to the blob: a Gymnasium environment reports one observation,
+    # one action and one reward per step, so it cannot serve two
+    # agents' streams, and the message names the count found and the
+    # shape that does serve it.
+    try:
+        _spec.require_single_agent(_spec.parse(make_blob(agent_count=2)))
+    except Exception as exc:
+        g.check("agent count 2" in str(exc)
+                and "K26RlParallelEnv" in str(exc),
+                "the single-agent refusal does not name what it found "
+                "and where the artifact goes: %s" % exc)
+    else:
+        g.check(False, "a two-agent artifact was not refused by the "
+                       "single-agent shapes")
     expect_refusal(make_blob(endian=0x04030201), "0x04030201",
                    "byte-swapped endian probe")
     expect_refusal(make_blob(abi=0x00020000), "0x00020000",

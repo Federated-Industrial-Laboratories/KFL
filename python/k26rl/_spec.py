@@ -191,7 +191,11 @@ def parse(blob):
 def validate(spec, abi_version, n_envs):
     """Refuse a spec this package cannot honestly serve. The checks
     are the load-time contract: probe, version echo, geometry echo,
-    slice arithmetic, single-agent, and auto-reset stepping."""
+    agent count, slice arithmetic, and auto-reset stepping.
+
+    How many agents a given API shape can serve is that shape's
+    question, not this one's: :func:`require_single_agent` and
+    :func:`require_multi_agent` answer it."""
     if spec.endian_probe != ENDIAN_PROBE_VALUE:
         raise K26RlError(
             None,
@@ -215,14 +219,15 @@ def validate(spec, abi_version, n_envs):
             None,
             "spec declares action total 0; an environment with no "
             "action channels cannot be stepped")
-    if spec.agent_count != 1:
+    if spec.agent_count is None or spec.agent_count < 1:
         raise K26RlError(
             None,
-            "artifact declares agent count %s; version 1 of this "
-            "package serves single-agent artifacts only"
-            % spec.agent_count)
-    _check_slices(spec.agent_obs_slices, spec.obs_total, "observation")
-    _check_slices(spec.agent_act_slices, spec.act_total, "action")
+            "spec declares agent count %s; every environment has at "
+            "least one agent" % spec.agent_count)
+    _check_slices(spec.agent_obs_slices, spec.obs_total, "observation",
+                  spec.agent_count)
+    _check_slices(spec.agent_act_slices, spec.act_total, "action",
+                  spec.agent_count)
     for chan in spec.act_channels:
         if chan.kind == ACT_KIND_DISCRETE and chan.arity < 1:
             raise K26RlError(
@@ -244,18 +249,144 @@ def validate(spec, abi_version, n_envs):
             % (spec.episode_flags or 0))
 
 
-def _check_slices(slices, total, what):
-    covered = 0
+def _check_slices(slices, total, what, agent_count):
+    """The per-agent slices must partition the vector: one slice per
+    declared agent, contiguous in agent-index order from zero, ending
+    exactly at the declared total. Everything a multi-agent consumer
+    reads out of the flat vectors rests on this, so it is checked
+    against the blob rather than assumed of it."""
+    if not slices:
+        if agent_count > 1:
+            raise K26RlError(
+                None,
+                "spec declares agent count %d but carries no per-agent "
+                "%s slice" % (agent_count, what))
+        # A one-agent vector is fully described by its total.
+        return
+    if len(slices) != agent_count:
+        raise K26RlError(
+            None,
+            "spec declares agent count %d but carries %d per-agent %s "
+            "slices" % (agent_count, len(slices), what))
+    seen = {}
     for agent, offset, count in slices:
+        if agent >= agent_count:
+            raise K26RlError(
+                None,
+                "an %s slice names agent %d, outside the declared "
+                "agent count %d" % (what, agent, agent_count))
+        if agent in seen:
+            raise K26RlError(
+                None, "two %s slices name agent %d" % (what, agent))
+        seen[agent] = (offset, count)
+    covered = 0
+    for agent in range(agent_count):
+        offset, count = seen[agent]
         if offset + count > total:
             raise K26RlError(
                 None,
                 "agent %d %s slice [%d, %d) runs past the declared "
                 "total %d" % (agent, what, offset, offset + count,
                               total))
+        if offset != covered:
+            raise K26RlError(
+                None,
+                "agent %d %s slice starts at %d, but the slices before "
+                "it cover [0, %d); per-agent slices are contiguous in "
+                "agent order" % (agent, what, offset, covered))
         covered += count
-    if slices and covered != total:
+    if covered != total:
         raise K26RlError(
             None,
             "agent %s slices cover %d of the declared total %d"
             % (what, covered, total))
+
+
+def slices_by_agent(slices, agent_count):
+    """The per-agent slices as ``(offset, count)`` pairs indexed by
+    agent, once :func:`validate` has established that they partition
+    the vector."""
+    table = {agent: (offset, count) for agent, offset, count in slices}
+    return [table[agent] for agent in range(agent_count)]
+
+
+def require_single_agent(spec):
+    """The refusal the single-agent API shapes make. A Gymnasium
+    environment reports one observation, one action and one reward per
+    step, so it cannot serve more than one agent's; a multi-agent
+    artifact's shape is the parallel wrapper."""
+    if spec.agent_count != 1:
+        raise K26RlError(
+            None,
+            "artifact declares agent count %s; a single-agent API "
+            "cannot serve a %s-agent artifact, and K26RlParallelEnv "
+            "is the shape that does"
+            % (spec.agent_count, spec.agent_count))
+
+
+def require_multi_agent(spec):
+    """The refusal the parallel wrapper makes. At agent count 1
+    observation channel names publish unqualified, so the artifact
+    carries no agent name anywhere, and this package invents none."""
+    if spec.agent_count is None or spec.agent_count < 2:
+        raise K26RlError(
+            None,
+            "artifact declares agent count %s; at agent count 1 "
+            "observation channel names publish unqualified, so the "
+            "artifact publishes no agent name to key the per-agent "
+            "dictionaries by, and K26RlEnv is the shape that serves "
+            "it" % spec.agent_count)
+
+
+def agent_names(spec):
+    """The published agent names, in agent-index order.
+
+    Above one agent every observation channel name publishes
+    qualified, as ``<agent>.<channel>``, so an agent's name is the
+    qualifier its own observation slice's channels carry. Action
+    channel names are published nowhere and no tag carries them, so an
+    agent that declares no observation channel has no published name;
+    such an artifact is refused rather than given an invented one.
+    """
+    names = []
+    for agent, (offset, count) in enumerate(
+            slices_by_agent(spec.agent_obs_slices, spec.agent_count)):
+        if count == 0:
+            raise K26RlError(
+                None,
+                "agent %d declares no observation channel, so the "
+                "artifact publishes no name for it: an agent name "
+                "reaches this package only as the qualifier on an "
+                "observation channel name, and no tag carries an "
+                "action channel name" % agent)
+        found = set()
+        for channel in range(offset, offset + count):
+            text = spec.obs_channel_names.get(channel)
+            if text is None:
+                raise K26RlError(
+                    None,
+                    "observation channel %d carries no published name, "
+                    "so agent %d's name cannot be read from it"
+                    % (channel, agent))
+            qualifier, sep, _rest = text.partition(".")
+            if not sep or not qualifier:
+                raise K26RlError(
+                    None,
+                    "observation channel %d publishes as %r, which "
+                    "carries no <agent>.<channel> qualifier; above one "
+                    "agent every observation channel name is qualified"
+                    % (channel, text))
+            found.add(qualifier)
+        if len(found) != 1:
+            raise K26RlError(
+                None,
+                "agent %d's observation channels [%d, %d) publish "
+                "under %d different qualifiers %s; one agent's "
+                "channels carry one name"
+                % (agent, offset, offset + count, len(found),
+                   sorted(found)))
+        names.append(found.pop())
+    if len(set(names)) != len(names):
+        raise K26RlError(
+            None, "two agents publish under one name: %s" % (names,))
+    return names

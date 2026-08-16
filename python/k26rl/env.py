@@ -1,13 +1,15 @@
 """Single-environment Gymnasium mapping over a compiled artifact.
 
-This module also carries the pieces both shapes share: the spaces
+This module also carries the pieces the API shapes share: the spaces
 built from the parsed spec, the action marshalling onto the flat
 double vector, and the session object that owns the handle, the
 buffers, the seed record, and the fault rendering. The vectorised
-shape in :mod:`k26rl.vector` builds on the same session.
+shape in :mod:`k26rl.vector` and the multi-agent shape in
+:mod:`k26rl.parallel` build on the same session.
 """
 
 import ctypes
+import warnings
 
 import numpy as np
 import gymnasium
@@ -25,17 +27,29 @@ def build_observation_space(spec):
     """Box(-inf, +inf) over the declared observation total. The spec
     declares no observation bounds in version 1, so none are
     invented."""
-    return gym_spaces.Box(low=-np.inf, high=np.inf,
-                          shape=(spec.obs_total,), dtype=np.float64)
+    return build_observation_space_of(spec.obs_total)
+
+
+def build_observation_space_of(count):
+    """Box(-inf, +inf) over ``count`` components: the whole vector for
+    a single-agent shape, one agent's observation slice width for the
+    parallel shape."""
+    return gym_spaces.Box(low=-np.inf, high=np.inf, shape=(count,),
+                          dtype=np.float64)
 
 
 def build_action_space(spec):
-    """The action space from the declared channels, in declared
+    """The action space over every declared channel."""
+    return build_action_space_of(spec.act_channels)
+
+
+def build_action_space_of(channels):
+    """The action space from a run of declared channels, in declared
     order: all box gives one Box with per-channel bounds, a single
     discrete channel gives Discrete, all discrete gives
     MultiDiscrete, and a mixture gives a Tuple of per-channel
-    spaces."""
-    channels = spec.act_channels
+    spaces. The run is the whole action vector for a single-agent
+    shape and one agent's action slice for the parallel shape."""
     kinds = [c.kind for c in channels]
     if all(k == _spec.ACT_KIND_BOX for k in kinds):
         lo = np.array([c.lo for c in channels], dtype=np.float64)
@@ -103,34 +117,45 @@ def _as_index_scalar(value, what):
 
 def flatten_action(action, space, spec):
     """One environment's action onto its flat double slice."""
-    act_total = spec.act_total
+    flat = np.empty(spec.act_total, dtype=np.float64)
+    flatten_action_into(flat, 0, action, space, spec.act_channels)
+    return flat
+
+
+def flatten_action_into(flat, base, action, space, channels, what="action"):
+    """One agent's action onto ``flat`` at the channels' own offsets.
+
+    ``base`` is where the run starts in ``flat`` and ``channels``
+    carries the run's declared kinds and bounds; the two coincide for
+    a single-agent shape and are the agent's action slice for the
+    parallel shape. Channel offsets are absolute, as the spec
+    publishes them."""
+    count = len(channels)
     if isinstance(space, gym_spaces.Box):
-        return _as_float_batch(action, (act_total,), "action")
+        flat[base:base + count] = _as_float_batch(action, (count,), what)
+        return
     if isinstance(space, gym_spaces.Discrete):
-        flat = np.empty(1, dtype=np.float64)
-        flat[0] = _as_index_scalar(action, "action")
-        return flat
+        flat[base] = _as_index_scalar(action, what)
+        return
     if isinstance(space, gym_spaces.MultiDiscrete):
-        return _as_index_batch(action, (act_total,), "action")
+        flat[base:base + count] = _as_index_batch(action, (count,), what)
+        return
     # Tuple of per-channel Box and Discrete entries, declared order.
-    if not isinstance(action, (tuple, list)) or \
-            len(action) != len(spec.act_channels):
+    if not isinstance(action, (tuple, list)) or len(action) != count:
         raise ValueError(
-            "action must be a sequence of %d per-channel entries"
-            % len(spec.act_channels))
-    flat = np.empty(act_total, dtype=np.float64)
-    for chan, part in zip(spec.act_channels, action):
+            "%s must be a sequence of %d per-channel entries"
+            % (what, count))
+    for chan, part in zip(channels, action):
         if chan.kind == _spec.ACT_KIND_BOX:
             arr = np.asarray(part, dtype=np.float64)
             if arr.shape not in ((), (1,)):
                 raise ValueError(
-                    "action channel %d has shape %s, expected a "
-                    "scalar" % (chan.offset, arr.shape))
+                    "%s channel %d has shape %s, expected a scalar"
+                    % (what, chan.offset, arr.shape))
             flat[chan.offset] = float(arr.reshape(()))
         else:
             flat[chan.offset] = _as_index_scalar(
-                part, "action channel %d" % chan.offset)
-    return flat
+                part, "%s channel %d" % (what, chan.offset))
 
 
 def flatten_action_batch(actions, space, spec, n_envs):
@@ -181,20 +206,34 @@ def check_seed(seed):
     return int(seed)
 
 
-def check_options(options):
+def check_options(options, refuse=True):
     """None and an empty mapping are accepted and ignored. Version 1
     defines no options, and silently ignoring an explicit request
-    would mislead, so a non-empty mapping is refused naming its
-    keys."""
+    would mislead, so a non-empty mapping is refused naming its keys.
+
+    ``refuse`` is False for the multi-agent shape, whose framework
+    conformance check passes a non-empty mapping to establish that
+    reset accepts the argument at all; refusing there would fail a
+    check of the API this package exists to implement. The mapping is
+    still not ignored silently: it is reported through the warnings
+    machinery, naming its keys, which is what the refusal is for."""
     if options is None:
         return
     if not isinstance(options, dict):
         raise TypeError("options must be a mapping or None, not %s"
                         % type(options).__name__)
-    if options:
+    if not options:
+        return
+    keys = sorted(map(str, options.keys()))
+    if refuse:
         raise ValueError(
             "version 1 defines no reset options; refusing options "
-            "with keys %s" % sorted(map(str, options.keys())))
+            "with keys %s" % keys)
+    # Three frames out is the consumer's own reset call: this frame,
+    # the API method that called it, and the caller of that.
+    warnings.warn(
+        "version 1 defines no reset options; ignoring options with "
+        "keys %s" % keys, stacklevel=3)
 
 
 # ---- the session: handle, buffers, seed record, fault rendering -----
@@ -206,7 +245,8 @@ class _Session:
     single-threaded, and concurrent handles in one process are legal.
     """
 
-    def __init__(self, artifact_path, seed, n_envs, on_fault):
+    def __init__(self, artifact_path, seed, n_envs, on_fault,
+                 multi_agent=False):
         if on_fault not in ("raise", "truncate"):
             raise ValueError(
                 "on_fault must be \"raise\" or \"truncate\", not %r"
@@ -230,6 +270,12 @@ class _Session:
             blob = self.artifact.spec_blob(self._handle)
             self.spec = _spec.parse(blob)
             _spec.validate(self.spec, self.artifact.abi_version, n_envs)
+            # How many agents this shape can serve is the shape's own
+            # question; both refusals name the count found.
+            if multi_agent:
+                _spec.require_multi_agent(self.spec)
+            else:
+                _spec.require_single_agent(self.spec)
         except Exception:
             self.artifact.destroy(self._handle)
             self._closed = True
