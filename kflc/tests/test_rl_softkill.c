@@ -85,6 +85,13 @@
 
 #define WORK_DIR "/tmp/kflc_rl_softkill_test"
 
+/* The compiler at the base commit is built outside the work directory,
+ * which this binary wipes at every run, and is reused when it is
+ * already there. It is a build of one immutable commit, so reusing it
+ * cannot go stale, and the directory carries that commit's name so it
+ * cannot be a build of a different one. */
+#define BASE_DIR "/tmp/kflc_rl_softkill_base_5d3c298"
+
 /* The commit this change opened at. Arms 10 and 14 build the compiler
  * there and compare, so that "unchanged" and "still a name" are
  * measured against the compiler that was, not against a reading of the
@@ -1096,7 +1103,12 @@ static const char *const SUPPLY_KFL =
  * adding them then differ by nearly a factor of two, and they differ in
  * the published flag as well: a fixture where one of them dominates
  * cannot tell the two apart at all, which is the third
- * gate-credibility rule. The emitter is quiet for the same reason. */
+ * gate-credibility rule. The emitter is quiet for the same reason.
+ *
+ * The arm this fixture serves runs before the perturbation beside it,
+ * so that a defect in the choice is caught by an arm that measures it
+ * rather than by that harness failing to find its needle in a line the
+ * defect has already removed. */
 #define SK_IR_TEPID(nm) \
     "    astro_payload " nm " body=watcher kind=detect_ir" \
     " aperture_m=0.05 integration_s=0.02 passband_lo_um=3.0" \
@@ -1123,6 +1135,35 @@ static const char *const CTR_TEPID_ON_KFL =
 static const char *const CTR_TEPID_OFF_KFL =
     CTR_TEPID_KFL("SKTEPC",
                   "        watcher.vel_x = watcher.vel_x + nudge * 0.0\n");
+
+/* Two craft closing on each other along the orbit normal, so that one
+ * run flies through the burn-through boundary instead of one compile
+ * per bracketing step. The separation starts outside the published
+ * boundary and shrinks at a fixed rate; the target holds its attitude,
+ * so the cross-section the boundary is a function of does not move
+ * while the craft do. */
+static const char *const BURN_KFL =
+    "form SKBURN\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER
+    "    astro_body mover assembly=\"calibration_box.k26asm\""
+    " parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=4.0e3 vel_x=0.0"
+    " vel_y=7546.0 vel_z=-20.0 quat_w=1.0 quat_x=0.0 quat_y=0.0"
+    " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.0\n"
+    SK_RADAR("rf", "ir_only", "")
+    SK_JAMMER("jam", "200.0")
+    "    episode\n"
+    "        control_dt 0.5\n"
+    "        substeps 4\n"
+    "        horizon 512\n"
+    "    end\n"
+    SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    observe effect jam as ew\n"
+    "    on_step\n        engage jam at watcher\n    end\n"
+    "    objective\n        reward radar_snr\n    end\n"
+    "end\n"
+    "end\n";
 
 /* A jammer whose host is the very craft its victim's radar is pointed
  * at, with a chaff cloud declared around that craft. The radar equation
@@ -1310,16 +1351,6 @@ static void victim_radar_(const char *so_path, const char *stem, int n,
     (void)stem;
 }
 
-static double a_bt_of_(const char *so_path)
-{
-    RlSpecView v;
-    spec_of_(so_path, &v);
-    int i = chan_(&v, "ew_burn_through");
-    double o[256];
-    run_obs_(so_path, 1, 0.0, o, 256);
-    return o[i];
-}
-
 static void gate_jammer_capability_(void)
 {
     char so_on[512], so_off[512];
@@ -1379,61 +1410,69 @@ static void gate_jammer_capability_(void)
     /* The burn-through channel against the artifact's own detection
      * crossover. The channel is documented as the range at which this
      * victim's radar burns through the jamming, and the only thing that
-     * can say whether it does is the victim's own flag: separations are
-     * driven until it flips and the published figure has to sit inside
-     * the bracket the search closes on. Without this the channel could
-     * name any range at all and nothing would notice.
+     * can say whether it does is the victim's own flag. So the two
+     * craft are flown through the crossover rather than compiled
+     * through it: they start outside the published range and close on
+     * it at a fixed rate, and the step where the flag first reads 1 is
+     * the step whose published range has to bracket the published
+     * boundary. Without this the channel could name any range at all
+     * and nothing would notice.
      *
-     * The bracket is closed by bisection on the declared separation,
-     * each step of which is a whole compile, so the search is coarse by
-     * design: fourteen halvings of twenty kilometres close it to about
-     * a metre and a quarter, which is six parts in ten thousand of the
-     * figure the channel publishes. */
+     * The separation is taken along the orbit normal so that closing it
+     * is a small out-of-plane rate rather than an orbit change, and the
+     * target's attitude is held so the cross-section the boundary is a
+     * function of does not move while the craft do. */
     {
-        char src[8192];
-        double bt = a_bt_of_(so_on);
-        double lo = 1.0, hi = 20000.0;
-        for (int it = 0; it < 14; it++) {
-            double mid = 0.5 * (lo + hi);
-            char sep[64];
-            snprintf(sep, sizeof sep, "%.6f", mid);
-            snprintf(src, sizeof src,
-                "form SKBT\n"
-                "fn world w\n"
-                SK_EARTH SK_WATCHER
-                "    astro_body mover assembly=\"calibration_box.k26asm\""
-                " parent=earth pos_x=7.0e6 pos_y=%s pos_z=0.0 vel_x=0.0"
-                " vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0"
-                " quat_y=0.0 quat_z=0.0 omega_x=0.0 omega_y=0.0"
-                " omega_z=0.0\n"
-                SK_RADAR("rf", "ir_only", "")
-                SK_JAMMER("jam", "200.0")
-                SK_EPISODE SK_ACTION
-                "    observe detect rf of mover as radar\n"
-                "    observe effect jam as ew\n"
-                "    on_step\n        engage jam at watcher\n    end\n"
-                "    objective\n        reward radar_snr\n    end\n"
-                "end\nend\n", sep);
-            build_(src, "bt");
-            char so_bt[512];
-            so_path_(so_bt, sizeof so_bt, "bt");
-            RlSpecView vb;
-            spec_of_(so_bt, &vb);
-            int i_det = chan_(&vb, "radar_detected");
-            double ob[256];
-            run_obs_(so_bt, 1, 0.0, ob, 256);
-            if (ob[i_det] == 1.0) lo = mid; else hi = mid;
+        build_(BURN_KFL, "burn");
+        char so_b[512];
+        so_path_(so_b, sizeof so_b, "burn");
+        RlSpecView vb;
+        spec_of_(so_b, &vb);
+        int b_det = chan_(&vb, "radar_detected");
+        int b_rng = chan_(&vb, "ew_range");
+        int b_bt  = chan_(&vb, "ew_burn_through");
+
+        SkArt c;
+        art_open_(&c, so_b, 4242u, 1u);
+        double act[4] = { 0.0, 0.0, 0.0, 0.0 };
+        double ob[256];
+        double prev_rng = 0.0, flip_rng = -1.0, flip_bt = 0.0;
+        double bt_lo = 1.0e300, bt_hi = -1.0e300;
+        int steps = 0;
+        for (int i = 0; i < 400; i++) {
+            ASSERT(c.s.step(c.env, act) == K26RL_OK);
+            ASSERT(c.s.obs(c.env, ob) == K26RL_OK);
+            steps++;
+            if (ob[b_bt] < bt_lo) bt_lo = ob[b_bt];
+            if (ob[b_bt] > bt_hi) bt_hi = ob[b_bt];
+            if (ob[b_det] == 1.0 && flip_rng < 0.0) {
+                flip_rng = ob[b_rng];
+                flip_bt  = ob[b_bt];
+                break;
+            }
+            prev_rng = ob[b_rng];
         }
-        if (!(bt >= lo && bt <= hi)) {
+        art_close_(&c);
+        if (flip_rng < 0.0) {
+            fprintf(stderr, "FAIL: the pair never closed through the "
+                    "crossover in %d steps; the fixture cannot measure "
+                    "the channel\n", steps);
+            exit(1);
+        }
+        /* The flag turned over between the previous step's range and
+         * this one's, so the published boundary has to lie in that
+         * interval. */
+        if (!(flip_bt >= flip_rng && flip_bt <= prev_rng)) {
             fprintf(stderr, "FAIL: the published burn-through is %.10g "
-                    "and the artifact's own detection crossover is "
-                    "between %.10g and %.10g\n", bt, lo, hi);
+                    "and the flag turned over between %.10g and %.10g\n",
+                    flip_bt, flip_rng, prev_rng);
             exit(1);
         }
         g_arms++;
-        printf("  the published burn-through %.10g sits inside the "
-               "artifact's own detection crossover, bracketed to "
-               "[%.6f, %.6f]\n", bt, lo, hi);
+        printf("  the published burn-through %.10g is where the victim's "
+               "own flag turns over: detected first at %.6f m, undetected "
+               "at %.6f m the step before, over %d steps of closing\n",
+               flip_bt, flip_rng, prev_rng, steps);
     }
 }
 
@@ -1598,27 +1637,6 @@ static void gate_counter_detection_(void)
            "self-signature of %.10g W and a counter range of %.10g m\n",
            off[i_snr], on[i_snr], on[i_ss], on[i_cr]);
 
-    /* The perturbation targets the statement rather than its exact
-     * text, so a defect that has already changed that line leaves the
-     * arm reporting the defect rather than the harness reporting a
-     * missing needle. */
-    emit_("ctron");
-    mutate_("ctron", "ctron_mut",
-            "s/^\\( *\\)if (_kfl_cs [^;]*;$//",
-            "if (_kfl_cs ", 1, 0);
-    char so_mut[512];
-    snprintf(so_mut, sizeof so_mut, WORK_DIR "/ctron_mut.so");
-    build_emitted_(WORK_DIR "/ctron_mut.cc", so_mut);
-    double mut[256];
-    run_obs_(so_mut, 3, 0.0, mut, 256);
-    if (mut[i_det] != 0.0) {
-        fprintf(stderr, "FAIL: with the counter-detection raise deleted "
-                "the victim still reads detected\n");
-        exit(1);
-    }
-    g_arms++;
-    printf("  and with that raise deleted the victim reads 0 again\n");
-
     /* Taking the larger of the two signals rather than adding them is a
      * modelling choice, and on the fixture above it is not a choice at
      * all: the counter-detection signal is millions of times the skin
@@ -1651,11 +1669,15 @@ static void gate_counter_detection_(void)
     double tadd[256];
     run_obs_(so_add, 1, 0.0, tadd, 256);
 
+    /* On this fixture the skin signature is the larger of the two, so
+     * an artifact taking the larger publishes exactly what it publishes
+     * with no engagement at all. An artifact combining them any other
+     * way does not, which is what this reads. */
     if (!(tmax[t_snr] == tskin[t_snr])) {
-        fprintf(stderr, "FAIL: the fixture's skin signature does not "
-                "dominate the counter signal, so taking the larger is "
-                "not what is being measured: %.10g against %.10g\n",
-                tmax[t_snr], tskin[t_snr]);
+        fprintf(stderr, "FAIL: with the skin signature the larger of the "
+                "two, the engaged run publishes %.17g against the "
+                "control's %.17g; the artifact is not taking the larger "
+                "of the two signals\n", tmax[t_snr], tskin[t_snr]);
         exit(1);
     }
     if (!(tadd[t_snr] > tmax[t_snr] * 1.5)) {
@@ -1674,6 +1696,28 @@ static void gate_counter_detection_(void)
            "publishes %.10g with the flag 0 and adding them publishes "
            "%.10g with the flag 1: the choice is measured, not assumed\n",
            tmax[t_snr], tadd[t_snr]);
+
+    /* The perturbation targets the statement rather than its exact
+     * text, so a defect that has already changed that line leaves the
+     * arm reporting the defect rather than the harness reporting a
+     * missing needle. */
+    emit_("ctron");
+    mutate_("ctron", "ctron_mut",
+            "s/^\\( *\\)if (_kfl_cs [^;]*;$//",
+            "if (_kfl_cs ", 1, 0);
+    char so_mut[512];
+    snprintf(so_mut, sizeof so_mut, WORK_DIR "/ctron_mut.so");
+    build_emitted_(WORK_DIR "/ctron_mut.cc", so_mut);
+    double mut[256];
+    run_obs_(so_mut, 3, 0.0, mut, 256);
+    if (mut[i_det] != 0.0) {
+        fprintf(stderr, "FAIL: with the counter-detection raise deleted "
+                "the victim still reads detected\n");
+        exit(1);
+    }
+    g_arms++;
+    printf("  and with that raise deleted the victim reads 0 again\n");
+
 }
 
 /* ---- Gate 7: the decoy's deploy is a body effect ---------------------- */
@@ -2335,7 +2379,7 @@ static void gate_chaff_additive_(void)
 {
     ASSERT(g_base_ok);
     build_(CHAFF_NONE_KFL, "ch0b");
-    emit_with_(WORK_DIR "/base/kflc/bin/kflc", "ch0b");
+    emit_with_(BASE_DIR "/kflc/bin/kflc", "ch0b");
     char so_base[512];
     snprintf(so_base, sizeof so_base, WORK_DIR "/ch0b_base.so");
     build_emitted_(WORK_DIR "/ch0b.cc", so_base);
@@ -2771,7 +2815,7 @@ static void gate_contextual_words_(void)
     int n = 0, regress = 0, newly = 0;
     for (int i = 0; NEW_WORDS[i]; i++) {
         for (int s = 0; s < 3; s++) {
-            int base = probe_(WORK_DIR "/base/kflc/bin/kflc",
+            int base = probe_(BASE_DIR "/kflc/bin/kflc",
                               NEW_WORDS[i], s);
             int head = probe_("./bin/kflc", NEW_WORDS[i], s);
             n++;
@@ -2817,21 +2861,27 @@ static void build_base_(void)
                "checkout's history)\n", g_arms);
         exit(77);
     }
-    if (run_("mkdir -p " WORK_DIR "/base && git -C .. archive "
-             BASE_COMMIT " | tar -x -C " WORK_DIR "/base") != 0) {
+    if (rl_file_exists_(BASE_DIR "/kflc/bin/kflc")) {
+        g_base_ok = 1;
+        printf("  the compiler at " BASE_COMMIT " is already built\n");
+        return;
+    }
+    if (run_("rm -rf " BASE_DIR " && mkdir -p " BASE_DIR
+             " && git -C .. archive " BASE_COMMIT " | tar -x -C "
+             BASE_DIR) != 0) {
         fprintf(stderr, "FAIL: " BASE_COMMIT " is in this history and "
                 "could not be extracted\n");
         exit(1);
     }
-    if (run_("make -C " WORK_DIR "/base/libk26rng > " WORK_DIR
-             "/base.log 2>&1") != 0 ||
-        run_("make -C " WORK_DIR "/base/libk26sense >> " WORK_DIR
-             "/base.log 2>&1") != 0 ||
-        run_("make -C " WORK_DIR "/base/libk26rl >> " WORK_DIR
-             "/base.log 2>&1") != 0 ||
-        run_("make -C " WORK_DIR "/base/kflc bin/kflc >> " WORK_DIR
-             "/base.log 2>&1") != 0) {
-        (void)!system("tail -20 " WORK_DIR "/base.log");
+    if (run_("make -C " BASE_DIR "/libk26rng > " BASE_DIR
+             "/build.log 2>&1") != 0 ||
+        run_("make -C " BASE_DIR "/libk26sense >> " BASE_DIR
+             "/build.log 2>&1") != 0 ||
+        run_("make -C " BASE_DIR "/libk26rl >> " BASE_DIR
+             "/build.log 2>&1") != 0 ||
+        run_("make -C " BASE_DIR "/kflc bin/kflc >> " BASE_DIR
+             "/build.log 2>&1") != 0) {
+        (void)!system("tail -20 " BASE_DIR "/build.log");
         fprintf(stderr, "FAIL: the compiler at " BASE_COMMIT " is in "
                 "this history and did not build; the arms that measure "
                 "against it cannot stand down quietly\n");
