@@ -2607,8 +2607,8 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
          * statement is admissible in an `on_step` body alone, which is
          * the one place these names are in scope. */
         emit_indent(out, indent);
-        fprintf(out, "kflrl_engage_%ld_(world, _kfl_pay, _kfl_payp, "
-                     "_kfl_dt, _kfl_eng);\n",
+        fprintf(out, "kflrl_engage_%ld_(world, _kfl_pay, _kfl_payu, "
+                     "_kfl_payp, _kfl_dt, _kfl_eng);\n",
                 s->position.kind == KFLV_INT ? s->position.u.i : 0L);
         return 0;
     }

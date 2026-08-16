@@ -32,10 +32,13 @@
  *   4b. The ablated mass is not a dead store. Deleting the mass write
  *      alone moves the trajectory, because the reduced mass divides
  *      the next engagement's velocity increment. The route is measured
- *      rather than assumed: with the velocity write also deleted the
- *      mass write moves nothing at all, which is what says the mass
- *      reaches the dynamics through the increment and not through the
- *      gravitational field.
+ *      rather than assumed, at two separations, because the answer
+ *      depends on one: with the velocity write also deleted a
+ *      residual remains, the target's own gravitational parameter
+ *      reaching the integrator's step control, and it is invisible two
+ *      kilometres out and measurable at a hundred and fifty metres.
+ *      The arm requires the increment to be the larger route rather
+ *      than requiring the other to be absent.
  *   5. The hit test, three arms that no two of which can be collapsed:
  *      a closing intercept hits; the same geometry receding does not,
  *      though its predicted closest approach is the same number; and a
@@ -54,6 +57,15 @@
  *      published components. An increment that lost the target's mass
  *      would still be non-zero and would still move, so a magnitude is
  *      what pins it.
+ *   6e. The bumper's thickness and the rear wall's are different keys
+ *      feeding different branches, measured by two fixtures differing
+ *      in that one key: the penetration analysis must not move and the
+ *      delivered energy must.
+ *   6d. And a magnitude cannot see a sign. The target's change in
+ *      velocity is projected onto the emitter-to-target line and
+ *      required positive, because a recoil reversed leaves every
+ *      published component bit-identical and pushes the target the
+ *      wrong way.
  *   7. Every published component moves. For each component of each
  *      kind, a fixture in which it moves and the measured spread; a
  *      component nothing can move is a component nothing can be shaped
@@ -113,12 +125,30 @@ static int g_arms;
     " vel_y=" vy " vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0" \
     " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.0\n"
 
-#define EFF_MOVER(asset, pz) \
+/* The separation is a parameter because the kinetic effector is a
+ * terminal-phase one: its intercept must fall inside the step about to
+ * be integrated, so how far apart the pair starts decides whether a
+ * given step lands. At the closing speed these fixtures use, 200
+ * metres per second against a half-second period, an intercept is
+ * inside the step below a hundred metres of separation and outside it
+ * above. Every fixture states which side of that it sits on. */
+#define EFF_MOVER(asset, py, pz) \
     "    astro_body mover assembly=\"" asset "\"" \
-    " parent=earth pos_x=7.0e6 pos_y=2.0e3 pos_z=" pz " vel_x=0.0" \
+    " parent=earth pos_x=7.0e6 pos_y=" py " pos_z=" pz " vel_x=0.0" \
     " vel_y=7546.0 vel_z=0.0 quat_w=0.7071067811865476 quat_x=0.0" \
     " quat_y=0.0 quat_z=-0.7071067811865476 omega_x=0.0 omega_y=0.0" \
     " omega_z=0.05\n"
+
+/* The same target lying broadside instead of nose on. Its collision
+ * primitive is a box of 2.0 by 1.0 by 1.0 metres, so along its own
+ * long axis it presents 1.0 square metre and along either short axis
+ * 2.0: the two attitudes differ by a factor of two in silhouette and
+ * in nothing else. */
+#define EFF_MOVER_BROADSIDE(asset, py, pz) \
+    "    astro_body mover assembly=\"" asset "\"" \
+    " parent=earth pos_x=7.0e6 pos_y=" py " pos_z=" pz " vel_x=0.0" \
+    " vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0" \
+    " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.05\n"
 
 /* The directed-energy payload. One megawatt at a metre and a half of
  * aperture is an emitter a reader could describe; the arm that
@@ -130,14 +160,18 @@ static int g_arms;
     " plasma_attn_k=1.0 target_material=aluminum" \
     " target_reflectivity=0.2\n"
 
-/* The kinetic payload, with the Whipple parameters of a shielded
- * target so the penetration components have a branch to run. */
+/* The kinetic payload, with the whole of a shielded target's Whipple
+ * description so the penetration components have a branch to run and
+ * the coupling routine has the two layers it distinguishes: a bumper
+ * of its own thickness, a stand-off, and the rear wall behind it. */
 #define EFF_IMPACTOR_SINGLE \
     "    astro_payload rock body=shooter kind=impactor pattern=single" \
     " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0" \
     " projectile_diameter_m=0.2 target_wall_thickness_m=0.002" \
+    " target_bumper_thickness_m=0.0016" \
     " target_bumper_density_kg_per_m3=2700.0" \
-    " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0\n"
+    " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0" \
+    " target_inner_thickness_m=0.003\n"
 
 /* The swarm payload declares both structure branches, the Whipple
  * parameters and the monolithic ones. The library runs the two
@@ -149,8 +183,10 @@ static int g_arms;
     " swarm_count=20 swarm_half_angle_rad=0.02" \
     " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0" \
     " projectile_diameter_m=0.2 target_wall_thickness_m=0.002" \
+    " target_bumper_thickness_m=0.0016" \
     " target_bumper_density_kg_per_m3=2700.0" \
     " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0" \
+    " target_inner_thickness_m=0.003" \
     " target_brinell_hardness=95.0 target_density_kg_per_m3=2700.0" \
     " target_speed_of_sound_m_per_s=5100.0" \
     " target_monolithic_thickness_m=0.02\n"
@@ -170,7 +206,7 @@ static int g_arms;
 static const char *const BOTH_KFL =
     "form EFFBOTH\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
     EFF_LASER("1.0e6") EFF_IMPACTOR_SINGLE
     EFF_EPISODE EFF_ACTION
     "    observe effect beam as las\n"
@@ -192,7 +228,7 @@ static const char *const BOTH_KFL =
 static const char *const LAS_KFL =
     "form EFFLAS\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
     EFF_LASER("1.0e6")
     EFF_EPISODE EFF_ACTION
     "    observe effect beam as las\n"
@@ -208,7 +244,7 @@ static const char *const LAS_KFL =
 static const char *const KIN_KFL =
     "form EFFKIN\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
     EFF_IMPACTOR_SINGLE
     EFF_EPISODE EFF_ACTION
     "    observe effect rock as kin\n"
@@ -227,7 +263,7 @@ static const char *const KIN_KFL =
 static const char *const CTRL_KFL =
     "form EFFCTRL\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
     EFF_EPISODE EFF_ACTION
     "    observe mover from shooter mode=geometric as los\n"
     "    on_step\n"
@@ -245,7 +281,7 @@ static const char *const CTRL_KFL =
 static const char *const SWARM_KFL =
     "form EFFSWARM\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
     EFF_IMPACTOR_SWARM
     EFF_EPISODE EFF_ACTION
     "    observe effect rock as kin\n"
@@ -265,7 +301,91 @@ static const char *const SWARM_KFL =
 static const char *const RECEDE_KFL =
     "form EFFRECEDE\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7346.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EARTH EFF_SHOOTER("7346.0")
+    EFF_MOVER("calibration_box.k26asm", "5.0e1", "0.0")
+    EFF_IMPACTOR_SINGLE
+    EFF_EPISODE EFF_ACTION
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* A genuine collision course two kilometres out. The predicted closest
+ * approach is zero and the time to it is ten seconds, which is twenty
+ * control periods, so the intercept is real and is nowhere near the
+ * step about to be integrated. Nothing may be transferred.
+ *
+ * This is the fixture the terminal-window bound exists for. Without it
+ * the engagement lands here, and lands again on every following step,
+ * each time delivering a whole projectile's momentum for an
+ * intercept that has not happened. */
+static const char *const LONG_KFL =
+    "form EFFLONG\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0")
+    EFF_MOVER("calibration_box.k26asm", "2.0e3", "0.0")
+    EFF_IMPACTOR_SINGLE
+    EFF_EPISODE EFF_ACTION
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* A control's body: the same craft and the same episode frame with no
+ * engagement in it, its step body writing a body state key scaled by
+ * zero so it has a block of the same shape without moving anything.
+ * One per geometry, because a control at a different separation is not
+ * a control at all. */
+#define EFF_CTRL_BODY \
+    "    observe mover from shooter mode=geometric as los\n" \
+    "    on_step\n" \
+    "        shooter.vel_x = shooter.vel_x + fire * 0.0\n" \
+    "    end\n" \
+    "    objective\n" \
+    "        reward los_range\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+static const char *const CTRL_LONG_KFL =
+    "form EFFCTRLLONG\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0")
+    EFF_MOVER("calibration_box.k26asm", "2.0e3", "0.0")
+    EFF_EPISODE EFF_ACTION EFF_CTRL_BODY;
+
+/* The receding fixture's own control. */
+static const char *const CTRL_RECEDE_KFL =
+    "form EFFCTRLRECEDE\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7346.0")
+    EFF_MOVER("calibration_box.k26asm", "5.0e1", "0.0")
+    EFF_EPISODE EFF_ACTION EFF_CTRL_BODY;
+
+/* A pass inside the step whose closest approach falls in the band
+ * between the silhouette's true radius and its square root.
+ *
+ * The target lies broadside, so it presents two square metres and its
+ * effective radius is sqrt(2/pi), about 0.798 m. A radius taken as
+ * sqrt(area) instead would be 1.414 m, and every other fixture here
+ * sits far outside that band: at zero, or at five metres. One metre is
+ * inside it, so this is the fixture that measures the boundary rather
+ * than the two sides of it. */
+static const char *const BAND_KFL =
+    "form EFFBAND\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0")
+    EFF_MOVER_BROADSIDE("calibration_box.k26asm", "5.0e1", "1.0")
     EFF_IMPACTOR_SINGLE
     EFF_EPISODE EFF_ACTION
     "    observe effect rock as kin\n"
@@ -285,7 +405,7 @@ static const char *const RECEDE_KFL =
 static const char *const OFFSET_KFL =
     "form EFFOFFSET\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "5.0")
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "5.0e1", "5.0")
     EFF_IMPACTOR_SINGLE
     EFF_EPISODE EFF_ACTION
     "    observe effect rock as kin\n"
@@ -305,7 +425,7 @@ static const char *const OFFSET_KFL =
 static const char *const COND_KFL =
     "form EFFCOND\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
     EFF_LASER("1.0e6") EFF_IMPACTOR_SINGLE
     EFF_EPISODE EFF_ACTION
     "    observe effect beam as las\n"
@@ -329,7 +449,7 @@ static const char *const COND_KFL =
 static const char *const LOOP_KFL =
     "form EFFLOOP\n"
     "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
     EFF_LASER("1.0e6")
     EFF_EPISODE EFF_ACTION
     "    observe effect beam as las\n"
@@ -396,17 +516,12 @@ static const char *const HOT_KFL =
  * ratio between them is what tells the two apart, and the ratio comes
  * from the asset's own declared dimensions rather than from a figure
  * restated here. */
-#define EFF_MOVER_BROADSIDE(asset) \
-    "    astro_body mover assembly=\"" asset "\"" \
-    " parent=earth pos_x=7.0e6 pos_y=2.0e3 pos_z=0.0 vel_x=0.0" \
-    " vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0" \
-    " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.05\n"
 
 static const char *const BROADSIDE_KFL =
     "form EFFBROAD\n"
     "fn world w\n"
     EFF_EARTH EFF_SHOOTER("7746.0")
-    EFF_MOVER_BROADSIDE("calibration_box.k26asm")
+    EFF_MOVER_BROADSIDE("calibration_box.k26asm", "2.0e3", "0.0")
     EFF_LASER("1.0e6") EFF_IMPACTOR_SWARM
     EFF_EPISODE EFF_ACTION
     "    observe effect beam as las\n"
@@ -427,7 +542,7 @@ static const char *const NOSEON_KFL =
     "form EFFNOSE\n"
     "fn world w\n"
     EFF_EARTH EFF_SHOOTER("7746.0")
-    EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_MOVER("calibration_box.k26asm", "2.0e3", "0.0")
     EFF_LASER("1.0e6") EFF_IMPACTOR_SWARM
     EFF_EPISODE EFF_ACTION
     "    observe effect beam as las\n"
@@ -470,14 +585,15 @@ static const char *const BARE_ASM =
  * another. */
 static const char *const LAS_COMPS[] = {
     "_engaged", "_effect", "_dv", "_mass_loss", "_range", "_spot",
-    "_encircled", "_fluence", "_transmissivity", "_ignited", NULL
+    "_encircled", "_fluence", "_transmissivity", "_p_coupled",
+    "_ignited", NULL
 };
 static const char *const KIN_COMPS[] = {
     "_engaged", "_effect", "_hit", "_closing_speed", "_t_close",
     "_miss", "_fraction", "_cos_angle", "_penetrates",
     "_critical_diameter", "_penetration", "_energy", NULL
 };
-#define LAS_N 10
+#define LAS_N 11
 #define KIN_N 12
 
 /* ---- Plumbing -------------------------------------------------------- */
@@ -664,7 +780,7 @@ static void gate_refusals_(void)
         "form EFFR\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         EFF_LASER("1.0e6")
         EFF_EPISODE EFF_ACTION
         "    engage beam at mover\n"
@@ -688,7 +804,7 @@ static void gate_refusals_(void)
         "form EFFR2\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         EFF_LASER("1.0e6")
         EFF_EPISODE EFF_ACTION
         "    observe effect beam as las\n"
@@ -713,7 +829,7 @@ static void gate_refusals_(void)
         "form EFFR3\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         "    astro_payload eye body=shooter kind=detect_radar"
         " p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10"
         " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0"
@@ -738,7 +854,7 @@ static void gate_refusals_(void)
         "form EFFR4\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         "    astro_payload eye body=shooter kind=detect_radar"
         " p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10"
         " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0"
@@ -764,7 +880,7 @@ static void gate_refusals_(void)
         "form EFFR5\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         EFF_LASER("1.0e6")
         EFF_EPISODE EFF_ACTION
         "    observe effect beam as las\n"
@@ -787,7 +903,7 @@ static void gate_refusals_(void)
         "form EFFR6\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         EFF_LASER("1.0e6")
         EFF_EPISODE EFF_ACTION
         "    observe effect beam as las\n"
@@ -809,7 +925,7 @@ static void gate_refusals_(void)
         "form EFFR7\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         EFF_LASER("1.0e6")
         EFF_EPISODE EFF_ACTION
         "    observe effect beam as las\n"
@@ -834,7 +950,7 @@ static void gate_refusals_(void)
         "form EFFR8\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("scratch_bare.k26asm", "0.0")
+        EFF_MOVER("scratch_bare.k26asm", "1.5e2", "0.0")
         EFF_LASER("1.0e6")
         EFF_EPISODE EFF_ACTION
         "    observe effect beam as las\n"
@@ -860,7 +976,7 @@ static void gate_refusals_(void)
         "form EFFR9\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         EFF_LASER("1.0e6")
         EFF_EPISODE EFF_ACTION
         "    observe effect beam as las\n"
@@ -886,7 +1002,7 @@ static void gate_refusals_(void)
         "form EFFR10\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         EFF_LASER("1.0e6")
         EFF_EPISODE EFF_ACTION
         "    observe effect beam as las\n"
@@ -913,7 +1029,7 @@ static void gate_refusals_(void)
         "form EFFR11\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         "    astro_payload rock body=shooter kind=impactor pattern=2"
         " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0"
         " projectile_diameter_m=0.2\n"
@@ -938,7 +1054,7 @@ static void gate_refusals_(void)
         "form EFFR12\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         "    astro_payload beam body=shooter kind=laser"
         " primary_diam_m=1.5 wavelength_nm=1064.0 p_output_w=1.0e6"
         " m_squared=1.2 pointing_jitter_rad=1.0e-7"
@@ -965,7 +1081,7 @@ static void gate_refusals_(void)
         "form EFFR13\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         "    astro_payload rock body=shooter kind=impactor"
         " pattern=uniform(1.0, 2.0)"
         " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0"
@@ -994,7 +1110,7 @@ static void gate_refusals_(void)
         "form EFFR14\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         "    astro_payload rock body=shooter kind=impactor pattern=swarm"
         " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0"
         " projectile_diameter_m=0.2\n"
@@ -1018,7 +1134,7 @@ static void gate_refusals_(void)
         "form EFFR15\n"
         "fn world w\n"
         EFF_EARTH EFF_SHOOTER("7746.0")
-        EFF_MOVER("calibration_box.k26asm", "0.0")
+        EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0")
         "    astro_payload rock body=shooter kind=impactor"
         " pattern=single swarm_count=20"
         " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0"
@@ -1147,27 +1263,38 @@ static void gate_effect_world_(void)
            "(impactor), in metres and metres per second combined\n",
            EFF_STEPS, d_las, d_kin);
 
-    /* The mutations. Each deletes the state write the arm above rests
-     * on, from that artifact's own emitted source, and requires the
-     * trajectory to return to the control's. An arm that still passed
-     * would be measuring something other than the effect. */
+    /* The mutations. Each deletes the whole of that kind's effect on
+     * the world, from that artifact's own emitted source, and requires
+     * the trajectory to return to the control's bit for bit. An arm
+     * that still passed would be measuring something other than the
+     * effect.
+     *
+     * For the emitter that is both writes and not only the velocity
+     * one. The ablated mass reaches the trajectory by two routes, and
+     * the second of them is measured in its own gate below; deleting
+     * one write and demanding bit-for-bit equality would be asserting
+     * that the other route is absent, which at close separations it is
+     * not. */
     emit_("las");
-    mutate_("las", "las_novel",
+    mutate_("las", "las_noeffect",
             "s/^    _kfl_tb->vel\\.\\([xyz]\\) += _kfl_dv \\* "
-            "_kfl_u\\.\\([xyz]\\);$/    (void)0;/",
+            "_kfl_u\\.\\([xyz]\\);$/    (void)0;/;"
+            "s/^        k26astro_body_set_mass(_kfl_tb, _kfl_mass - "
+            "_kfl_loss);$/        (void)0;/",
             "_kfl_tb->vel", 3, 0);
-    build_emitted_(WORK_DIR "/las_novel.cc", WORK_DIR "/las_novel.so");
-    double las_novel[6];
-    run_body_(WORK_DIR "/las_novel.so", EFF_STEPS, 0.0, las_novel);
-    if (dist6_(las_novel, ctrl) != 0.0) {
-        fprintf(stderr, "FAIL: with the emitter's velocity write deleted "
-                "the trajectory still differs from the control by %.6g; "
-                "the arm above is measuring something else\n",
-                dist6_(las_novel, ctrl));
+    build_emitted_(WORK_DIR "/las_noeffect.cc",
+                   WORK_DIR "/las_noeffect.so");
+    double las_noeffect[6];
+    run_body_(WORK_DIR "/las_noeffect.so", EFF_STEPS, 0.0, las_noeffect);
+    if (dist6_(las_noeffect, ctrl) != 0.0) {
+        fprintf(stderr, "FAIL: with the emitter's two state writes "
+                "deleted the trajectory still differs from the control "
+                "by %.6g; the arm above is measuring something else\n",
+                dist6_(las_noeffect, ctrl));
         exit(1);
     }
     g_arms++;
-    printf("  mutation: the emitter's velocity write deleted returns the "
+    printf("  mutation: the emitter's two state writes deleted return the "
            "trajectory to the control's, bit for bit\n");
 
     /* The needle is the increment rather than the field, because the
@@ -1197,80 +1324,145 @@ static void gate_effect_world_(void)
 
 /* A high-power emitter, declared so the ablated fraction is large
  * enough to see in six steps. The figure is a modelling choice of this
- * gate and not a claim about any real emitter; what the arm measures is
- * the route the mass takes, which does not depend on the power. */
-static const char *const MASSY_KFL =
-    "form EFFMASS\n"
-    "fn world w\n"
-    EFF_EARTH EFF_SHOOTER("7746.0") EFF_MOVER("calibration_box.k26asm", "0.0")
-    EFF_LASER("1.0e9")
-    EFF_EPISODE EFF_ACTION
-    "    observe effect beam as las\n"
-    "    on_step\n"
-    "        engage beam at mover\n"
-    "    end\n"
-    "    objective\n"
-    "        reward las_effect\n"
-    "    end\n"
+ * gate and not a claim about any real emitter; what the arm measures
+ * is the route the mass takes, which does not depend on the power.
+ *
+ * Two separations, because the answer depends on one. Far apart, the
+ * mass reaches the trajectory only by dividing the next engagement's
+ * velocity increment. Close in, a second and much weaker route opens:
+ * the target's own mass sets its gravitational parameter, which enters
+ * the integrator's own step control through the close-encounter and
+ * predictor machinery, and at close separation that machinery is live.
+ * A single-separation fixture would report one of those two answers
+ * and call it the answer. */
+#define MASSY_KFL_AT(form, py, power) \
+    "form " form "\n" \
+    "fn world w\n" \
+    EFF_EARTH EFF_SHOOTER("7746.0") \
+    EFF_MOVER("calibration_box.k26asm", py, "0.0") \
+    EFF_LASER(power) \
+    EFF_EPISODE EFF_ACTION \
+    "    observe effect beam as las\n" \
+    "    on_step\n" \
+    "        engage beam at mover\n" \
+    "    end\n" \
+    "    objective\n" \
+    "        reward las_effect\n" \
+    "    end\n" \
+    "end\n" \
     "end\n"
-    "end\n";
 
-static void gate_mass_consumed_(void)
+static const char *const MASSY_KFL =
+    MASSY_KFL_AT("EFFMASS", "2.0e3", "1.0e9");
+static const char *const MASSY_NEAR_KFL =
+    MASSY_KFL_AT("EFFMASSNEAR", "1.5e2", "1.0e9");
+
+/* Measure, for one fixture, how far the mass write moves the target on
+ * its own and how far it moves it once the velocity write is gone.
+ * The first is the whole of what the mass does; the second is what is
+ * left when the route through the increment is closed. */
+static void mass_routes_(const char *src, const char *stem,
+                         double *out_total, double *out_field)
 {
-    build_(MASSY_KFL, "massy");
-    emit_("massy");
+    char so[512], cc[512], mso[512];
+    build_(src, stem);
+    emit_(stem);
+    so_path_(so, sizeof so, stem);
 
     double base[6], nomass[6], novel[6], neither[6];
-    char so[512];
-    so_path_(so, sizeof so, "massy");
     run_body_(so, EFF_STEPS, 0.0, base);
 
-    mutate_("massy", "massy_nomass",
+    char a[128], b[128], c[128];
+    snprintf(a, sizeof a, "%s_nomass", stem);
+    snprintf(b, sizeof b, "%s_novel", stem);
+    snprintf(c, sizeof c, "%s_neither", stem);
+
+    mutate_(stem, a,
             "s/^        k26astro_body_set_mass(_kfl_tb, _kfl_mass - "
             "_kfl_loss);$/        (void)0;/",
             "k26astro_body_set_mass", 3, 2);
-    build_emitted_(WORK_DIR "/massy_nomass.cc",
-                   WORK_DIR "/massy_nomass.so");
-    run_body_(WORK_DIR "/massy_nomass.so", EFF_STEPS, 0.0, nomass);
+    snprintf(cc, sizeof cc, WORK_DIR "/%s.cc", a);
+    snprintf(mso, sizeof mso, WORK_DIR "/%s.so", a);
+    build_emitted_(cc, mso);
+    run_body_(mso, EFF_STEPS, 0.0, nomass);
 
-    double d_mass = dist6_(base, nomass);
-    if (!(d_mass > 0.0)) {
-        fprintf(stderr, "FAIL: deleting the mass write changed nothing; "
-                "the published mass loss would be a dead store\n");
-        exit(1);
-    }
-    g_arms++;
-    printf("  deleting the mass write moves the target by %.6g: the "
-           "ablated mass is read back, not merely written\n", d_mass);
-
-    /* The route, measured rather than reasoned. With the velocity write
-     * also gone the mass write moves nothing at all, so the mass
-     * reaches the trajectory by dividing the next engagement's velocity
-     * increment and not through the gravitational field. */
-    mutate_("massy", "massy_novel",
+    mutate_(stem, b,
             "s/^    _kfl_tb->vel\\.\\([xyz]\\) += _kfl_dv \\* "
             "_kfl_u\\.\\([xyz]\\);$/    (void)0;/",
             "_kfl_tb->vel", 3, 0);
-    build_emitted_(WORK_DIR "/massy_novel.cc", WORK_DIR "/massy_novel.so");
-    run_body_(WORK_DIR "/massy_novel.so", EFF_STEPS, 0.0, novel);
+    snprintf(cc, sizeof cc, WORK_DIR "/%s.cc", b);
+    snprintf(mso, sizeof mso, WORK_DIR "/%s.so", b);
+    build_emitted_(cc, mso);
+    run_body_(mso, EFF_STEPS, 0.0, novel);
 
-    mutate_("massy_novel", "massy_neither",
+    mutate_(b, c,
             "s/^        k26astro_body_set_mass(_kfl_tb, _kfl_mass - "
             "_kfl_loss);$/        (void)0;/",
             "k26astro_body_set_mass", 3, 2);
-    build_emitted_(WORK_DIR "/massy_neither.cc",
-                   WORK_DIR "/massy_neither.so");
-    run_body_(WORK_DIR "/massy_neither.so", EFF_STEPS, 0.0, neither);
+    snprintf(cc, sizeof cc, WORK_DIR "/%s.cc", c);
+    snprintf(mso, sizeof mso, WORK_DIR "/%s.so", c);
+    build_emitted_(cc, mso);
+    run_body_(mso, EFF_STEPS, 0.0, neither);
 
-    double d_field = dist6_(novel, neither);
-    if (d_field != 0.0) {
-        fprintf(stderr, "NOTE: with the velocity write gone the mass "
-                "write still moves the target by %.6g\n", d_field);
+    *out_total = dist6_(base, nomass);
+    *out_field = dist6_(novel, neither);
+}
+
+static void gate_mass_consumed_(void)
+{
+    double far_total = 0.0, far_field = 0.0;
+    double near_total = 0.0, near_field = 0.0;
+
+    mass_routes_(MASSY_KFL, "massy", &far_total, &far_field);
+    mass_routes_(MASSY_NEAR_KFL, "massy_near", &near_total, &near_field);
+
+    if (!(far_total > 0.0) || !(near_total > 0.0)) {
+        fprintf(stderr, "FAIL: deleting the mass write changed nothing "
+                "(%.6g far, %.6g near); the published mass loss would be "
+                "a dead store\n", far_total, near_total);
+        exit(1);
     }
-    g_arms++;
-    printf("  the route is the increment, not the field: with the "
-           "velocity write also deleted the mass write moves the target "
-           "by %.6g\n", d_field);
+    g_arms += 2;
+    printf("  deleting the mass write moves the target by %.6g at 2 km "
+           "and %.6g at 150 m: the ablated mass is read back, not merely "
+           "written\n", far_total, near_total);
+
+    /* The mass takes two routes to the trajectory and which of them
+     * carries it depends on the separation, which is why this arm
+     * measures two. Closing the route through the velocity increment
+     * leaves nothing at all two kilometres out, and leaves a residual
+     * of the same order as the whole effect at a hundred and fifty
+     * metres: that residual is the target's own gravitational
+     * parameter reaching the integrator's step control, which is live
+     * when the pair is close and not when it is far.
+     *
+     * The arm asserts both halves of that, so it fails if the
+     * residual ever appears at long range or vanishes at short. It
+     * does not assert an ordering between the two routes: at the
+     * closer separation they are the same size and partly cancel, and
+     * an ordering claim would have been a claim this gate measured to
+     * be false. */
+    if (far_field != 0.0) {
+        fprintf(stderr, "FAIL: two kilometres out, the mass write moves "
+                "the target by %.6g with the velocity write deleted; the "
+                "field route was measured to be absent at this "
+                "separation\n", far_field);
+        exit(1);
+    }
+    if (!(near_field > 0.0)) {
+        fprintf(stderr, "FAIL: at a hundred and fifty metres the mass "
+                "write moves nothing with the velocity write deleted, so "
+                "the second route this arm reports is not present and "
+                "the fixture does not measure it\n");
+        exit(1);
+    }
+    g_arms += 2;
+    printf("  the mass takes two routes and the separation decides "
+           "which: with the velocity write also deleted it moves the "
+           "target by %.6g at 2 km and %.6g at 150 m, against %.6g and "
+           "%.6g with it, so the increment carries it far out and the "
+           "integrator's own step control carries it close in\n",
+           far_field, near_field, far_total, near_total);
 }
 
 /* ---- Gate 5: the hit test -------------------------------------------- */
@@ -1290,30 +1482,110 @@ static void run_obs_(const char *so_path, int n, double act0,
     art_close_(&a);
 }
 
+/* The step the kinetic fixtures land on. They start a hundred and
+ * fifty metres apart closing at two hundred metres per second, so the
+ * first step's intercept is three quarters of a second ahead, which is
+ * outside the half-second period, and the second step's is a quarter
+ * of a second ahead, which is inside it. The pair then crosses and
+ * recedes. One artifact therefore carries a step before the window, a
+ * step inside it, and steps after it. */
+#define EFF_LAND_STEP 2
+
 static void gate_hit_test_(void)
 {
     char so[512];
-    double closing[KIN_N], recede[KIN_N], offset[KIN_N];
+    double before[KIN_N], landing[KIN_N], recede[KIN_N];
+    double offset[KIN_N], longr[KIN_N], band[KIN_N];
 
     build_(RECEDE_KFL, "recede");
     build_(OFFSET_KFL, "offset");
+    build_(LONG_KFL, "long");
+    build_(CTRL_LONG_KFL, "ctrl_long");
+    build_(CTRL_RECEDE_KFL, "ctrl_recede");
+    build_(BAND_KFL, "band");
 
     so_path_(so, sizeof so, "kin");
-    run_obs_(so, 1, 0.0, closing, KIN_N);
+    run_obs_(so, 1, 0.0, before, KIN_N);
+    run_obs_(so, EFF_LAND_STEP, 0.0, landing, KIN_N);
     so_path_(so, sizeof so, "recede");
     run_obs_(so, 1, 0.0, recede, KIN_N);
     so_path_(so, sizeof so, "offset");
     run_obs_(so, 1, 0.0, offset, KIN_N);
+    so_path_(so, sizeof so, "long");
+    run_obs_(so, 1, 0.0, longr, KIN_N);
+    so_path_(so, sizeof so, "band");
+    run_obs_(so, 1, 0.0, band, KIN_N);
 
-    /* Closing: a hit, with the time to closest approach ahead. */
-    ASSERT(closing[0] == 1.0);
-    ASSERT(closing[2] == 1.0);
-    ASSERT(closing[4] > 0.0);
-    ASSERT(closing[1] > 0.0);
+    /* Inside the window: a hit, and momentum transferred. */
+    ASSERT(landing[0] == 1.0);
+    if (landing[2] != 1.0) {
+        fprintf(stderr, "FAIL: an intercept %.6g s ahead of a %.6g s "
+                "step did not land\n", landing[4], 0.5);
+        exit(1);
+    }
+    ASSERT(landing[1] > 0.0);
+    ASSERT(landing[4] > 0.0 && landing[4] <= 0.5);
 
-    /* Receding: engaged, and not a hit, with the same order of
-     * predicted closest approach. The discriminating quantity is the
-     * sign of the time to closest approach and nothing else. */
+    /* One step earlier, on the same artifact and the same episode: the
+     * same collision course, the same predicted miss, an intercept
+     * three quarters of a second ahead, and no transfer. This is the
+     * boundary measured from the inside. */
+    ASSERT(before[0] == 1.0);
+    if (before[2] != 0.0) {
+        fprintf(stderr, "FAIL: an intercept %.6g s ahead of a 0.5 s step "
+                "landed\n", before[4]);
+        exit(1);
+    }
+    if (!(before[4] > 0.5)) {
+        fprintf(stderr, "FAIL: the step before the landing has its "
+                "intercept %.6g s ahead, which is inside the period, so "
+                "it does not measure the bound\n", before[4]);
+        exit(1);
+    }
+    ASSERT(before[1] == 0.0);
+    g_arms += 2;
+    printf("  the intercept must fall inside the step: %.9g s ahead does "
+           "not land, %.9g s ahead does, on one artifact and one episode "
+           "at a period of 0.5 s\n", before[4], landing[4]);
+
+    /* Far outside the window on a genuine collision course. The
+     * predicted closest approach is zero, so only the horizon can
+     * refuse it. */
+    ASSERT(longr[0] == 1.0);
+    if (longr[2] != 0.0) {
+        fprintf(stderr, "FAIL: an intercept %.6g s ahead reported a hit\n",
+                longr[4]);
+        exit(1);
+    }
+    if (!(longr[4] > 5.0) || !(longr[5] < 1.0e-6)) {
+        fprintf(stderr, "FAIL: the long-horizon fixture is %.6g s ahead "
+                "with a predicted miss of %.6g m, so it is not a distant "
+                "intercept on a collision course\n", longr[4], longr[5]);
+        exit(1);
+    }
+    ASSERT(longr[1] == 0.0);
+
+    /* And nothing reached the world. A channel reading zero is not the
+     * same claim as a target that did not move. */
+    double ctrl_long[6], long_body[6];
+    so_path_(so, sizeof so, "ctrl_long");
+    run_body_(so, EFF_STEPS, 0.0, ctrl_long);
+    so_path_(so, sizeof so, "long");
+    run_body_(so, EFF_STEPS, 0.0, long_body);
+    if (dist6_(long_body, ctrl_long) != 0.0) {
+        fprintf(stderr, "FAIL: a long-horizon engagement moved the target "
+                "by %.6g over %d steps\n",
+                dist6_(long_body, ctrl_long), EFF_STEPS);
+        exit(1);
+    }
+    g_arms += 2;
+    printf("  a collision course %.9g s ahead transfers nothing: `_hit` "
+           "0, `_effect` 0, and the target's state after %d steps is the "
+           "control's bit for bit\n", longr[4], EFF_STEPS);
+
+    /* Receding: engaged, inside the distance window, and not a hit.
+     * The discriminating quantity is the sign of the time and nothing
+     * else. */
     ASSERT(recede[0] == 1.0);
     if (recede[2] != 0.0) {
         fprintf(stderr, "FAIL: a receding target reported a hit\n");
@@ -1327,38 +1599,86 @@ static void gate_hit_test_(void)
     }
     ASSERT(recede[1] == 0.0);
 
-    /* Offset: engaged, approaching, and still not a hit, because the
-     * predicted closest approach is outside the silhouette. */
+    /* Offset: engaged, inside the time window, and still not a hit,
+     * because the predicted closest approach is outside the
+     * silhouette. */
     ASSERT(offset[0] == 1.0);
     if (offset[2] != 0.0) {
         fprintf(stderr, "FAIL: a pass at %.6g m reported a hit\n",
                 offset[5]);
         exit(1);
     }
-    if (!(offset[4] > 0.0)) {
-        fprintf(stderr, "FAIL: the offset fixture is receding (%.6g), so "
-                "it does not separate the two halves of the test\n",
-                offset[4]);
+    if (!(offset[4] > 0.0 && offset[4] <= 0.5)) {
+        fprintf(stderr, "FAIL: the offset fixture's intercept is %.6g s "
+                "ahead, so the horizon and not the distance is what "
+                "refuses it\n", offset[4]);
         exit(1);
     }
     ASSERT(offset[1] == 0.0);
-    g_arms += 3;
-    printf("  hit test: closing hits (miss %.6g m, time %.6g s), "
-           "receding does not (miss %.6g m, time %.6g s), a pass at "
-           "%.6g m does not (time %.6g s)\n",
-           closing[5], closing[4], recede[5], recede[4], offset[5],
-           offset[4]);
+    g_arms += 2;
+    printf("  receding does not land (miss %.6g m, time %.6g s); a pass "
+           "at %.6g m inside the step does not land (time %.6g s)\n",
+           recede[5], recede[4], offset[5], offset[4]);
 
-    /* And the effect follows the test: a hit transfers momentum and a
-     * miss transfers none, measured on the world rather than on the
-     * channel. */
-    double ctrl[6], rec[6], off[6];
-    so_path_(so, sizeof so, "ctrl");
+    /* The band between the silhouette's radius and its square root.
+     * The target is broadside, so it presents two square metres: the
+     * radius is sqrt(2/pi) = 0.7979 m and the square root of the area
+     * is 1.4142 m. A pass at one metre is inside that band, and is the
+     * only fixture here that tells the two apart. */
+    ASSERT(band[0] == 1.0);
+    if (!(band[5] > sqrt(2.0 / 3.14159265358979323846) &&
+          band[5] < sqrt(2.0))) {
+        fprintf(stderr, "FAIL: the band fixture passes at %.6g m, which "
+                "is not between %.6g and %.6g, so it does not bracket "
+                "the radius\n", band[5],
+                sqrt(2.0 / 3.14159265358979323846), sqrt(2.0));
+        exit(1);
+    }
+    if (!(band[4] > 0.0 && band[4] <= 0.5)) {
+        fprintf(stderr, "FAIL: the band fixture's intercept is %.6g s "
+                "ahead, so the horizon and not the distance refuses "
+                "it\n", band[4]);
+        exit(1);
+    }
+    if (band[2] != 0.0) {
+        fprintf(stderr, "FAIL: a pass at %.6g m against a silhouette of "
+                "radius %.6g m reported a hit\n", band[5],
+                sqrt(2.0 / 3.14159265358979323846));
+        exit(1);
+    }
+    ASSERT(band[1] == 0.0);
+    /* The band fixture is broadside, so its first body axis is square
+     * to the closing direction and the impact cosine is the edge-on
+     * case: the library clamps by comparison, which leaves a negative
+     * zero where it finds one, and the published range is [0, 1]. */
+    if (band[7] != 0.0) {
+        fprintf(stderr, "FAIL: the broadside fixture's impact cosine is "
+                "%.17g, so it is not the edge-on case this arm reads\n",
+                band[7]);
+        exit(1);
+    }
+    if (signbit(band[7])) {
+        fprintf(stderr, "FAIL: the impact cosine published a negative "
+                "zero, which is outside its documented range\n");
+        exit(1);
+    }
+    g_arms++;
+    printf("  the impact cosine publishes no negative zero at the edge-on "
+           "geometry\n");
+    g_arms++;
+    printf("  the radius is the disc's, not the area's: a pass at %.9g m "
+           "against a silhouette of radius %.9g m does not land, and "
+           "%.9g m is inside the band an area-rooted radius would "
+           "admit\n", band[5], sqrt(2.0 / 3.14159265358979323846),
+           band[5]);
+
+    /* And the effect follows the test: a miss transfers none, measured
+     * on the world rather than on the channel. */
+    double ctrl[6], rec[6];
+    so_path_(so, sizeof so, "ctrl_recede");
     run_body_(so, EFF_STEPS, 0.0, ctrl);
     so_path_(so, sizeof so, "recede");
     run_body_(so, EFF_STEPS, 0.0, rec);
-    so_path_(so, sizeof so, "offset");
-    run_body_(so, EFF_STEPS, 0.0, off);
     if (dist6_(rec, ctrl) != 0.0) {
         fprintf(stderr, "FAIL: a receding engagement moved the target by "
                 "%.6g\n", dist6_(rec, ctrl));
@@ -1366,9 +1686,7 @@ static void gate_hit_test_(void)
     }
     g_arms++;
     printf("  a miss transfers no momentum: the receding fixture's target "
-           "state is the control's, bit for bit (the offset fixture "
-           "starts elsewhere and is compared by its own channel)\n");
-    ASSERT(off[0] == off[0]);
+           "state is the control's, bit for bit\n");
 }
 
 /* ---- Gate 6: swarm against single ------------------------------------ */
@@ -1380,12 +1698,19 @@ static void gate_swarm_(void)
 
     build_(SWARM_KFL, "swarm");
 
+    /* Sampled on the step the intercept lands, since a step outside
+     * the terminal window transfers nothing whatever the pattern and
+     * the two would agree at zero. The fraction is sampled a step
+     * earlier as well, where it is published without a landing, which
+     * is what lets the arm see it move with the range. */
     so_path_(so, sizeof so, "kin");
-    run_obs_(so, 1, 0.0, single1, KIN_N);
+    run_obs_(so, EFF_LAND_STEP, 0.0, single1, KIN_N);
     so_path_(so, sizeof so, "swarm");
-    run_obs_(so, 1, 0.0, swarm1, KIN_N);
-    run_obs_(so, 5, 0.0, swarm5, KIN_N);
+    run_obs_(so, 1, 0.0, swarm5, KIN_N);
+    run_obs_(so, EFF_LAND_STEP, 0.0, swarm1, KIN_N);
 
+    ASSERT(single1[2] == 1.0);
+    ASSERT(swarm1[2] == 1.0);
     ASSERT(single1[6] == 1.0);
     if (!(swarm1[6] > 0.0 && swarm1[6] < 1.0)) {
         fprintf(stderr, "FAIL: the swarm fraction is %.6g, which is not a "
@@ -1401,17 +1726,37 @@ static void gate_swarm_(void)
     /* The fraction rises as the range closes, because the footprint
      * shrinks with it: a fraction that did not move with range would be
      * a constant wearing a channel's name. */
-    if (!(swarm5[6] > swarm1[6])) {
+    if (!(swarm1[6] > swarm5[6])) {
         fprintf(stderr, "FAIL: the swarm fraction did not move with "
-                "range: %.6g at step 1 and %.6g at step 5\n",
-                swarm1[6], swarm5[6]);
+                "range: %.6g a step out and %.6g at the landing\n",
+                swarm5[6], swarm1[6]);
         exit(1);
     }
-    g_arms += 3;
+    /* The delivered energy carries the landed fraction too. Unscaled
+     * it would report a swarm's whole release as arriving, and a
+     * policy shaped on it could not tell the two patterns apart. */
+    if (!(swarm1[11] < single1[11])) {
+        fprintf(stderr, "FAIL: the swarm delivered %.17g and the single "
+                "projectile %.17g; the energy does not carry the landed "
+                "fraction\n", swarm1[11], single1[11]);
+        exit(1);
+    }
+    double e_want = swarm1[6] * single1[11];
+    double e_rel  = fabs(swarm1[11] - e_want) / e_want;
+    if (e_rel > 1.0e-9) {
+        fprintf(stderr, "FAIL: the swarm delivered %.17g where the "
+                "single projectile's %.17g scaled by the landed "
+                "fraction %.17g gives %.17g\n",
+                swarm1[11], single1[11], swarm1[6], e_want);
+        exit(1);
+    }
+    g_arms += 5;
     printf("  swarm against single: fraction %.6g against 1.0, "
-           "increment %.6g against %.6g m/s, fraction rising to %.6g as "
-           "the range closes\n",
-           swarm1[6], swarm1[1], single1[1], swarm5[6]);
+           "increment %.6g against %.6g m/s, energy %.6g against %.6g J "
+           "which is that fraction of it to %.3g, fraction rising from "
+           "%.6g as the range closes\n",
+           swarm1[6], swarm1[1], single1[1], swarm1[11], single1[11],
+           e_rel, swarm5[6]);
 }
 
 /* ---- Gate 6b: the silhouette follows the line of action -------------- */
@@ -1488,7 +1833,7 @@ static void gate_increment_arithmetic_(void)
      * landed times the projectile mass times the closing speed, and the
      * increment is that over the target's mass. */
     so_path_(so, sizeof so, "swarm");
-    run_obs_(so, 3, 0.0, kin, KIN_N);
+    run_obs_(so, EFF_LAND_STEP, 0.0, kin, KIN_N);
     ASSERT(kin[2] == 1.0);
     double want = kin[6] * 50.0 * kin[3] / EFF_TARGET_MASS_KG;
     double rel  = fabs(kin[1] - want) / want;
@@ -1528,6 +1873,149 @@ static void gate_increment_arithmetic_(void)
     printf("  the emitter's increment is the impulse over the target's "
            "mass: %.9g against %.9g (relative difference %.3g)\n",
            las[2], want_dv, rel_dv);
+}
+
+/* ---- Gate 6e: the bumper's thickness is its own key ------------------ */
+
+/* The impact analysis takes the rear wall's thickness and the coupling
+ * routine takes the bumper's, and until this pass one key was fed to
+ * both. That is not a documentation question: the two decide different
+ * branches, so a program declaring only a rear wall was silently
+ * claiming a bumper of the same thickness and getting a different
+ * delivered energy for it.
+ *
+ * Two fixtures differing in that one key, and in nothing else, with an
+ * inner wall declared in both so the coupling routine's Whipple branch
+ * and its fallback give different answers. If they agreed, the key
+ * would have no consumer and the distinction would be a comment. */
+#define EFF_SHIELD_KFL(form, bumper) \
+    "form " form "\n" \
+    "fn world w\n" \
+    EFF_EARTH EFF_SHOOTER("7746.0") \
+    EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0") \
+    "    astro_payload rock body=shooter kind=impactor pattern=single" \
+    " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0" \
+    " projectile_diameter_m=0.2 target_wall_thickness_m=0.002" \
+    bumper \
+    " target_bumper_density_kg_per_m3=2700.0" \
+    " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0" \
+    " target_inner_thickness_m=0.003\n" \
+    EFF_EPISODE EFF_ACTION \
+    "    observe effect rock as kin\n" \
+    "    on_step\n" \
+    "        engage rock at mover\n" \
+    "    end\n" \
+    "    objective\n" \
+    "        reward kin_effect\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+static const char *const SHIELD_WALL_KFL =
+    EFF_SHIELD_KFL("EFFSHIELDWALL", "");
+static const char *const SHIELD_BUMPER_KFL =
+    EFF_SHIELD_KFL("EFFSHIELDBUMPER", " target_bumper_thickness_m=0.0016");
+
+static void gate_bumper_key_(void)
+{
+    double wall[KIN_N], bumper[KIN_N];
+    char so[512];
+
+    build_(SHIELD_WALL_KFL, "shield_wall");
+    build_(SHIELD_BUMPER_KFL, "shield_bumper");
+    so_path_(so, sizeof so, "shield_wall");
+    run_obs_(so, EFF_LAND_STEP, 0.0, wall, KIN_N);
+    so_path_(so, sizeof so, "shield_bumper");
+    run_obs_(so, EFF_LAND_STEP, 0.0, bumper, KIN_N);
+
+    ASSERT(wall[2] == 1.0 && bumper[2] == 1.0);
+    /* The penetration analysis reads the rear wall and not the bumper,
+     * so the two fixtures must agree on it: a key that moved this as
+     * well would still be feeding two layers. */
+    if (wall[9] != bumper[9] || wall[8] != bumper[8]) {
+        fprintf(stderr, "FAIL: declaring the bumper's thickness moved "
+                "the penetration analysis (critical diameter %.17g "
+                "against %.17g), which reads the rear wall\n",
+                wall[9], bumper[9]);
+        exit(1);
+    }
+    if (wall[11] == bumper[11]) {
+        fprintf(stderr, "FAIL: declaring the bumper's thickness left the "
+                "delivered energy at %.17g, so the key has no consumer\n",
+                wall[11]);
+        exit(1);
+    }
+    g_arms += 2;
+    printf("  the bumper's thickness is its own key: declaring it leaves "
+           "the critical diameter at %.9g and moves the delivered energy "
+           "from %.9g to %.9g J\n", wall[9], wall[11], bumper[11]);
+}
+
+/* ---- Gate 6d: the effect points the way it should -------------------- */
+
+/* Every arm so far has measured a magnitude, and a magnitude cannot
+ * see a sign. Reversing the emitter's line-of-sight unit vector leaves
+ * every published component bit-identical and pushes the target the
+ * wrong way, which is a defect nothing above can fail on.
+ *
+ * The ablation plume leaves along the beam, so the recoil pushes the
+ * target away from the emitter. This arm projects the target's change
+ * in velocity, against a matched control, onto the emitter-to-target
+ * line, and requires it positive and of the published magnitude. */
+static void gate_effect_direction_(void)
+{
+    double las[6], ctrl[6];
+    char so[512];
+
+    so_path_(so, sizeof so, "las");
+    run_body_(so, 1, 0.0, las);
+    so_path_(so, sizeof so, "ctrl");
+    run_body_(so, 1, 0.0, ctrl);
+
+    /* The bodies are read relative to earth, so the emitter-to-target
+     * line is the difference of their two positions. The shooter is
+     * body 1 and the target body 2, and `run_body_` returns the
+     * target's six, so the shooter's are fetched here. */
+    EffArt a;
+    so_path_(so, sizeof so, "las");
+    art_open_(&a, so, 4242u, 1u);
+    double act[4] = { 0.0, 0.0, 0.0, 0.0 };
+    ASSERT(a.s.step(a.env, act) == K26RL_OK);
+    double b[64];
+    ASSERT(a.s.bodies(a.env, 0u, b, 64u) == 18);
+    double ux = las[0] - b[6], uy = las[1] - b[7], uz = las[2] - b[8];
+    double un = sqrt(ux * ux + uy * uy + uz * uz);
+    ASSERT(un > 0.0);
+    ux /= un; uy /= un; uz /= un;
+
+    double o[128];
+    ASSERT(a.s.obs(a.env, o) == K26RL_OK);
+    double published = o[2];            /* the emitter's `_dv` */
+    art_close_(&a);
+
+    double dvx = las[3] - ctrl[3];
+    double dvy = las[4] - ctrl[4];
+    double dvz = las[5] - ctrl[5];
+    double along = dvx * ux + dvy * uy + dvz * uz;
+
+    if (!(along > 0.0)) {
+        fprintf(stderr, "FAIL: the emitter's recoil pushed the target "
+                "%.17g along the line from emitter to target, so it "
+                "pushed it toward the emitter\n", along);
+        exit(1);
+    }
+    double rel = fabs(along - published) / published;
+    if (rel > 1.0e-6) {
+        fprintf(stderr, "FAIL: the target's velocity change along the "
+                "line of sight is %.17g and the published increment is "
+                "%.17g\n", along, published);
+        exit(1);
+    }
+    g_arms += 2;
+    printf("  the recoil pushes the target away from the emitter: the "
+           "target's velocity change projects %+.9g m/s on the "
+           "emitter-to-target line, against a published increment of "
+           "%.9g (relative difference %.3g)\n", along, published, rel);
 }
 
 /* ---- Gate 7: every published component moves ------------------------- */
@@ -1733,6 +2221,8 @@ int main(void)
     gate_swarm_();
     gate_silhouette_();
     gate_increment_arithmetic_();
+    gate_bumper_key_();
+    gate_effect_direction_();
     gate_components_move_();
     gate_zero_fill_();
     gate_runtime_second_engage_();

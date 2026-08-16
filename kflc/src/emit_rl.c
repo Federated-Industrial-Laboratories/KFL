@@ -240,16 +240,21 @@ static const char *const RL_TRK_COMP_[RL_TRK_COMPS] = {
  * event and an impact event share no fields.
  *
  * Every channel here can be moved by a program a reader can write, and
- * three quantities the event structs carry are deliberately absent for
- * the opposite reason. The laser's threshold fluence is a constant of
- * the declared material; its effective dwell is the control period;
- * and its on-target intensity is the published fluence divided by that
- * period. None of the three can move within an episode, and a channel
- * that cannot move is a channel nothing can be gated on. */
-#define RL_EFF_LAS_COMPS 10
+ * four of the ablation event's thirteen fields are deliberately absent
+ * for the opposite reason, each because nothing in a program can move
+ * it: the power at the aperture is the declared output power times a
+ * Strehl ratio computed from two declared constants; the threshold
+ * fluence is a constant of the declared material; the effective dwell
+ * is the control period; and the on-target intensity is the published
+ * fluence divided by that period. A channel that cannot move is a
+ * channel nothing can be gated on. The coupled power is published,
+ * because it does move: it carries the plasma transmissivity and the
+ * encircled fraction, and both of those move. */
+#define RL_EFF_LAS_COMPS 11
 static const char *const RL_EFF_LAS_COMP_[RL_EFF_LAS_COMPS] = {
     "_engaged", "_effect", "_dv", "_mass_loss", "_range", "_spot",
-    "_encircled", "_fluence", "_transmissivity", "_ignited"
+    "_encircled", "_fluence", "_transmissivity", "_p_coupled",
+    "_ignited"
 };
 
 #define RL_EFF_IMP_COMPS 12
@@ -536,7 +541,7 @@ typedef enum {
 } RlPayloadKind;
 
 #define RL_PAY_KINDS     6
-#define RL_PAY_MAXP     16
+#define RL_PAY_MAXP     20
 #define RL_MAX_PAYLOADS 32
 
 /* A key whose value is a word rather than a number, and the constant
@@ -625,12 +630,21 @@ static const RlPayWord RL_PAY_PATTERN_[] = {
  * the target's motion needs none of them: momentum transfer is a
  * function of the projectile and the closing geometry alone.
  *
- * Seven of the nine are `k26astro_impactor_analyse_impact`'s own
- * parameters, spelled as it spells them. The remaining two are fields
- * of the target-structure specification the delivered-energy routine
+ * Seven of the ten are `k26astro_impactor_analyse_impact`'s own
+ * parameters, spelled as it spells them. The other three are fields of
+ * the target-structure specification the delivered-energy routine
  * takes, prefixed `target_` for consistency with the seven beside
- * them: the wall the Whipple stand-off protects, and the thickness the
- * monolithic penetration depth is judged against. */
+ * them: the bumper the stand-off carries, the wall behind it, and the
+ * thickness the monolithic penetration depth is judged against.
+ *
+ * The bumper's thickness is its own key and not the wall's. The
+ * ballistic-limit equation's first parameter is the *rear wall's*
+ * thickness, which is what `target_wall_thickness_m` means and what
+ * the impact analysis is given; the coupling routine's
+ * `outer_thickness_m` is the *bumper's*, which is a different layer of
+ * the same shield. Feeding one key to both would make a program that
+ * declared a rear wall silently claim a bumper of the same thickness,
+ * and the two decide different things. */
 static const RlPayKey RL_PAY_IMPACTOR_[] = {
     { "pattern",                      1, "0.0",
       RL_PAY_PATTERN_,
@@ -644,6 +658,7 @@ static const RlPayKey RL_PAY_IMPACTOR_[] = {
     { "swarm_count",                  0, "0.0", NULL, 0 },
     { "swarm_half_angle_rad",         0, "0.0", NULL, 0 },
     { "target_wall_thickness_m",         0, "0.0", NULL, 0 },
+    { "target_bumper_thickness_m",       0, "0.0", NULL, 0 },
     { "target_bumper_density_kg_per_m3", 0, "0.0", NULL, 0 },
     { "target_bumper_spacing_m",         0, "0.0", NULL, 0 },
     { "target_wall_yield_stress_ksi",    0, "0.0", NULL, 0 },
@@ -3818,11 +3833,13 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
 "#define KFLRL_PAYP(h, e) ((h)->payp + (size_t)(e) * KFLRL_N_PAYLOAD \\\n"
 "                          * KFLRL_PAY_NPARAM)\n"
 "#define KFLRL_PAYH(h, e) ((h)->payloads + (size_t)(e) * KFLRL_N_PAYLOAD)\n"
+"#define KFLRL_PAYU(h, e) ((h)->payu + (size_t)(e) * KFLRL_N_PAYLOAD)\n"
 "#define KFLRL_INFOT(h, e)  ((h)->info_t[(e)])\n"
 "#define KFLRL_INFODAY(h, e) ((h)->info_day[(e)])\n"
 "#else\n"
 "#define KFLRL_PAYP(h, e) ((double *)0)\n"
 "#define KFLRL_PAYH(h, e) ((void **)0)\n"
+"#define KFLRL_PAYU(h, e) ((void **)0)\n"
 "#define KFLRL_INFOT(h, e)  (0.0)\n"
 "#define KFLRL_INFODAY(h, e) ((int64_t)0)\n"
 "#endif\n"
@@ -4985,7 +5002,7 @@ static int rl_emit_payload_build_(FILE *out, const RlModel *m,
             "        }\n", out);
         } else if (py->kind == RL_PAY_IMPACTOR) {
             /* The constructor takes the pattern, the three projectile
-             * parameters and the two swarm ones; the nine target
+             * parameters and the two swarm ones; the ten target
              * parameters sit above them in the store and are read by
              * the impact analysis at engagement. A single-pattern
              * payload passes the library's own ignored values for the
@@ -5001,6 +5018,48 @@ static int rl_emit_payload_build_(FILE *out, const RlModel *m,
             "            k26astro_impactor_destroy(_kfl_h);\n"
             "            return -1;\n"
             "        }\n", out);
+            /* A swarm's declared projectile mass is the total released
+             * mass, which the swarm library's own per-unit helper says
+             * plainly: it divides that total by the count. So the
+             * declared projectile describes the release and not a
+             * unit, and the question the penetration analysis answers,
+             * whether an arriving projectile gets through this shield,
+             * is a question about a unit.
+             *
+             * A second handle carries that unit. Its mass is the
+             * per-unit mass the library computes; its diameter is
+             * scaled by the cube root of the count, which is what
+             * divides a body into geometrically similar pieces; and
+             * its density is unchanged, which is what makes the three
+             * agree. Deriving one of the three from the other two
+             * instead would silently overrule whatever relation the
+             * program declared, and this library accepts all three
+             * independently.
+             *
+             * It is built here, in the world prefix, and it binds to
+             * no vehicle: it is a description of a shape rather than a
+             * payload the craft carries. */
+            if (py->attr[0] &&
+                rl_pay_attr_text_(py->attr[0]) &&
+                strcmp(rl_pay_attr_text_(py->attr[0]), "swarm") == 0) {
+                fputs(
+                "        {\n"
+                "            double _kfl_um = k26astro_swarm_per_unit_mass(\n"
+                "                (int)_kfl_pp[4], _kfl_pp[1]);\n"
+                "            double _kfl_ud = (_kfl_pp[4] > 0.0)\n"
+                "                ? _kfl_pp[3] / cbrt(_kfl_pp[4]) : _kfl_pp[3];\n"
+                "            K26AstroImpactor *_kfl_hu =\n"
+                "                k26astro_impactor_new(\n"
+                "                    K26ASTRO_IMPACTOR_PATTERN_SINGLE,\n"
+                "                    _kfl_um, _kfl_pp[2], _kfl_ud, 1, 0.0);\n"
+                "            if (!_kfl_hu) {\n"
+                "                k26astro_impactor_destroy(_kfl_h);\n"
+                "                return -1;\n"
+                "            }\n", out);
+                fprintf(out,
+                "            _kfl_payu[%d] = (void *)_kfl_hu;\n"
+                "        }\n", p);
+            }
         } else if (py->kind == RL_PAY_LASER) {
             /* The constructor takes the seven emitter parameters; the
              * material and the reflectivity describe the target and are
@@ -5065,12 +5124,13 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
           "                              double *_kfl_dr0,\n"
           "                              K26AstroVehicle **_kfl_veh,\n"
           "                              void **_kfl_pay, "
-          "double *_kfl_payp)\n"
+          "void **_kfl_payu,\n"
+          "                              double *_kfl_payp)\n"
           "{\n"
           "    const uint32_t _kfl_ep = 0;\n"
           "    (void)_kfl_key; (void)_kfl_envi; (void)_kfl_ep; "
           "(void)_kfl_wscal; (void)_kfl_dr0; (void)_kfl_veh;\n"
-          "    (void)_kfl_pay; (void)_kfl_payp;\n", out);
+          "    (void)_kfl_pay; (void)_kfl_payu; (void)_kfl_payp;\n", out);
 
     /* Known-body index locals, the batch emitter's convention, so the
      * shared statement emitter resolves parent/observe targets. A
@@ -7117,6 +7177,7 @@ static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
         "/* `engage %s at %s`, line %d. */\n"
         "static void kflrl_engage_%d_(K26AstroWorld *world,\n"
         "                             void *const *pay,\n"
+        "                             void *const *payu,\n"
         "                             const double *payp, double dt,\n"
         "                             KflrlEng *eng)\n"
         "{\n"
@@ -7135,6 +7196,7 @@ static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
         "    K26AstroBody *_kfl_tb = k26astro_world_body_at(\n"
         "        world, kflrl_body_idx_[%d]);\n"
         "    %s *_kfl_h = pay ? (%s *)pay[%d] : NULL;\n"
+        "    (void)payu;\n"
         "    const double *pp = payp ? payp + %d * KFLRL_PAY_NPARAM\n"
         "                            : NULL;\n"
         "    if (!_kfl_eb || !_kfl_tb || !_kfl_h || !pp) return;\n"
@@ -7192,7 +7254,8 @@ static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
         "    ch[6] = ev.encircled_fraction;\n"
         "    ch[7] = ev.fluence_J_per_m2;\n"
         "    ch[8] = ev.plasma_transmissivity;\n"
-        "    ch[9] = ev.plasma_ignited ? 1.0 : 0.0;\n"
+        "    ch[9] = ev.p_coupled_W;\n"
+        "    ch[10] = ev.plasma_ignited ? 1.0 : 0.0;\n"
         "}\n\n", out);
         return;
     }
@@ -7230,15 +7293,26 @@ static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
         "        k26m3d_quat_conj(_kfl_tb->attitude), _kfl_w);\n"
         "    double _kfl_area = kflrl_sig_area_(%d, _kfl_look);\n"
         "    if (!(_kfl_area > 0.0)) return;\n"
-        /* The hit test. The target's effective silhouette radius is the
-         * radius of a disc of the projected area, and the intercept
-         * lands when the predicted closest approach falls inside it
-         * with the approach still ahead: a negative time to closest
-         * approach is a target already receding, which is a miss
-         * however small the predicted separation. */
+        /* The hit test, in two parts. The target's effective silhouette
+         * radius is the radius of a disc of the projected area, and the
+         * predicted closest approach must fall inside it.
+         *
+         * And the predicted intercept must fall inside the step about
+         * to be integrated. The prediction is a straight line through
+         * both bodies' current states, which is defensible only over a
+         * horizon short enough that neither trajectory curves
+         * appreciably, and one control period is that horizon by
+         * construction: it is the interval the artifact is about to
+         * integrate. Without the bound an engagement lands whenever a
+         * straight line says the paths cross at any time in the
+         * future, which for two craft in nearby orbits is almost
+         * always, and it lands again on every step until they meet.
+         * The bound is what makes this a terminal-phase effector, and
+         * it is why the reach scales with closing speed rather than
+         * being a fixed distance. */
         "    double _kfl_rad = sqrt(_kfl_area / K26A_PI);\n"
-        "    int _kfl_hit = (_kfl_tca > 0.0 && _kfl_miss <= _kfl_rad)\n"
-        "                 ? 1 : 0;\n"
+        "    int _kfl_hit = (_kfl_tca > 0.0 && _kfl_tca <= dt &&\n"
+        "                    _kfl_miss <= _kfl_rad) ? 1 : 0;\n"
         /* The first body axis is the axis the assembly format runs
          * along the craft, and the axis the projected area's own first
          * term is taken against. */
@@ -7246,6 +7320,12 @@ static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
         "                                         k26m3d_v3(1.0, 0.0, 0.0));\n"
         "    double _kfl_cos = k26astro_impactor_impact_cos_angle(_kfl_w,\n"
         "                                                         _kfl_n);\n"
+        /* The library clamps a negative cosine to zero by comparison,
+         * which leaves a negative zero as it found it. The published
+         * range is [0, 1] and negative zero is not in it, so the sign
+         * is normalised where the channel is written rather than left
+         * for a consumer to discover. */
+        "    if (_kfl_cos == 0.0) _kfl_cos = 0.0;\n"
         /* A swarm and a single projectile differ in what reaches the
          * target. The cone's footprint at the engagement range is the
          * area the released units are spread over, and the fraction of
@@ -7283,30 +7363,46 @@ static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
         "    _kfl_tb->vel.y += _kfl_dv * _kfl_w.y;\n"
         "    _kfl_tb->vel.z += _kfl_dv * _kfl_w.z;\n"
         "    ch[1] = _kfl_dv;\n"
-        /* The penetration analysis. Its own header documents which
-         * branch runs on which parameters and skips the rest, so the
-         * declared target keys are passed straight through and an
-         * undeclared branch leaves its channels at zero. */
+        /* The penetration analysis, which is a question about one
+         * arriving unit rather than about the release as a whole:
+         * whether a projectile gets through this shield. For a swarm
+         * that unit is not the declared projectile but one of the
+         * units it was divided into, so the analysis runs against the
+         * per-unit handle built beside the payload at create. For a
+         * single projectile the two are the same handle.
+         *
+         * The library's own header documents which branch runs on
+         * which parameters and skips the rest, so the declared target
+         * keys are passed straight through and an undeclared branch
+         * leaves its channels at zero. */
+        "    const K26AstroImpactor *_kfl_u = payu && payu[%d]\n"
+        "        ? (const K26AstroImpactor *)payu[%d] : _kfl_h;\n"
         "    K26AstroImpactEvent ev = k26astro_impactor_analyse_impact(\n"
-        "        _kfl_h, _kfl_vc, _kfl_cos,\n"
-        "        pp[6], pp[7], pp[8], pp[9], pp[10], pp[11], pp[12]);\n"
+        "        _kfl_u, _kfl_vc, _kfl_cos,\n"
+        "        pp[6], pp[8], pp[9], pp[10], pp[11], pp[12], pp[13]);\n"
+        /* Only the four fields this version's decision logic reads are
+         * filled. Writing the others would put a mapping in the
+         * artifact that nothing checks and nothing consumes, which is
+         * the shape of the defect the bumper key above exists to
+         * correct. */
         "    K26AstroTargetStructureSpec spec;\n"
         "    memset(&spec, 0, sizeof spec);\n"
-        "    spec.outer_thickness_m               = pp[6];\n"
-        "    spec.bumper_density_kg_per_m3        = pp[7];\n"
-        "    spec.bumper_gap_m                    = pp[8];\n"
-        "    spec.outer_yield_stress_ksi          = pp[9];\n"
-        "    spec.monolithic_brinell_hardness     = pp[10];\n"
-        "    spec.monolithic_density_kg_per_m3    = pp[11];\n"
-        "    spec.monolithic_speed_of_sound_m_per_s = pp[12];\n"
-        "    spec.inner_thickness_m               = pp[13];\n"
-        "    spec.monolithic_thickness_m          = pp[14];\n"
+        "    spec.outer_thickness_m      = pp[7];\n"
+        "    spec.bumper_gap_m           = pp[9];\n"
+        "    spec.inner_thickness_m      = pp[14];\n"
+        "    spec.monolithic_thickness_m = pp[15];\n"
         "    ch[8]  = ev.penetrates ? 1.0 : 0.0;\n"
         "    ch[9]  = ev.critical_diameter_m;\n"
         "    ch[10] = ev.monolithic_penetration_m;\n"
-        "    ch[11] = k26astro_impactor_energy_delivered_j(_kfl_h, &ev,\n"
-        "                                                  &spec);\n"
-        "}\n\n", tb);
+        /* The delivered energy is the landed total's, so it is
+         * computed from the whole declared projectile and then scaled
+         * by the fraction that landed, exactly as the momentum is.
+         * Unscaled it would report a swarm's whole release as arriving
+         * on the target and a policy could not tell one pattern from
+         * the other. */
+        "    ch[11] = _kfl_frac *\n"
+        "        k26astro_impactor_energy_delivered_j(_kfl_h, &ev, &spec);\n"
+        "}\n\n", tb, p, p);
 }
 
 /* The on_step body: action names in scope as read-only scalars, body
@@ -7410,12 +7506,13 @@ static int rl_emit_on_step_(FILE *out, RlModel *m,
           "const double *_kfl_act_v,\n"
           "                           KflrlAct *_kfl_a, "
           "void *const *_kfl_pay,\n"
+          "                           void *const *_kfl_payu,\n"
           "                           const double *_kfl_payp,\n"
           "                           double _kfl_dt, KflrlEng *_kfl_eng)\n"
           "{\n"
           "    (void)world; (void)_kfl_act_v; (void)_kfl_a;\n"
-          "    (void)_kfl_pay; (void)_kfl_payp; (void)_kfl_dt;\n"
-          "    (void)_kfl_eng;\n", out);
+          "    (void)_kfl_pay; (void)_kfl_payu; (void)_kfl_payp;\n"
+          "    (void)_kfl_dt; (void)_kfl_eng;\n", out);
     if (m->on_step) {
         /* Every agent's action channels are in scope. A name unique
          * across the blocks is bound unqualified as well as
@@ -7844,6 +7941,13 @@ static void rl_emit_env_core_(FILE *out)
 "     * is published as unavailable, because reporting it would make\n"
 "     * episode k+1 a function of episode k. */\n"
 "    void   **payloads;\n"
+/* The per-unit handles a swarm release needs, one slot per payload
+ * and null for every payload that is not a swarm. A swarm's
+ * penetration analysis is a question about one arriving unit, and
+ * the unit is not the declared projectile, so the handle carrying
+ * the divided geometry is built once beside the payload rather
+ * than derived on the stepping path. */
+"    void   **payu;\n"
 "    double  *payp;\n"
 "    double  *info_t;\n"
 "    int64_t *info_day;\n"
@@ -8468,7 +8572,18 @@ static void rl_emit_env_core_(FILE *out)
 "                                   h->payloads[i]);\n"
 "        }\n"
 "    }\n"
+/* The per-unit handles are the same kind as the payload whose slot
+ * they sit in, so one destructor table serves both walks. They bind
+ * to no vehicle, so nothing else has to be told they are going. */
+"    if (h->payu) {\n"
+"        for (uint32_t i = 0; i < h->n_envs * KFLRL_N_PAYLOAD; i++) {\n"
+"            if (!h->payu[i]) continue;\n"
+"            kflrl_payload_destroy_((int)(i % KFLRL_N_PAYLOAD),\n"
+"                                   h->payu[i]);\n"
+"        }\n"
+"    }\n"
 "    free(h->payloads);\n"
+"    free(h->payu);\n"
 "    free(h->payp);\n"
 "    free(h->info_t);\n"
 "    free(h->info_day);\n"
@@ -8666,12 +8781,15 @@ static void rl_emit_env_core_(FILE *out)
 "#if KFLRL_N_PAYLOAD > 0\n"
 "    h->payloads = (void **)calloc(\n"
 "        (size_t)n_envs * KFLRL_N_PAYLOAD, sizeof(void *));\n"
+"    h->payu = (void **)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_PAYLOAD, sizeof(void *));\n"
 "    h->payp = (double *)calloc(\n"
 "        (size_t)n_envs * KFLRL_N_PAYLOAD * KFLRL_PAY_NPARAM,\n"
 "        sizeof(double));\n"
 "    h->info_t   = (double *)calloc(n_envs, sizeof(double));\n"
 "    h->info_day = (int64_t *)calloc(n_envs, sizeof(int64_t));\n"
-"    if (!h->payloads || !h->payp || !h->info_t || !h->info_day) {\n"
+"    if (!h->payloads || !h->payu || !h->payp || !h->info_t ||\n"
+"        !h->info_day) {\n"
 "        kflrl_free_handle_(h);\n"
 "        return K26RL_E_INTERNAL;\n"
 "    }\n"
@@ -8723,9 +8841,10 @@ static void rl_emit_env_core_(FILE *out)
 "#endif\n"
 "#if KFLRL_N_PAYLOAD > 0\n"
 "                h->payloads + (size_t)e * KFLRL_N_PAYLOAD,\n"
+"                h->payu + (size_t)e * KFLRL_N_PAYLOAD,\n"
 "                h->payp + (size_t)e * KFLRL_N_PAYLOAD * KFLRL_PAY_NPARAM\n"
 "#else\n"
-"                NULL, NULL\n"
+"                NULL, NULL, NULL\n"
 "#endif\n"
 "                ) != 0) {\n"
 "            kflrl_free_handle_(h);\n"
@@ -9042,7 +9161,8 @@ static void rl_emit_env_core_(FILE *out)
 "        memset(&h->eng[e], 0, sizeof h->eng[e]);\n"
 "#endif\n"
 "        kflrl_on_step_(h->worlds[e], aslice, &h->act[e],\n"
-"                       KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
+"                       KFLRL_PAYH(h, e), KFLRL_PAYU(h, e),\n"
+"                       KFLRL_PAYP(h, e),\n"
 "                       h->control_dt, KFLRL_ENG(h, e));\n"
 "#if KFLRL_N_EFFECTOR > 0\n"
 "        /* A payload engaged twice inside one step. The compiler\n"

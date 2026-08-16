@@ -1182,7 +1182,7 @@ because an ablation event and an impact event share no fields.
 
 | `kind=` | Required keys |
 |---|---|
-| `impactor` | `pattern`, one of `single` or `swarm`; `projectile_mass_kg`, `projectile_density_kg_per_m3`, `projectile_diameter_m`; `swarm_count` and `swarm_half_angle_rad`, required for `swarm` and refused for `single`; optional target-structure keys, below |
+| `impactor` | `pattern`, one of `single` or `swarm`; `projectile_mass_kg` (the whole released mass), `projectile_density_kg_per_m3`, `projectile_diameter_m`; `swarm_count` and `swarm_half_angle_rad`, required for `swarm` and refused for `single`; optional target-structure keys, below |
 | `laser` | `primary_diam_m`, `wavelength_nm`, `p_output_w`, `m_squared`, `pointing_jitter_rad`, `rms_wavefront_m`, `plasma_attn_k`, `target_material`, `target_reflectivity` |
 
 `pattern` and `target_material` take a word rather than a number,
@@ -1209,16 +1209,16 @@ Twelve components:
 |---|---|
 | `<name>_engaged` | 1.0 on a step where the payload was engaged. |
 | `<name>_effect` | The velocity increment imparted to the target on a hit, in metres per second; 0.0 on a miss. |
-| `<name>_hit` | 1.0 when the predicted intercept lands on the target. |
+| `<name>_hit` | 1.0 when the predicted intercept lands on the target inside this step. |
 | `<name>_closing_speed` | The magnitude of the relative velocity, in metres per second. |
 | `<name>_t_close` | Predicted time to closest approach, in seconds; negative when the target is already receding. |
 | `<name>_miss` | Predicted closest-approach distance, in metres. |
 | `<name>_fraction` | The fraction of the released projectile mass that lands on the target: 1.0 for `single`, and the target's silhouette over the cone's footprint for `swarm`. |
-| `<name>_cos_angle` | Cosine of the impact angle between the closing direction and the target's first body axis, in [0, 1]; 0.0 when that axis points away from the projectile, since a surface is not struck from behind. |
+| `<name>_cos_angle` | Cosine of the impact angle between the closing direction and the target's first body axis, in [0, 1], with no negative zero; it reads 0.0 when that axis points away from the projectile, since a surface is not struck from behind. |
 | `<name>_penetrates` | 1.0 when the projectile diameter exceeds the Whipple critical diameter. |
 | `<name>_critical_diameter` | That critical diameter, in metres. |
 | `<name>_penetration` | Monolithic penetration depth, in metres. |
-| `<name>_energy` | Energy delivered to the target's interior, in joules. |
+| `<name>_energy` | Energy delivered to the target's interior by the mass that landed, in joules. |
 
 Seven of the twelve are published whenever the payload is engaged,
 because they describe the intercept the engagement set up: `_engaged`,
@@ -1233,25 +1233,72 @@ Whipple analysis derives from it go to zero with it. That is the
 library's own convention and is stated here because a reader who does
 not know it would read a zero critical diameter as a defect.
 
-**The hit test.** The projectile is released carrying its launcher's
-own state and flies ballistically, so the engagement is resolved from
-the relative state of the two craft rather than by adding a body to the
-world. The intercept lands when the predicted closest approach falls
-within the target's effective silhouette radius, which is the radius of
-a disc of the projected area the target presents along the closing
-direction, **and** the time to closest approach is positive. A negative
-time to closest approach is a target already past its nearest point,
-which is a miss however small the predicted separation.
+**The hit test**, in two parts. The intercept lands when
+
+- the predicted closest approach falls within the target's effective
+  silhouette radius, which is the radius of a disc of the projected
+  area the target presents along the closing direction; **and**
+- the predicted time to closest approach is positive **and no greater
+  than the control period**.
+
+The second bound is what makes this a terminal-phase effector. The
+prediction is a straight line through both bodies' current states, and
+that is defensible only over a horizon short enough that neither
+trajectory curves appreciably; one control period is that horizon by
+construction, since it is the interval the artifact is about to
+integrate. Without the bound an engagement would land whenever a
+straight line said the paths cross at any time in the future, which for
+two craft in nearby orbits is almost always, and it would land again on
+every following step.
+
+A negative time to closest approach is a target already past its
+nearest point, and a time beyond the period is an intercept that has
+not happened yet; both are misses however small the predicted
+separation. Reaching the geometry is therefore the task rather than a
+formality, and the effector's reach scales with closing speed rather
+than being a fixed distance.
+
+**The whole engagement is resolved inside the engaging step.** The
+projectile is released carrying its launcher's own state and is never
+a body in the world: it has no flight time, it is not propagated, and
+it cannot be observed. A swarm's units are likewise not simulated
+individually.
+
+**There is no magazine.** A program may engage on as many steps as it
+likes; nothing here counts rounds or refuses a payload that has fired.
+A program modelling stores does so with the means the grammar already
+gives it, a counter and a conditional around the statement.
 
 **The effect.** Momentum transfer, and nothing beyond it. The
 projectile arrives carrying its mass times the closing speed in the
 target's frame, and the target takes that momentum along the closing
 direction, scaled by the fraction that landed. The momentum
-enhancement factor is therefore exactly 1. The published deflection
-literature reports it above 1 for a cratering impact into a rubble
-body, because the ejecta thrown back off the surface carries momentum
-of its own; this model does not carry the ejecta mass and speed that
-figure comes from, and does not claim it.
+enhancement factor is therefore exactly 1, which is the model's own
+assumption and is stated rather than derived: no ejecta is modelled, so
+no momentum thrown back off the target's surface is carried, and a
+model that carried it would report a larger transfer than this one
+does.
+
+**`projectile_mass_kg` is the whole released mass, not one unit's.**
+For `pattern=swarm` it is divided by `swarm_count` to give the mass of
+each unit, which is what the library's own per-unit helper does with
+it. Both readings of the key are otherwise plausible, so it is stated
+here.
+
+That division is what `swarm_count` decides, and it decides one thing:
+**the penetration analysis is a question about a single arriving
+unit**, whether one projectile gets through this shield, while the
+momentum and the delivered energy are properties of the landed total.
+So `_penetrates`, `_critical_diameter` and `_penetration` describe a
+unit carrying `projectile_mass_kg / swarm_count` of mass at a diameter
+scaled by the cube root of the count, which is the division that keeps
+the units geometrically similar to the projectile declared; the density
+is unchanged, so whatever relation the three declared figures had
+survives the division rather than one of them being re-derived.
+`_effect` and `_energy` describe the total that landed, and both carry
+the landed fraction. A swarm of many small units therefore penetrates
+less and transfers the same momentum as a swarm of few large ones at
+equal total mass and equal spread.
 
 **The target-structure keys are optional**, and each is the parameter
 of the same name that the library's impact analysis or its
@@ -1259,20 +1306,30 @@ delivered-energy routine takes:
 
 | Key | What it feeds |
 |---|---|
-| `target_wall_thickness_m`, `target_bumper_density_kg_per_m3`, `target_bumper_spacing_m`, `target_wall_yield_stress_ksi` | The Whipple analysis, which runs when the wall thickness is positive and is skipped otherwise. |
+| `target_wall_thickness_m`, `target_bumper_density_kg_per_m3`, `target_bumper_spacing_m`, `target_wall_yield_stress_ksi` | The Whipple analysis, which runs when the rear wall's thickness is positive and is skipped otherwise. |
 | `target_brinell_hardness`, `target_density_kg_per_m3`, `target_speed_of_sound_m_per_s` | The monolithic-plate analysis, which runs when all three are positive and is skipped otherwise. |
-| `target_inner_thickness_m` | The inner structural wall behind a Whipple stand-off, which lowers the coupled energy from full penetration to partial. |
+| `target_bumper_thickness_m`, `target_bumper_spacing_m` | The energy-coupling routine's Whipple branch, which runs when both are positive. |
+| `target_inner_thickness_m` | The inner structural wall behind the stand-off, which lowers the coupled energy from full penetration to partial. |
 | `target_monolithic_thickness_m` | The thickness the monolithic penetration depth is judged against. |
+
+**The bumper's thickness and the rear wall's are different keys**, and
+the two decide different things. The ballistic-limit equation takes the
+*rear wall's* thickness, which is `target_wall_thickness_m`; the
+energy-coupling routine takes the *bumper's*, which is
+`target_bumper_thickness_m`. A shielded target that declares only the
+rear wall gets the penetration analysis and not the coupling routine's
+Whipple branch, and that is the honest reading of what it declared.
 
 A skipped branch leaves its components at 0.0, which is the library's
 own documented behaviour and not a failure. `_energy` is the exception
 and is published whatever is declared: with no target geometry at all
 the library returns its documented worst case, the full-penetration
-fraction of the impact energy.
+fraction of the impact energy, and that figure is then scaled by the
+landed fraction like every other.
 
 ##### The directed-energy laser
 
-Ten components:
+Eleven components:
 
 | Component | Value |
 |---|---|
@@ -1285,6 +1342,7 @@ Ten components:
 | `<name>_encircled` | Fraction of the beam's energy falling inside the target's projected area. |
 | `<name>_fluence` | Fluence at the target, in joules per square metre. |
 | `<name>_transmissivity` | Plasma-plug transmissivity, in [0, 1]. |
+| `<name>_p_coupled` | Power coupled into the target, in watts. |
 | `<name>_ignited` | 1.0 when the fluence reached the material's plasma-ignition threshold. |
 
 **The effect.** The ablation plume leaves along the beam, so the recoil
@@ -1304,12 +1362,23 @@ the detection channels take, in the target's own frame: a craft that
 turns changes both what a detector sees and what a beam lands on, and
 there is one description of that geometry rather than two.
 
-Three quantities the library's ablation event carries are deliberately
-not published. The threshold fluence is a constant of the declared
-material; the effective dwell is the control period; and the on-target
-intensity is the published fluence divided by that period. None of the
-three can move within an episode, and a component nothing can move is a
-component nothing can be shaped against.
+The library's ablation event carries thirteen fields. Nine are
+published above; the remaining four are deliberately absent, each
+because nothing a program can write moves it:
+
+- the **power at the aperture** is the declared output power times a
+  Strehl ratio computed from the declared wavefront error and
+  wavelength, so it is the declared power times a constant;
+- the **threshold fluence** is a constant of the declared material;
+- the **effective dwell** is the control period;
+- the **on-target intensity** is the published fluence divided by that
+  period.
+
+A component nothing can move is a component nothing can be shaped
+against. The coupled power is published rather than absent because it
+does move: it is the on-target power scaled by the reflectivity and the
+plasma transmissivity, and both the transmissivity and the encircled
+fraction that set it move with the geometry.
 
 ##### Both kinds
 

@@ -454,7 +454,8 @@ static const char *const OBS_SFX_TRACK_[] =
  * lookup below reads the world rather than the statement alone. */
 static const char *const OBS_SFX_EFF_LASER_[] =
     { "_engaged", "_effect", "_dv", "_mass_loss", "_range", "_spot",
-      "_encircled", "_fluence", "_transmissivity", "_ignited", NULL };
+      "_encircled", "_fluence", "_transmissivity", "_p_coupled",
+      "_ignited", NULL };
 static const char *const OBS_SFX_EFF_IMPACTOR_[] =
     { "_engaged", "_effect", "_hit", "_closing_speed", "_t_close",
       "_miss", "_fraction", "_cos_angle", "_penetrates",

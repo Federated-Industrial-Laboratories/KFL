@@ -876,12 +876,18 @@ static int child_main_(void)
 
     /* Gate 7: the defense payloads, and the matched control.
      *
-     * The window opens after create and one reset and then runs sixty
-     * steps of two environments at a horizon of twelve, so it holds
-     * step 1 and five boundary resets per environment. Both halves
-     * are driven identically; the counts are printed as figures
-     * rather than only asserted, because what the payloads cost is
-     * the reading and not merely whether it is zero. */
+     * The window opens on a fresh handle, with no reset before it, and
+     * then runs sixty steps of two environments at a horizon of
+     * twelve, so it holds step 1 and the boundary resets that fall
+     * inside it. How many that is, is counted from the artifact's own
+     * flags word below and printed from that count; this comment does
+     * not restate it, because a figure written beside a measured one
+     * is a figure that goes stale while the measurement stays right,
+     * which is what happened to the two particulars this sentence
+     * replaces. Both halves are driven identically; the counts are
+     * printed as figures rather than only asserted, because what the
+     * payloads cost is the reading and not merely whether it is
+     * zero. */
     {
         unsigned long pay_a = 0, pay_w = 0, non_a = 0, non_w = 0;
         static const char *const SOS[2] = {
