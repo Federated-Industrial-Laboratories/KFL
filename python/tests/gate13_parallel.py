@@ -18,10 +18,16 @@ per environment and identical for every agent, on termination, on
 truncation and on fault, with the roster emptying and step-after-end
 refused; an artifact whose slices do not partition its vectors is
 refused naming what it found; an agent that publishes no name is
-refused rather than named by invention; a single-agent artifact is
-served by the single-agent shape exactly as before; importing the
-package does not import the optional dependency; and PettingZoo's own
-parallel API conformance check runs against the fixture.
+refused rather than named by invention; every action-space branch is
+driven against a raw handle over a three-agent mixed-kind artifact; a
+reset option this version does not define comes back named in the info
+mapping as well as in a warning, so the record survives a consumer's
+warning filters; a single-agent artifact is served by the single-agent
+shape exactly as before; close is idempotent and everything on a
+closed environment is refused before any artifact call, while the two
+run records stay readable; importing the package does not import the
+optional dependency; and PettingZoo's own parallel API conformance
+check runs against the fixture.
 
 Skips (77) when the built compiler, the stack archives, gymnasium or
 pettingzoo are absent.
@@ -31,6 +37,7 @@ import ctypes
 import struct
 import subprocess
 import sys
+import warnings
 
 import _gateutil as g
 
@@ -75,6 +82,64 @@ fn world pair_term_world
         a_craft.vel_x = a_craft.vel_x + alpha.push
         a_craft.vel_z = a_craft.vel_z + bank
         b_craft.vel_x = b_craft.vel_x + beta.push
+    end
+end
+end
+"""
+
+# Three agents whose action spaces take three different shapes, so the
+# marshalling's every branch is driven: alpha's box-and-discrete
+# mixture is a Tuple, beta's two discretes are a MultiDiscrete, and
+# gamma's one discrete is a Discrete. Their widths are three, two and
+# one against five, ten and fifteen observation components, so no two
+# agents' slices can be exchanged without changing a shape. Every
+# action channel reaches a body's velocity, because a channel nothing
+# reads cannot show that it was marshalled to the right offset.
+PAIR_MIX_KFL = """\
+form RL_PAIRMIX
+fn world mix_world
+    astro_body earth gm=3.986004418e14 mass=5.972e24
+    astro_body a_craft gm=1.0 parent=earth pos_x=7.0e6 vel_y=7546.0
+    astro_body b_craft gm=1.0 parent=earth pos_x=7.4e6 vel_y=7340.0
+    astro_body c_craft gm=1.0 parent=earth pos_x=7.8e6 vel_y=7150.0
+    episode
+        control_dt 1.0
+        horizon 60
+    end
+    agent alpha
+        action push box -1.0 1.0 default 0.0
+        action bank box -2.0 2.0 default 0.0
+        action stage discrete 3 default 0
+        observe a_craft from earth mode=geometric as trk
+        objective
+            reward 1.0
+        end
+    end
+    agent beta
+        action gearsel discrete 4 default 0
+        action trim discrete 2 default 0
+        observe b_craft from earth mode=geometric as trk
+        observe b_craft from a_craft mode=geometric as rel
+        objective
+            reward 2.0
+        end
+    end
+    agent gamma
+        action sel discrete 5 default 0
+        observe c_craft from earth mode=geometric as trk
+        observe c_craft from a_craft mode=geometric as rela
+        observe c_craft from b_craft mode=geometric as relb
+        objective
+            reward 3.0
+        end
+    end
+    on_step
+        a_craft.vel_x = a_craft.vel_x + push
+        a_craft.vel_z = a_craft.vel_z + bank
+        a_craft.vel_y = a_craft.vel_y + stage
+        b_craft.vel_x = b_craft.vel_x + gearsel
+        b_craft.vel_z = b_craft.vel_z + trim
+        c_craft.vel_x = c_craft.vel_x + sel
     end
 end
 end
@@ -185,6 +250,23 @@ end
 end
 """
 
+# The suppressed-warning probe: with warnings off at the interpreter,
+# the record of what an ignored reset option discarded must still
+# reach the consumer through the info mapping.
+OPTIONS_PROBE = """\
+import sys
+import warnings
+sys.path.insert(0, %r)
+from k26rl.parallel import K26RlParallelEnv, INFO_IGNORED_OPTIONS
+env = K26RlParallelEnv(%r, seed=%d)
+with warnings.catch_warnings(record=True) as caught:
+    obs, infos = env.reset(options={"scenario": "hard", "b": 1})
+    seen = [str(w.message) for w in caught]
+env.close()
+first = infos[sorted(infos)[0]]
+print(len(seen), first[INFO_IGNORED_OPTIONS])
+"""
+
 # The import-isolation probe: importing the package, and reaching the
 # single-agent class through it, must not pull in the optional
 # dependency.
@@ -215,6 +297,19 @@ def act_alpha(t):
 
 def act_beta(t):
     return (((t * 9) % 13) / 13.0 - 0.5,)
+
+
+# The mixed-kind stream: one function per channel, each inside its
+# declared bounds or arity and each moving at every step, so a value
+# marshalled to the wrong offset lands on a channel that was carrying
+# something else.
+def mix_channels(t):
+    return (((t * 5) % 11) / 11.0 - 0.5,      # alpha push, box
+            ((t * 3) % 7) / 7.0 - 0.5,        # alpha bank, box
+            (t * 2) % 3,                      # alpha stage, arity 3
+            (t + 1) % 4,                      # beta gearsel, arity 4
+            t % 2,                            # beta trim, arity 2
+            (t * 3) % 5)                      # gamma sel, arity 5
 
 
 class Arms:
@@ -265,9 +360,9 @@ def main():
 
     from k26rl import _abi, _spec
     from k26rl.env import K26RlEnv
-    from k26rl.parallel import K26RlParallelEnv
+    from k26rl.parallel import K26RlParallelEnv, INFO_IGNORED_OPTIONS
     from k26rl.vector import K26RlVectorEnv
-    from k26rl._errors import K26RlFaultError
+    from k26rl._errors import K26RlError, K26RlFaultError
 
     arms = Arms()
     pair = g.compile_fixture("rl_multi_agent")
@@ -393,6 +488,16 @@ def main():
         arms.check(infos == {"leader": {}, "follower": {}},
                    "step %d: info is %s on an ordinary step"
                    % (t, infos))
+        # Each agent's array owns its buffer. A view would carry the
+        # right values, so the retention arm below cannot see this;
+        # what it would carry with them is every other agent's
+        # components, once for every step a consumer stores.
+        for agent in obs:
+            arms.check(obs[agent].base is None,
+                       "step %d: the %s observation is a view over a "
+                       "%d-element parent, not its own array"
+                       % (t, agent, obs[agent].base.size
+                          if obs[agent].base is not None else 0))
         retained.append((obs, {a: want_obs[o:o + c].tobytes()
                                for a, (o, c) in obs_at.items()}))
     art.destroy(handle)
@@ -405,6 +510,72 @@ def main():
             arms.check(obs[agent].tobytes() == wanted,
                        "step %d: the %s observation changed after the "
                        "steps that followed it" % (t, agent))
+
+    # ---- every action-space branch, against the raw handle -----------
+    # The fixture above drives all four marshalling branches: a Tuple
+    # carrying box and discrete elements, a MultiDiscrete, and a
+    # Discrete, beside the all-box case the two-agent fixture already
+    # covers. Each is compared bitwise against a raw handle fed the
+    # concatenated vector, so a value written to the wrong offset, or
+    # transformed on the way, shows up as a different trajectory.
+    mix_so = g.compile_fixture("rl_pair_mix", PAIR_MIX_KFL)
+    mix = K26RlParallelEnv(mix_so, seed=SEED)
+    arms.check(mix.possible_agents == ["alpha", "beta", "gamma"],
+               "the mixed fixture publishes %s"
+               % (mix.possible_agents,))
+    alpha_space = mix.action_space("alpha")
+    arms.check(isinstance(alpha_space, gym_spaces.Tuple)
+               and len(alpha_space.spaces) == 3
+               and isinstance(alpha_space.spaces[0], gym_spaces.Box)
+               and isinstance(alpha_space.spaces[2],
+                              gym_spaces.Discrete),
+               "alpha's action space is %r" % (alpha_space,))
+    beta_space = mix.action_space("beta")
+    arms.check(isinstance(beta_space, gym_spaces.MultiDiscrete)
+               and list(beta_space.nvec) == [4, 2],
+               "beta's action space is %r" % (beta_space,))
+    gamma_space = mix.action_space("gamma")
+    arms.check(isinstance(gamma_space, gym_spaces.Discrete)
+               and gamma_space.n == 5,
+               "gamma's action space is %r" % (gamma_space,))
+
+    mix_art = _abi.Artifact(mix_so)
+    mix_handle = mix_art.create(SEED, 1)
+    mix_spec = _spec.parse(mix_art.spec_blob(mix_handle))
+    mix_at = dict(zip(["alpha", "beta", "gamma"],
+                      _spec.slices_by_agent(mix_spec.agent_obs_slices,
+                                            mix_spec.agent_count)))
+    mix_obs = np.empty(mix_spec.obs_total, dtype=np.float64)
+    mix_rew = np.empty(mix_spec.agent_count, dtype=np.float64)
+    mix.reset()
+    for t in range(T):
+        push, bank, stage, gearsel, trim, sel = mix_channels(t)
+        obs, rew, _term, _trunc, _infos = mix.step({
+            "alpha": (push, bank, stage),
+            "beta": np.array([gearsel, trim], dtype=np.int64),
+            "gamma": sel})
+        flat = np.array([push, bank, stage, gearsel, trim, sel],
+                        dtype=np.float64)
+        mix_art.step(mix_handle, flat.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_double)))
+        mix_art.obs(mix_handle, mix_obs.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_double)))
+        mix_art.reward(mix_handle, mix_rew.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_double)))
+        for agent, (offset, count) in mix_at.items():
+            arms.check(
+                obs[agent].tobytes()
+                == mix_obs[offset:offset + count].tobytes(),
+                "mixed step %d: %s observation differs from the raw "
+                "handle's channels [%d, %d)"
+                % (t, agent, offset, offset + count))
+        arms.check(
+            [rew[n] for n in ("alpha", "beta", "gamma")]
+            == [mix_rew[0], mix_rew[1], mix_rew[2]],
+            "mixed step %d: rewards %s against the raw handle's %s"
+            % (t, rew, mix_rew))
+    mix_art.destroy(mix_handle)
+    mix.close()
 
     # ---- the recorded stream is the artifact's, not this shape's -----
     # The same seed and the same actions, recorded once through the
@@ -752,6 +923,90 @@ def main():
                    "a non-empty options mapping on the single-agent "
                    "shape")
     plain_env.close()
+
+    # ---- an ignored reset option is recoverable ----------------------
+    # The warning is one half and the filterable half; the info payload
+    # is the half that survives a consumer's warning filters, and the
+    # arms are separate because deleting either leaves the other
+    # passing.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        run = K26RlParallelEnv(pair, seed=SEED)
+        _obs, infos = run.reset(options={"scenario": "hard", "b": 1})
+        run.close()
+    arms.check(len(caught) == 1,
+               "a non-empty options mapping raised %d warnings, "
+               "expected 1" % len(caught))
+    arms.check("'b', 'scenario'" in str(caught[0].message),
+               "the warning does not name the keys: %s"
+               % caught[0].message)
+    arms.check(all(info.get(INFO_IGNORED_OPTIONS) == ["b", "scenario"]
+                   for info in infos.values()),
+               "the reset info does not carry the ignored keys: %s"
+               % (infos,))
+    run = K26RlParallelEnv(pair, seed=SEED)
+    _obs, infos = run.reset()
+    arms.check(all(INFO_IGNORED_OPTIONS not in info
+                   for info in infos.values()),
+               "a reset that ignored nothing still reported keys: %s"
+               % (infos,))
+    run.close()
+
+    # Measured rather than argued: with warnings suppressed at the
+    # interpreter, the warning is gone and the payload is not.
+    probe = subprocess.run(
+        [sys.executable, "-W", "ignore", "-c",
+         OPTIONS_PROBE % (str(g.PKG_DIR), str(pair), SEED)],
+        capture_output=True, text=True)
+    arms.check(probe.returncode == 0,
+               "the suppressed-warning probe failed (rc=%d): %s%s"
+               % (probe.returncode, probe.stdout, probe.stderr))
+    arms.check(probe.stdout.strip() == "0 ['b', 'scenario']",
+               "under -W ignore the probe reported %r, expected no "
+               "warning and the ignored keys"
+               % probe.stdout.strip())
+
+    # ---- close, on the same terms as the other two shapes ------------
+    # The loading gate pins this for the single and vectorised shapes
+    # and stays free of this optional dependency; the same discipline
+    # for this shape is pinned here, where the dependency already is.
+    def expect_closed(call, what):
+        try:
+            call()
+        except K26RlError as exc:
+            arms.check("closed" in str(exc),
+                       "%s after close: %s" % (what, exc))
+        else:
+            arms.check(False,
+                       "%s on a closed environment succeeded" % what)
+
+    closing = K26RlParallelEnv(pair, seed=17)
+    roster = list(closing.possible_agents)
+    closing.close()
+    closing.close()
+    shut = {"leader": np.zeros(2), "follower": np.zeros(1)}
+    expect_closed(lambda: closing.step(shut), "parallel step")
+    expect_closed(lambda: closing.reset(), "parallel reset")
+    expect_closed(lambda: closing.reset(seed=18),
+                  "parallel seeded reset")
+    expect_closed(lambda: closing.set_output("/tmp/never.episode"),
+                  "parallel set_output")
+    for prop in ("env_spec", "control_dt", "obs_channel_names",
+                 "obs_channel_kinds", "agent_obs_channel_names",
+                 "on_fault"):
+        expect_closed(lambda prop=prop: getattr(closing, prop),
+                      "parallel property %s" % prop)
+    arms.check(closing.seeds_held == frozenset({17}),
+               "seeds_held unreadable or wrong after close: %r"
+               % (closing.seeds_held,))
+    arms.check(closing.output_path is None,
+               "output_path unreadable or wrong after close: %r"
+               % (closing.output_path,))
+    # The roster is this object's own record and reaches no artifact,
+    # so it survives close as the other two records do.
+    arms.check(closing.possible_agents == roster,
+               "the agent roster changed across close: %r"
+               % (closing.possible_agents,))
 
     # ---- the optional dependency stays optional ----------------------
     probe = subprocess.run(

@@ -59,6 +59,12 @@ from .env import (
 # is one per environment.
 _ENV = 0
 
+#: Info key naming the reset options this version discarded. Version 1
+#: defines no option, and the keys come back here so that a consumer
+#: who suppressed warnings can still see that an explicit request had
+#: no effect.
+INFO_IGNORED_OPTIONS = "ignored_reset_options"
+
 
 class K26RlParallelEnv(ParallelEnv):
     """A multi-agent artifact behind PettingZoo's ``ParallelEnv``.
@@ -81,6 +87,15 @@ class K26RlParallelEnv(ParallelEnv):
     otherwise would be inventing a per-agent ending the artifact does
     not have. On an ending step ``agents`` empties, as the API's
     convention has it, and ``reset`` repopulates it.
+
+    ``agents`` is this object's record of who is still in the episode,
+    not a control surface. The artifact's roster is fixed for the
+    environment's life and the whole action vector is stepped every
+    step, so removing a name from ``agents`` mid-episode does not
+    retire that agent: it only stops anyone supplying its channels,
+    which are then stepped as zeros rather than as their declared
+    defaults. A consumer that wants an agent to stop acting sends it
+    the action that means that.
 
     ``on_fault`` selects the fault mode, as on the single-agent
     shapes: ``"raise"`` (the default) raises :class:`K26RlFaultError`
@@ -200,7 +215,7 @@ class K26RlParallelEnv(ParallelEnv):
 
     def reset(self, seed=None, options=None):
         self._session.ensure_open()
-        check_options(options, refuse=False)
+        ignored = check_options(options, refuse=False)
         if seed is not None:
             seed = check_seed(seed)
         # Nothing seeds a Python-side generator here: every draw in an
@@ -209,8 +224,14 @@ class K26RlParallelEnv(ParallelEnv):
         obs = self._session.reset_routed(seed)
         self.agents = list(self.possible_agents)
         self._needs_reset = False
+        # Version 1 defines no reset option, so an option handed in
+        # was discarded; it comes back named in the info mapping,
+        # because a warning is filterable and a consumer who suppressed
+        # warnings would otherwise have no way to learn that an
+        # explicit request had no effect.
+        info = {INFO_IGNORED_OPTIONS: list(ignored)} if ignored else {}
         return (self._split_obs(obs),
-                {name: {} for name in self.agents})
+                {name: dict(info) for name in self.agents})
 
     def step(self, actions):
         self._session.ensure_open()
@@ -283,9 +304,14 @@ class K26RlParallelEnv(ParallelEnv):
 
     def _split_obs(self, obs):
         """The one environment's flat observation vector cut into one
-        array per agent at the published offsets. Each agent's array is
-        its own copy, so no consumer's stored observation is a view
-        over another's."""
+        array per agent at the published offsets.
+
+        Each agent's array is a copy rather than a view onto the cut
+        vector. The slices are disjoint, so a view could not corrupt
+        another agent's values; what it would do is keep the whole
+        vector alive behind a small array, so a consumer filling a
+        replay buffer with one agent's five components would be holding
+        every agent's fifteen, once per stored step."""
         row = obs[_ENV]
         return {name: row[offset:offset + count].copy()
                 for name, (offset, count) in self._obs_slice.items()}

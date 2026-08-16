@@ -20,6 +20,19 @@ dependencies = [
 # The multi-agent shape needs pettingzoo and is imported only when it
 # is asked for, so a consumer who wants the single-agent shapes never
 # installs it.
+#
+# The floor is the version this package was verified against, 1.27.0,
+# and no lower bound was tested: an older release may well work, but
+# saying so here without having run it would be a claim rather than a
+# fact. A consumer who needs an older one lowers the floor and runs
+# the multi-agent gate.
+#
+# It adds one package and no other. Measured against the pinned
+# gymnasium with `pip show`: pettingzoo requires gymnasium, numpy and
+# typing-extensions, and gymnasium requires cloudpickle,
+# farama-notifications, numpy and typing-extensions, so every
+# requirement of pettingzoo is already a requirement of gymnasium and
+# the closure grows by pettingzoo itself.
 [project.optional-dependencies]
 multiagent = [
     "pettingzoo>=1.27",

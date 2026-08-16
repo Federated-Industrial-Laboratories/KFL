@@ -210,20 +210,25 @@ def check_options(options, refuse=True):
     """None and an empty mapping are accepted and ignored. Version 1
     defines no options, and silently ignoring an explicit request
     would mislead, so a non-empty mapping is refused naming its keys.
+    Returns the ignored keys, which is an empty list on every path
+    that ignores nothing.
 
-    ``refuse`` is False for the multi-agent shape, whose framework
-    conformance check passes a non-empty mapping to establish that
-    reset accepts the argument at all; refusing there would fail a
-    check of the API this package exists to implement. The mapping is
-    still not ignored silently: it is reported through the warnings
-    machinery, naming its keys, which is what the refusal is for."""
+    ``refuse`` is False for the multi-agent shape, where the same rule
+    is enforced at a lower strength: that framework's conformance
+    check passes a non-empty mapping in to establish that reset
+    accepts the argument at all, and this package chose to be
+    conformant to it and to pay for the choice here. The mapping is
+    still not ignored silently, and not only through the warnings
+    machinery, which a consumer can filter away: the keys are returned
+    for the caller to publish in what it hands back, so the record of
+    what was discarded survives ``-W ignore``."""
     if options is None:
-        return
+        return []
     if not isinstance(options, dict):
         raise TypeError("options must be a mapping or None, not %s"
                         % type(options).__name__)
     if not options:
-        return
+        return []
     keys = sorted(map(str, options.keys()))
     if refuse:
         raise ValueError(
@@ -234,6 +239,7 @@ def check_options(options, refuse=True):
     warnings.warn(
         "version 1 defines no reset options; ignoring options with "
         "keys %s" % keys, stacklevel=3)
+    return keys
 
 
 # ---- the session: handle, buffers, seed record, fault rendering -----
