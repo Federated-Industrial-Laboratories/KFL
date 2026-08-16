@@ -78,6 +78,14 @@ def require_gymnasium(gate_name):
              % (gate_name, sys.executable))
 
 
+def require_pettingzoo(gate_name):
+    try:
+        import pettingzoo  # noqa: F401  (presence probe only)
+    except ImportError:
+        skip("%s: the pettingzoo package is not importable with %s"
+             % (gate_name, sys.executable))
+
+
 def run(cmd, **kwargs):
     proc = subprocess.run(cmd, **kwargs)
     if proc.returncode != 0:

@@ -1,8 +1,12 @@
 # Test runner for the k26rl package. Each gate is one process and
 # owns its skip conditions: it exits 77 with a printed reason when
-# the built compiler, a stack archive, or the gymnasium package is
+# the built compiler, a stack archive, or a package it needs is
 # absent, so `make test` completes everywhere and reports what it
-# could not check. Every gate runs; the summary line counts passes,
+# could not check. The multi-agent gate needs pettingzoo, which is an
+# optional dependency of the package, so it is the one gate a
+# consumer of the single-agent shapes alone will see skip.
+#
+# Every gate runs; the summary line counts passes,
 # skips, and failures, the exit status is nonzero exactly when a
 # gate failed, and a run in which every gate skipped fails, because
 # an all-skip exit 0 enforces nothing and a green suite that checked
@@ -28,7 +32,8 @@ GATES = tests/gate01_cross_driver.py \
         tests/gate07_api_conformance.py \
         tests/gate10_marshalling.py \
         tests/gate11_loading.py \
-        tests/gate12_environments.py
+        tests/gate12_environments.py \
+        tests/gate13_parallel.py
 
 .PHONY: test
 test:
