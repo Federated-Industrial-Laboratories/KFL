@@ -35,6 +35,12 @@
  *      spherical target under the same rotation moves none of them,
  *      which is what tells a channel that honours aspect from one
  *      that reads something else that happens to change.
+ *   5b. The route imperfection takes. The single-generator rule says
+ *      the tier's own noise path is not this layer's route; it does
+ *      not show that this layer's route reaches these channels. A
+ *      detection observe bound to a declared sensor publishes a
+ *      corrupted value beside an uncorrupted one, and the uncorrupted
+ *      one is what the same program publishes with no sensor bound.
  *   6. One generator. An artifact carrying every payload kind names
  *      the tier's generator nowhere, hands every tier evaluator a null
  *      one, and leaves no undefined reference to it once compiled.
@@ -101,7 +107,7 @@ static int g_arms;
     "    astro_payload eye body=watcher kind=detect_ir aperture_m=1.0" \
     " integration_s=0.5 passband_lo_um=3.0 passband_hi_um=12.0" \
     " throughput=0.5 snr_threshold=5.0 target_temp_k=300.0" \
-    " target_emissivity=0.9 optics_temp_k=280.0" \
+    " target_emissivity=0.9 t_optics_k=280.0" \
     " optics_emissivity=0.05\n" \
     "    astro_payload rf body=watcher kind=detect_radar p_tx_w=2000.0" \
     " g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10 loss_sys_db=3.0" \
@@ -115,7 +121,7 @@ static int g_arms;
     " aperture_m=2.0" \
     " integration_s=0.5 passband_lo_um=3.0 passband_hi_um=12.0" \
     " throughput=0.5 snr_threshold=5.0 target_temp_k=300.0" \
-    " target_emissivity=0.9 optics_temp_k=280.0" \
+    " target_emissivity=0.9 t_optics_k=280.0" \
     " optics_emissivity=0.05\n" \
     "    astro_payload picture body=watcher kind=infostate history=256\n"
 
@@ -186,6 +192,29 @@ static const char *const BALL_ASM =
     "    end\n"
     "end\n";
 
+/* An assembly with a mesh and no collision primitive. The mass
+ * properties derive from the mesh, so the reader accepts it; what it
+ * has not got is a silhouette, which is the shape a detection target
+ * must not be. */
+static const char *const BARE_ASM =
+    "# scratch_bare.k26asm - geometry without a collider.\n"
+    "#\n"
+    "# Not a craft. It exists so a detection target that presents no\n"
+    "# area can be written down: mass properties derive from the mesh\n"
+    "# and no collision primitive is declared, which is the one shape\n"
+    "# whose signature would be zero at every aspect.\n"
+    "assembly scratch_bare\n"
+    "    frame x_to_port\n"
+    "    provenance mass \"the shape's own definition\" computed\n"
+    "    provenance inertia \"derived from the geometry by the"
+    " compiler\" computed\n"
+    "    component hull\n"
+    "        mass 1000.0\n"
+    "        at 0.0 0.0 0.0\n"
+    "        mesh calibration_box.k26mesh\n"
+    "    end\n"
+    "end\n";
+
 /* ---- Refusal plumbing ------------------------------------------------ */
 
 static int check_(const char *src, char **out_log)
@@ -232,7 +261,36 @@ static void must_accept_(const char *what, const char *src)
         exit(1);
     }
     g_arms++;
-    printf("  accepted: %s\n", what);
+    printf("  accepted by the checker: %s\n", what);
+}
+
+/* The checker does not build, so an arm that only checks says the
+ * program was not refused and nothing about whether an artifact of it
+ * exists. This one compiles, links, opens and steps it. */
+static void must_build_(const char *what, const char *src,
+                        const char *stem, int n_act)
+{
+    char path[512], out[512];
+    snprintf(path, sizeof path, WORK_DIR "/%s.kfl", stem);
+    snprintf(out, sizeof out, WORK_DIR "/%s", stem);
+    rl_write_file_(path, src);
+    rl_compile_(path, out, WORK_DIR);
+    snprintf(path, sizeof path, WORK_DIR "/%s.rlenv.so", stem);
+    void *so = rl_dlopen_(path);
+    RlSurface s;
+    rl_resolve_surface_(so, &s);
+    K26RlEnv *env = NULL;
+    ASSERT(s.create(3u, 1u, &env) == K26RL_OK);
+    double act[16];
+    for (int i = 0; i < 16; i++) act[i] = 0.0;
+    ASSERT(n_act <= 16);
+    ASSERT(s.step(env, act) == K26RL_OK);
+    ASSERT(s.reset(env) == K26RL_OK);
+    ASSERT(s.step(env, act) == K26RL_OK);
+    s.destroy(env);
+    dlclose(so);
+    g_arms++;
+    printf("  built and stepped: %s\n", what);
 }
 
 /* ---- Gate 1: the refusals ------------------------------------------- */
@@ -417,6 +475,66 @@ static void gate_refusals_(void)
                           "part of the compiled program's identity", NULL };
     must_refuse_("a payload declaration inside a conditional", src, f15);
 
+    /* Two information states on one body. The payload binds through
+     * the vehicle's singleton slot, so the second would evict the
+     * first and leave its channels reporting nothing. */
+    snprintf(src, sizeof src, "%s%s%s%s",
+        DEF_HEAD, DEF_MOVER("calibration_box.k26asm", "0.0"),
+        "    astro_payload picture body=watcher kind=infostate\n"
+        "    astro_payload second body=watcher kind=infostate\n",
+        DEF_EPISODE "end\nend\n");
+    const char *f17[] = { "astro_payload `second`",
+                          "already carries the information state "
+                          "`picture` declared at line",
+                          "would evict the first", NULL };
+    must_refuse_("two information states on one body", src, f17);
+
+    /* Three detection payloads on one body are admitted, because they
+     * bind through the list slot: the rule above is this one kind's
+     * and not a rule about payload counts. The whole fixture below
+     * carries four of them and is accepted. */
+    snprintf(src, sizeof src, "%s%s%s%s",
+        DEF_HEAD, DEF_MOVER("calibration_box.k26asm", "0.0"),
+        "    astro_payload picture body=watcher kind=infostate\n"
+        "    astro_payload other body=mover kind=infostate\n",
+        DEF_EPISODE "end\nend\n");
+    must_accept_("one information state on each of two bodies", src);
+
+    /* A detection target whose assembly declares components but no
+     * collider. Without this refusal the checker accepts it and the
+     * build then fails against a generated file, naming neither the
+     * body nor what is missing. */
+    snprintf(src, sizeof src, "%s%s%s%s%s",
+        DEF_HEAD, DEF_MOVER("scratch_bare.k26asm", "0.0"),
+        DEF_PAYLOADS, DEF_EPISODE,
+        "    agent hunter\n"
+        "        action nudge box -1.0 1.0 default 0.0\n"
+        "        observe detect eye of mover as ir\n"
+        "    end\n"
+        "end\nend\n");
+    const char *f18[] = { "scratch_bare.k26asm", "declares no `collider`",
+                          "presents no area along a line of sight", NULL };
+    must_refuse_("a detection target whose assembly has no collider",
+                 src, f18);
+
+    /* A history below the minimum the library documents. It clamps
+     * silently; a reader who has been given a minimum takes it for a
+     * refusal, so it is one. */
+    snprintf(src, sizeof src, "%s%s%s%s",
+        DEF_HEAD, DEF_MOVER("calibration_box.k26asm", "0.0"),
+        "    astro_payload picture body=watcher kind=infostate"
+        " history=1\n",
+        DEF_EPISODE "end\nend\n");
+    const char *f19[] = { "`history=1` is below the minimum of 2", NULL };
+    must_refuse_("a history capacity below the documented minimum",
+                 src, f19);
+    snprintf(src, sizeof src, "%s%s%s%s",
+        DEF_HEAD, DEF_MOVER("calibration_box.k26asm", "0.0"),
+        "    astro_payload picture body=watcher kind=infostate"
+        " history=2\n",
+        DEF_EPISODE "end\nend\n");
+    must_accept_("a history capacity at the documented minimum", src);
+
     /* A payload inside `on_step`, which is where the design says it
      * may not be: the block calls evaluators and constructs nothing. */
     snprintf(src, sizeof src, "%s%s%s%s",
@@ -430,9 +548,14 @@ static void gate_refusals_(void)
                           "on_step block", NULL };
     must_refuse_("a payload declaration inside on_step", src, f16);
 
-    /* And the whole fixture, accepted. */
+    /* And the whole fixture. It carries every kind this surface
+     * binds, so building it is what says an artifact exists for each
+     * of them: the checker's acceptance above says only that nothing
+     * refused the source. */
     must_accept_("every payload kind of this surface in one world",
                  BOX_KFL);
+    must_build_("every payload kind of this surface in one world",
+                BOX_KFL, "accept_all", 2);
 }
 
 /* ---- Gate 2: every agent block declares an observation --------------- */
@@ -958,6 +1081,7 @@ static void gate_aspect_(void)
 
     ASSERT(box.s.obs(box.env, vb) == K26RL_OK);
     ASSERT(ball.s.obs(ball.env, vs) == K26RL_OK);
+    double vb0_aspect = vb[chan_(&box, "hunter.ir_aspect")];
     double b0[3] = { vb[b_ir], vb[b_rd], vb[b_ld] };
     double s0[3] = { vs[s_ir], vs[s_rd], vs[s_ld] };
     ASSERT(b0[0] > 0.0 && b0[1] > 0.0 && b0[2] > 0.0);
@@ -974,6 +1098,37 @@ static void gate_aspect_(void)
      * shot-noise detection give a ratio in the square root of the
      * area; the radar's flat-plate cross-section is in its square. */
     double ratio = box_area_(0.05 * 3.0) / box_area_(0.0);
+
+    /* The aspect channel exists to explain the movement below, so it
+     * must move with it. The line of sight is along the world y axis
+     * and the target turns about its z axis, so the cosine against
+     * its first body axis is the sine of the turned angle. */
+    {
+        int b_as = chan_(&box, "hunter.ir_aspect");
+        double want0 = 0.0, want3 = sin(0.05 * 3.0);
+        double got0 = vb0_aspect, got3 = vb[b_as];
+        if (fabs(got0 - want0) > 1.0e-9 ||
+            fabs(got3 - want3) > 2.0e-3) {
+            fprintf(stderr, "FAIL aspect channel: %.9f then %.9f, the "
+                    "geometry gives %.9f then %.9f\n", got0, got3,
+                    want0, want3);
+            exit(1);
+        }
+        /* And it must move by an amount a reader could act on, not by
+         * a rounding: the quantity it explains moves by tens of per
+         * cent over the same window. */
+        if (!(fabs(got3 - got0) > 0.1)) {
+            fprintf(stderr, "FAIL aspect channel moved by %.3e while the "
+                    "signal-to-noise it explains moved by %.1f per "
+                    "cent\n", fabs(got3 - got0),
+                    100.0 * (vb[b_rd] / b0[1] - 1.0));
+            exit(1);
+        }
+        g_arms++;
+        printf("  aspect channel: %.6f then %.6f, the sine of the angle "
+               "turned, while the radar reading moves %.1f per cent\n",
+               got0, got3, 100.0 * (vb[b_rd] / b0[1] - 1.0));
+    }
     struct { const char *name; double got; double want; } arms[3] = {
         { "infrared", vb[b_ir] / b0[0], sqrt(ratio) },
         { "radar",    vb[b_rd] / b0[1], ratio * ratio },
@@ -1070,6 +1225,91 @@ static void gate_modality_map_(void)
         printf("  modality %s reaches the library as %d, the value its "
                "header declares\n", MODS[i].name, MODS[i].value);
     }
+}
+
+/* ---- Gate 5b: the route imperfection takes ------------------------- */
+
+/* The single-generator rule says the tier's own noise path is not the
+ * route this layer takes; it does not on its own show that the layer's
+ * route reaches these channels at all. This arm shows it: a detection
+ * observe bound to a declared sensor publishes a corrupted value
+ * beside the uncorrupted one, and the uncorrupted one is what the same
+ * program publishes with no sensor bound. */
+static void gate_sensor_route_(void)
+{
+#define SENSED_TAIL(clause) \
+        DEF_EPISODE \
+        "    agent hunter\n" \
+        "        action nudge box -1.0 1.0 default 0.0\n" \
+        "        observe detect eye of mover " clause "as ir\n" \
+        "        observe track picture of mover as trk\n" \
+        "    end\n" \
+        "    agent quarry\n" \
+        "        action dodge box -1.0 1.0 default 0.0\n" \
+        "        observe mover from watcher mode=geometric as los\n" \
+        "    end\n" \
+        "end\n" \
+        "end\n"
+
+    static const char *const SENSED_KFL =
+        DEF_HEAD DEF_MOVER("calibration_box.k26asm", "0.0")
+        DEF_PAYLOADS
+        "    sensor rough\n"
+        "        noise normal 0.0 25000.0\n"
+        "    end\n"
+        SENSED_TAIL("through rough with truth ");
+
+    /* The same program with the one clause removed, so what the
+     * comparison below isolates is the clause and not two worlds. */
+    static const char *const UNSENSED_KFL =
+        DEF_HEAD DEF_MOVER("calibration_box.k26asm", "0.0")
+        DEF_PAYLOADS
+        SENSED_TAIL("");
+    Driven d;
+    open_(&d, SENSED_KFL, "sensed", 23u);
+    int c_snr  = chan_(&d, "hunter.ir_snr");
+    int c_true = chan_(&d, "hunter.ir_truth_snr");
+    double v[128], act[2] = { 0.0, 0.0 };
+    int moved = 0;
+    double first_gap = 0.0;
+    for (int s = 0; s < 6; s++) {
+        ASSERT(d.s.step(d.env, act) == K26RL_OK);
+        ASSERT(d.s.obs(d.env, v) == K26RL_OK);
+        if (v[c_snr] != v[c_true]) {
+            moved++;
+            if (first_gap == 0.0) first_gap = v[c_snr] - v[c_true];
+        }
+    }
+    if (moved < 5) {
+        fprintf(stderr, "FAIL: a bound sensor left the detection channel "
+                "uncorrupted on %d of 6 steps\n", 6 - moved);
+        exit(1);
+    }
+    /* The uncorrupted half must be the value the same program without
+     * the clause publishes, or the pairing would be corrupting both.
+     * Both handles are driven from create over the same number of
+     * steps, so the comparison isolates the clause. */
+    Driven plain;
+    open_(&plain, UNSENSED_KFL, "unsensed", 23u);
+    int p_snr = chan_(&plain, "hunter.ir_snr");
+    double pv[128];
+    for (int s = 0; s < 6; s++) {
+        ASSERT(plain.s.step(plain.env, act) == K26RL_OK);
+    }
+    ASSERT(plain.s.obs(plain.env, pv) == K26RL_OK);
+    ASSERT(d.s.obs(d.env, v) == K26RL_OK);
+    if (v[c_true] != pv[p_snr]) {
+        fprintf(stderr, "FAIL: the paired true value is %.17g and the "
+                "unsensed program publishes %.17g\n", v[c_true],
+                pv[p_snr]);
+        exit(1);
+    }
+    g_arms++;
+    printf("  a bound sensor corrupts the detection channel on %d of 6 "
+           "steps (first gap %.6g) while the paired true value stays "
+           "the unsensed one\n", moved, first_gap);
+    close_(&d);
+    close_(&plain);
 }
 
 /* ---- Gate 6: one generator ------------------------------------------- */
@@ -1340,6 +1580,7 @@ int main(void)
                    "examples/assets/crew_vehicle_10t.k26asm "
                    WORK_DIR "/");
     rl_write_file_(WORK_DIR "/scratch_ball.k26asm", BALL_ASM);
+    rl_write_file_(WORK_DIR "/scratch_bare.k26asm", BARE_ASM);
 
     printf("test_rl_defense: payloads, detection, and the information "
            "state\n");
@@ -1357,6 +1598,7 @@ int main(void)
     gate_validity_seed_();
     gate_aspect_();
     gate_modality_map_();
+    gate_sensor_route_();
     gate_one_generator_();
     gate_determinism_();
 

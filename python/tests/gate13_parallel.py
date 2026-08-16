@@ -856,6 +856,42 @@ def main():
                    ["agent 0 declares no observation channel",
                     "no tag carries an action channel name"],
                    "a spec whose agent 0 has no observation channel")
+    # The constructor's own cleanup path. It used to be reached by the
+    # artifact above, which no longer compiles, so it is reached here
+    # by making the one step it guards fail: the session must be a real
+    # one, really opened and really closed, or the arm would be
+    # checking a stub. The session is captured on the way past rather
+    # than replaced.
+    import k26rl.parallel as _parallel
+    captured = []
+    real_session = _parallel._Session
+    real_names = _parallel._spec.agent_names
+
+    class _Watched(real_session):
+        def __init__(self, *a, **kw):
+            real_session.__init__(self, *a, **kw)
+            captured.append(self)
+
+    def _boom(_spec_value):
+        raise RuntimeError("agent names unreadable")
+
+    _parallel._Session = _Watched
+    _parallel._spec.agent_names = _boom
+    try:
+        expect_refusal(arms,
+                       lambda: K26RlParallelEnv(g.compile_fixture("rl_multi_agent"),
+                                                seed=SEED),
+                       ["agent names unreadable"],
+                       "a constructor that fails after opening the handle",
+                       exc_type=RuntimeError)
+    finally:
+        _parallel._Session = real_session
+        _parallel._spec.agent_names = real_names
+    arms.check(len(captured) == 1,
+               "one session was opened, not %d" % len(captured))
+    arms.check(captured and captured[0].closed,
+               "the handle the failed constructor opened was released")
+    arms.completed("a failed construction releases the handle it opened")
     # A qualifier-free name above one agent, and a slice whose channels
     # carry two different qualifiers.
     def names_from(mapping):

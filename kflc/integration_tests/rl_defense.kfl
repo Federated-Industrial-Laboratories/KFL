@@ -29,7 +29,7 @@ fn world watch_world
     astro_body watcher assembly="../examples/assets/crew_vehicle_10t.k26asm" parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.0
     astro_body target assembly="../examples/assets/calibration_box.k26asm" parent=earth pos_x=7.0e6 pos_y=2.0e4 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.05
 
-    astro_payload eye body=watcher kind=detect_ir aperture_m=1.0 integration_s=0.5 passband_lo_um=3.0 passband_hi_um=12.0 throughput=0.5 snr_threshold=5.0 target_temp_k=normal(300.0,10.0) target_emissivity=0.9 optics_temp_k=280.0 optics_emissivity=0.05
+    astro_payload eye body=watcher kind=detect_ir aperture_m=1.0 integration_s=0.5 passband_lo_um=3.0 passband_hi_um=12.0 throughput=0.5 snr_threshold=5.0 target_temp_k=normal(300.0,10.0) target_emissivity=0.9 t_optics_k=280.0 optics_emissivity=0.05
     astro_payload rf body=watcher kind=detect_radar p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10 loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0 noise_figure=2.0 snr_threshold=10.0
     astro_payload beam body=watcher kind=detect_lidar pulse_energy_j=0.1 wavelength_nm=1064.0 aperture_rx_m=0.5 atmospheric_tx=1.0 detector_efficiency=0.3 snr_threshold=5.0 target_albedo=uniform(0.1,0.3)
     astro_payload picture body=watcher kind=infostate history=256

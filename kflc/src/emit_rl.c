@@ -492,7 +492,7 @@ static const RlPayKey RL_PAY_IR_[] = {
      * a warm instrument looking in its own emission band, and the
      * library says so; a program that wants the honest noise floor
      * declares its optics rather than rebuilding the model. */
-    { "optics_temp_k",     0, "0.0" },
+    { "t_optics_k",        0, "0.0" },
     { "optics_emissivity", 0, "0.0" }
 };
 
@@ -1893,6 +1893,53 @@ static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
             }
         }
         if (kd->n_keys > m->pay_nparam) m->pay_nparam = kd->n_keys;
+
+        /* At most one information state per body. It binds through the
+         * vehicle's singleton payload slot, so a second evicts the
+         * first and the eviction nulls the evicted one's observer: its
+         * nine channels then read invalid for the rest of the run,
+         * which is exactly the silence the target cap above exists to
+         * prevent. Detection payloads bind through the list slot and
+         * are unaffected, so the rule is this kind's alone. */
+        if (py->kind == RL_PAY_INFOSTATE && py->body >= 0) {
+            for (int q = 0; q < p; q++) {
+                if (m->payloads[q].kind != RL_PAY_INFOSTATE) continue;
+                if (m->payloads[q].body != py->body) continue;
+                kflc_diag_errorf(diag, py->line,
+                    "astro_payload `%s`: `%s` already carries the "
+                    "information state `%s` declared at line %d, and a "
+                    "body carries at most one: the second would evict "
+                    "the first, whose channels would then report "
+                    "nothing for the rest of the run",
+                    py->name, m->bodies[py->body].body->name,
+                    m->payloads[q].name, m->payloads[q].line);
+                err = 1;
+                break;
+            }
+        }
+
+        /* D7's other half: the history capacity the library documents
+         * a minimum for. The library clamps a smaller value silently;
+         * a reader who has been told the minimum takes it for a
+         * refusal, so it is one. A distribution is already refused
+         * above, so the value here is a literal or an expression the
+         * emitted code evaluates, and only a literal can be judged
+         * now: what can be judged is judged. */
+        if (py->kind == RL_PAY_INFOSTATE && py->attr[0]) {
+            const char *txt = rl_pay_attr_text_(py->attr[0]);
+            char *end = NULL;
+            double v = txt ? strtod(txt, &end) : 0.0;
+            if (txt && end && *end == '\0' &&
+                v < (double)K26ASTRO_INFOSTATE_MIN_HISTORY_CAPACITY) {
+                kflc_diag_errorf(diag, py->attr[0]->line,
+                    "astro_payload `%s`: `history=%s` is below the "
+                    "minimum of %d the information state needs to "
+                    "interpolate between two samples",
+                    py->name, txt,
+                    K26ASTRO_INFOSTATE_MIN_HISTORY_CAPACITY);
+                err = 1;
+            }
+        }
     }
     return err;
 }
@@ -2048,6 +2095,32 @@ static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
             if (m->obs_target[i] == b) wanted = 1;
         }
         if (!wanted) continue;
+        int have = 0;
+        for (int c = 0; c < m->n_colliders; c++) {
+            if (m->colliders[c].body == b) have++;
+        }
+        if (have == 0) {
+            /* An assembly may declare components and no collider, and
+             * such a body has no silhouette. Without this the program
+             * passes the check and then fails to build, against a
+             * generated source, naming neither the body nor what is
+             * missing. */
+            const KflcAttr *a = rl_attr_(m->bodies[b].body, "assembly");
+            char path[KFLC_ASM_PATH_MAX];
+            const char *raw = a ? rl_pay_attr_text_(a) : NULL;
+            if (!raw || kflc_assembly_unquote(raw, path, sizeof path)) {
+                snprintf(path, sizeof path, "%s", raw ? raw : "?");
+            }
+            kflc_diag_errorf(diag, m->bodies[b].body->line,
+                "observe detect ... of `%s`: the assembly `%s` declares "
+                "no `collider`, so `%s` presents no area along a line of "
+                "sight and its signature would be zero at every aspect; "
+                "a detection target needs at least one collision "
+                "primitive", m->bodies[b].body->name, path,
+                m->bodies[b].body->name);
+            err = 1;
+            continue;
+        }
         for (int c = 0; c < m->n_colliders; c++) {
             if (m->colliders[c].body != b) continue;
             if (m->n_sig >= RL_MAX_SIG) {
@@ -3234,19 +3307,27 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
         fputs(
 "/* The clock the information state is pushed and observed on.\n"
 " *\n"
-" * It is this layer's own, counted in seconds from create and never\n"
-" * reset, rather than the world's: the world's clock returns to the\n"
-" * episode baseline at every reset, and a push older than the ring's\n"
-" * newest sample is dropped, so pushing on the world's clock would\n"
-" * silence the history for the rest of the run. The library needs\n"
-" * only that its epochs are consistent and increasing, which this\n"
-" * is by construction; the retarded-time solution depends on\n"
-" * differences of them and not on their origin.\n"
+" * It is this layer's own rather than the world's: the world's clock\n"
+" * returns to the episode baseline at every reset, and a push older\n"
+" * than the ring's newest sample is dropped, so pushing on the\n"
+" * world's clock would silence the history for the rest of the run.\n"
+" * The library needs only that its epochs are consistent and\n"
+" * increasing, which this is by construction; the retarded-time\n"
+" * solution depends on differences of them and not on their origin.\n"
 " *\n"
-" * The day index carries the growth across episodes and the\n"
-" * seconds carry the time within one, so two samples of one\n"
+" * The day index only ever increases, one step per reset, and the\n"
+" * seconds restart at each episode's epoch. So two samples of one\n"
 " * episode differ by the same arithmetic on the same operands\n"
-" * however many episodes have run before it. */\n"
+" * however many episodes have run before it, and the day index tells\n"
+" * an epoch of this episode from one of any earlier episode exactly.\n"
+" *\n"
+" * The clock is what lets the pushes continue across a reset. It is\n"
+" * not on its own what keeps the episodes apart: the ring is never\n"
+" * emptied, so the retarded time of an early step falls inside\n"
+" * retained history and the interpolator will bracket across the\n"
+" * reset and return a valid observation with the previous episode's\n"
+" * sample blended into it. What rejects that is the day test at the\n"
+" * point of publication. */\n"
 "static K26AstroEpoch kflrl_info_epoch_(int64_t day, double t_s)\n"
 "{\n"
 "    K26AstroEpoch t = k26astro_epoch_j2000_tt();\n"
@@ -4748,7 +4829,16 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
              * observation whose retarded time precedes this episode's
              * epoch was interpolated across the reset. It is
              * published as unavailable, which is what it is. */
-            "            if (_kfl_o.valid && _kfl_o.age_s <= t_info) {\n"
+            /* The retarded epoch must lie in this episode. The ring
+             * still holds the previous episode's samples, so an
+             * observation solved across the reset comes back valid
+             * with that episode's state blended in; the day index the
+             * epochs carry separates the two exactly, where comparing
+             * the reported age against the elapsed time leaves a band
+             * of a few nanoseconds in which the iterate crossed the
+             * epoch and the reported age did not. */
+            "            if (_kfl_o.valid &&\n"
+            "                _kfl_o.t_retarded.days_since_J2000 >= t_day) {\n"
             "                _kfl_val = 1.0;\n"
             "                _kfl_px = _kfl_o.position.x;\n"
             "                _kfl_py = _kfl_o.position.y;\n"
@@ -4794,15 +4884,17 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
         "                _kfl_uy = _kfl_d.y / _kfl_rng;\n"
         "                _kfl_uz = _kfl_d.z / _kfl_rng;\n"
         "            }\n"
-        "            double _kfl_vs = k26m3d_v3_len(_kfl_tb->vel);\n"
-        "            if (_kfl_vs > 0.0) {\n"
-        "                _kfl_asp = (_kfl_ux * _kfl_tb->vel.x\n"
-        "                          + _kfl_uy * _kfl_tb->vel.y\n"
-        "                          + _kfl_uz * _kfl_tb->vel.z) / _kfl_vs;\n"
-        "            }\n"
         "            K26V3 _kfl_look = k26m3d_quat_rotate_v3(\n"
         "                k26m3d_quat_conj(_kfl_tb->attitude),\n"
         "                k26m3d_v3(_kfl_ux, _kfl_uy, _kfl_uz));\n"
+        /* The aspect the silhouette is actually taken at: the line of
+         * sight resolved in the target's own frame, against the first
+         * body axis, which the assembly format runs along the craft.
+         * It is the first component of the look vector by
+         * construction. A velocity-referenced cosine would name the
+         * same angle for a craft flying nose forward and would sit
+         * still while the signature moved for one that is not. */
+        "            _kfl_asp = _kfl_look.x;\n"
         "            double _kfl_area = kflrl_sig_area_(%d, _kfl_look);\n"
         "            const double *_kfl_pp = payp\n"
         "                ? payp + %d * KFLRL_PAY_NPARAM : NULL;\n"
@@ -6838,11 +6930,16 @@ static void rl_emit_env_core_(FILE *out)
 "     * difference inside an episode the same arithmetic on the\n"
 "     * same operands in every episode.\n"
 "     *\n"
-"     * An observation whose retarded time precedes this episode's\n"
-"     * epoch is published as unavailable rather than interpolated\n"
-"     * across the reset: what lies on the far side is the previous\n"
-"     * episode, and reporting it would make episode k+1 a function\n"
-"     * of episode k. */\n"
+"     * The clock alone does not keep the episodes apart, and the\n"
+"     * observation path does not rely on it to. The ring is never\n"
+"     * emptied, so an early step's retarded time falls inside\n"
+"     * retained history and the interpolator brackets across the\n"
+"     * reset and returns a valid observation with the previous\n"
+"     * episode's sample blended in. What rejects that is the day\n"
+"     * index test where the channels are published: an observation\n"
+"     * whose retarded epoch falls before this episode's epoch day\n"
+"     * is published as unavailable, because reporting it would make\n"
+"     * episode k+1 a function of episode k. */\n"
 "    void   **payloads;\n"
 "    double  *payp;\n"
 "    double  *info_t;\n"

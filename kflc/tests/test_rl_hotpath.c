@@ -46,10 +46,16 @@
  *      exception the survey found, the information state's first push
  *      for a target, allocates that target's history ring, so the
  *      binding pushes at the episode epoch before any stepping and
- *      the ring exists before the window opens. The window covers
- *      step 1 and five boundary resets per environment, which is the
- *      point: a window opened at step 2 would measure nothing, and
- *      the control says what the payloads themselves cost.
+ *      the ring exists before the window opens. The window opens on a
+ *      fresh handle and covers step 1, the boundary resets, and one
+ *      driven reset, which is the point: a window opened after a
+ *      reset would let the reset do the allocating outside it. How
+ *      many boundaries fell inside is read from the artifact's flags
+ *      word and asserted, not divided out of the fixture's own
+ *      constants. Two targets are tracked, because the ring is
+ *      allocated per pair and one pair cannot express an indexing
+ *      defect in the loop that seeds them. The matched control says
+ *      what the payloads themselves cost.
  *   6. The collision pass and the relative-state observe, over their
  *      own fixture: two collidable bodies that meet inside every
  *      episode, with the second body's state published in the first's
@@ -294,6 +300,14 @@ static const char *const HP_PAY_KFL =
     " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0 omega_z=0.01\n"
     "    astro_body mover assembly=\"hpcoll.k26asm\" parent=earth"
     " pos_x=7.0e6 pos_y=2.0e4 vel_y=7546.0 quat_w=1.0 omega_z=0.05\n"
+    /* A second tracked target, because the ring the seeding
+     * allocates is per (information state, target) pair and a
+     * fixture holding one pair cannot express an indexing defect in
+     * the loop that seeds them: at one pair a seeding that covered
+     * only the first pair and one that covered all of them are the
+     * same loop. */
+    "    astro_body drifter assembly=\"hpcoll.k26asm\" parent=earth"
+    " pos_x=7.0e6 pos_y=-3.0e4 vel_y=7546.0 quat_w=1.0 omega_z=0.02\n"
     "    astro_payload eye body=watcher kind=detect_ir aperture_m=1.0"
     " integration_s=0.5 passband_lo_um=3.0 passband_hi_um=12.0"
     " throughput=0.5 snr_threshold=5.0 target_temp_k=300.0"
@@ -318,6 +332,7 @@ static const char *const HP_PAY_KFL =
     "        observe detect rf of mover as radar\n"
     "        observe detect beam of mover as lidar\n"
     "        observe track picture of mover modality=radar as trk\n"
+    "        observe track picture of drifter modality=ir as trk2\n"
     "    end\n"
     "    agent quarry\n"
     "        action dodge box -1.0 1.0 default 0.0\n"
@@ -343,6 +358,8 @@ static const char *const HP_NOPAY_KFL =
     " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0 omega_z=0.01\n"
     "    astro_body mover assembly=\"hpcoll.k26asm\" parent=earth"
     " pos_x=7.0e6 pos_y=2.0e4 vel_y=7546.0 quat_w=1.0 omega_z=0.05\n"
+    "    astro_body drifter assembly=\"hpcoll.k26asm\" parent=earth"
+    " pos_x=7.0e6 pos_y=-3.0e4 vel_y=7546.0 quat_w=1.0 omega_z=0.02\n"
     "    episode\n"
     "        control_dt 0.5\n"
     "        horizon 12\n"
@@ -363,9 +380,11 @@ static const char *const HP_NOPAY_KFL =
     "end\n"
     "end\n";
 
-/* Two actions, and a horizon of 12 at a period of half a second. */
+/* Two actions, and a horizon of 12 at a period of half a second. The
+ * horizon is short against the window on purpose, so boundary resets
+ * fall inside it; how many actually did is counted from the artifact
+ * rather than divided out of these two numbers. */
 #define HP_PAY_ACT      2
-#define HP_PAY_HORIZON 12
 #define HP_PAY_STEPS   60
 
 static const char *const HP_COLL_KFL =
@@ -850,7 +869,10 @@ static int child_main_(void)
 
             K26RlEnv *env = NULL;
             static double pact[HP_ENVS * HP_PAY_ACT];
+            static uint32_t pflags[HP_ENVS];
+            int boundaries[HP_ENVS];
             for (int i = 0; i < HP_ENVS * HP_PAY_ACT; i++) pact[i] = 0.0;
+            for (int i = 0; i < HP_ENVS; i++) boundaries[i] = 0;
             ASSERT(ps.create(9u, HP_ENVS, &env) == K26RL_OK);
             /* No reset before the window opens. The frozen surface
              * says a handle's observations are valid immediately and
@@ -864,6 +886,19 @@ static int child_main_(void)
             *armed_ = 1;
             for (int t = 0; t < HP_PAY_STEPS; t++) {
                 ASSERT(ps.step(env, pact) == K26RL_OK);
+                /* The boundary resets are counted from the artifact's
+                 * own flags word rather than divided out of the two
+                 * constants above. A gate that prints a figure it
+                 * computed from its own configuration is reporting
+                 * that configuration and not its measurement, and
+                 * would go on printing it if the horizon moved past
+                 * the window and no boundary fell inside at all. */
+                ASSERT(ps.flags(env, pflags) == K26RL_OK);
+                for (int e = 0; e < HP_ENVS; e++) {
+                    if (pflags[e] & K26RL_FLAG_RESET_BOUNDARY) {
+                        boundaries[e]++;
+                    }
+                }
                 /* An explicit reset inside the window, beside the
                  * boundary ones, so the caller-driven reset path is
                  * measured as well as the automatic one. */
@@ -872,17 +907,30 @@ static int child_main_(void)
                 }
             }
             *armed_ = 0;
+            /* The window is worth its zero only if it holds what it
+             * says it holds. Every environment must have crossed at
+             * least two boundaries, and all of them the same number,
+             * since they are driven identically. */
+            for (int e = 0; e < HP_ENVS; e++) {
+                if (boundaries[e] < 2 || boundaries[e] != boundaries[0]) {
+                    fprintf(stderr, "FAIL gate 7: environment %d crossed "
+                            "%d boundary reset(s) against environment 0's "
+                            "%d; the window must hold at least two in "
+                            "each\n", e, boundaries[e], boundaries[0]);
+                    exit(1);
+                }
+            }
             unsigned long a = alloc_total_(), w = write_total_();
             if (half == 0) { pay_a = a; pay_w = w; }
             else           { non_a = a; non_w = w; }
             printf("gate 7: %s: %d steps x %d envs, window holds step 1,"
-                   " %d boundary reset(s) per environment and 1 driven"
-                   " reset, and opens on a fresh handle: alloc-family %lu"
+                   " %d boundary reset(s) per environment counted from"
+                   " the flags word and 1 driven reset, and opens on a"
+                   " fresh handle: alloc-family %lu"
                    " (malloc %lu calloc %lu realloc %lu free %lu),"
                    " write-family %lu\n",
                    half == 0 ? "every payload kind" : "matched control",
-                   HP_PAY_STEPS, HP_ENVS,
-                   HP_PAY_STEPS / HP_PAY_HORIZON, a,
+                   HP_PAY_STEPS, HP_ENVS, boundaries[0], a,
                    counts_[0], counts_[1], counts_[2], counts_[3], w);
             ASSERT(a == 0);
             ASSERT(w == 0);
