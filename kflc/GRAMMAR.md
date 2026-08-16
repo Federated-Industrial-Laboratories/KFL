@@ -387,7 +387,7 @@ caller sets each step, what that caller observes, and what the reward is.
 The compiler then produces an artifact an outside training loop can drive
 step by step (see *The compiled artifact* below).
 
-Seven constructs carry the surface, all of them statements inside a
+Eight constructs carry the surface, all of them statements inside a
 `fn world` body:
 
 | Construct                     | Purpose                                                    |
@@ -398,6 +398,7 @@ Seven constructs carry the surface, all of them statements inside a
 | `observe ... as <name>`       | A named observation channel, recomputed each step.          |
 | `objective` ... `end`         | The reward, and an optional terminal adjustment.            |
 | `agent <name>` ... `end`      | A scope owning actions, observation channels, and an objective. |
+| `sensor <name>` ... `end`     | An imperfection model bound to observation channels with `through`. |
 | `astro_payload <name> ...`    | A detection sensor or information state carried by one craft. |
 
 These words bind as keywords only at statement position inside a
@@ -958,6 +959,15 @@ built, and destroyed with the environment. Nothing is constructed while
 stepping: the per-step path calls the libraries' evaluators, which
 return a value and allocate nothing.
 
+One call on that path is not an evaluator. The information state's
+history push allocates a target's ring the first time it sees that
+target, and the per-step path calls it once per sub-advance. It costs
+nothing there only because the binding has already pushed every
+observer-target pair once when the world was built and once at every
+reset, so no push the step makes is ever a first one. That is the same
+act as the seeding described under *Information state* below, and it
+is what the allocation figures in this compiler's own gates measure.
+
 The admissible keys are a function of `kind=`. A key that belongs to
 another kind is refused naming that kind rather than reported as
 unknown; a missing required key is refused naming it. Every key is a
@@ -968,26 +978,42 @@ constructed and a per-episode draw could not reach it.
 
 | `kind=` | Required keys |
 |---|---|
-| `detect_ir` | `aperture_m`, `integration_s`, `passband_lo_um`, `passband_hi_um`, `throughput`, `snr_threshold`, `target_temp_k`, `target_emissivity`; optional `optics_temp_k` and `optics_emissivity`, both 0 by default |
+| `detect_ir` | `aperture_m`, `integration_s`, `passband_lo_um`, `passband_hi_um`, `throughput`, `snr_threshold`, `target_temp_k`, `target_emissivity`; optional `t_optics_k` and `optics_emissivity`, both 0 by default |
 | `detect_radar` | `p_tx_w`, `g_tx_db`, `g_rx_db`, `freq_hz`, `loss_sys_db`, `bandwidth_hz`, `t_sys_k`, `noise_figure`, `snr_threshold` |
 | `detect_lidar` | `pulse_energy_j`, `wavelength_nm`, `aperture_rx_m`, `atmospheric_tx`, `detector_efficiency`, `snr_threshold`, `target_albedo` |
-| `infostate` | `history`, optional, 1024 by default and at least 2; fixed when the payload is constructed, so it takes no distribution |
+| `infostate` | `history`, optional, 1024 by default; fixed when the payload is constructed, so it takes no distribution, and refused below 2, which is the fewest samples an interpolation needs |
 
-The keys named after the instrument are the library constructor's own
-parameters of the same name. The three named `target_` are not: a
-detection calculation needs the radiometric properties of what is being
-looked at as well as the instrument's, and they are declared here
+Every key naming the instrument is a parameter of the library function
+that consumes it, spelled the same way: the constructor's for the six
+`detect_ir` instrument keys, the nine `detect_radar` keys and the six
+`detect_lidar` instrument keys, and the evaluator's for `t_optics_k`
+and `optics_emissivity`.
+
+The three named `target_` describe what is being looked at rather than
+the instrument, which is why no constructor carries them.
+`target_albedo` is the lidar evaluator's parameter of that name;
+`target_temp_k` and `target_emissivity` are this grammar's names for
+the target temperature and emissivity the infrared path needs, which
+the library takes as `emitter_T_K` and as the emissivity argument of
+its in-band radiated-power routine. They are declared on the payload
 because they are the reference-target properties a detection threshold
-is specified against. One detection payload therefore models one target
-class, and a program observing two dissimilar targets declares one
-payload per class. Radar needs none of them, its cross-section being
-geometric.
+is specified against. **One detection payload therefore models one
+target class**, and a program observing two dissimilar targets declares
+one payload per class. Radar needs none of them, its cross-section
+being geometric.
 
-`optics_temp_k` and `optics_emissivity` describe the observing
-telescope's own thermal emission, which for a warm instrument looking in
-its own emission band sets the noise floor. Both default to 0, which is
-the library's documented cosmic-background-only behaviour; a program
+`t_optics_k` and `optics_emissivity` describe the observing telescope's
+own thermal emission, which for a warm instrument looking in its own
+emission band sets the noise floor. Both default to 0, which is the
+library's documented cosmic-background-only behaviour; a program
 modelling a real instrument declares them.
+
+**A body carries any number of detection payloads and at most one
+information state.** A detection sensor binds into the vehicle's
+payload list; an information state binds into its singleton slot, so a
+second would evict the first and leave the evicted one's channels
+reporting nothing for the rest of the run. A second is refused naming
+both statements.
 
 #### Detection
 
@@ -996,9 +1022,12 @@ observe detect <payload> of <target> as <name>
 ```
 
 `<payload>` names an `astro_payload` of a detection kind and `<target>`
-an `astro_body` of the same world that binds an `assembly=`, since the
-signature is computed from the geometry the assembly declares. A payload
-does not observe the craft that carries it. Seven components:
+an `astro_body` of the same world that binds an `assembly=` **declaring
+at least one `collider`**, since the signature is computed from the
+collision primitives the assembly declares and a body with none would
+present no area at any aspect. A body with no assembly, and an assembly
+with no collider, are each refused naming the body and what is missing.
+A payload does not observe the craft that carries it. Seven components:
 
 | Component | Value |
 |---|---|
@@ -1006,7 +1035,7 @@ does not observe the craft that carries it. Seven components:
 | `<name>_snr` | The computed signal-to-noise ratio, dimensionless. |
 | `<name>_range` | Observer-to-target distance, in metres. |
 | `<name>_dir_x`, `<name>_dir_y`, `<name>_dir_z` | Unit direction from the observer to the target, in the world frame. |
-| `<name>_aspect` | Cosine of the angle between the line of sight and the target's velocity, in [-1, 1]. |
+| `<name>_aspect` | Cosine of the angle between the line of sight and the target's first body axis, in [-1, 1]. |
 
 Both the hard decision and the continuous quantity are published, so a
 program may shape a reward over one and terminate on the other without
@@ -1018,16 +1047,47 @@ the signature models are aspect dependent: the target's silhouette is
 the projected area of its assembly's collision primitives along the line
 of sight, taken in the target's own frame, so a craft that turns changes
 what its observer sees, and without the aspect channel an agent sees
-detections come and go with nothing that explains them. Overlapping
-primitives are summed rather than unioned, which overstates the area of
-a craft whose colliders interpenetrate.
+detections come and go with nothing that explains them. The channel is
+therefore taken against the same frame the silhouette is: the first body
+axis, which the assembly format runs along the craft. For a craft flying
+nose forward that is the angle between the line of sight and the
+direction of flight. Overlapping primitives are summed rather than
+unioned, which overstates the area of a craft whose colliders
+interpenetrate.
 
 The infrared model takes the in-band radiated power of that area at the
 declared temperature and emissivity; the radar model takes the target as
 a flat plate of that area facing the observer, which is the
 geometric-optics form; the lidar model takes that area as the projected
-area and derives its transmit gain from the declared aperture and
-wavelength.
+area.
+
+Three lidar quantities the statement does not declare are pinned here
+rather than left to be discovered:
+
+- the **transmit gain** is the diffraction-limited figure for the
+  declared `aperture_rx_m` at the declared wavelength, so one aperture
+  stands for both ends of the path;
+- the **view-angle cosine** is 1.0, because the area already carries
+  the projection and applying it twice would square it;
+- the **beam-quality factor** is 1.0, the diffraction-limited value, so
+  the returned photon count takes no degradation the statement has no
+  way to declare.
+
+**These channels carry no imperfection of their own.** Every model here
+computes a noise-free quantity, and the libraries' own optional noise
+generators are not used. A program that wants a noisy detector binds a
+declared `sensor` to the channel exactly as it would to any other
+observation, and may ask for the uncorrupted values beside the
+corrupted ones:
+
+```
+observe detect eye of target through rangefinder with truth as ir
+observe track picture of target through rangefinder as trk
+```
+
+That route puts the draws on this capability's own generator at the
+coordinates a replay reproduces, which the libraries' own generators
+would not.
 
 #### Information state
 
@@ -1066,7 +1126,9 @@ than one step.
 
 At most 64 targets may be tracked against one information state, which
 is the library's own per-observer limit; a program that names more is
-refused naming the payload, the count, and the limit.
+refused naming the payload, the count, and the limit. And at most one
+information state is carried by one body, for the reason given with the
+statement above.
 
 ### The `objective` block
 
