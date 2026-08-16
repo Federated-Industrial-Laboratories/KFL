@@ -1058,7 +1058,17 @@ Both are optional. The strip count is what says a cloud is there:
 `target_chaff_sigma_dipole_m2` declared without it is refused, since it
 would describe strips that do not exist and nothing would read it. A
 strip count declared alone takes the library's own X-band default for a
-single strip. **A payload declaring no chaff key computes exactly the
+single strip.
+
+**The strip count is bounded by the range the cloud statistics routine
+counts strips in, 0 to 2147483647.** A literal outside it is refused
+naming the bound. Past that range the value cannot be handed to the
+routine at all, and a count that could not be handed over would be read
+as no cloud, which is a declared figure nothing reads: the same ground
+the pair rule above stands on. The key admits distribution forms, so a
+drawn value is saturated at the bound rather than wrapped, which makes
+an extreme draw the largest cloud the routine can describe rather than
+no cloud. **A payload declaring no chaff key computes exactly the
 cross-section it computed before these keys existed**, the cloud's term
 not being emitted at all, so the addition is additive rather than a
 change to every radar program. The library's per-sample chaff draw,
@@ -1459,11 +1469,12 @@ is visible; the countermeasure's own channels say only what it did.
 
 ##### The decoy
 
-Seven components:
+Eight components:
 
 | Component | Value |
 |---|---|
 | `<name>_engaged` | 1.0 on a step where the payload was engaged. |
+| `<name>_deployed` | 1.0 when a decoy actually left the host on that step, 0.0 when the host could not supply it. |
 | `<name>_effect` | The largest confidence degradation delivered to one of the victim's detection payloads, in [0, 1); 0.0 when the engagement reached none. |
 | `<name>_reached` | How many of the victim's detection payloads the engagement wrote a degradation to. |
 | `<name>_p_discriminated` | The discrimination probability behind `_effect`; 0.0 when the engagement reached no payload. |
@@ -1480,10 +1491,14 @@ one minus that degradation, and the detection flag is then taken again
 on the moved statistic, since a flag that rested on the value before is
 a flag taken at a threshold the published quantity no longer meets. The
 regime is each victim payload's own `discriminator_regime`, so two
-observers of one decoy are degraded differently. Two decoys against one
-observer compose the way the library's own discrimination model composes
-its channels: the observer has to see through both, so the probabilities
-of not seeing through each multiply.
+observers of one decoy are degraded differently.
+
+Two decoys against one observer compose the way the library's own
+discrimination model composes its channels. The observer is undeceived
+only if it discriminates every decoy, so the probabilities of
+discriminating each multiply, and the confidence it keeps is that
+product: **two decoys leave the observer less than one does**, and a
+hundred leave it less again.
 
 Mapping a discrimination probability onto a detection statistic is this
 grammar's choice and not the library's, which returns the probability
@@ -1493,14 +1508,39 @@ alone. It is stated here rather than left in the code.
 `dry_mass_kg` leaves the host at `deploy_dv_mps`, so the host takes the
 opposite momentum and loses that mass. The decoy is placed between the
 host and the observer it is meant to fool, which is what fixes the
-direction: the host recoils away from the victim. `_mass_loss` reports
-the mass actually removed, and a deploy that would take the whole craft
-removes nothing, on the same rule the ablated mass follows.
+direction: the host recoils away from the victim.
 
-**There is no magazine**, here as for the kinetic effector. Each
-engagement deploys another decoy and costs another dry mass; a program
-modelling stores writes the counter and the conditional the grammar
-already gives it.
+`deploy_dv_mps` is the separation velocity **between the decoy and the
+host after the deploy**, not the decoy's speed in the frame the host
+had before it. Writing momentum conservation with that convention gives
+the host an increment of `dry_mass_kg * deploy_dv_mps` divided by the
+mass the host had before the deploy, and no approximation enters. The
+other convention divides by the mass left behind instead; both are
+defensible and this one is chosen because it is the one that closes
+exactly. The two differ at second order in the mass fraction, and the
+choice is stated because nothing else here would say which was meant.
+
+**The decoy is the one effector kind whose engagements run out, and what
+bounds them is conservation rather than a declared count.** The momentum
+the host takes is derived from the mass that leaves it, so the two
+cannot be decided separately: a deploy the host cannot supply must
+impart no momentum either, or the statement pays a benefit out of mass
+that never left. Since nothing counts rounds, a program that engages on
+every step walks its host down towards the declared dry mass, and from
+there the host's own mass refuses the deploy.
+
+**When the host is not strictly heavier than the decoy, nothing is
+deployed**: no momentum, no mass loss, and no degradation on any victim,
+since a decoy that never left the craft cannot be confused with it.
+`_deployed` reads 0.0 on such a step and the three quantities read 0.0
+with it, while `_engaged` still reads 1.0 because the statement ran.
+That is a real magazine derived from what the tier already models,
+rather than a stores mechanism this layer invented; a program wanting a
+smaller magazine than its host's mass writes the counter and the
+conditional the grammar already gives it.
+
+The strict comparison is the same rule the ablated mass follows: a
+massless body in the integrator is not a state this layer will produce.
 
 ##### The jammer
 
@@ -1513,7 +1553,7 @@ Nine components:
 | `<name>_reached` | How many of the victim's detection payloads the engagement wrote to: the radar payloads jammed, and the infrared payloads given the counter-detection signal below. |
 | `<name>_range` | Jammer-to-victim distance, in metres. |
 | `<name>_rcs` | The radar cross-section the ratio behind `_effect` was computed against: the host's own silhouette along the line the victim looks down, in square metres. |
-| `<name>_burn_through` | The range at which that victim's radar burns through the jamming, in metres. |
+| `<name>_burn_through` | The range at which that victim's radar burns through the jamming: the separation at which its published statistic crosses its own declared threshold under the degradation below. In metres. |
 | `<name>_self_signature` | The jammer's own emitted power, in watts. |
 | `<name>_counter_range` | The range at which the victim's most capable passive infrared observer detects that emission, in metres; 0.0 when the victim carries none. |
 | `<name>_counter_detected` | 1.0 when the jammer's host is inside `_counter_range`. |
@@ -1526,6 +1566,20 @@ of that host and not to its view of anything else. A statistic of signal
 over noise becomes signal over noise plus jamming, and the detection flag
 is taken again on the moved statistic. Two jammers on one victim add
 their power at the receiver, so their ratios add.
+
+**`_burn_through` is derived from the degradation this grammar applies,
+not from the library's own helper.** That helper solves the ratio
+against the *jammer's* declared `snr_threshold` and never sees the
+victim's, so its figure and this artifact's own `_detected` flag
+disagree by a factor of the victim's threshold: at equal thresholds of
+10 it names a range ten times the one where the flag actually flips. A
+channel a policy steers on has to mean what the flag beside it means, so
+the published figure is the crossover of the law above. The statistic
+falls as one over range to the fourth and the ratio grows as range
+squared, which makes the crossover the positive root of a quadratic in
+range squared. The jammer's own `snr_threshold` remains the
+constructor's parameter of that name and is what the library validates
+the payload against; it does not enter this channel.
 
 The other edge is on the same statement and is not optional. Every watt
 transmitted announces the emitter's position: the transmitted power
@@ -1542,6 +1596,27 @@ come from differently derived noise models.
 That is why `radiator_temp_k` is required. A payload that published the
 benefit and let the cost be left undeclared would model an advantage
 that costs nothing.
+
+**`_counter_detected` and the victim's own `_detected` can disagree, and
+a reader is told so here rather than discovering it.** This channel is a
+statement about range: whether the jammer's host is inside the range at
+which the victim's infrared observer detects its emission. The victim's
+`_detected` is a statement about that observer's published statistic
+after every countermeasure in force, a decoy's derate included, and the
+derate is applied when the observation is computed rather than when the
+engagement runs. So a craft can be inside the counter-detection range
+and still not be detected, because something else in the same step
+lowered the observer's confidence. Recomputing this flag after the
+derate would make it a second copy of `_detected` and take away the
+thing it is for, which is telling a policy whether its own emission
+gives it away.
+
+**The cloud a victim declares around the craft the jammer protects
+enters the jamming ratio as well as the radar equation.** A radar that
+sees a larger return has a stronger signal to mask, so a cross-section
+the radar equation used and the ratio did not would have the two
+describing different craft and would overstate the jamming by whatever
+the cloud returns. `_rcs` publishes the figure both use.
 
 **A jammer's host needs a silhouette.** The cross-section the ratio
 divides by is the projected area of the host assembly's collision
