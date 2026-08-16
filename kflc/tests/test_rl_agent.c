@@ -393,6 +393,7 @@ static char *bound_src_(int agent_len, int base_len)
         "    end\n"
         "    agent second\n"
         "        action brake box -1.0 1.0 default 0.0\n"
+        "        observe craft from earth mode=geometric as look\n"
         "    end\n"
         "end\n"
         "end\n", an, bn);
@@ -744,9 +745,11 @@ static void gate_on_step_resolution_(void)
         "    agent alpha\n"
         "        action thrust box -1.0 1.0 default 0.0\n"
         "        action yaw box -1.0 1.0 default 0.0\n"
+        "        observe craft from earth mode=geometric as trk\n"
         "    end\n"
         "    agent beta\n"
         "        action thrust box -1.0 1.0 default 0.0\n"
+        "        observe craft from earth mode=geometric as look\n"
         "    end\n";
     char src[4096];
 
@@ -760,7 +763,7 @@ static void gate_on_step_resolution_(void)
         "end\n");
     const char *f1[] = { "`thrust` is ambiguous", "agent `alpha` declares "
                          "it at line 10", "agent `beta` declares it at "
-                         "line 14", "`alpha.thrust`", "`beta.thrust`",
+                         "line 15", "`alpha.thrust`", "`beta.thrust`",
                          NULL };
     must_refuse_("an ambiguous unqualified action name in on_step",
                  src, f1);

@@ -835,14 +835,27 @@ def main():
     arms.completed("the undefective two-agent blob validates")
 
     # ---- an agent that publishes no name -----------------------------
-    unnamed = g.compile_fixture("rl_unnamed", UNNAMED_KFL)
-    # The needles are the cause rather than the symptom: the checks
-    # that follow would refuse this artifact too, for a reason that
-    # does not tell the reader what is missing.
-    expect_refusal(arms, lambda: K26RlParallelEnv(unnamed, seed=SEED),
+    # The compiler refuses this shape outright, so no artifact of it
+    # reaches this package: an agent's name arrives only as the
+    # qualifier on its own observation channel names, and a block that
+    # declares none publishes a name nothing can read.
+    refusal = g.refuse_fixture("rl_unnamed", UNNAMED_KFL)
+    arms.check("declares no `observe ... as`" in refusal,
+               "the compiler's refusal names the missing observation")
+    arms.completed("the compiler refuses an agent with no observation")
+    # The package's own guard is still its contract and still fires. It
+    # is driven against a spec built here rather than a compiled one,
+    # because the compiler no longer produces the artifact it refuses.
+    def silent():
+        spec = _spec.parse(blob(obs_slices=((0, 0, 0), (1, 0, 15))))
+        spec.obs_channel_names = {c: "follower.c%d" % c
+                                  for c in range(15)}
+        return _spec.agent_names(spec)
+
+    expect_refusal(arms, silent,
                    ["agent 0 declares no observation channel",
                     "no tag carries an action channel name"],
-                   "an agent with no observation channel")
+                   "a spec whose agent 0 has no observation channel")
     # A qualifier-free name above one agent, and a slice whose channels
     # carry two different qualifiers.
     def names_from(mapping):

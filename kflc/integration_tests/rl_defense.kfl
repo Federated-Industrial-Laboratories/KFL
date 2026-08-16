@@ -1,0 +1,68 @@
+# rl_defense.kfl: the defense payload surface, round-trip fixture.
+#
+# One craft carries a detection sensor of each kind and an information
+# state; a second is what they are pointed at. The payloads are declared
+# in the world prefix, which is where they are constructed: the stepping
+# path calls the libraries' evaluators and constructs nothing.
+#
+# The two observation forms are both here. `observe detect` publishes
+# whether the target was seen, the continuous quantity that decision was
+# taken on, and the geometry it was taken from, with no light-time
+# correction. `observe track` publishes where the target was when the
+# light left it, with an explicit validity channel, because a history
+# that does not reach back to the retarded time produces no observation
+# at all.
+#
+# The two agents deliberately declare different numbers of channels, so
+# the published slices tell a correct partition from one that has
+# swapped them, and each declares at least one observation, which above
+# one agent is what makes its name survive compilation.
+#
+# Exercised by the round-trip harness; the behaviour of everything here
+# is gated by tests/test_rl_defense.
+
+form RL_DEFENSE
+title "Defense payload grammar round-trip fixture"
+
+fn world watch_world
+    astro_body earth gm=3.986004418e14 mass=5.972e24
+    astro_body watcher assembly="../examples/assets/crew_vehicle_10t.k26asm" parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.0
+    astro_body target assembly="../examples/assets/calibration_box.k26asm" parent=earth pos_x=7.0e6 pos_y=2.0e4 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.05
+
+    astro_payload eye body=watcher kind=detect_ir aperture_m=1.0 integration_s=0.5 passband_lo_um=3.0 passband_hi_um=12.0 throughput=0.5 snr_threshold=5.0 target_temp_k=normal(300.0,10.0) target_emissivity=0.9 optics_temp_k=280.0 optics_emissivity=0.05
+    astro_payload rf body=watcher kind=detect_radar p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10 loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0 noise_figure=2.0 snr_threshold=10.0
+    astro_payload beam body=watcher kind=detect_lidar pulse_energy_j=0.1 wavelength_nm=1064.0 aperture_rx_m=0.5 atmospheric_tx=1.0 detector_efficiency=0.3 snr_threshold=5.0 target_albedo=uniform(0.1,0.3)
+    astro_payload picture body=watcher kind=infostate history=256
+
+    episode
+        control_dt 0.5
+        substeps 4
+        horizon 200
+    end
+
+    agent hunter
+        action nudge box -1.0 1.0 default 0.0
+        observe detect eye of target as ir
+        observe detect rf of target as radar
+        observe detect beam of target as lidar
+        observe track picture of target modality=radar as trk
+        objective
+            reward hunter.ir_snr
+        end
+    end
+
+    agent quarry
+        action dodge box -1.0 1.0 default 0.0
+        observe target from watcher mode=geometric as los
+        objective
+            reward 0.0 - hunter.ir_snr
+        end
+    end
+
+    on_step
+        watcher.vel_x = watcher.vel_x + nudge
+        target.vel_x = target.vel_x + dodge
+    end
+end
+
+end

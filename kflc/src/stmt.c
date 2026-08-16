@@ -520,7 +520,8 @@ static int rl_word_is_construct_(Lexer *L, const char *s)
     if (strcmp(s, "on_step") == 0) {
         return peek_kind_(L, &k) && (k == T_NEWLINE || k == T_EOF);
     }
-    if (strcmp(s, "sensor") == 0 || strcmp(s, "agent") == 0) {
+    if (strcmp(s, "sensor") == 0 || strcmp(s, "agent") == 0 ||
+        strcmp(s, "astro_payload") == 0) {
         return peek_kind_(L, &k) && k == T_IDENT;
     }
     return 0;
@@ -1280,6 +1281,77 @@ static KflcNode *parse_agent_(Lexer *L, Token *cur,
     return n;
 }
 
+/* `astro_payload <name> body=<body> kind=<kind> [key=value ...]`.
+ *
+ * The shape is astro_body's, deliberately: a name and whitespace
+ * separated `key=value` pairs whose values are kept as verbatim
+ * expression text and validated at emit time, where the kind is known
+ * and where the distribution forms are already recognised. One
+ * statement covers every defense payload kind because the libraries
+ * share one payload slot and one kind-tag registry, so the parse has
+ * one case and the key schema is a function of `kind=` rather than of
+ * the statement word. */
+static KflcNode *parse_astro_payload_(Lexer *L, Token *cur,
+                                      KflcArena *arena, KflcDiag *diag,
+                                      int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (cur->kind != T_IDENT) {
+        kflc_diag_errorf(diag, line0,
+            "astro_payload: expected payload name");
+        *had_error = 1;
+        while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
+        if (at_nl(cur)) advance(L, cur, had_error);
+        return NULL;
+    }
+    char *pay_name = cur->str;
+    char *raw = take_line_remainder(L, arena);
+    advance(L, cur, had_error);
+    if (at_nl(cur)) advance(L, cur, had_error);
+
+    KflcNode *n = new_node(arena, KFLN_STMT_ASTRO_PAYLOAD, line0);
+    n->name = pay_name;
+
+    char *p = trim(raw);
+    while (*p) {
+        while (*p == ' ' || *p == '\t') p++;
+        if (!*p) break;
+        char *kbeg = p;
+        while (*p && *p != '=' && *p != ' ' && *p != '\t') p++;
+        if (*p != '=') {
+            kflc_diag_errorf(diag, line0,
+                "astro_payload %s: expected `key=value` (got `%s`)",
+                pay_name, kbeg);
+            *had_error = 1;
+            return n;
+        }
+        char *kend = p;
+        *kend = '\0';
+        char *key = kflc_arena_strdup(arena, kbeg);
+        p++;  /* past '=' */
+        char *vbeg = p;
+        int paren = 0, brack = 0;
+        while (*p) {
+            if      (*p == '(') paren++;
+            else if (*p == ')') paren--;
+            else if (*p == '[') brack++;
+            else if (*p == ']') brack--;
+            else if ((*p == ' ' || *p == '\t') && paren == 0 && brack == 0) break;
+            p++;
+        }
+        char saved_v = *p; *p = '\0';
+        char *val = kflc_arena_strdup(arena, vbeg);
+        if (saved_v) { *p = saved_v; }
+        KflcValue v;
+        memset(&v, 0, sizeof v);
+        v.kind = KFLV_IDENT;
+        v.u.s  = val;
+        stmt_append_attr(arena, n, key, v, line0);
+    }
+    return n;
+}
+
 /* Parse a single statement on the current line. Consumes the trailing
  * newline. Returns NULL on parse error.
  *
@@ -1327,6 +1399,8 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                 return parse_sensor_(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "agent") == 0)
                 return parse_agent_(L, cur, arena, diag, had_error);
+            if (strcmp(cur->str, "astro_payload") == 0)
+                return parse_astro_payload_(L, cur, arena, diag, had_error);
         }
     }
 
@@ -1905,12 +1979,59 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             port_form     = 1;
             attitude_form = 1;
         }
+        /* `observe detect <payload> of <target> as <name>` and
+         * `observe track <payload> of <target> [modality=<m>] as <name>`
+         * name a payload and a body rather than an observer and a
+         * target, so they carry two names like the port form and are
+         * told apart by the same rule: a body genuinely called `detect`
+         * or `track` still takes the line-of-sight form, because
+         * `observe detect from earth` has `from` where these forms have
+         * a payload name. */
+        int         defense_form = 0;   /* 1 detect, 2 track */
+        const char *payload_ident = NULL;
+        if (!relative_form && !port_form &&
+            (strcmp(target_ident, "detect") == 0 ||
+             strcmp(target_ident, "track") == 0) &&
+            cur->kind == T_IDENT && !is_ident_named(cur, "from"))
+        {
+            defense_form  = strcmp(target_ident, "detect") == 0 ? 1 : 2;
+            payload_ident = cur->str;
+            advance(L, cur, had_error);
+            if (!is_ident_named(cur, "of")) {
+                kflc_diag_errorf(diag, line0,
+                    "observe %s %s: expected `of` and the name of the "
+                    "body observed; if `%s` is a body here, its "
+                    "line-of-sight form is `observe %s from <observer>` "
+                    "with `from` before any key",
+                    defense_form == 1 ? "detect" : "track", payload_ident,
+                    defense_form == 1 ? "detect" : "track",
+                    defense_form == 1 ? "detect" : "track");
+                *had_error = 1;
+                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
+                if (at_nl(cur)) advance(L, cur, had_error);
+                return NULL;
+            }
+            advance(L, cur, had_error);
+            if (cur->kind != T_IDENT) {
+                kflc_diag_errorf(diag, line0,
+                    "observe %s %s of: expected a body name",
+                    defense_form == 1 ? "detect" : "track", payload_ident);
+                *had_error = 1;
+                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
+                if (at_nl(cur)) advance(L, cur, had_error);
+                return NULL;
+            }
+            /* As the port form: the cursor stays on the body name,
+             * which is where the trailing-clause scan starts. */
+            target_ident  = cur->str;
+            attitude_form = 1;
+        }
         /* Not after the relative branch has consumed a target name: a
          * target that happens to be called `attitude` or `contact` is
          * a name here, not a form, and re-entering the branch below
          * would rewrite the target a second time and leave the
          * diagnostic naming the wrong body. */
-        if (!relative_form && !port_form &&
+        if (!relative_form && !port_form && !defense_form &&
             (strcmp(target_ident, "attitude") == 0 ||
              strcmp(target_ident, "contact") == 0) &&
             is_ident_named(cur, "of"))
@@ -1979,10 +2100,14 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
              * rather than a bare 1, because that name is the second
              * thing the statement said and the round trip has to
              * print it back. */
-            kv.u.s  = kflc_arena_strdup(arena, port_form ? port_ident : "1");
-            const char *marker = relative_form ? "relative"
-                               : port_form     ? "port"
-                               : contact_form  ? "contact" : "attitude";
+            kv.u.s  = kflc_arena_strdup(arena,
+                          port_form    ? port_ident
+                        : defense_form ? payload_ident : "1");
+            const char *marker = relative_form   ? "relative"
+                               : port_form       ? "port"
+                               : defense_form == 1 ? "detect"
+                               : defense_form == 2 ? "track"
+                               : contact_form    ? "contact" : "attitude";
             stmt_append_attr(arena, n, marker, kv, line0);
         }
 

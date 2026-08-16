@@ -531,6 +531,18 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
         break;
     }
 
+    case KFLN_STMT_ASTRO_PAYLOAD: {
+        indent(out, level);
+        fprintf(out, "astro_payload %s", n->name ? n->name : "?");
+        for (const KflcAttr *a = n->attrs; a; a = a->next) {
+            const char *v = (a->value.kind == KFLV_IDENT && a->value.u.s)
+                            ? a->value.u.s : "?";
+            fprintf(out, " %s=%s", a->name, v);
+        }
+        fputc('\n', out);
+        break;
+    }
+
     case KFLN_STMT_STEP: {
         indent(out, level);
         fputs("step ", out);
@@ -580,7 +592,18 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
         const int m_con = find_attr_(n->attrs, "contact") != NULL;
         const int m_rel = find_attr_(n->attrs, "relative") != NULL;
         const KflcAttr *m_port = find_attr_(n->attrs, "port");
-        if (m_port) {
+        /* The two defense forms name a payload and a target, so their
+         * markers carry the payload name for the same reason the port
+         * marker carries the port's. */
+        const KflcAttr *m_det = find_attr_(n->attrs, "detect");
+        const KflcAttr *m_trk = find_attr_(n->attrs, "track");
+        if (m_det || m_trk) {
+            const KflcAttr *mk = m_det ? m_det : m_trk;
+            fprintf(out, "observe %s %s of %s", m_det ? "detect" : "track",
+                    (mk->value.kind == KFLV_IDENT && mk->value.u.s)
+                        ? mk->value.u.s : "?",
+                    n->name ? n->name : "?");
+        } else if (m_port) {
             fprintf(out, "observe port %s of %s",
                     (m_port->value.kind == KFLV_IDENT && m_port->value.u.s)
                         ? m_port->value.u.s : "?",
@@ -608,6 +631,8 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
             if (strcmp(a->name, "contact") == 0) continue;
             if (strcmp(a->name, "relative") == 0) continue;
             if (strcmp(a->name, "port") == 0) continue;
+            if (strcmp(a->name, "detect") == 0) continue;
+            if (strcmp(a->name, "track") == 0) continue;
             const char *v = (a->value.kind == KFLV_IDENT && a->value.u.s)
                             ? a->value.u.s : "?";
             fprintf(out, " %s=%s", a->name, v);

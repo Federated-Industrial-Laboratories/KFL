@@ -1,7 +1,7 @@
 /* test_rl_contextual_keywords.c: a construct word is still a name.
  *
- * `agent`, `sensor` and `on_step` introduce block constructs at
- * statement position inside a `fn world` body. They are not reserved
+ * `agent`, `sensor`, `on_step` and `astro_payload` introduce
+ * constructs at statement position inside a `fn world` body. They are not reserved
  * words: a Grammar 3.1 program that binds one of them as an ordinary
  * identifier compiles and behaves as it always did, because each opens
  * its block only when what follows is what that block form requires.
@@ -12,8 +12,9 @@
  *      compile, and the value the program computes through the name is
  *      the value it should be, so the word is not merely tolerated but
  *      read as the binding it names.
- *   2. The block readings. `agent <name>`, `sensor <name>` and a bare
- *      `on_step` still open their blocks in a program that uses them.
+ *   2. The construct readings. `agent <name>`, `sensor <name>`,
+ *      `astro_payload <name> ...` and a bare `on_step` still open
+ *      their constructs in a program that uses them.
  *
  * Both halves are needed and neither is sufficient. A fixture holding
  * only the block form cannot tell a disambiguating parser from a
@@ -43,8 +44,10 @@
 #define WORK_DIR "/tmp/kflc_rl_ctxkw_test"
 
 /* The three words this gate is about. */
-static const char *const WORDS[] = { "agent", "sensor", "on_step", NULL };
-#define WORD_COUNT 3
+static const char *const WORDS[] = {
+    "agent", "sensor", "on_step", "astro_payload", NULL
+};
+#define WORD_COUNT 4
 
 static int g_arms;
 
@@ -191,8 +194,14 @@ static void arm_blocks_(void)
         "form CTXBLK\n"
         "fn world w\n"
         "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
-        "    astro_body craft gm=1.0 parent=earth pos_x=7.0e6"
-        " vel_y=7546.0\n"
+        "    astro_body craft assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0\n"
+        "    astro_body mark assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.02e6 vel_y=7535.0\n"
+        "    astro_payload eye body=craft kind=detect_radar"
+        " p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10"
+        " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0"
+        " noise_figure=2.0 snr_threshold=10.0\n"
         "    episode\n"
         "        control_dt 10.0\n"
         "        horizon 4\n"
@@ -204,6 +213,7 @@ static void arm_blocks_(void)
         "        action thrust box -1.0 1.0 default 0.0\n"
         "        observe craft from earth mode=geometric through rf"
         " as trk\n"
+        "        observe detect eye of mark as look\n"
         "        objective\n"
         "            reward 0.0 - pilot.trk_range\n"
         "        end\n"
@@ -213,7 +223,7 @@ static void arm_blocks_(void)
         "    end\n"
         "end\n"
         "end\n";
-    must_compile_("all three block forms in one program", SRC);
+    must_compile_("all four construct forms in one program", SRC);
 }
 
 /* A word that opens a block, and the same word bound as a name in the
@@ -225,10 +235,18 @@ static void arm_both_readings_(void)
         "form CTXBOTH\n"
         "fn world w\n"
         "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
-        "    astro_body craft gm=1.0 parent=earth pos_x=7.0e6"
-        " vel_y=7546.0\n"
+        "    astro_body craft assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0\n"
+        "    astro_body mark assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.02e6 vel_y=7535.0\n"
+        "    astro_payload eye body=craft kind=detect_radar"
+        " p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10"
+        " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0"
+        " noise_figure=2.0 snr_threshold=10.0\n"
         "    let sensor: double = 3.0\n"
         "    sensor = sensor + 1.0\n"
+        "    let astro_payload: double = 5.0\n"
+        "    astro_payload = astro_payload + 1.0\n"
         "    episode\n"
         "        control_dt 10.0\n"
         "        horizon 4\n"
@@ -242,7 +260,7 @@ static void arm_both_readings_(void)
         "    end\n"
         "    agent watcher\n"
         "        action brake box -1.0 1.0 default 0.0\n"
-        "        observe craft from earth mode=geometric as look\n"
+        "        observe detect eye of mark as look\n"
         "        objective\n"
         "            reward watcher.look_range\n"
         "        end\n"
@@ -256,6 +274,13 @@ static void arm_both_readings_(void)
 int main(void)
 {
     rl_run_or_die_("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
+    /* The construct arms declare a payload, which needs a body that
+     * carries a vehicle, so the assembly and its mesh travel with the
+     * generated sources: an assembly path resolves against the
+     * directory of the file that names it. */
+    rl_run_or_die_("cp examples/assets/calibration_box.k26asm "
+                   "examples/assets/calibration_box.k26mesh "
+                   WORK_DIR "/");
     /* The check arms need only the compiler. The run arms link the
      * stack, so they are the part that stands down when it is absent,
      * and the gate says which half it ran. */

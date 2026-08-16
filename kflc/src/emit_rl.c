@@ -41,6 +41,10 @@
  * them. */
 #include "k26sense.h"
 #include "k26rl_env.h"
+/* The per-observer target cap the information state documents. The
+ * compiler refuses a program that would exceed it, so the limit is
+ * read from the library's own header rather than restated here. */
+#include "k26astro_infostate/infostate_consts.h"
 #include "assembly.h"
 #include "capture.h"
 
@@ -190,6 +194,35 @@ static const char *const RL_PORT_COMP_[RL_PORT_COMPS] = {
     "_v_axial", "_v_lateral", "_v_pitchyaw", "_v_roll"
 };
 
+/* A detection observe publishes whether the target was seen, the
+ * continuous quantity that decision was taken on, and the geometry it
+ * was taken from. Both the hard decision and the continuous quantity
+ * are published so a program can shape a reward on one and terminate
+ * on the other without deriving either from the other. The aspect
+ * cosine is there because the signature models are aspect dependent:
+ * without it an agent sees detections come and go with no channel
+ * that explains them. These channels are geometric and carry no
+ * light-time correction; the corrected view is the track form's. */
+#define RL_DET_COMPS 7
+static const char *const RL_DET_COMP_[RL_DET_COMPS] = {
+    "_detected", "_snr", "_range", "_dir_x", "_dir_y", "_dir_z",
+    "_aspect"
+};
+
+/* An information-state observe publishes where the target was when
+ * the light left it, how far away that was, and how old the picture
+ * is, with an explicit validity channel because a history that does
+ * not reach back to the retarded time produces no observation at all.
+ * The solver's iteration count is deliberately absent: it is a
+ * convergence diagnostic rather than a state of the world, and an
+ * agent that could see it could learn the shape of the solver rather
+ * than the shape of the problem. */
+#define RL_TRK_COMPS 9
+static const char *const RL_TRK_COMP_[RL_TRK_COMPS] = {
+    "_valid", "_pos_x", "_pos_y", "_pos_z", "_vel_x", "_vel_y",
+    "_vel_z", "_range", "_age"
+};
+
 /* Which form an observe is. The marker attribute the parser leaves is
  * what decides it, so the four are told apart in one place and the
  * width and the names cannot drift apart between them. */
@@ -198,7 +231,9 @@ typedef enum {
     RL_OBS_ATT  = 1,
     RL_OBS_CON  = 2,
     RL_OBS_REL  = 3,
-    RL_OBS_PORT = 4
+    RL_OBS_PORT = 4,
+    RL_OBS_DET  = 5,
+    RL_OBS_TRK  = 6
 } RlObserveForm;
 
 static RlObserveForm rl_observe_form_(const KflcNode *n)
@@ -206,12 +241,29 @@ static RlObserveForm rl_observe_form_(const KflcNode *n)
     if (!n) return RL_OBS_LOS;
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (!a->name) continue;
+        if (strcmp(a->name, "detect") == 0)   return RL_OBS_DET;
+        if (strcmp(a->name, "track") == 0)    return RL_OBS_TRK;
         if (strcmp(a->name, "attitude") == 0) return RL_OBS_ATT;
         if (strcmp(a->name, "contact") == 0)  return RL_OBS_CON;
         if (strcmp(a->name, "relative") == 0) return RL_OBS_REL;
         if (strcmp(a->name, "port") == 0)     return RL_OBS_PORT;
     }
     return RL_OBS_LOS;
+}
+
+/* The payload an `observe detect`/`observe track` names, which its
+ * marker attribute carries for the same reason the port marker
+ * carries the port's own name. */
+static const char *rl_observe_payload_(const KflcNode *n)
+{
+    if (!n) return NULL;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (!a->name || a->value.kind != KFLV_IDENT) continue;
+        if (strcmp(a->name, "detect") == 0 || strcmp(a->name, "track") == 0) {
+            return a->value.u.s;
+        }
+    }
+    return NULL;
 }
 
 static int rl_observe_is_attitude_(const KflcNode *n)
@@ -255,6 +307,8 @@ static int rl_observe_base_width_(const KflcNode *n)
     case RL_OBS_CON: return RL_CON_COMPS;
     case RL_OBS_REL: return RL_REL_COMPS;
     case RL_OBS_PORT: return RL_PORT_COMPS;
+    case RL_OBS_DET: return RL_DET_COMPS;
+    case RL_OBS_TRK: return RL_TRK_COMPS;
     case RL_OBS_LOS: return RL_OBS_COMPS;
     }
     return RL_OBS_COMPS;
@@ -279,6 +333,8 @@ static const char *rl_observe_base_comp_(const KflcNode *n, int c)
     case RL_OBS_CON: return RL_CON_COMP_[c];
     case RL_OBS_REL: return RL_REL_COMP_[c];
     case RL_OBS_PORT: return RL_PORT_COMP_[c];
+    case RL_OBS_DET: return RL_DET_COMP_[c];
+    case RL_OBS_TRK: return RL_TRK_COMP_[c];
     case RL_OBS_LOS: return RL_OBS_COMP_[c];
     }
     return RL_OBS_COMP_[c];
@@ -326,6 +382,14 @@ typedef struct {
  * `body` is the model body index; `name` is what a program commands
  * it by. */
 #define RL_MAX_ACT 64
+/* The bound on assembly-bearing bodies, which is separate from the
+ * actuator bound above because the two count different things. It was
+ * the actuator bound until this item, and at that value a program
+ * could not reach the information state's own per-observer target cap
+ * of 64: one observer plus 64 targets is 65 vehicles, so the vehicle
+ * bound refused first and the cap's refusal could never fire. A limit
+ * whose diagnostic cannot be produced is a limit nothing gates. */
+#define RL_MAX_VEH 128
 /* A declared sensor: its name, and the model terms it applies in the
  * order they were written. The terms are resolved from the block's
  * children once, at model build, so the emitter needs no parse tree
@@ -370,6 +434,137 @@ typedef struct {
     double axis[3][3];
     double half[3];
 } RlCollider;
+
+/* ---- Defense payloads ----------------------------------------------- *
+ *
+ * One `astro_payload` statement covers the whole tier because the
+ * libraries share one payload slot and one kind-tag registry, so the
+ * admissible key set is a function of `kind=` and lives in the table
+ * below rather than in a parser case per kind.
+ *
+ * Parameter order is this table's order, and it is the order the
+ * per-environment parameter store is written and read in, so a key
+ * cannot reach the wrong argument of a library call. The required keys
+ * are the tier constructor's own parameters of the same name.
+ *
+ * Three parameters are not any constructor's. A detection evaluator
+ * needs the target's radiometric properties as well as the
+ * instrument's, and the tier's constructors do not carry them because
+ * they describe what is being looked at rather than the instrument.
+ * They are declared on the payload for two reasons: they are the
+ * reference-target properties a detection threshold is specified
+ * against, and declaring them here puts them on the same
+ * domain-randomisation stream as every other payload parameter. The
+ * consequence is stated rather than hidden: one detection payload
+ * models one target class, and a program observing two dissimilar
+ * targets declares one payload per class.
+ *
+ * Radar needs none of them, its cross-section being geometric. */
+typedef enum {
+    RL_PAY_DETECT_IR    = 0,
+    RL_PAY_DETECT_RADAR = 1,
+    RL_PAY_DETECT_LIDAR = 2,
+    RL_PAY_INFOSTATE    = 3
+} RlPayloadKind;
+
+#define RL_PAY_KINDS     4
+#define RL_PAY_MAXP     10
+#define RL_MAX_PAYLOADS 32
+
+typedef struct {
+    const char *key;
+    int         required;
+    const char *dflt;      /* emitted verbatim when the key is absent */
+} RlPayKey;
+
+static const RlPayKey RL_PAY_IR_[] = {
+    { "aperture_m",        1, "0.0" },
+    { "integration_s",     1, "0.0" },
+    { "passband_lo_um",    1, "0.0" },
+    { "passband_hi_um",    1, "0.0" },
+    { "throughput",        1, "0.0" },
+    { "snr_threshold",     1, "0.0" },
+    { "target_temp_k",     1, "0.0" },
+    { "target_emissivity", 1, "0.0" },
+    /* Optional, and zero by default, which is what the library
+     * documents as recovering its cosmic-background-only behaviour.
+     * They are offered because that behaviour is background free for
+     * a warm instrument looking in its own emission band, and the
+     * library says so; a program that wants the honest noise floor
+     * declares its optics rather than rebuilding the model. */
+    { "optics_temp_k",     0, "0.0" },
+    { "optics_emissivity", 0, "0.0" }
+};
+
+static const RlPayKey RL_PAY_RADAR_[] = {
+    { "p_tx_w",        1, "0.0" },
+    { "g_tx_db",       1, "0.0" },
+    { "g_rx_db",       1, "0.0" },
+    { "freq_hz",       1, "0.0" },
+    { "loss_sys_db",   1, "0.0" },
+    { "bandwidth_hz",  1, "0.0" },
+    { "t_sys_k",       1, "0.0" },
+    { "noise_figure",  1, "0.0" },
+    { "snr_threshold", 1, "0.0" }
+};
+
+static const RlPayKey RL_PAY_LIDAR_[] = {
+    { "pulse_energy_j",      1, "0.0" },
+    { "wavelength_nm",       1, "0.0" },
+    { "aperture_rx_m",       1, "0.0" },
+    { "atmospheric_tx",      1, "0.0" },
+    { "detector_efficiency", 1, "0.0" },
+    { "snr_threshold",       1, "0.0" },
+    { "target_albedo",       1, "0.0" }
+};
+
+static const RlPayKey RL_PAY_INFO_[] = {
+    { "history", 0, "1024" }
+};
+
+typedef struct {
+    const char     *name;         /* the `kind=` value */
+    const char     *tag;          /* the registry's own tag name */
+    const RlPayKey *keys;
+    int             n_keys;
+    int             is_detect;
+} RlPayKindDesc;
+
+static const RlPayKindDesc RL_PAY_KIND_[RL_PAY_KINDS] = {
+    { "detect_ir",    "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
+      RL_PAY_IR_,    (int)(sizeof RL_PAY_IR_    / sizeof RL_PAY_IR_[0]),    1 },
+    { "detect_radar", "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
+      RL_PAY_RADAR_, (int)(sizeof RL_PAY_RADAR_ / sizeof RL_PAY_RADAR_[0]), 1 },
+    { "detect_lidar", "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
+      RL_PAY_LIDAR_, (int)(sizeof RL_PAY_LIDAR_ / sizeof RL_PAY_LIDAR_[0]), 1 },
+    { "infostate",    "K26ASTRO_DEFENSE_KIND_INFOSTATE",
+      RL_PAY_INFO_,  (int)(sizeof RL_PAY_INFO_  / sizeof RL_PAY_INFO_[0]),  0 }
+};
+
+typedef struct {
+    const KflcNode *node;
+    const char     *name;
+    int             kind;                 /* an RlPayloadKind */
+    int             body;                 /* index into the model's bodies */
+    int             veh;                  /* vehicle slot of that body */
+    const KflcAttr *attr[RL_PAY_MAXP];    /* declared key, or NULL */
+    KflcExpr       *dist[RL_PAY_MAXP];    /* distribution form, or NULL */
+    int             dr[RL_PAY_MAXP];      /* draw slot, or -1 */
+    int             line;
+} RlPayload;
+
+/* One primitive of a detection target's silhouette, in that body's own
+ * frame. The projected area of the set along the line of sight is the
+ * aspect-dependent geometry the tier's signature models take, and it
+ * is derived from the colliders the assembly already declares rather
+ * than from a second description of the same craft. */
+#define RL_MAX_SIG 256
+typedef struct {
+    int    body;
+    int    kind;              /* 1 sphere, 2 capsule, 3 box */
+    double axis[3][3];
+    double half[3];
+} RlSigPrim;
 
 typedef struct {
     int    veh, body;
@@ -421,8 +616,17 @@ typedef struct {
     int written;
 } RlActRef;
 
+/* A distribution-valued declaration on the domain-randomisation
+ * stream. Exactly one of `body` and `payload` is a real index and the
+ * other is -1: a draw belongs to the body attribute or to the payload
+ * key that declared it. Channels are allocated in source order over
+ * the bodies and then over the payloads, which for a program that
+ * declares no payload is the allocation it always had, so no existing
+ * program's draw coordinates move. */
 typedef struct {
-    int             body;      /* index into bodies[] */
+    int             body;      /* index into bodies[], or -1 */
+    int             payload;   /* index into payloads[], or -1 */
+    int             param;     /* parameter slot when payload >= 0 */
     const KflcAttr *attr;      /* the distribution-valued attribute */
     KflcExpr       *dist;      /* parsed uniform/normal call */
     int             channel;   /* class 0x0002 channel */
@@ -522,11 +726,21 @@ typedef struct {
     int         n_thrusters;
     RlPort      ports[RL_MAX_ACT];
     int         n_ports;
-    double      veh_com[RL_MAX_ACT][3];
-    double      veh_bound[RL_MAX_ACT];
+    double      veh_com[RL_MAX_VEH][3];
+    double      veh_bound[RL_MAX_VEH];
     int         n_veh;
     RlCollider  colliders[RL_MAX_COLL];
     int         n_colliders;
+    RlPayload   payloads[RL_MAX_PAYLOADS];
+    int         n_payloads;
+    /* Per observe of a defense form: the payload it names and the body
+     * it observes, resolved once so the emitter needs no lookups. Both
+     * are -1 for every other form. */
+    int         obs_payload[RL_MAX_OBSERVES];
+    int         obs_target[RL_MAX_OBSERVES];
+    RlSigPrim   sig[RL_MAX_SIG];
+    int         n_sig;
+    int         pay_nparam;         /* widest parameter set in use */
     RlActRef    acts[RL_MAX_ACT];
     int         n_acts;
     const KflcAttr *horizon;          /* or NULL */
@@ -947,9 +1161,9 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
             kflc_arena_release(ar);
             return 1;
         }
-        if (veh >= RL_MAX_ACT) {
+        if (veh >= RL_MAX_VEH) {
             kflc_diag_errorf(diag, m->bodies[i].body->line,
-                "more than %d bodies carry an assembly", RL_MAX_ACT);
+                "more than %d bodies carry an assembly", RL_MAX_VEH);
             kflc_arena_release(ar);
             return 1;
         }
@@ -1407,6 +1621,30 @@ static int rl_finish_agents_(RlModel *m, KflcDiag *diag)
     }
     if (err) return 1;
 
+    /* Every block declares at least one observation, above one agent.
+     * An agent's name reaches a consumer only through the qualifier on
+     * its own observation channel names, so a block with none
+     * publishes a slice of (n, 0, 0) and its name does not survive
+     * compilation at all: it is absent from the spec blob, from the
+     * artifact and therefore from the episode file, and a per-agent
+     * API has nothing to key it by. Refusing at the one place the name
+     * still exists puts the diagnostic where the author can act on it.
+     * At one agent the name publishes unqualified and nothing depends
+     * on it, so the rule is not applied there. */
+    if (m->agent_count > 1) {
+        for (int i = 0; i < m->n_agents; i++) {
+            if (m->agents[i].n_obs > 0) continue;
+            kflc_diag_errorf(diag, m->agents[i].node->line,
+                "agent `%s`: this block declares no `observe ... as`, and "
+                "an agent's name reaches a consumer only through the "
+                "qualifier on its own observation channels, so above one "
+                "agent such a block publishes a name nothing can read; "
+                "declare at least one observation",
+                m->agents[i].name ? m->agents[i].name : "?");
+            err = 1;
+        }
+    }
+
     /* Slices. Channels allocate in source order within a block and
      * blocks in source order, so each agent's slice is contiguous and
      * the concatenation over agents is the whole vector. */
@@ -1495,6 +1733,339 @@ static int rl_obs_pub_name_(const RlModel *m, int i, int c,
     return 0;
 }
 
+static int rl_body_index_of_(const RlModel *m, const char *name);
+
+/* The vehicle slot of a body, which is its position among the
+ * assembly-bearing bodies in declaration order: the order every
+ * per-vehicle table in the artifact is written in. Returns -1 for a
+ * body that binds no assembly. */
+static int rl_veh_slot_of_(const RlModel *m, int body)
+{
+    int seen = 0;
+    for (int b = 0; b < m->n_bodies; b++) {
+        if (!rl_body_has_assembly_(m, b)) continue;
+        if (b == body) return seen;
+        seen++;
+    }
+    return -1;
+}
+
+static const char *rl_pay_attr_text_(const KflcAttr *a)
+{
+    if (a && a->value.kind == KFLV_IDENT && a->value.u.s) return a->value.u.s;
+    return NULL;
+}
+
+/* Resolve every `astro_payload`: its kind, the body it is carried by,
+ * and its key set. Every refusal names what a reader has to change,
+ * which is why a key belonging to another kind is refused naming that
+ * kind rather than reported as unknown: the second diagnostic sends a
+ * reader to the grammar reference and the first answers them. */
+static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
+                               KflcArena *arena, KflcDiag *diag)
+{
+    int err = 0;
+    for (int p = 0; p < m->n_payloads; p++) {
+        RlPayload *py = &m->payloads[p];
+        py->kind = -1;
+        py->body = -1;
+        py->veh  = -1;
+        for (int k = 0; k < RL_PAY_MAXP; k++) {
+            py->attr[k] = NULL;
+            py->dist[k] = NULL;
+            py->dr[k]   = -1;
+        }
+        for (int q = 0; q < p; q++) {
+            if (m->payloads[q].name && py->name &&
+                strcmp(m->payloads[q].name, py->name) == 0) {
+                kflc_diag_errorf(diag, py->line,
+                    "astro_payload `%s`: a payload of that name is already "
+                    "declared at line %d", py->name, m->payloads[q].line);
+                err = 1;
+            }
+        }
+
+        const KflcAttr *kind_a = rl_attr_(py->node, "kind");
+        const KflcAttr *body_a = rl_attr_(py->node, "body");
+        const char *kind_s = rl_pay_attr_text_(kind_a);
+        const char *body_s = rl_pay_attr_text_(body_a);
+        if (!kind_s) {
+            kflc_diag_errorf(diag, py->line,
+                "astro_payload `%s`: missing required `kind=`; the kinds "
+                "this grammar binds are detect_ir, detect_radar, "
+                "detect_lidar and infostate", py->name);
+            err = 1;
+        } else {
+            for (int k = 0; k < RL_PAY_KINDS; k++) {
+                if (strcmp(RL_PAY_KIND_[k].name, kind_s) == 0) py->kind = k;
+            }
+            if (py->kind < 0) {
+                kflc_diag_errorf(diag, py->line,
+                    "astro_payload `%s`: unknown kind `%s`; the kinds this "
+                    "grammar binds are detect_ir, detect_radar, "
+                    "detect_lidar and infostate", py->name, kind_s);
+                err = 1;
+            }
+        }
+        if (!body_s) {
+            kflc_diag_errorf(diag, py->line,
+                "astro_payload `%s`: missing required `body=`, which names "
+                "the astro_body that carries the payload", py->name);
+            err = 1;
+        } else {
+            py->body = rl_body_index_of_(m, body_s);
+            if (py->body < 0) {
+                kflc_diag_errorf(diag, py->line,
+                    "astro_payload `%s`: `body=%s` names no astro_body "
+                    "declared in this world", py->name, body_s);
+                err = 1;
+            } else if (!rl_body_has_assembly_(m, py->body)) {
+                kflc_diag_errorf(diag, py->line,
+                    "astro_payload `%s`: `body=%s` declares no `assembly=` "
+                    "at line %d, so it carries no vehicle and nothing can "
+                    "be bound to it", py->name, body_s,
+                    m->bodies[py->body].body->line);
+                err = 1;
+            } else {
+                py->veh = rl_veh_slot_of_(m, py->body);
+            }
+        }
+        if (py->kind < 0) continue;
+
+        const RlPayKindDesc *kd = &RL_PAY_KIND_[py->kind];
+        for (const KflcAttr *a = py->node->attrs; a; a = a->next) {
+            if (!a->name) continue;
+            if (strcmp(a->name, "kind") == 0) continue;
+            if (strcmp(a->name, "body") == 0) continue;
+            int slot = -1;
+            for (int k = 0; k < kd->n_keys; k++) {
+                if (strcmp(kd->keys[k].key, a->name) == 0) slot = k;
+            }
+            if (slot < 0) {
+                const char *owner = NULL;
+                for (int k = 0; k < RL_PAY_KINDS && !owner; k++) {
+                    if (k == py->kind) continue;
+                    for (int j = 0; j < RL_PAY_KIND_[k].n_keys; j++) {
+                        if (strcmp(RL_PAY_KIND_[k].keys[j].key,
+                                   a->name) == 0) {
+                            owner = RL_PAY_KIND_[k].name;
+                            break;
+                        }
+                    }
+                }
+                if (owner) {
+                    kflc_diag_errorf(diag, a->line,
+                        "astro_payload `%s`: `%s=` belongs to kind `%s`, "
+                        "not to `%s`", py->name, a->name, owner, kd->name);
+                } else {
+                    kflc_diag_errorf(diag, a->line,
+                        "astro_payload `%s`: unknown key `%s=` for kind "
+                        "`%s`", py->name, a->name, kd->name);
+                }
+                err = 1;
+                continue;
+            }
+            py->attr[slot] = a;
+            int derr = 0;
+            KflcExpr *d = rl_attr_dist_(a, form, arena, diag, &derr);
+            if (derr) err = 1;
+            if (d && py->kind == RL_PAY_INFOSTATE) {
+                /* The history capacity is fixed when the ring is
+                 * allocated, and the ring is allocated once in the
+                 * world prefix, so a per-episode draw could not reach
+                 * it. Refusing says so rather than drawing a number
+                 * nothing applies. */
+                kflc_diag_errorf(diag, a->line,
+                    "astro_payload `%s`: `%s=` is fixed when the payload "
+                    "is constructed and admits no distribution form",
+                    py->name, a->name);
+                err = 1;
+                continue;
+            }
+            py->dist[slot] = d;
+        }
+        for (int k = 0; k < kd->n_keys; k++) {
+            if (kd->keys[k].required && !py->attr[k]) {
+                kflc_diag_errorf(diag, py->line,
+                    "astro_payload `%s`: kind `%s` requires `%s=`",
+                    py->name, kd->name, kd->keys[k].key);
+                err = 1;
+            }
+        }
+        if (kd->n_keys > m->pay_nparam) m->pay_nparam = kd->n_keys;
+    }
+    return err;
+}
+
+/* The modality an `observe track` declared. The library records it
+ * into the observation snapshot unchanged and applies no per-modality
+ * processing, and says so; the grammar admits the five it names and
+ * refuses anything else rather than passing a number through. */
+static int rl_track_modality_(const KflcNode *n, const char **out_bad)
+{
+    const KflcAttr *a = rl_attr_(n, "modality");
+    if (!a) return 0;
+    const char *v = rl_pay_attr_text_(a);
+    if (!v) { *out_bad = "?"; return -1; }
+    if (strcmp(v, "none") == 0)  return 0;
+    if (strcmp(v, "ir") == 0)    return 1;
+    if (strcmp(v, "radar") == 0) return 2;
+    if (strcmp(v, "lidar") == 0) return 3;
+    if (strcmp(v, "ephem") == 0) return 4;
+    *out_bad = v;
+    return -1;
+}
+
+/* Resolve the two defense observation forms and derive the silhouette
+ * of every detection target. Runs after the actuator pass, which is
+ * what puts the assemblies' colliders in the model. */
+static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
+{
+    int err = 0;
+    for (int i = 0; i < m->n_observes; i++) {
+        m->obs_payload[i] = -1;
+        m->obs_target[i]  = -1;
+    }
+    for (int i = 0; i < m->n_observes; i++) {
+        const KflcNode *s = m->observes[i];
+        RlObserveForm f = rl_observe_form_(s);
+        if (f != RL_OBS_DET && f != RL_OBS_TRK) continue;
+        const char *word = (f == RL_OBS_DET) ? "detect" : "track";
+        const char *pn = rl_observe_payload_(s);
+        int p = -1;
+        for (int q = 0; q < m->n_payloads; q++) {
+            if (m->payloads[q].name && pn &&
+                strcmp(m->payloads[q].name, pn) == 0) p = q;
+        }
+        if (p < 0) {
+            kflc_diag_errorf(diag, s->line,
+                "observe %s %s of %s: no astro_payload of that name is "
+                "declared in this world", word, pn ? pn : "?",
+                s->name ? s->name : "?");
+            err = 1;
+            continue;
+        }
+        if (m->payloads[p].kind < 0) { err = 1; continue; }
+        const RlPayKindDesc *kd = &RL_PAY_KIND_[m->payloads[p].kind];
+        if (f == RL_OBS_DET && !kd->is_detect) {
+            kflc_diag_errorf(diag, s->line,
+                "observe detect %s of %s: `%s` is of kind `%s`; this form "
+                "takes a detection payload", pn, s->name ? s->name : "?",
+                pn, kd->name);
+            err = 1;
+            continue;
+        }
+        if (f == RL_OBS_TRK && m->payloads[p].kind != RL_PAY_INFOSTATE) {
+            kflc_diag_errorf(diag, s->line,
+                "observe track %s of %s: `%s` is of kind `%s`; this form "
+                "takes a payload of kind `infostate`", pn,
+                s->name ? s->name : "?", pn, kd->name);
+            err = 1;
+            continue;
+        }
+        const char *bad = NULL;
+        if (f == RL_OBS_DET && rl_attr_(s, "modality")) {
+            kflc_diag_errorf(diag, s->line,
+                "observe detect %s of %s: `modality=` belongs to the "
+                "`observe track` form, which records it into the "
+                "information state's own snapshot", pn,
+                s->name ? s->name : "?");
+            err = 1;
+        }
+        if (f == RL_OBS_TRK && rl_track_modality_(s, &bad) < 0) {
+            kflc_diag_errorf(diag, s->line,
+                "observe track %s of %s: unknown modality `%s`; the "
+                "modalities are none, ir, radar, lidar and ephem", pn,
+                s->name ? s->name : "?", bad ? bad : "?");
+            err = 1;
+        }
+        int tgt = rl_body_index_of_(m, s->name);
+        if (tgt < 0) {
+            kflc_diag_errorf(diag, s->line,
+                "observe %s %s of `%s`: no astro_body of that name is "
+                "declared in this world", word, pn,
+                s->name ? s->name : "?");
+            err = 1;
+            continue;
+        }
+        if (!rl_body_has_assembly_(m, tgt)) {
+            kflc_diag_errorf(diag, s->line,
+                "observe %s %s of `%s`: `%s` declares no `assembly=`, so "
+                "it carries neither the geometry a signature is computed "
+                "from nor the vehicle a track is kept against", word, pn,
+                s->name, s->name);
+            err = 1;
+            continue;
+        }
+        if (tgt == m->payloads[p].body) {
+            kflc_diag_errorf(diag, s->line,
+                "observe %s %s of `%s`: `%s` is carried by `%s` itself, "
+                "and a payload does not observe its own platform", word,
+                pn, s->name, pn, s->name);
+            err = 1;
+            continue;
+        }
+        m->obs_payload[i] = p;
+        m->obs_target[i]  = tgt;
+    }
+    if (err) return 1;
+
+    /* The per-observer target cap the library documents. Past it a
+     * push is a silent no-op, which would leave a channel reading
+     * invalid forever for a reason nothing reports, so it is refused
+     * here naming the payload, the count and the limit. */
+    for (int p = 0; p < m->n_payloads; p++) {
+        if (m->payloads[p].kind != RL_PAY_INFOSTATE) continue;
+        int seen[RL_MAX_BODIES];
+        int n_seen = 0;
+        for (int i = 0; i < m->n_observes; i++) {
+            if (m->obs_payload[i] != p) continue;
+            if (rl_observe_form_(m->observes[i]) != RL_OBS_TRK) continue;
+            int dup = 0;
+            for (int q = 0; q < n_seen; q++) {
+                if (seen[q] == m->obs_target[i]) dup = 1;
+            }
+            if (!dup && n_seen < RL_MAX_BODIES) seen[n_seen++] = m->obs_target[i];
+        }
+        if (n_seen > K26ASTRO_INFOSTATE_MAX_TARGETS) {
+            kflc_diag_errorf(diag, m->payloads[p].line,
+                "astro_payload `%s`: %d targets are tracked against this "
+                "information state and the per-observer limit is %d",
+                m->payloads[p].name, n_seen,
+                K26ASTRO_INFOSTATE_MAX_TARGETS);
+            err = 1;
+        }
+    }
+
+    /* The silhouette of every detection target, taken from the
+     * colliders its assembly declares. Bodies are walked in
+     * declaration order so the emitted table's order is the program's
+     * own and not an accident of which observe was written first. */
+    for (int b = 0; b < m->n_bodies; b++) {
+        int wanted = 0;
+        for (int i = 0; i < m->n_observes; i++) {
+            if (rl_observe_form_(m->observes[i]) != RL_OBS_DET) continue;
+            if (m->obs_target[i] == b) wanted = 1;
+        }
+        if (!wanted) continue;
+        for (int c = 0; c < m->n_colliders; c++) {
+            if (m->colliders[c].body != b) continue;
+            if (m->n_sig >= RL_MAX_SIG) {
+                kflc_diag_errorf(diag, m->bodies[b].body->line,
+                    "more than %d signature primitives in this program",
+                    RL_MAX_SIG);
+                return 1;
+            }
+            RlSigPrim *sp = &m->sig[m->n_sig++];
+            sp->body = b;
+            sp->kind = m->colliders[c].kind;
+            memcpy(sp->axis, m->colliders[c].axis, sizeof sp->axis);
+            memcpy(sp->half, m->colliders[c].half, sizeof sp->half);
+        }
+    }
+    return err;
+}
+
 static int rl_collect_(RlModel *m, const KflcNode *form,
                        KflcArena *arena, KflcDiag *diag)
 {
@@ -1581,6 +2152,23 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
         case KFLN_STMT_SENSOR:
             if (rl_collect_sensor_(m, s, diag)) err = 1;
             break;
+        case KFLN_STMT_ASTRO_PAYLOAD:
+            if (m->n_payloads == RL_MAX_PAYLOADS) {
+                kflc_diag_errorf(diag, s->line,
+                    "too many astro_payload declarations (limit %d)",
+                    RL_MAX_PAYLOADS);
+                return 1;
+            }
+            if (!s->name) {
+                kflc_diag_errorf(diag, s->line,
+                    "astro_payload requires a name");
+                return 1;
+            }
+            m->payloads[m->n_payloads].node = s;
+            m->payloads[m->n_payloads].name = s->name;
+            m->payloads[m->n_payloads].line = s->line;
+            m->n_payloads++;
+            break;
         case KFLN_STMT_OBSERVE:
             if (rl_observe_as_(s)) {
                 if (rl_add_observe_(m, s, -1, diag)) return 1;
@@ -1619,6 +2207,16 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
                         "and is part of the compiled program's identity");
                     err = 1;
                 }
+                /* A payload is constructed once per environment in the
+                 * world prefix and lives as long as the environment,
+                 * so its declaration cannot be conditional either. */
+                if (c->kind == KFLN_STMT_ASTRO_PAYLOAD) {
+                    kflc_diag_errorf(diag, c->line,
+                        "astro_payload declarations in a reinforcement "
+                        "learning world must be top level: the payload "
+                        "set is part of the compiled program's identity");
+                    err = 1;
+                }
             }
         }
     }
@@ -1649,6 +2247,7 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
         return 1;
     }
     if (rl_finish_agents_(m, diag)) return 1;
+    if (rl_finish_payloads_(m, form, arena, diag)) err = 1;
 
     /* Domain-randomisation parameters: distribution-valued astro_body
      * attributes, channels in source order within class 0x0002. */
@@ -1664,9 +2263,34 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
                 return 1;
             }
             m->dr[m->n_dr].body    = i;
+            m->dr[m->n_dr].payload = -1;
+            m->dr[m->n_dr].param   = -1;
             m->dr[m->n_dr].attr    = a;
             m->dr[m->n_dr].dist    = d;
             m->dr[m->n_dr].channel = m->n_dr;
+            m->n_dr++;
+        }
+    }
+    /* Payload keys, after the bodies and in source order within the
+     * payload set. A program that declares no payload allocates
+     * exactly the channels it allocated before, so no existing draw
+     * coordinate moves. */
+    for (int p = 0; p < m->n_payloads; p++) {
+        for (int k = 0; k < RL_PAY_MAXP; k++) {
+            if (!m->payloads[p].dist[k]) continue;
+            if (m->n_dr == RL_MAX_DR) {
+                kflc_diag_errorf(diag, m->payloads[p].line,
+                    "too many domain-randomisation parameters (limit %d)",
+                    RL_MAX_DR);
+                return 1;
+            }
+            m->dr[m->n_dr].body    = -1;
+            m->dr[m->n_dr].payload = p;
+            m->dr[m->n_dr].param   = k;
+            m->dr[m->n_dr].attr    = m->payloads[p].attr[k];
+            m->dr[m->n_dr].dist    = m->payloads[p].dist[k];
+            m->dr[m->n_dr].channel = m->n_dr;
+            m->payloads[p].dr[k]   = m->n_dr;
             m->n_dr++;
         }
     }
@@ -1761,6 +2385,7 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
     }
 
     if (!err && rl_collect_actuators_(m, diag)) err = 1;
+    if (!err && rl_finish_defense_(m, diag)) err = 1;
 
     return err;
 }
@@ -2256,6 +2881,50 @@ static int rl_has_relative_observe_(const RlModel *m)
     return 0;
 }
 
+static int rl_n_pay_kind_(const RlModel *m, int kind)
+{
+    int n = 0;
+    for (int p = 0; p < m->n_payloads; p++) {
+        if (m->payloads[p].kind == kind) n++;
+    }
+    return n;
+}
+
+static int rl_n_detect_(const RlModel *m)
+{
+    int n = 0;
+    for (int p = 0; p < m->n_payloads; p++) {
+        if (m->payloads[p].kind >= 0 &&
+            RL_PAY_KIND_[m->payloads[p].kind].is_detect) n++;
+    }
+    return n;
+}
+
+/* The (information state, target) pairs the binding pushes a sample
+ * for. One pair per distinct target of each infostate payload, taken
+ * in observe declaration order, so the push order is the program's own
+ * and the same on every step and in every environment. */
+static int rl_track_pairs_(const RlModel *m, int *pay, int *veh, int cap)
+{
+    int n = 0;
+    for (int i = 0; i < m->n_observes; i++) {
+        if (rl_observe_form_(m->observes[i]) != RL_OBS_TRK) continue;
+        int p = m->obs_payload[i];
+        int b = m->obs_target[i];
+        if (p < 0 || b < 0) continue;
+        int v = rl_veh_slot_of_(m, b);
+        int dup = 0;
+        for (int q = 0; q < n; q++) {
+            if (pay[q] == p && veh[q] == v) dup = 1;
+        }
+        if (dup || n >= cap) continue;
+        pay[n] = p;
+        veh[n] = v;
+        n++;
+    }
+    return n;
+}
+
 /* The actuator tables and the per-environment block their commands
  * and wheel momenta live in. The tables are what the assemblies
  * declared and never change; the block is state, one per environment,
@@ -2519,6 +3188,208 @@ static void rl_emit_actuators_(FILE *out, const RlModel *m)
  * cannot initialise a union member by name, and because the bias
  * walk's two coefficients are not known until the control period is
  * read. */
+/* The defense payload set, the pairs the information state is pushed
+ * for, and the silhouette of every detection target.
+ *
+ * Everything here is a compile-time constant table, so the stepping
+ * path indexes fixed arrays and constructs nothing: the payloads are
+ * built once per environment in the world prefix and the step calls
+ * evaluators only. */
+static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
+{
+    fprintf(out, "#define KFLRL_N_PAYLOAD %d\n", m->n_payloads);
+    fprintf(out, "#define KFLRL_PAY_NPARAM %d\n",
+            m->pay_nparam > 0 ? m->pay_nparam : 1);
+    int tpay[RL_MAX_PAYLOADS * RL_MAX_BODIES];
+    int tveh[RL_MAX_PAYLOADS * RL_MAX_BODIES];
+    int n_pairs = rl_track_pairs_(m, tpay, tveh,
+                                  (int)(sizeof tpay / sizeof tpay[0]));
+    fprintf(out, "#define KFLRL_N_TRACKPAIR %d\n", n_pairs);
+    fprintf(out, "#define KFLRL_N_SIG %d\n\n", m->n_sig);
+    fputs(
+"/* This environment's slice of the payload handle array and of the\n"
+" * parameter store. Both are macros so a program with no payload\n"
+" * passes a null pointer through the same call sites rather than\n"
+" * carrying a second shape of them. */\n"
+"#if KFLRL_N_PAYLOAD > 0\n"
+"#define KFLRL_PAYP(h, e) ((h)->payp + (size_t)(e) * KFLRL_N_PAYLOAD \\\n"
+"                          * KFLRL_PAY_NPARAM)\n"
+"#define KFLRL_PAYH(h, e) ((h)->payloads + (size_t)(e) * KFLRL_N_PAYLOAD)\n"
+"#define KFLRL_INFOT(h, e)  ((h)->info_t[(e)])\n"
+"#define KFLRL_INFODAY(h, e) ((h)->info_day[(e)])\n"
+"#else\n"
+"#define KFLRL_PAYP(h, e) ((double *)0)\n"
+"#define KFLRL_PAYH(h, e) ((void **)0)\n"
+"#define KFLRL_INFOT(h, e)  (0.0)\n"
+"#define KFLRL_INFODAY(h, e) ((int64_t)0)\n"
+"#endif\n"
+"#if KFLRL_N_VEHICLES > 0\n"
+"#define KFLRL_VEHS(h, e) ((h)->vehicles + (size_t)(e) * KFLRL_N_VEHICLES)\n"
+"#else\n"
+"#define KFLRL_VEHS(h, e) ((K26AstroVehicle **)0)\n"
+"#endif\n\n", out);
+    if (m->n_payloads == 0) return 0;
+
+    if (rl_n_pay_kind_(m, RL_PAY_INFOSTATE) > 0) {
+        fputs(
+"/* The clock the information state is pushed and observed on.\n"
+" *\n"
+" * It is this layer's own, counted in seconds from create and never\n"
+" * reset, rather than the world's: the world's clock returns to the\n"
+" * episode baseline at every reset, and a push older than the ring's\n"
+" * newest sample is dropped, so pushing on the world's clock would\n"
+" * silence the history for the rest of the run. The library needs\n"
+" * only that its epochs are consistent and increasing, which this\n"
+" * is by construction; the retarded-time solution depends on\n"
+" * differences of them and not on their origin.\n"
+" *\n"
+" * The day index carries the growth across episodes and the\n"
+" * seconds carry the time within one, so two samples of one\n"
+" * episode differ by the same arithmetic on the same operands\n"
+" * however many episodes have run before it. */\n"
+"static K26AstroEpoch kflrl_info_epoch_(int64_t day, double t_s)\n"
+"{\n"
+"    K26AstroEpoch t = k26astro_epoch_j2000_tt();\n"
+"    t.days_since_J2000 = day;\n"
+"    t.seconds_of_day   = 0.0;\n"
+"    k26astro_epoch_add_seconds(&t, t_s);\n"
+"    return t;\n"
+"}\n\n", out);
+    }
+
+    /* Teardown per payload slot. The slot decides the destructor
+     * because the handle is carried as a void pointer: one array
+     * holds every kind, which is what makes the construction and
+     * teardown loops one loop each rather than one per kind. */
+    fputs("static void kflrl_payload_destroy_(int slot, void *p)\n{\n"
+          "    switch (slot) {\n", out);
+    for (int p = 0; p < m->n_payloads; p++) {
+        fprintf(out, "    case %d: %s((%s *)p); break;\n", p,
+                m->payloads[p].kind == RL_PAY_INFOSTATE
+                    ? "k26astro_infostate_destroy"
+                    : "k26astro_detect_sensor_destroy",
+                m->payloads[p].kind == RL_PAY_INFOSTATE
+                    ? "K26AstroInfostate" : "K26AstroDetectSensor");
+    }
+    fputs("    default: break;\n    }\n}\n\n", out);
+
+    /* The kind tag each payload's base must carry. It is written from
+     * the tier's own registry and checked against the constructed
+     * payload at build, so the grammar's claim to mirror the registry
+     * is a mechanical check rather than a comment. */
+    fputs("static const uint32_t kflrl_pay_tag_[] = {\n", out);
+    for (int p = 0; p < m->n_payloads; p++) {
+        fprintf(out, "    (uint32_t)%s,\n", RL_PAY_KIND_[m->payloads[p].kind].tag);
+    }
+    fputs("};\n\n", out);
+    fputs("static const int kflrl_pay_veh_[] = {\n", out);
+    for (int p = 0; p < m->n_payloads; p++) {
+        fprintf(out, "    %d,\n", m->payloads[p].veh);
+    }
+    fputs("};\n\n", out);
+
+    if (n_pairs > 0) {
+        fputs("/* One (information state, target vehicle) pair per push,\n"
+              " * in observe declaration order. */\n"
+              "static const int kflrl_track_pay_[] = {\n", out);
+        for (int i = 0; i < n_pairs; i++) fprintf(out, "    %d,\n", tpay[i]);
+        fputs("};\n\nstatic const int kflrl_track_veh_[] = {\n", out);
+        for (int i = 0; i < n_pairs; i++) fprintf(out, "    %d,\n", tveh[i]);
+        fputs("};\n\n", out);
+    }
+
+    if (m->n_sig > 0) {
+        fputs(
+"/* One primitive of a detection target's silhouette, in that body's\n"
+" * own frame, with the component placement already baked in by the\n"
+" * assembly reader. `axis` holds the primitive's own axes as columns\n"
+" * in that frame; `half` holds a sphere's radius, a capsule's radius\n"
+" * and half length, or a box's three half extents. */\n"
+"typedef struct {\n"
+"    int    kind;\n"
+"    double axis[3][3];\n"
+"    double half[3];\n"
+"} KflrlSigPrim;\n\n"
+"static const KflrlSigPrim kflrl_sig_[] = {\n", out);
+        for (int i = 0; i < m->n_sig; i++) {
+            const RlSigPrim *sp = &m->sig[i];
+            fprintf(out, "    { %d, { { %.17g, %.17g, %.17g },"
+                         " { %.17g, %.17g, %.17g },"
+                         " { %.17g, %.17g, %.17g } },"
+                         " { %.17g, %.17g, %.17g } },\n",
+                    sp->kind,
+                    sp->axis[0][0], sp->axis[0][1], sp->axis[0][2],
+                    sp->axis[1][0], sp->axis[1][1], sp->axis[1][2],
+                    sp->axis[2][0], sp->axis[2][1], sp->axis[2][2],
+                    sp->half[0], sp->half[1], sp->half[2]);
+        }
+        fputs("};\n\nstatic const int kflrl_sig_first_[] = {\n", out);
+        for (int b = 0; b < m->n_bodies; b++) {
+            int first = -1;
+            for (int i = 0; i < m->n_sig; i++) {
+                if (m->sig[i].body == b && first < 0) first = i;
+            }
+            fprintf(out, "    %d,\n", first < 0 ? 0 : first);
+        }
+        fputs("};\n\nstatic const int kflrl_sig_count_[] = {\n", out);
+        for (int b = 0; b < m->n_bodies; b++) {
+            int n = 0;
+            for (int i = 0; i < m->n_sig; i++) {
+                if (m->sig[i].body == b) n++;
+            }
+            fprintf(out, "    %d,\n", n);
+        }
+        fputs("};\n\n", out);
+        fputs(
+"/* The area a target presents along a look direction, the direction\n"
+" * given in the target's own frame. The three convex primitives have\n"
+" * closed forms: a sphere presents its great circle at every aspect,\n"
+" * a capsule its two caps as one sphere plus the side of its\n"
+" * cylinder, and a box the three face pairs each weighted by how\n"
+" * squarely it faces the observer. Overlapping primitives are summed\n"
+" * rather than unioned, which overstates the area of a craft whose\n"
+" * colliders interpenetrate and is stated rather than corrected: the\n"
+" * union of arbitrary primitives has no closed form and an iterative\n"
+" * one would not belong on this path.\n"
+" *\n"
+" * The arithmetic is addition, multiplication and one square root,\n"
+" * all correctly rounded under IEEE-754, so the area is a function of\n"
+" * the asset bytes and the orientation alone. */\n"
+"static double kflrl_sig_area_(int body, K26V3 look_body)\n"
+"{\n"
+"    double area = 0.0;\n"
+"    int first = kflrl_sig_first_[body];\n"
+"    int n     = kflrl_sig_count_[body];\n"
+"    for (int i = first; i < first + n; i++) {\n"
+"        const KflrlSigPrim *s = &kflrl_sig_[i];\n"
+"        if (s->kind == 1) {\n"
+"            area += K26A_PI * s->half[0] * s->half[0];\n"
+"        } else if (s->kind == 2) {\n"
+"            double c = look_body.x * s->axis[2][0]\n"
+"                     + look_body.y * s->axis[2][1]\n"
+"                     + look_body.z * s->axis[2][2];\n"
+"            double s2 = 1.0 - c * c;\n"
+"            if (s2 < 0.0) s2 = 0.0;\n"
+"            area += K26A_PI * s->half[0] * s->half[0]\n"
+"                  + 2.0 * s->half[0] * (2.0 * s->half[2]) * sqrt(s2);\n"
+"        } else {\n"
+"            for (int k = 0; k < 3; k++) {\n"
+"                double c = look_body.x * s->axis[k][0]\n"
+"                         + look_body.y * s->axis[k][1]\n"
+"                         + look_body.z * s->axis[k][2];\n"
+"                if (c < 0.0) c = -c;\n"
+"                double e0 = s->half[(k + 1) % 3];\n"
+"                double e1 = s->half[(k + 2) % 3];\n"
+"                area += 4.0 * e0 * e1 * c;\n"
+"            }\n"
+"        }\n"
+"    }\n"
+"    return area;\n"
+"}\n\n", out);
+    }
+    return 0;
+}
+
 static int rl_n_sensed_(const RlModel *m)
 {
     int n = 0;
@@ -2666,6 +3537,24 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
          * proximity library, for the reason the field model is
          * conditional below: a dependency follows a declaration. */
         fputs("#include <k26astro_prox/prox.h>\n", out);
+    }
+    /* Likewise the defense tier: a program that declares no payload
+     * acquires no archive on its link line. The kind registry is
+     * included beside them because the payload base carries its tag
+     * and this artifact sets it from the same registry the libraries
+     * read it from. */
+    if (rl_n_pay_kind_(m, RL_PAY_INFOSTATE) > 0) {
+        fputs("#include <k26astro_infostate/infostate.h>\n"
+              "#include <k26astro_infostate/infostate_consts.h>\n"
+              "#include <k26astro_core/epoch.h>\n", out);
+    }
+    if (rl_n_detect_(m) > 0) {
+        fputs("#include <k26astro_detect/detect.h>\n"
+              "#include <k26astro_core/consts.h>\n", out);
+    }
+    if (m->n_payloads > 0) {
+        fputs("#include <k26astro_defense/defense_kinds.h>\n"
+              "#include <k26astro_vehicle/payload.h>\n", out);
     }
     if (rl_n_sensed_(m) > 0) {
         /* Only a program that declares a sensor pulls in the
@@ -2965,6 +3854,8 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         }
         fputs("};\n\n", out);
     }
+
+    if (rl_emit_payload_tables_(out, m)) return 1;
 
     /* ---- Docking ports ---------------------------------------- *
      *
@@ -3365,6 +4256,105 @@ typedef struct {
  * at the environment's episode-0 coordinates); reinforcement learning
  * constructs and as-bound observes are the episode machinery's and
  * are skipped; everything else is the ordinary statement emitter. */
+/* Construct every declared payload, once per environment, in the world
+ * prefix and after the vehicles exist.
+ *
+ * This is the whole of the tier's allocation discipline on this side:
+ * the constructors and destructors are the only allocating functions
+ * the five libraries have, and they are called here and at teardown.
+ * The evaluators the step calls allocate nothing and return a value
+ * struct, so nothing below this function has to be counted.
+ *
+ * The declared parameters are also stored per environment, because the
+ * tier's handles publish no accessors for them and the evaluators take
+ * them as arguments. That store is what a per-episode draw writes, so
+ * a randomised parameter reaches the evaluator on the episode that
+ * drew it. */
+static int rl_emit_payload_build_(FILE *out, const RlModel *m,
+                                  const KflcExprCtx *ctx, KflcDiag *diag)
+{
+    for (int p = 0; p < m->n_payloads; p++) {
+        const RlPayload *py = &m->payloads[p];
+        const RlPayKindDesc *kd = &RL_PAY_KIND_[py->kind];
+        fprintf(out, "    {\n"
+                     "        /* astro_payload `%s`, kind `%s`, carried "
+                     "by `%s` */\n"
+                     "        double *_kfl_pp = _kfl_payp + %d * "
+                     "KFLRL_PAY_NPARAM;\n",
+                py->name, kd->name, m->bodies[py->body].body->name, p);
+        for (int k = 0; k < kd->n_keys; k++) {
+            if (py->dr[k] >= 0) {
+                fputs("        {\n            double _kfl_v = ", out);
+                if (rl_emit_draw_(out, py->dist[k], 0x0002u,
+                                  m->dr[py->dr[k]].channel, ctx, diag)) {
+                    return 1;
+                }
+                fputs(";\n", out);
+                fprintf(out, "            if (_kfl_dr0) _kfl_dr0[%d] = "
+                             "_kfl_v;\n", py->dr[k]);
+                fprintf(out, "            _kfl_pp[%d] = _kfl_v;\n", k);
+                fputs("        }\n", out);
+            } else {
+                const char *v = py->attr[k] ? rl_pay_attr_text_(py->attr[k])
+                                            : kd->keys[k].dflt;
+                fprintf(out, "        _kfl_pp[%d] = (double)(%s);\n",
+                        k, v ? v : kd->keys[k].dflt);
+            }
+        }
+        fprintf(out,
+            "        K26AstroVehicle *_kfl_ov = _kfl_veh ? _kfl_veh[%d] "
+            ": NULL;\n"
+            "        if (!_kfl_ov) return -1;\n", py->veh);
+        if (py->kind == RL_PAY_INFOSTATE) {
+            fputs(
+            "        K26AstroInfostate *_kfl_h = k26astro_infostate_new(\n"
+            "            _kfl_ov, (int)_kfl_pp[0]);\n"
+            "        if (!_kfl_h) return -1;\n"
+            "        if (k26astro_infostate_attach(_kfl_h) != 0) {\n"
+            "            k26astro_infostate_destroy(_kfl_h);\n"
+            "            return -1;\n"
+            "        }\n", out);
+        } else {
+            const char *fn =
+                py->kind == RL_PAY_DETECT_IR    ? "k26astro_detect_sensor_new_ir"
+              : py->kind == RL_PAY_DETECT_RADAR ? "k26astro_detect_sensor_new_radar"
+                                                : "k26astro_detect_sensor_new_lidar";
+            /* The constructor takes only the instrument's own
+             * parameters; the target-class ones sit above them in the
+             * store and are read by the evaluator. */
+            int n_ctor = py->kind == RL_PAY_DETECT_IR    ? 6
+                       : py->kind == RL_PAY_DETECT_RADAR ? 9 : 6;
+            fprintf(out,
+                "        K26AstroDetectSensor *_kfl_h = %s(\n", fn);
+            for (int k = 0; k < n_ctor; k++) {
+                fprintf(out, "            _kfl_pp[%d]%s\n", k,
+                        k + 1 == n_ctor ? ");" : ",");
+            }
+            fputs(
+            "        if (!_kfl_h) return -1;\n"
+            "        if (k26astro_detect_sensor_attach(_kfl_h, _kfl_ov) "
+            "!= 0) {\n"
+            "            k26astro_detect_sensor_destroy(_kfl_h);\n"
+            "            return -1;\n"
+            "        }\n", out);
+        }
+        /* The kind tag the payload carries is checked against the tag
+         * this program wrote from the registry, so the grammar's claim
+         * to mirror that registry is measured rather than asserted. */
+        fprintf(out,
+            "        if (k26astro_payload_kind("
+            "(const K26AstroPayload *)_kfl_h) != kflrl_pay_tag_[%d]) {\n",
+            p);
+        fprintf(out, "            %s(_kfl_h);\n            return -1;\n"
+                     "        }\n",
+                py->kind == RL_PAY_INFOSTATE ? "k26astro_infostate_destroy"
+                                             : "k26astro_detect_sensor_destroy");
+        fprintf(out, "        _kfl_pay[%d] = (void *)_kfl_h;\n"
+                     "    }\n", p);
+    }
+    return 0;
+}
+
 static int rl_emit_build_world_(FILE *out, const RlModel *m,
                                 const KflcNode *form, KflcArena *arena,
                                 KflcExprFn *user_fn_arr, int n_user_fns,
@@ -3375,11 +4365,14 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
           "                              uint32_t _kfl_envi, "
           "double *_kfl_wscal,\n"
           "                              double *_kfl_dr0,\n"
-          "                              K26AstroVehicle **_kfl_veh)\n"
+          "                              K26AstroVehicle **_kfl_veh,\n"
+          "                              void **_kfl_pay, "
+          "double *_kfl_payp)\n"
           "{\n"
           "    const uint32_t _kfl_ep = 0;\n"
           "    (void)_kfl_key; (void)_kfl_envi; (void)_kfl_ep; "
-          "(void)_kfl_wscal; (void)_kfl_dr0; (void)_kfl_veh;\n", out);
+          "(void)_kfl_wscal; (void)_kfl_dr0; (void)_kfl_veh;\n"
+          "    (void)_kfl_pay; (void)_kfl_payp;\n", out);
 
     /* Known-body index locals, the batch emitter's convention, so the
      * shared statement emitter resolves parent/observe targets. A
@@ -3404,7 +4397,8 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
     for (const KflcNode *s = m->world->children; s; s = s->next) {
         if (s->kind == KFLN_STMT_EPISODE || s->kind == KFLN_STMT_ACTION ||
             s->kind == KFLN_STMT_ON_STEP || s->kind == KFLN_STMT_OBJECTIVE ||
-            s->kind == KFLN_STMT_AGENT) {
+            s->kind == KFLN_STMT_AGENT ||
+            s->kind == KFLN_STMT_ASTRO_PAYLOAD) {
             continue;
         }
         rl_collect_lets_(s, arena, &live, &live_n, &live_cap);
@@ -3439,7 +4433,7 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
 
     int body_i = 0;
     int veh_i  = 0;
-    RlVehEmit veh[RL_MAX_ACT];
+    RlVehEmit veh[RL_MAX_VEH];
     for (const KflcNode *s = m->world->children; s; s = s->next) {
         switch (s->kind) {
         case KFLN_STMT_EPISODE:
@@ -3448,6 +4442,9 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
         case KFLN_STMT_OBJECTIVE:
         case KFLN_STMT_SENSOR:
         case KFLN_STMT_AGENT:
+        /* Payloads are constructed after the vehicles exist, so the
+         * statement contributes nothing where it is written. */
+        case KFLN_STMT_ASTRO_PAYLOAD:
             continue;
         case KFLN_STMT_OBSERVE:
             if (rl_observe_as_(s)) continue;   /* channel, not a print */
@@ -3539,10 +4536,10 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                 "        kflrl_body_idx_[%d] = _kfl_body_%s_idx;\n",
                 s->name, s->name, body_i, s->name);
             if (asmb) {
-                if (veh_i >= RL_MAX_ACT) {
+                if (veh_i >= RL_MAX_VEH) {
                     kflc_diag_errorf(diag, s->line,
                         "more than %d bodies carry an assembly",
-                        RL_MAX_ACT);
+                        RL_MAX_VEH);
                     kflc_arena_release(asm_a);
                     return 1;
                 }
@@ -3608,6 +4605,8 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                 ve->body_name, i);
     }
 
+    if (rl_emit_payload_build_(out, m, &ctx, diag)) return 1;
+
     /* Capture the world scalars for the objective and termination
      * evaluators: the prefix runs once per environment at create, and
      * these are its final values. */
@@ -3631,10 +4630,12 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
           "                               uint32_t _kfl_envi, "
           "uint32_t _kfl_ep,\n"
           "                               double *rec,\n"
-          "                               const double *_kfl_dr0)\n"
+          "                               const double *_kfl_dr0,\n"
+          "                               double *_kfl_payp)\n"
           "{\n"
           "    (void)world; (void)_kfl_key; (void)_kfl_envi; "
-          "(void)_kfl_ep; (void)rec; (void)_kfl_dr0;\n", out);
+          "(void)_kfl_ep; (void)rec; (void)_kfl_dr0;\n"
+          "    (void)_kfl_payp;\n", out);
 
     for (int i = 0; i < m->n_resets; i++) {
         fprintf(out, "    rec[%d] = ", i);
@@ -3661,6 +4662,16 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
     for (int i = 0; i < m->n_dr; i++) {
         char var[32];
         snprintf(var, sizeof var, "rec[%d]", m->n_resets + i);
+        if (m->dr[i].payload >= 0) {
+            /* A payload key's draw lands in the per-environment
+             * parameter store, which is what the evaluators read: the
+             * handle itself carries the values it was constructed
+             * with and publishes no way to change them. */
+            fprintf(out, "    _kfl_payp[%d * KFLRL_PAY_NPARAM + %d] = "
+                         "%s;\n",
+                    m->dr[i].payload, m->dr[i].param, var);
+            continue;
+        }
         fprintf(out, "    {\n        K26AstroBody *_kfl_bp = "
                      "k26astro_world_body_at(world, kflrl_body_idx_[%d]);\n"
                      "        if (_kfl_bp) {\n", m->dr[i].body);
@@ -3690,6 +4701,192 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
  * channels each. The range channel is the magnitude of the relative
  * position vector between the corrected target position and the
  * observer, in metres. */
+/* The two defense observation forms.
+ *
+ * Detection is closed form over the two bodies' current state: no
+ * integration, no draw, no iteration, and no light-time correction.
+ * The corrected view is the track form's, which is the division of
+ * labour the two libraries already have. Both call the tier's
+ * evaluators with a null generator, so every imperfection on these
+ * channels arrives through the sensor layer, which has the
+ * draw-coordinate discipline replay rests on.
+ *
+ * The signature is aspect dependent because the tier's models are:
+ * the area the target presents is computed along the line of sight in
+ * the target's own frame, so a craft that turns changes what its
+ * observer sees. The published aspect channel is the cosine between
+ * the line of sight and the target's velocity, which is what a
+ * velocity-forward craft's own attitude follows. */
+static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
+                                     int i, int off)
+{
+    const KflcNode *s = m->observes[i];
+    int p   = m->obs_payload[i];
+    int tgt = m->obs_target[i];
+    const RlPayload *py = &m->payloads[p];
+
+    if (rl_observe_form_(s) == RL_OBS_TRK) {
+        const char *bad = NULL;
+        int mod = rl_track_modality_(s, &bad);
+        fprintf(out,
+            "    {\n"
+            "        double _kfl_val = 0.0;\n"
+            "        double _kfl_px = 0.0, _kfl_py = 0.0, _kfl_pz = 0.0;\n"
+            "        double _kfl_vx = 0.0, _kfl_vy = 0.0, _kfl_vz = 0.0;\n"
+            "        double _kfl_rr = 0.0, _kfl_ag = 0.0;\n"
+            "        K26AstroInfostate *_kfl_is = pay\n"
+            "            ? (K26AstroInfostate *)pay[%d] : NULL;\n"
+            "        K26AstroVehicle *_kfl_tv = veh ? veh[%d] : NULL;\n"
+            "        if (_kfl_is && _kfl_tv) {\n"
+            "            K26AstroInfostateObservation _kfl_o =\n"
+            "                k26astro_infostate_observe(_kfl_is, _kfl_tv,\n"
+            "                    kflrl_info_epoch_(t_day, t_info),\n"
+            "                    (K26AstroInfostateModality)%d);\n"
+            /* The age test is what keeps one episode out of the next.
+             * The ring carries the previous episode's samples, since
+             * the library offers no way to empty it, so an
+             * observation whose retarded time precedes this episode's
+             * epoch was interpolated across the reset. It is
+             * published as unavailable, which is what it is. */
+            "            if (_kfl_o.valid && _kfl_o.age_s <= t_info) {\n"
+            "                _kfl_val = 1.0;\n"
+            "                _kfl_px = _kfl_o.position.x;\n"
+            "                _kfl_py = _kfl_o.position.y;\n"
+            "                _kfl_pz = _kfl_o.position.z;\n"
+            "                _kfl_vx = _kfl_o.velocity.x;\n"
+            "                _kfl_vy = _kfl_o.velocity.y;\n"
+            "                _kfl_vz = _kfl_o.velocity.z;\n"
+            "                _kfl_rr = _kfl_o.range_m;\n"
+            "                _kfl_ag = _kfl_o.age_s;\n"
+            "            }\n"
+            "        }\n"
+            "        out_v[%d] = _kfl_val;\n"
+            "        out_v[%d] = _kfl_px;\n"
+            "        out_v[%d] = _kfl_py;\n"
+            "        out_v[%d] = _kfl_pz;\n"
+            "        out_v[%d] = _kfl_vx;\n"
+            "        out_v[%d] = _kfl_vy;\n"
+            "        out_v[%d] = _kfl_vz;\n"
+            "        out_v[%d] = _kfl_rr;\n"
+            "        out_v[%d] = _kfl_ag;\n"
+            "    }\n",
+            p, rl_veh_slot_of_(m, tgt), mod < 0 ? 0 : mod,
+            off, off + 1, off + 2, off + 3, off + 4, off + 5, off + 6,
+            off + 7, off + 8);
+        return;
+    }
+
+    fprintf(out,
+        "    {\n"
+        "        const K26AstroBody *_kfl_ob = k26astro_world_body_at(\n"
+        "            world, kflrl_body_idx_[%d]);\n"
+        "        const K26AstroBody *_kfl_tb = k26astro_world_body_at(\n"
+        "            world, kflrl_body_idx_[%d]);\n"
+        "        double _kfl_det = 0.0, _kfl_snr = 0.0, _kfl_rng = 0.0;\n"
+        "        double _kfl_ux = 0.0, _kfl_uy = 0.0, _kfl_uz = 0.0;\n"
+        "        double _kfl_asp = 0.0;\n"
+        "        if (_kfl_ob && _kfl_tb) {\n"
+        "            K26V3 _kfl_d = k26astro_pos_sub(&_kfl_tb->pos,\n"
+        "                                            &_kfl_ob->pos);\n"
+        "            _kfl_rng = k26m3d_v3_len(_kfl_d);\n"
+        "            if (_kfl_rng > 0.0) {\n"
+        "                _kfl_ux = _kfl_d.x / _kfl_rng;\n"
+        "                _kfl_uy = _kfl_d.y / _kfl_rng;\n"
+        "                _kfl_uz = _kfl_d.z / _kfl_rng;\n"
+        "            }\n"
+        "            double _kfl_vs = k26m3d_v3_len(_kfl_tb->vel);\n"
+        "            if (_kfl_vs > 0.0) {\n"
+        "                _kfl_asp = (_kfl_ux * _kfl_tb->vel.x\n"
+        "                          + _kfl_uy * _kfl_tb->vel.y\n"
+        "                          + _kfl_uz * _kfl_tb->vel.z) / _kfl_vs;\n"
+        "            }\n"
+        "            K26V3 _kfl_look = k26m3d_quat_rotate_v3(\n"
+        "                k26m3d_quat_conj(_kfl_tb->attitude),\n"
+        "                k26m3d_v3(_kfl_ux, _kfl_uy, _kfl_uz));\n"
+        "            double _kfl_area = kflrl_sig_area_(%d, _kfl_look);\n"
+        "            const double *_kfl_pp = payp\n"
+        "                ? payp + %d * KFLRL_PAY_NPARAM : NULL;\n"
+        "            if (_kfl_pp && _kfl_rng > 0.0) {\n",
+        py->body, tgt, tgt, p);
+
+    if (py->kind == RL_PAY_DETECT_IR) {
+        fputs(
+        "                double _kfl_pw =\n"
+        "                    k26astro_signature_ir_planck_inband(\n"
+        "                        _kfl_area, _kfl_pp[7], _kfl_pp[6],\n"
+        "                        _kfl_pp[2] * 1.0e-6,\n"
+        "                        _kfl_pp[3] * 1.0e-6, 64);\n"
+        "                K26AstroDetectIrEvent _kfl_ev =\n"
+        "                    k26astro_detect_ir_passive_with_optics(\n"
+        "                        _kfl_pw, _kfl_pp[6], _kfl_rng,\n"
+        "                        _kfl_pp[0], _kfl_pp[1], _kfl_pp[2],\n"
+        "                        _kfl_pp[3], _kfl_pp[4], _kfl_pp[5],\n"
+        "                        _kfl_pp[8], _kfl_pp[9], NULL);\n"
+        "                _kfl_snr = _kfl_ev.snr;\n"
+        "                _kfl_det = _kfl_ev.detected ? 1.0 : 0.0;\n", out);
+    } else if (py->kind == RL_PAY_DETECT_RADAR) {
+        /* The target is taken as a flat plate of its own projected
+         * area facing the observer, which is the geometric-optics
+         * form the signature library implements and the one its
+         * facet routine returns for a facet the observer looks
+         * squarely at. The aspect dependence is in the area. */
+        fputs(
+        "                double _kfl_lam = _kfl_pp[3] > 0.0\n"
+        "                    ? (K26A_C / _kfl_pp[3]) : 0.0;\n"
+        "                K26V3 _kfl_nrm = k26m3d_v3(-_kfl_look.x,\n"
+        "                                           -_kfl_look.y,\n"
+        "                                           -_kfl_look.z);\n"
+        "                double _kfl_rcs =\n"
+        "                    k26astro_signature_rcs_monostatic(\n"
+        "                        1, &_kfl_nrm, &_kfl_area, _kfl_look,\n"
+        "                        _kfl_lam);\n"
+        "                K26AstroDetectRadarEvent _kfl_ev =\n"
+        "                    k26astro_detect_radar_active(\n"
+        "                        _kfl_pp[0], _kfl_pp[1], _kfl_pp[2],\n"
+        "                        _kfl_pp[3], _kfl_rcs, _kfl_rng,\n"
+        "                        _kfl_pp[4], _kfl_pp[5], _kfl_pp[6],\n"
+        "                        _kfl_pp[7], _kfl_pp[8], NULL);\n"
+        "                _kfl_snr = _kfl_ev.snr;\n"
+        "                _kfl_det = _kfl_ev.detected ? 1.0 : 0.0;\n", out);
+    } else {
+        /* The transmit gain is the diffraction-limited figure for the
+         * declared aperture at the declared wavelength, which is the
+         * relation the library's own header states, rather than a
+         * separate declaration that could disagree with the aperture
+         * beside it. The view-angle cosine is 1 because the area
+         * already carries the projection. */
+        fputs(
+        "                double _kfl_lam = _kfl_pp[1] * 1.0e-9;\n"
+        "                double _kfl_gt = 0.0;\n"
+        "                if (_kfl_lam > 0.0 && _kfl_pp[2] > 0.0) {\n"
+        "                    double _kfl_g = K26A_PI * _kfl_pp[2]\n"
+        "                                  / _kfl_lam;\n"
+        "                    _kfl_gt = 10.0 * log10(_kfl_g * _kfl_g);\n"
+        "                }\n"
+        "                K26AstroDetectLidarEvent _kfl_ev =\n"
+        "                    k26astro_detect_lidar_active(\n"
+        "                        _kfl_pp[0], _kfl_pp[1], _kfl_pp[2],\n"
+        "                        _kfl_gt, _kfl_pp[6], _kfl_area, 1.0,\n"
+        "                        _kfl_rng, _kfl_pp[3], _kfl_pp[4],\n"
+        "                        _kfl_pp[5], NULL);\n"
+        "                _kfl_snr = _kfl_ev.snr;\n"
+        "                _kfl_det = _kfl_ev.detected ? 1.0 : 0.0;\n", out);
+    }
+
+    fprintf(out,
+        "            }\n"
+        "        }\n"
+        "        out_v[%d] = _kfl_det;\n"
+        "        out_v[%d] = _kfl_snr;\n"
+        "        out_v[%d] = _kfl_rng;\n"
+        "        out_v[%d] = _kfl_ux;\n"
+        "        out_v[%d] = _kfl_uy;\n"
+        "        out_v[%d] = _kfl_uz;\n"
+        "        out_v[%d] = _kfl_asp;\n"
+        "    }\n",
+        off, off + 1, off + 2, off + 3, off + 4, off + 5, off + 6);
+}
+
 static int rl_emit_observe_(FILE *out, const RlModel *m,
                             KflcDiag *diag)
 {
@@ -3701,12 +4898,23 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
           "static void kflrl_observe_(K26AstroWorld *world, "
           "double *out_v,\n"
           "                           const KflrlContact *ct,\n"
-          "                           const KflrlJoin *jn)\n"
+          "                           const KflrlJoin *jn,\n"
+          "                           void *const *pay,\n"
+          "                           const double *payp,\n"
+          "                           K26AstroVehicle *const *veh,\n"
+          "                           int64_t t_day, double t_info)\n"
           "{\n"
-          "    (void)world; (void)out_v; (void)ct; (void)jn;\n", out);
+          "    (void)world; (void)out_v; (void)ct; (void)jn;\n"
+          "    (void)pay; (void)payp; (void)veh; (void)t_day; "
+          "(void)t_info;\n", out);
     for (int i = 0; i < m->n_observes; i++) {
         const KflcNode *s = m->observes[i];
         int off = rl_obs_offset_(m->observes, i);
+        if (rl_observe_form_(s) == RL_OBS_DET ||
+            rl_observe_form_(s) == RL_OBS_TRK) {
+            rl_emit_observe_defense_(out, m, i, off);
+            continue;
+        }
         if (rl_observe_form_(s) == RL_OBS_PORT) {
             /* The form names a port on a body, and the state it
              * publishes is that port's with respect to the one it
@@ -5603,6 +6811,42 @@ static void rl_emit_env_core_(FILE *out)
 "    K26SenseTerm  *sterm;\n"
 "    K26SenseState *sense;\n"
 "    double        *sense_ring;\n"
+"#endif\n", out);
+    fputs(
+"#if KFLRL_N_PAYLOAD > 0\n"
+"    /* The defense payloads, one set per environment, constructed\n"
+"     * once in the world prefix and destroyed with the handle;\n"
+"     * `payp` is the parameter store the evaluators read, since the\n"
+"     * tier's handles publish no accessors for what they were built\n"
+"     * with and a per-episode draw has to reach them somewhere.\n"
+"     *\n"
+"     * The information state is pushed and observed on a clock of\n"
+"     * this layer's own, in two parts. `info_t` is the seconds\n"
+"     * elapsed since the current episode's epoch and starts each\n"
+"     * episode at zero; `info_day` is a day index that only ever\n"
+"     * increases, one step per reset.\n"
+"     *\n"
+"     * The split is what makes an episode reproduce its\n"
+"     * predecessor bit for bit. The history ring drops a push\n"
+"     * older than its newest sample and the library offers no way\n"
+"     * to empty it, so the epochs must increase across a reset;\n"
+"     * but the retarded-time solution is a function of differences\n"
+"     * between them, and a difference taken between two seconds\n"
+"     * counts that grew with the run would round differently in\n"
+"     * each episode. Putting the growth in the day index and the\n"
+"     * within-episode time in the seconds field leaves every\n"
+"     * difference inside an episode the same arithmetic on the\n"
+"     * same operands in every episode.\n"
+"     *\n"
+"     * An observation whose retarded time precedes this episode's\n"
+"     * epoch is published as unavailable rather than interpolated\n"
+"     * across the reset: what lies on the far side is the previous\n"
+"     * episode, and reporting it would make episode k+1 a function\n"
+"     * of episode k. */\n"
+"    void   **payloads;\n"
+"    double  *payp;\n"
+"    double  *info_t;\n"
+"    int64_t *info_day;\n"
 "#endif\n"
 #endif
 
@@ -5923,8 +7167,43 @@ static void rl_emit_env_core_(FILE *out)
 " * integrator transients a step leaves behind, re-seed the world's\n"
 " * runtime noise stream, apply the episode's draws, and recompute\n"
 " * the initial observation. No allocation on this path. */\n"
-"static void kflrl_reset_env_(K26RlEnv *h, uint32_t e, uint32_t ep)\n"
+"#if KFLRL_N_PAYLOAD > 0\n"
+"/* One sample per (information state, target) pair at the clock's\n"
+" * current reading. Called once at the episode epoch before any\n"
+" * stepping, which is what allocates each target's ring in the\n"
+" * prefix and what gives the interpolator its first sample, and once\n"
+" * per sub-advance thereafter, so the history is finer than the\n"
+" * light-time lag rather than coarser than it. The rings exist from\n"
+" * the first call onward, so no call after the first allocates. */\n"
+"static void kflrl_info_push_(K26RlEnv *h, uint32_t e)\n"
 "{\n"
+"#if KFLRL_N_TRACKPAIR > 0\n"
+"    K26AstroEpoch t = kflrl_info_epoch_(h->info_day[e], h->info_t[e]);\n"
+"    K26AstroPos origin = k26astro_pos_zero();\n"
+"    for (int i = 0; i < KFLRL_N_TRACKPAIR; i++) {\n"
+"        K26AstroInfostate *is = (K26AstroInfostate *)\n"
+"            h->payloads[(size_t)e * KFLRL_N_PAYLOAD\n"
+"                        + kflrl_track_pay_[i]];\n"
+"        int tv_slot = kflrl_track_veh_[i];\n"
+"        K26AstroVehicle *tv =\n"
+"            h->vehicles[(size_t)e * KFLRL_N_VEHICLES + tv_slot];\n"
+"        if (!is || !tv) continue;\n"
+"        const K26AstroBody *tb = k26astro_world_body_at(\n"
+"            h->worlds[e],\n"
+"            kflrl_body_idx_[kflrl_vehicle_body_[tv_slot]]);\n"
+"        if (!tb) continue;\n"
+"        k26astro_infostate_target_push(\n"
+"            is, tv, t, k26astro_pos_sub(&tb->pos, &origin), tb->vel);\n"
+"    }\n"
+"#else\n"
+"    (void)h; (void)e;\n"
+"#endif\n"
+"}\n"
+"#endif\n"
+"\n"
+"static void kflrl_reset_env_(K26RlEnv *h, uint32_t e, uint32_t ep)\n"
+"{\n", out);
+    fputs(
 "    K26AstroWorld *w = h->worlds[e];\n"
 "#if KFLRL_N_VEHICLES > 0\n"
 "    /* Actuator state is episode state: a wheel's stored momentum and\n"
@@ -5967,9 +7246,19 @@ static void rl_emit_env_core_(FILE *out)
 "        w, kflrl_world_seed_(h->key, e, ep));\n"
 "#if KFLRL_N_REC > 0\n"
 "    kflrl_apply_draws_(w, h->key, e, ep,\n"
-"                       h->dr_vals + (size_t)e * KFLRL_N_REC, NULL);\n"
+"                       h->dr_vals + (size_t)e * KFLRL_N_REC, NULL,\n"
+"                       KFLRL_PAYP(h, e));\n"
 "#else\n"
-"    kflrl_apply_draws_(w, h->key, e, ep, NULL, NULL);\n"
+"    kflrl_apply_draws_(w, h->key, e, ep, NULL, NULL, KFLRL_PAYP(h, e));\n"
+"#endif\n"
+"#if KFLRL_N_PAYLOAD > 0\n"
+"    /* The new episode's epoch: a whole day past the last sample\n"
+"     * pushed, and past any day the last episode itself ran into, so\n"
+"     * the seed is strictly newer than what the ring holds and is\n"
+"     * appended rather than replacing it. */\n"
+"    h->info_day[e] += 1 + (int64_t)floor(h->info_t[e] / 86400.0);\n"
+"    h->info_t[e]    = 0.0;\n"
+"    kflrl_info_push_(h, e);\n"
 "#endif\n"
 "    h->episode[e] = ep;\n"
 "    h->steps[e]   = 0;\n"
@@ -5980,7 +7269,9 @@ static void rl_emit_env_core_(FILE *out)
 "    h->fault[e]   = 0;\n"
 "    kflrl_observe_(w, h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
 "                   &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
-"                       &h->join[e]);\n"
+"                   &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
+"                   KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
+"                   KFLRL_INFOT(h, e));\n"
 "    kflrl_sense_reset_(h, e, ep,\n"
 "                       h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
 "}\n"
@@ -6149,6 +7440,25 @@ static void rl_emit_env_core_(FILE *out)
 "static void kflrl_free_handle_(K26RlEnv *h)\n"
 "{\n"
 "    if (!h) return;\n"
+"#if KFLRL_N_PAYLOAD > 0\n"
+"    /* Payloads before vehicles: each `_destroy` unlinks itself from\n"
+"     * the vehicle's payload slot before releasing its storage, so\n"
+"     * the vehicle must still be there when it runs. This is the\n"
+"     * other half of the tier's allocation discipline: the\n"
+"     * constructors ran once in the world prefix and the destructors\n"
+"     * run once here, and nothing between them allocates. */\n"
+"    if (h->payloads) {\n"
+"        for (uint32_t i = 0; i < h->n_envs * KFLRL_N_PAYLOAD; i++) {\n"
+"            if (!h->payloads[i]) continue;\n"
+"            kflrl_payload_destroy_((int)(i % KFLRL_N_PAYLOAD),\n"
+"                                   h->payloads[i]);\n"
+"        }\n"
+"    }\n"
+"    free(h->payloads);\n"
+"    free(h->payp);\n"
+"    free(h->info_t);\n"
+"    free(h->info_day);\n"
+"#endif\n"
 "#if KFLRL_N_VEHICLES > 0\n"
 "    /* Vehicles first: a vehicle's teardown notifies its subsystems\n"
 "     * and unregisters from the world, so the world must still be\n"
@@ -6336,6 +7646,19 @@ static void rl_emit_env_core_(FILE *out)
 "        return K26RL_E_INTERNAL;\n"
 "    }\n"
 "#endif\n"
+"#if KFLRL_N_PAYLOAD > 0\n"
+"    h->payloads = (void **)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_PAYLOAD, sizeof(void *));\n"
+"    h->payp = (double *)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_PAYLOAD * KFLRL_PAY_NPARAM,\n"
+"        sizeof(double));\n"
+"    h->info_t   = (double *)calloc(n_envs, sizeof(double));\n"
+"    h->info_day = (int64_t *)calloc(n_envs, sizeof(int64_t));\n"
+"    if (!h->payloads || !h->payp || !h->info_t || !h->info_day) {\n"
+"        kflrl_free_handle_(h);\n"
+"        return K26RL_E_INTERNAL;\n"
+"    }\n"
+"#endif\n"
 "    h->scratch = (double *)calloc(\n"
 "        KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1, sizeof(double));\n"
 "    if (!h->seen_seeds || !h->worlds || !h->baseline || !h->baseline_t ||\n"
@@ -6370,9 +7693,15 @@ static void rl_emit_env_core_(FILE *out)
 "        if (kflrl_build_world_(h->worlds[e], h->key, e,\n"
 "                h->wscal + (size_t)e * KFLRL_N_WSCAL, dr0,\n"
 "#if KFLRL_N_VEHICLES > 0\n"
-"                h->vehicles + (size_t)e * KFLRL_N_VEHICLES\n"
+"                h->vehicles + (size_t)e * KFLRL_N_VEHICLES,\n"
 "#else\n"
-"                NULL\n"
+"                NULL,\n"
+"#endif\n"
+"#if KFLRL_N_PAYLOAD > 0\n"
+"                h->payloads + (size_t)e * KFLRL_N_PAYLOAD,\n"
+"                h->payp + (size_t)e * KFLRL_N_PAYLOAD * KFLRL_PAY_NPARAM\n"
+"#else\n"
+"                NULL, NULL\n"
 "#endif\n"
 "                ) != 0) {\n"
 "            kflrl_free_handle_(h);\n"
@@ -6407,14 +7736,27 @@ static void rl_emit_env_core_(FILE *out)
 "        }\n"
 "#if KFLRL_N_REC > 0\n"
 "        kflrl_apply_draws_(h->worlds[e], h->key, e, 0,\n"
-"                           h->dr_vals + (size_t)e * KFLRL_N_REC, dr0);\n"
+"                           h->dr_vals + (size_t)e * KFLRL_N_REC, dr0,\n"
+"                           KFLRL_PAYP(h, e));\n"
 "#else\n"
-"        kflrl_apply_draws_(h->worlds[e], h->key, e, 0, NULL, dr0);\n"
+"        kflrl_apply_draws_(h->worlds[e], h->key, e, 0, NULL, dr0,\n"
+"                           KFLRL_PAYP(h, e));\n"
+"#endif\n"
+"#if KFLRL_N_PAYLOAD > 0\n"
+"        /* The episode epoch, before any stepping: this allocates\n"
+"         * each target's history ring here in the prefix, where\n"
+"         * allocation belongs, and gives the interpolator its first\n"
+"         * sample. One act serves both. */\n"
+"        h->info_day[e] = 0;\n"
+"        h->info_t[e]   = 0.0;\n"
+"        kflrl_info_push_(h, e);\n"
 "#endif\n"
 "        kflrl_observe_(h->worlds[e],\n"
 "                       h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
 "                       &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
-"                       &h->join[e]);\n"
+"                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
+"                       KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
+"                       KFLRL_INFOT(h, e));\n"
 "    }\n"
 "\n"
 "    h->spec_len = kflrl_spec_write_(NULL, h);\n", out);
@@ -7020,6 +8362,14 @@ static void rl_emit_env_core_(FILE *out)
 "#endif\n"
 "            }\n"
 "#endif\n"
+"#if KFLRL_N_PAYLOAD > 0\n"
+"            /* The information state is pushed at the end of each\n"
+"             * sub-advance, after the collision pass has had its say,\n"
+"             * so what the history holds is the state the transition\n"
+"             * actually produced. */\n"
+"            h->info_t[e] += step_dt;\n"
+"            kflrl_info_push_(h, e);\n"
+"#endif\n"
 "        }\n"
 "        if (att_reason != 0) {\n"
 "            K26RlStatus fst = kflrl_fault_(h, e, aslice, att_reason);\n"
@@ -7042,7 +8392,9 @@ static void rl_emit_env_core_(FILE *out)
 "\n"
 "        kflrl_observe_(h->worlds[e], h->scratch,\n"
 "                       &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
-"                       &h->join[e]);\n"
+"                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
+"                       KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
+"                       KFLRL_INFOT(h, e));\n"
 "        /* The transition index is the draw index every per-step term\n"
 "         * uses, and h->steps[e] is still the count before this\n"
 "         * transition, so the first transition of an episode draws at\n"

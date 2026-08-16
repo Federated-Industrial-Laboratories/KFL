@@ -462,6 +462,7 @@ static void compiler_gates_(void)
         const char *cc_base =
             "cc -O3 -g -std=c11 -Iinclude -Isrc -I../libk26rl/include "
             "-I../libk26sense/include -I../libk26rng/include "
+            "-I../libk26astro_infostate/include "
             "-ffp-contract=off -fexcess-precision=standard ";
         char cmd[1024];
         snprintf(cmd, sizeof cmd,

@@ -4,7 +4,8 @@ DESTDIR ?=
 
 CFLAGS  ?= -O2 -g
 override CFLAGS += -std=c11 -Wall -Wextra -Wpedantic \
-                   -Iinclude -Isrc -I../libk26rl/include -I../libk26sense/include -I../libk26rng/include
+                   -Iinclude -Isrc -I../libk26rl/include -I../libk26sense/include -I../libk26rng/include \
+                   -I../libk26astro_infostate/include
 # The float-control flags every library in this tree carries, on the
 # compiler itself. They are appended with `override` rather than left
 # to the caller because they are not a tuning choice: the compiler now
@@ -394,6 +395,19 @@ $(RL_AGENT_TEST): tests/test_rl_agent.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The defense payload statement, the detection channels and the
+# information state. The gate builds artifacts, so it names the
+# compiler and the episode archive as its prerequisites.
+RL_DEFENSE_TEST = tests/test_rl_defense
+$(RL_DEFENSE_TEST): tests/test_rl_defense.c $(RL_GATE_DEPS) \
+                  ../libk26rl/include/k26rl_env.h \
+                  ../libk26astro_infostate/include/k26astro_infostate/infostate.h \
+                  ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include \
+	    -I../libk26astro_infostate/include \
+	    -I../libk26astro_core/include -I../libk26m3d/include \
+	    -o $@ $< ../libk26rl/libk26rl.a -ldl -lm
+
 # A program with no agent block publishes the spec it published
 # before the block existed. Builds the compiler at the base commit
 # from history, compiles every reinforcement learning program in the
@@ -440,7 +454,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_AGENT_ID_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_AGENT_ID_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -450,6 +464,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
 	./$(TEST_BIN) integration_tests/rl_multi_agent.kfl
+	./$(TEST_BIN) integration_tests/rl_defense.kfl
 	./$(MANIFEST_TEST)
 	./$(BODY_BINDING_TEST)
 	./$(W8_ARENA_TEST)
@@ -465,7 +480,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_ACTUATOR_TEST) $(RL_COLL_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
-	          $(RL_AGENT_TEST); do \
+	          $(RL_AGENT_TEST) $(RL_DEFENSE_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \

@@ -206,7 +206,15 @@ typedef enum {
      * index is source order from 0, and a world with no such block is
      * agent count 1 with every declaration owned by the implicit
      * agent 0. */
-    KFLN_STMT_AGENT
+    KFLN_STMT_AGENT,
+    /* `astro_payload <name> body=<body> kind=<kind> [key=value ...]`.
+     * `name` is the payload's name; the attrs carry every key as
+     * verbatim expression text, exactly as astro_body carries its own.
+     * One statement covers the whole defense payload set because the
+     * libraries share one payload slot and one kind-tag registry, so a
+     * further payload kind is a new `kind=` value rather than a new
+     * statement. */
+    KFLN_STMT_ASTRO_PAYLOAD
 } KflcNodeKind;
 
 /* Type system. The base scalar kinds are joined by KFLT_VECTOR /

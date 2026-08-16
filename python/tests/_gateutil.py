@@ -142,6 +142,27 @@ def compile_fixture(name, source_text=None):
     return so
 
 
+def refuse_fixture(name, source_text):
+    """Run the compiler's check pass over a program that must not
+    compile, and return its diagnostic. Exits non-zero when the
+    program compiles, because an arm that cannot tell a refusal from
+    an acceptance measures nothing."""
+    WORK.mkdir(parents=True, exist_ok=True)
+    src = WORK / (name + ".kfl")
+    src.write_text(source_text)
+    log = WORK / (name + ".refuse.log")
+    with open(log, "w") as lf:
+        proc = subprocess.run([str(KFLC), "--check", str(src)],
+                              stdout=lf, stderr=subprocess.STDOUT)
+    text = log.read_text()
+    if proc.returncode == 0:
+        print(text)
+        print("kflc accepted %s, which this arm requires it to refuse"
+              % src)
+        sys.exit(1)
+    return text
+
+
 def build_c(source_name, out_name, extra_args=()):
     """Compile one helper C source from this directory into WORK,
     cached on the timestamps of the source and the included ABI

@@ -108,6 +108,7 @@ static int stmts_have_rl_(const KflcNode *stmts, const KflcNode *form)
         case KFLN_STMT_ON_STEP:
         case KFLN_STMT_OBJECTIVE:
         case KFLN_STMT_AGENT:
+        case KFLN_STMT_ASTRO_PAYLOAD:
             return 1;
         case KFLN_STMT_OBSERVE:
             if (observe_as_name_(s)) return 1;
@@ -429,6 +430,22 @@ static const char *const OBS_SFX_REL_[] =
 static const char *const OBS_SFX_PORT_[] =
     { "_captured", "_axial", "_lateral", "_pitchyaw", "_roll",
       "_v_axial", "_v_lateral", "_v_pitchyaw", "_v_roll", NULL };
+/* A detection observe publishes whether the target was seen, the
+ * continuous quantity the decision was taken on, and the geometry it
+ * was taken from, which is seven. The aspect cosine is among them
+ * because the signature models are aspect dependent, so an agent
+ * without it cannot see why its detections come and go. */
+static const char *const OBS_SFX_DETECT_[] =
+    { "_detected", "_snr", "_range", "_dir_x", "_dir_y", "_dir_z",
+      "_aspect", NULL };
+/* An information-state observe publishes the target's state at the
+ * retarded time, the range and the age of what it is looking at, with
+ * an explicit validity channel, which is nine. The solver's iteration
+ * count is not among them: it is a convergence diagnostic and not a
+ * state of the world. */
+static const char *const OBS_SFX_TRACK_[] =
+    { "_valid", "_pos_x", "_pos_y", "_pos_z", "_vel_x", "_vel_y",
+      "_vel_z", "_range", "_age", NULL };
 
 static int observe_marker_(const KflcNode *n, const char *marker)
 {
@@ -450,6 +467,8 @@ static int observe_has_truth_(const KflcNode *n)
 
 static const char *const *observe_suffixes_(const KflcNode *n)
 {
+    if (observe_marker_(n, "detect"))   return OBS_SFX_DETECT_;
+    if (observe_marker_(n, "track"))    return OBS_SFX_TRACK_;
     if (observe_marker_(n, "port"))     return OBS_SFX_PORT_;
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
     if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;

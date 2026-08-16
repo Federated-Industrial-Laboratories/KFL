@@ -44,6 +44,7 @@ static const char *kind_name(KflcNodeKind k)
     case KFLN_STMT_SENSOR:        return "STMT_SENSOR";
     case KFLN_STMT_SENSOR_TERM:   return "STMT_SENSOR_TERM";
     case KFLN_STMT_AGENT:         return "STMT_AGENT";
+    case KFLN_STMT_ASTRO_PAYLOAD: return "STMT_ASTRO_PAYLOAD";
     }
     return "?";
 }

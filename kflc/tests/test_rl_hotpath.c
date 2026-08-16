@@ -39,6 +39,17 @@
  *      is where an implementation that published over a pipe, or that
  *      remapped or allocated per frame, or that waited on a consumer,
  *      would show up.
+ *   7. The defense payloads, over a fixture carrying every payload
+ *      kind this surface binds, and a matched control that carries
+ *      none. The tier's constructors and destructors are its only
+ *      allocating functions and both run outside the window; the one
+ *      exception the survey found, the information state's first push
+ *      for a target, allocates that target's history ring, so the
+ *      binding pushes at the episode epoch before any stepping and
+ *      the ring exists before the window opens. The window covers
+ *      step 1 and five boundary resets per environment, which is the
+ *      point: a window opened at step 2 would measure nothing, and
+ *      the control says what the payloads themselves cost.
  *   6. The collision pass and the relative-state observe, over their
  *      own fixture: two collidable bodies that meet inside every
  *      episode, with the second body's state published in the first's
@@ -267,6 +278,95 @@ static const char *const HP_COLL_ASM =
     "        dead_rate 2.0e-3\n"
     "    end\n"
     "end\n";
+
+/* Every payload kind this surface binds, over two craft that carry
+ * vehicles. The information state is what this gate is about: its
+ * push is the tier's one function that allocates outside a
+ * constructor, and it runs once per sub-advance of every step inside
+ * the window. Four sub-advances at a horizon of 12 puts five boundary
+ * resets inside a sixty-step window at two environments, so the
+ * reset path is measured rather than merely the steady step. */
+static const char *const HP_PAY_KFL =
+    "form RL_HOTPATH_PAY\n"
+    "fn world hpp_world\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body watcher assembly=\"hpcoll.k26asm\" parent=earth"
+    " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0 omega_z=0.01\n"
+    "    astro_body mover assembly=\"hpcoll.k26asm\" parent=earth"
+    " pos_x=7.0e6 pos_y=2.0e4 vel_y=7546.0 quat_w=1.0 omega_z=0.05\n"
+    "    astro_payload eye body=watcher kind=detect_ir aperture_m=1.0"
+    " integration_s=0.5 passband_lo_um=3.0 passband_hi_um=12.0"
+    " throughput=0.5 snr_threshold=5.0 target_temp_k=300.0"
+    " target_emissivity=0.9\n"
+    "    astro_payload rf body=watcher kind=detect_radar p_tx_w=2000.0"
+    " g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10 loss_sys_db=3.0"
+    " bandwidth_hz=1.0e6 t_sys_k=290.0 noise_figure=2.0"
+    " snr_threshold=10.0\n"
+    "    astro_payload beam body=watcher kind=detect_lidar"
+    " pulse_energy_j=0.1 wavelength_nm=1064.0 aperture_rx_m=0.5"
+    " atmospheric_tx=1.0 detector_efficiency=0.3 snr_threshold=5.0"
+    " target_albedo=0.2\n"
+    "    astro_payload picture body=watcher kind=infostate history=64\n"
+    "    episode\n"
+    "        control_dt 0.5\n"
+    "        horizon 12\n"
+    "        substeps 4\n"
+    "    end\n"
+    "    agent hunter\n"
+    "        action nudge box -1.0 1.0 default 0.0\n"
+    "        observe detect eye of mover as ir\n"
+    "        observe detect rf of mover as radar\n"
+    "        observe detect beam of mover as lidar\n"
+    "        observe track picture of mover modality=radar as trk\n"
+    "    end\n"
+    "    agent quarry\n"
+    "        action dodge box -1.0 1.0 default 0.0\n"
+    "        observe mover from watcher mode=geometric as los\n"
+    "    end\n"
+    "    on_step\n"
+    "        watcher.vel_x = watcher.vel_x + nudge\n"
+    "        mover.vel_x = mover.vel_x + dodge\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The matched control: the same world, the same craft, the same
+ * period and subdivision and horizon, with the payloads and the
+ * channels they publish removed and nothing else changed. Without it
+ * a count of zero says only that this program allocates nothing, not
+ * what the payloads themselves cost. */
+static const char *const HP_NOPAY_KFL =
+    "form RL_HOTPATH_NOPAY\n"
+    "fn world hpn_world\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body watcher assembly=\"hpcoll.k26asm\" parent=earth"
+    " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0 omega_z=0.01\n"
+    "    astro_body mover assembly=\"hpcoll.k26asm\" parent=earth"
+    " pos_x=7.0e6 pos_y=2.0e4 vel_y=7546.0 quat_w=1.0 omega_z=0.05\n"
+    "    episode\n"
+    "        control_dt 0.5\n"
+    "        horizon 12\n"
+    "        substeps 4\n"
+    "    end\n"
+    "    agent hunter\n"
+    "        action nudge box -1.0 1.0 default 0.0\n"
+    "        observe mover from watcher mode=geometric as ir\n"
+    "    end\n"
+    "    agent quarry\n"
+    "        action dodge box -1.0 1.0 default 0.0\n"
+    "        observe mover from watcher mode=geometric as los\n"
+    "    end\n"
+    "    on_step\n"
+    "        watcher.vel_x = watcher.vel_x + nudge\n"
+    "        mover.vel_x = mover.vel_x + dodge\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* Two actions, and a horizon of 12 at a period of half a second. */
+#define HP_PAY_ACT      2
+#define HP_PAY_HORIZON 12
+#define HP_PAY_STEPS   60
 
 static const char *const HP_COLL_KFL =
     "form RL_HOTPATH_COLL\n"
@@ -729,10 +829,77 @@ static int child_main_(void)
     printf("gate 6: every addition to the stepping path measured here"
            " allocates nothing and writes nothing: OK\n");
 
+    /* Gate 7: the defense payloads, and the matched control.
+     *
+     * The window opens after create and one reset and then runs sixty
+     * steps of two environments at a horizon of twelve, so it holds
+     * step 1 and five boundary resets per environment. Both halves
+     * are driven identically; the counts are printed as figures
+     * rather than only asserted, because what the payloads cost is
+     * the reading and not merely whether it is zero. */
+    {
+        unsigned long pay_a = 0, pay_w = 0, non_a = 0, non_w = 0;
+        static const char *const SOS[2] = {
+            WORK_DIR "/hppay.rlenv.so", WORK_DIR "/hpnopay.rlenv.so"
+        };
+        for (int half = 0; half < 2; half++) {
+            void *pso = rl_dlopen_(SOS[half]);
+            RlSurface ps;
+            rl_resolve_surface_(pso, &ps);
+            ASSERT(ps.abi_version() == K26RL_ABI_VERSION);
+
+            K26RlEnv *env = NULL;
+            static double pact[HP_ENVS * HP_PAY_ACT];
+            for (int i = 0; i < HP_ENVS * HP_PAY_ACT; i++) pact[i] = 0.0;
+            ASSERT(ps.create(9u, HP_ENVS, &env) == K26RL_OK);
+            /* No reset before the window opens. The frozen surface
+             * says a handle's observations are valid immediately and
+             * the first step steps normally, so stepping straight from
+             * create is a route a caller may take; a window that
+             * always began with a reset would let a binding that
+             * allocated on the first step of a fresh handle pass,
+             * because the reset would have done the allocating
+             * outside it. */
+            counters_clear_();
+            *armed_ = 1;
+            for (int t = 0; t < HP_PAY_STEPS; t++) {
+                ASSERT(ps.step(env, pact) == K26RL_OK);
+                /* An explicit reset inside the window, beside the
+                 * boundary ones, so the caller-driven reset path is
+                 * measured as well as the automatic one. */
+                if (t == HP_PAY_STEPS / 2) {
+                    ASSERT(ps.reset(env) == K26RL_OK);
+                }
+            }
+            *armed_ = 0;
+            unsigned long a = alloc_total_(), w = write_total_();
+            if (half == 0) { pay_a = a; pay_w = w; }
+            else           { non_a = a; non_w = w; }
+            printf("gate 7: %s: %d steps x %d envs, window holds step 1,"
+                   " %d boundary reset(s) per environment and 1 driven"
+                   " reset, and opens on a fresh handle: alloc-family %lu"
+                   " (malloc %lu calloc %lu realloc %lu free %lu),"
+                   " write-family %lu\n",
+                   half == 0 ? "every payload kind" : "matched control",
+                   HP_PAY_STEPS, HP_ENVS,
+                   HP_PAY_STEPS / HP_PAY_HORIZON, a,
+                   counts_[0], counts_[1], counts_[2], counts_[3], w);
+            ASSERT(a == 0);
+            ASSERT(w == 0);
+            ps.destroy(env);
+            dlclose(pso);
+        }
+        ASSERT(pay_a == 0 && non_a == 0);
+        ASSERT(pay_w == 0 && non_w == 0);
+        printf("gate 7: the payload-bearing artifact and its matched"
+               " control both allocate %lu and write %lu across the"
+               " window: OK\n", pay_a, pay_w);
+    }
+
     dlclose(so);
     fclose(fnull);
     close(devnull);
-    printf("test_rl_hotpath: 6 gates passed\n");
+    printf("test_rl_hotpath: 7 gates passed\n");
     return 0;
 }
 
@@ -754,6 +921,13 @@ int main(void)
     rl_write_file_(WORK_DIR "/hpcoll.kfl", HP_COLL_KFL);
     rl_compile_(WORK_DIR "/hpcoll.kfl", WORK_DIR "/hpcoll", WORK_DIR);
     ASSERT(rl_file_exists_(WORK_DIR "/hpcoll.rlenv.so"));
+
+    rl_write_file_(WORK_DIR "/hppay.kfl", HP_PAY_KFL);
+    rl_compile_(WORK_DIR "/hppay.kfl", WORK_DIR "/hppay", WORK_DIR);
+    ASSERT(rl_file_exists_(WORK_DIR "/hppay.rlenv.so"));
+    rl_write_file_(WORK_DIR "/hpnopay.kfl", HP_NOPAY_KFL);
+    rl_compile_(WORK_DIR "/hpnopay.kfl", WORK_DIR "/hpnopay", WORK_DIR);
+    ASSERT(rl_file_exists_(WORK_DIR "/hpnopay.rlenv.so"));
 
     rl_write_file_(WORK_DIR "/interpose.c", HP_INTERPOSE_C);
     rl_run_or_die_("cc -O2 -fPIC -shared -o " WORK_DIR "/interpose.so "
