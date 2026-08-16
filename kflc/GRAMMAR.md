@@ -387,7 +387,7 @@ caller sets each step, what that caller observes, and what the reward is.
 The compiler then produces an artifact an outside training loop can drive
 step by step (see *The compiled artifact* below).
 
-Six constructs carry the surface, all of them statements inside a
+Seven constructs carry the surface, all of them statements inside a
 `fn world` body:
 
 | Construct                     | Purpose                                                    |
@@ -398,6 +398,7 @@ Six constructs carry the surface, all of them statements inside a
 | `observe ... as <name>`       | A named observation channel, recomputed each step.          |
 | `objective` ... `end`         | The reward, and an optional terminal adjustment.            |
 | `agent <name>` ... `end`      | A scope owning actions, observation channels, and an objective. |
+| `astro_payload <name> ...`    | A detection sensor or information state carried by one craft. |
 
 These words bind as keywords only at statement position inside a
 `fn world` body. Everywhere else they stay ordinary identifiers, so
@@ -405,12 +406,12 @@ existing programs that use them as names keep compiling. (`episode`,
 `action`, and `objective` sit on the compiler's reserved-name list, so a
 `let`, `const`, or `arg` that binds one of them draws a warning.)
 
-`agent`, `sensor`, and `on_step` are not reserved, and inside a
-`fn world` body each opens its block only when what follows it is what
-that block form requires: an identifier for `agent` and `sensor`, the
-end of the line for `on_step`. Written any other way they stay ordinary
-identifiers, so a program that binds one of them as a name keeps
-compiling:
+`agent`, `sensor`, `astro_payload`, and `on_step` are not reserved, and
+inside a `fn world` body each opens its construct only when what follows
+it is what that construct's form requires: an identifier for `agent`,
+`sensor`, and `astro_payload`, the end of the line for `on_step`.
+Written any other way they stay ordinary identifiers, so a program that
+binds one of them as a name keeps compiling:
 
 ```
 fn world w
@@ -938,6 +939,135 @@ argument, and an action may not collide with any of those either; the
 compiler rejects the program rather than letting one silently shadow
 another.
 
+#### Defense payloads
+
+```
+astro_payload <name> body=<body> kind=<kind> [key=value ...]
+```
+
+A world-prefix statement declaring one payload carried by one craft.
+`body=` names an `astro_body` of the same world that binds an
+`assembly=`, since a payload attaches to a vehicle and a body without an
+assembly carries none; a body without one is refused naming both
+statements. Payloads are top level, not inside an `if`, `while`, or
+`for_each`, because the payload set is part of the compiled program's
+identity.
+
+Each payload is constructed once per environment when the world is
+built, and destroyed with the environment. Nothing is constructed while
+stepping: the per-step path calls the libraries' evaluators, which
+return a value and allocate nothing.
+
+The admissible keys are a function of `kind=`. A key that belongs to
+another kind is refused naming that kind rather than reported as
+unknown; a missing required key is refused naming it. Every key is a
+scalar expression evaluated when the world is built and may take the
+`uniform` and `normal` distribution forms, exactly as an `astro_body`
+attribute may, except where a key is fixed when the payload is
+constructed and a per-episode draw could not reach it.
+
+| `kind=` | Required keys |
+|---|---|
+| `detect_ir` | `aperture_m`, `integration_s`, `passband_lo_um`, `passband_hi_um`, `throughput`, `snr_threshold`, `target_temp_k`, `target_emissivity`; optional `optics_temp_k` and `optics_emissivity`, both 0 by default |
+| `detect_radar` | `p_tx_w`, `g_tx_db`, `g_rx_db`, `freq_hz`, `loss_sys_db`, `bandwidth_hz`, `t_sys_k`, `noise_figure`, `snr_threshold` |
+| `detect_lidar` | `pulse_energy_j`, `wavelength_nm`, `aperture_rx_m`, `atmospheric_tx`, `detector_efficiency`, `snr_threshold`, `target_albedo` |
+| `infostate` | `history`, optional, 1024 by default and at least 2; fixed when the payload is constructed, so it takes no distribution |
+
+The keys named after the instrument are the library constructor's own
+parameters of the same name. The three named `target_` are not: a
+detection calculation needs the radiometric properties of what is being
+looked at as well as the instrument's, and they are declared here
+because they are the reference-target properties a detection threshold
+is specified against. One detection payload therefore models one target
+class, and a program observing two dissimilar targets declares one
+payload per class. Radar needs none of them, its cross-section being
+geometric.
+
+`optics_temp_k` and `optics_emissivity` describe the observing
+telescope's own thermal emission, which for a warm instrument looking in
+its own emission band sets the noise floor. Both default to 0, which is
+the library's documented cosmic-background-only behaviour; a program
+modelling a real instrument declares them.
+
+#### Detection
+
+```
+observe detect <payload> of <target> as <name>
+```
+
+`<payload>` names an `astro_payload` of a detection kind and `<target>`
+an `astro_body` of the same world that binds an `assembly=`, since the
+signature is computed from the geometry the assembly declares. A payload
+does not observe the craft that carries it. Seven components:
+
+| Component | Value |
+|---|---|
+| `<name>_detected` | 1.0 when the computed signal-to-noise ratio meets the payload's declared threshold, 0.0 otherwise. |
+| `<name>_snr` | The computed signal-to-noise ratio, dimensionless. |
+| `<name>_range` | Observer-to-target distance, in metres. |
+| `<name>_dir_x`, `<name>_dir_y`, `<name>_dir_z` | Unit direction from the observer to the target, in the world frame. |
+| `<name>_aspect` | Cosine of the angle between the line of sight and the target's velocity, in [-1, 1]. |
+
+Both the hard decision and the continuous quantity are published, so a
+program may shape a reward over one and terminate on the other without
+deriving either from the other.
+
+These channels are geometric and carry no light-time correction; the
+corrected view is the track form's below. `_aspect` is published because
+the signature models are aspect dependent: the target's silhouette is
+the projected area of its assembly's collision primitives along the line
+of sight, taken in the target's own frame, so a craft that turns changes
+what its observer sees, and without the aspect channel an agent sees
+detections come and go with nothing that explains them. Overlapping
+primitives are summed rather than unioned, which overstates the area of
+a craft whose colliders interpenetrate.
+
+The infrared model takes the in-band radiated power of that area at the
+declared temperature and emissivity; the radar model takes the target as
+a flat plate of that area facing the observer, which is the
+geometric-optics form; the lidar model takes that area as the projected
+area and derives its transmit gain from the declared aperture and
+wavelength.
+
+#### Information state
+
+```
+observe track <payload> of <target> [modality=<modality>] as <name>
+```
+
+`<payload>` names an `astro_payload` of kind `infostate`; `<target>` is
+an `astro_body` binding an `assembly=`. `modality=` takes `none`, `ir`,
+`radar`, `lidar`, or `ephem` and defaults to `none`; it is recorded into
+the observation unchanged, the library applying no per-modality
+processing. Nine components:
+
+| Component | Value |
+|---|---|
+| `<name>_valid` | 1.0 when an observation was produced, 0.0 otherwise. |
+| `<name>_pos_x`, `<name>_pos_y`, `<name>_pos_z` | Target position at the retarded time, world frame, in metres. |
+| `<name>_vel_x`, `<name>_vel_y`, `<name>_vel_z` | Target velocity at the retarded time, in metres per second. |
+| `<name>_range` | Observer-to-target distance at that solution, in metres. |
+| `<name>_age` | The observer's clock time less the retarded time, in seconds. |
+
+When `_valid` reads 0.0 the other eight read 0.0. The solver's iteration
+count is not published: it is a convergence diagnostic rather than a
+state of the world.
+
+The target's true state is pushed into the payload's history once per
+sub-advance, so the history is finer than the light-time lag rather than
+coarser. At the start of each episode, before any stepping, one sample
+is pushed at the episode epoch. **The first observation of an episode is
+therefore unavailable**: the only sample is the epoch itself and the
+retarded time is strictly earlier, so the observer would be receiving
+light emitted before the episode began, and no such state is invented to
+supply it. The same holds on any later step whose elapsed time is
+shorter than the light time to the target, which at long ranges is more
+than one step.
+
+At most 64 targets may be tracked against one information state, which
+is the library's own per-observer limit; a program that names more is
+refused naming the payload, the count, and the limit.
+
 ### The `objective` block
 
 ```
@@ -996,6 +1126,15 @@ block with no `action` declares an observation-only agent, which is legal
 for the same reason an action total of 0 is. A block with neither an
 action nor an objective is an error: it publishes no action channel and
 no reward and has no effect on the program.
+
+**Above one agent, every block declares at least one `observe ... as`.**
+An agent's name reaches a consumer only through the qualifier on its own
+observation channel names, so a block that declares none publishes a
+name that does not survive compilation: it is absent from the spec, from
+the artifact, and therefore from the recorded episode file, and a
+per-agent interface has nothing to key it by. At one agent the names
+publish unqualified and nothing depends on the agent's own name, so the
+rule applies above one agent only.
 
 Agent names are unique within a world, are at most 31 bytes, and may not
 equal an `astro_body` name in the same world or the name `episode`, both
