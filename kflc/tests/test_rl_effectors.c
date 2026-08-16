@@ -44,6 +44,16 @@
  *   6. Swarm against single. The two patterns give genuinely different
  *      transferred momentum through the footprint fraction, and the
  *      fraction moves with range.
+ *   6b. The silhouette follows the line the effector acts on. Two
+ *      targets differing only in attitude, nose on and broadside, are
+ *      required to differ by the ratio the asset's own box dimensions
+ *      predict. An arm that only asks whether an area-dependent
+ *      quantity moves cannot tell a silhouette taken along the closing
+ *      direction from one taken along a fixed axis.
+ *   6c. Each kind's principal result is recomputed from the other
+ *      published components. An increment that lost the target's mass
+ *      would still be non-zero and would still move, so a magnitude is
+ *      what pins it.
  *   7. Every published component moves. For each component of each
  *      kind, a fixture in which it moves and the measured spread; a
  *      component nothing can move is a component nothing can be shaped
@@ -369,6 +379,65 @@ static const char *const HOT_KFL =
     "    end\n"
     "    objective\n"
     "        reward las_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The same swarm and the same emitter against a target lying broadside
+ * to the closing direction rather than nose on. The target's collision
+ * primitive is a box of 2.0 by 1.0 by 1.0 metres, so the area it
+ * presents along its own long axis is 1.0 square metre and the area
+ * along either short axis is 2.0: the two fixtures differ by a factor
+ * of two in silhouette and in nothing else.
+ *
+ * They exist because a silhouette taken along a fixed axis rather than
+ * along the direction the effector acts on survives every arm that
+ * only asks whether a quantity moves. Two attitudes with a predicted
+ * ratio between them is what tells the two apart, and the ratio comes
+ * from the asset's own declared dimensions rather than from a figure
+ * restated here. */
+#define EFF_MOVER_BROADSIDE(asset) \
+    "    astro_body mover assembly=\"" asset "\"" \
+    " parent=earth pos_x=7.0e6 pos_y=2.0e3 pos_z=0.0 vel_x=0.0" \
+    " vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0" \
+    " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.05\n"
+
+static const char *const BROADSIDE_KFL =
+    "form EFFBROAD\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0")
+    EFF_MOVER_BROADSIDE("calibration_box.k26asm")
+    EFF_LASER("1.0e6") EFF_IMPACTOR_SWARM
+    EFF_EPISODE EFF_ACTION
+    "    observe effect beam as las\n"
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage beam at mover\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward las_effect + kin_effect\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The nose-on half of the same pair, identical but for the target's
+ * initial attitude. */
+static const char *const NOSEON_KFL =
+    "form EFFNOSE\n"
+    "fn world w\n"
+    EFF_EARTH EFF_SHOOTER("7746.0")
+    EFF_MOVER("calibration_box.k26asm", "0.0")
+    EFF_LASER("1.0e6") EFF_IMPACTOR_SWARM
+    EFF_EPISODE EFF_ACTION
+    "    observe effect beam as las\n"
+    "    observe effect rock as kin\n"
+    "    on_step\n"
+    "        engage beam at mover\n"
+    "        engage rock at mover\n"
+    "    end\n"
+    "    objective\n"
+    "        reward las_effect + kin_effect\n"
     "    end\n"
     "end\n"
     "end\n";
@@ -1345,6 +1414,122 @@ static void gate_swarm_(void)
            swarm1[6], swarm1[1], single1[1], swarm5[6]);
 }
 
+/* ---- Gate 6b: the silhouette follows the line of action -------------- */
+
+/* The target's declared mass, read from the assembly this gate uses:
+ * `calibration_box.k26asm` states 1000 kg for its single component.
+ * The frozen surface publishes no mass getter, so the figure travels
+ * from the asset rather than from the artifact, and the arm that uses
+ * it says so. */
+#define EFF_TARGET_MASS_KG 1000.0
+
+static void gate_silhouette_(void)
+{
+    double nose[LAS_N + KIN_N], broad[LAS_N + KIN_N];
+    char so[512];
+
+    build_(NOSEON_KFL, "noseon");
+    build_(BROADSIDE_KFL, "broadside");
+    so_path_(so, sizeof so, "noseon");
+    run_obs_(so, 1, 0.0, nose, LAS_N + KIN_N);
+    so_path_(so, sizeof so, "broadside");
+    run_obs_(so, 1, 0.0, broad, LAS_N + KIN_N);
+
+    /* The impactor's footprint fraction is the silhouette over the
+     * cone's footprint, and both fixtures are at the same range on the
+     * step sampled, so the fraction's ratio is the silhouette's. */
+    double f_ratio = broad[LAS_N + 6] / nose[LAS_N + 6];
+    if (fabs(f_ratio - 2.0) > 1.0e-9) {
+        fprintf(stderr, "FAIL: the swarm fraction ratio between a "
+                "broadside and a nose-on target is %.17g, and the box's "
+                "own dimensions predict 2.0; the silhouette is not being "
+                "taken along the closing direction\n", f_ratio);
+        exit(1);
+    }
+    g_arms++;
+    printf("  the impactor's silhouette follows the closing direction: "
+           "fraction %.9g broadside against %.9g nose on, a ratio of "
+           "%.12g where the asset's 2.0 by 1.0 by 1.0 metre box predicts "
+           "2\n", broad[LAS_N + 6], nose[LAS_N + 6], f_ratio);
+
+    /* The emitter's fluence is its power over the area it lands on, so
+     * a target of twice the silhouette takes half the fluence. The
+     * ratio is not exactly two because the encircled fraction differs
+     * slightly between a one and a two square metre target, which is a
+     * real difference and is what the tolerance below allows for. */
+    double e_ratio = nose[7] / broad[7];
+    if (fabs(e_ratio - 2.0) > 1.0e-3) {
+        fprintf(stderr, "FAIL: the emitter's fluence ratio between a "
+                "nose-on and a broadside target is %.17g, and the box's "
+                "own dimensions predict 2.0\n", e_ratio);
+        exit(1);
+    }
+    g_arms++;
+    printf("  the emitter's silhouette follows the line of sight: "
+           "fluence %.9g nose on against %.9g broadside, a ratio of "
+           "%.12g against the geometry's 2, the remainder being the "
+           "encircled fraction (%.9g against %.9g)\n",
+           nose[7], broad[7], e_ratio, nose[6], broad[6]);
+}
+
+/* ---- Gate 6c: the increment is the momentum balance ------------------ */
+
+/* Both kinds publish a principal result whose arithmetic is fixed by
+ * the design, and an arm that only asks whether it is non-zero cannot
+ * tell a velocity increment from a momentum wearing its name. Each is
+ * recomputed here from the other published components and the two
+ * declared figures the statement carries. */
+static void gate_increment_arithmetic_(void)
+{
+    double kin[KIN_N], las[LAS_N];
+    char so[512];
+
+    /* The impactor: the transferred momentum is the fraction that
+     * landed times the projectile mass times the closing speed, and the
+     * increment is that over the target's mass. */
+    so_path_(so, sizeof so, "swarm");
+    run_obs_(so, 3, 0.0, kin, KIN_N);
+    ASSERT(kin[2] == 1.0);
+    double want = kin[6] * 50.0 * kin[3] / EFF_TARGET_MASS_KG;
+    double rel  = fabs(kin[1] - want) / want;
+    if (rel > 1.0e-12) {
+        fprintf(stderr, "FAIL: the impactor published an increment of "
+                "%.17g where the momentum balance over the published "
+                "fraction (%.17g), the declared projectile mass "
+                "(50 kg) and the published closing speed (%.17g) gives "
+                "%.17g\n", kin[1], kin[6], kin[3], want);
+        exit(1);
+    }
+    g_arms++;
+    printf("  the impactor's increment is the momentum balance: %.9g "
+           "against %.9g recomputed from the published fraction, the "
+           "declared projectile mass and the published closing speed "
+           "(relative difference %.3g)\n", kin[1], want, rel);
+
+    /* The emitter: the increment is the published impulse over the
+     * target's mass. The first engagement is the one to check, because
+     * from the second onward the divisor is the mass the earlier
+     * ablations left rather than the declared one, and that coupling
+     * is what the mass arm above measures. Checking a later step here
+     * would either restate that coupling or need a tolerance wide
+     * enough to hide the defect this arm exists to catch. */
+    so_path_(so, sizeof so, "las");
+    run_obs_(so, 1, 0.0, las, LAS_N);
+    double want_dv = las[1] / EFF_TARGET_MASS_KG;
+    double rel_dv  = fabs(las[2] - want_dv) / want_dv;
+    if (rel_dv > 1.0e-12) {
+        fprintf(stderr, "FAIL: the emitter published an increment of "
+                "%.17g where the published impulse (%.17g) over the "
+                "target's declared mass gives %.17g\n",
+                las[2], las[1], want_dv);
+        exit(1);
+    }
+    g_arms++;
+    printf("  the emitter's increment is the impulse over the target's "
+           "mass: %.9g against %.9g (relative difference %.3g)\n",
+           las[2], want_dv, rel_dv);
+}
+
 /* ---- Gate 7: every published component moves ------------------------- */
 
 /* The spread of each component over a run, so a component that cannot
@@ -1546,6 +1731,8 @@ int main(void)
     gate_mass_consumed_();
     gate_hit_test_();
     gate_swarm_();
+    gate_silhouette_();
+    gate_increment_arithmetic_();
     gate_components_move_();
     gate_zero_fill_();
     gate_runtime_second_engage_();

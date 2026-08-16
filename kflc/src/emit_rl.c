@@ -5430,14 +5430,18 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
     const RlPayload *py = &m->payloads[p];
 
     if (rl_observe_form_(s) == RL_OBS_EFF) {
+        /* The block is read without a null test. This form exists only
+         * in a program that declares an effector payload, and such a
+         * program's handle always carries a block: a test here would be
+         * a branch nothing can take, which is a branch no gate can
+         * measure. What makes an unengaged step read zero is the clear
+         * at the top of the step, not a fallback here. */
         int w = rl_observe_base_width_(s);
         fprintf(out, "    {\n"
-                     "        const double *_kfl_ec = eng\n"
-                     "            ? eng->ch + %d * KFLRL_EFF_STRIDE : NULL;\n",
-                p);
+                     "        const double *_kfl_ec =\n"
+                     "            eng->ch + %d * KFLRL_EFF_STRIDE;\n", p);
         for (int c = 0; c < w; c++) {
-            fprintf(out, "        out_v[%d] = _kfl_ec ? _kfl_ec[%d] : 0.0;\n",
-                    off + c, c);
+            fprintf(out, "        out_v[%d] = _kfl_ec[%d];\n", off + c, c);
         }
         fputs("    }\n", out);
         return;
