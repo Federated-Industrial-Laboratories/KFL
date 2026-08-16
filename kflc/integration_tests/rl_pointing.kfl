@@ -12,6 +12,19 @@
 # and by the dual-mode artifact gate (tests/test_rl_emit), which
 # compiles it with `kflc -o` into the batch executable plus the
 # companion shared object and drives both.
+#
+# Both action channels reach something a driver can read back, which
+# is a requirement of every gate that drives this fixture and not a
+# convenience: a channel nothing consumes cannot show that a value was
+# marshalled onto it. `thrust` enters the reward. `gear` enters the
+# out-of-plane velocity through `on_step`, as a discrete stage under
+# first-order damping, so its effect is bounded by the fixed point
+# gear / (1 - damping) rather than accumulating with the horizon.
+# Under the declared defaults the statement is exactly inert: `gear`
+# is 0 and the out-of-plane dynamics of a body at pos_z 0 with vel_z 0
+# in a central field are identically zero, so 0.0 * 0.99 + 0.0 is 0.0
+# and a driver feeding the defaults sees the trajectory it saw before
+# the statement existed.
 
 form RL_POINTING
 title "RL grammar 3.2 round-trip fixture"
@@ -31,6 +44,7 @@ fn world pointing_world
     action gear discrete 3 default 0
     on_step
         let damping: double = 0.99
+        craft.vel_z = craft.vel_z * damping + gear
     end
     observe craft from earth mode=astrometric as track
     objective

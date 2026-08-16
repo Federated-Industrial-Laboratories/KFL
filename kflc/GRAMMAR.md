@@ -1182,6 +1182,7 @@ form RL_POINTING
 
         on_step
             let damping: double = 0.99
+            craft.vel_z = craft.vel_z * damping + gear
         end
 
         observe craft from earth mode=astrometric as track
@@ -1211,10 +1212,18 @@ The first command writes `pointing` and `pointing.rlenv.so`; the second
 records eight environments for four episodes each into
 `pointing.k26epi`.
 
+Both of its action channels reach something a driver reads back, which
+is worth copying rather than a detail of this fixture: `thrust` enters
+the reward, and `gear` enters the out-of-plane velocity as a discrete
+stage under first-order damping, so its effect settles at
+`gear / (1 - damping)` instead of growing with the horizon. An action
+channel no expression consumes is a channel a test cannot tell was
+delivered.
+
 Two worked control problems sit beside it,
 `integration_tests/orbit_transfer.kfl` and
 `integration_tests/stationkeeping.kfl`: each drives the craft's velocity
-from its action in `on_step`, reads the range and range-rate channels
+from a continuous action alone, reads the range and range-rate channels
 for its endings, and draws its initial state per episode from the run's
 seed.
 

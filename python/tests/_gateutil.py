@@ -237,6 +237,12 @@ end
 # bounds and the gear indices leave the declared arity 3: the package
 # passes action values through unchecked, and a helpful clip anywhere
 # breaks the file comparison.
+#
+# Both channels reach the fixture's world, so these values move the
+# trajectory rather than sitting in the action buffer unread. That is
+# what makes the comparisons that consume this stream able to fail on
+# a value delivered to the wrong offset; a stream feeding a channel
+# nothing consumes would compare two runs of the same inert number.
 
 def act_thrust(t, e):
     return ((t * 7 + e * 3) % 13) / 13.0 * 4.0 - 2.0

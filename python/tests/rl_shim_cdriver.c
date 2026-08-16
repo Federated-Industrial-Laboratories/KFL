@@ -14,7 +14,10 @@
  *       rewards, n uint32 flag words.
  *
  * The scripted stream leaves the declared action bounds and arity
- * on purpose; the artifact takes values as given.
+ * on purpose; the artifact takes values as given. Both channels reach
+ * the fixture's world, so an out-of-arity index perturbs the
+ * trajectory rather than sitting inert, and any driver that clipped or
+ * rounded one would diverge from this one within a step.
  *
  * Build: cc -O2 -I<...>/libk26rl/include rl_shim_cdriver.c -ldl -lm
  */

@@ -1126,7 +1126,9 @@ int main(void)
     write_attitude_asset_();
     actuator_cases_();
 
-    /* Positive: the full RL surface parses and checks clean. */
+    /* Positive: the full RL surface parses and checks clean. Kept in
+       step with integration_tests/rl_pointing.kfl, whose shape this
+       is, including the discrete channel read inside on_step. */
     expect_("full",
         "form RL_FULL\n"
         "fn world w\n"
@@ -1145,6 +1147,7 @@ int main(void)
         "    action gear discrete 3 default 0\n"
         "    on_step\n"
         "        let damping: double = 0.99\n"
+        "        craft.vel_z = craft.vel_z * damping + gear\n"
         "    end\n"
         "    observe craft from earth mode=astrometric as track\n"
         "    objective\n"
