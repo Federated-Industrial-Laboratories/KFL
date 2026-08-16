@@ -1165,6 +1165,73 @@ static const char *const BURN_KFL =
     "end\n"
     "end\n";
 
+/* The same closing geometry at a hundred kilowatts and a metre a
+ * second, which is a different numerical regime rather than a second
+ * helping of the same one. The stronger the jamming, the more the
+ * quadratic's linear term dominates its constant, and the subtracting
+ * form of the root then differs from the dividing one by more than the
+ * step's own resolution. At two hundred watts the two agree to seven
+ * digits and no arm on that fixture could tell them apart. */
+static const char *const BURN_FINE_KFL =
+    "form SKBURNF\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER
+    "    astro_body mover assembly=\"calibration_box.k26asm\""
+    " parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=2.0e2 vel_x=0.0"
+    " vel_y=7546.0 vel_z=-1.0 quat_w=1.0 quat_x=0.0 quat_y=0.0"
+    " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.0\n"
+    SK_RADAR("rf", "ir_only", "")
+    SK_JAMMER("jam", "1.0e5")
+    "    episode\n"
+    "        control_dt 0.5\n"
+    "        substeps 4\n"
+    "        horizon 512\n"
+    "    end\n"
+    SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    observe effect jam as ew\n"
+    "    on_step\n        engage jam at watcher\n    end\n"
+    "    objective\n        reward radar_snr\n    end\n"
+    "end\n"
+    "end\n";
+
+/* A chaff cloud whose strip count is drawn rather than written, and
+ * drawn past the range the routine counts strips in. The compile-time
+ * refusal can only judge a literal, so this is the shape that reaches
+ * the conversion, and the saturation is what stops it reading as no
+ * cloud at all. */
+static const char *const CHAFF_DRAWN_KFL =
+    "form SKCHD\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+    SK_RADAR_BASE("rf", " target_chaff_n_strips=uniform(3.0e9, 4.0e9)"
+                        " target_chaff_sigma_dipole_m2=1.0e-3")
+    SK_EPISODE SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    on_step\n"
+    "        watcher.vel_x = watcher.vel_x + nudge * 0.0\n"
+    "    end\n"
+    "    objective\n        reward radar_snr\n    end\n"
+    "end\n"
+    "end\n";
+
+/* The same cloud written at the bound itself, which is what the drawn
+ * one has to saturate to. */
+static const char *const CHAFF_AT_BOUND_KFL =
+    "form SKCHB\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+    SK_RADAR_BASE("rf", " target_chaff_n_strips=2147483647.0"
+                        " target_chaff_sigma_dipole_m2=1.0e-3")
+    SK_EPISODE SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    on_step\n"
+    "        watcher.vel_x = watcher.vel_x + nudge * 0.0\n"
+    "    end\n"
+    "    objective\n        reward radar_snr\n    end\n"
+    "end\n"
+    "end\n";
+
 /* A jammer whose host is the very craft its victim's radar is pointed
  * at, with a chaff cloud declared around that craft. The radar equation
  * and the jamming ratio then describe the same craft, and the arm
@@ -1351,6 +1418,71 @@ static void victim_radar_(const char *so_path, const char *stem, int n,
     (void)stem;
 }
 
+/* The burn-through channel against the artifact's own detection
+ * crossover. The channel is documented as the range at which this
+ * victim's radar burns through the jamming, and the only thing that can
+ * say whether it does is the victim's own flag. So the two craft are
+ * flown through the crossover rather than compiled through it: they
+ * start outside the published range and close on it at a fixed rate,
+ * and the step where the flag first reads 1 is the step whose published
+ * range has to bracket the published boundary. Without this the channel
+ * could name any range at all and nothing would notice.
+ *
+ * The separation is taken along the orbit normal so that closing it is
+ * a small out-of-plane rate rather than an orbit change, and the target
+ * holds its attitude so the cross-section the boundary is a function of
+ * does not move while the craft do. */
+static void burn_crossover_(const char *what, const char *src,
+                            const char *stem)
+{
+    build_(src, stem);
+    char so_b[512];
+    so_path_(so_b, sizeof so_b, stem);
+    RlSpecView vb;
+    spec_of_(so_b, &vb);
+    int b_det = chan_(&vb, "radar_detected");
+    int b_rng = chan_(&vb, "ew_range");
+    int b_bt  = chan_(&vb, "ew_burn_through");
+
+    SkArt c;
+    art_open_(&c, so_b, 4242u, 1u);
+    double act[4] = { 0.0, 0.0, 0.0, 0.0 };
+    double ob[256];
+    double prev_rng = 0.0, flip_rng = -1.0, flip_bt = 0.0;
+    int steps = 0;
+    for (int i = 0; i < 500; i++) {
+        ASSERT(c.s.step(c.env, act) == K26RL_OK);
+        ASSERT(c.s.obs(c.env, ob) == K26RL_OK);
+        steps++;
+        if (ob[b_det] == 1.0) {
+            flip_rng = ob[b_rng];
+            flip_bt  = ob[b_bt];
+            break;
+        }
+        prev_rng = ob[b_rng];
+    }
+    art_close_(&c);
+    if (flip_rng < 0.0) {
+        fprintf(stderr, "FAIL %s: the pair never closed through the "
+                "crossover in %d steps; the fixture cannot measure the "
+                "channel\n", what, steps);
+        exit(1);
+    }
+    /* The flag turned over between the previous step's range and this
+     * one's, so the published boundary has to lie in that interval. */
+    if (!(flip_bt >= flip_rng && flip_bt <= prev_rng)) {
+        fprintf(stderr, "FAIL %s: the published burn-through is %.10g "
+                "and the flag turned over between %.10g and %.10g\n",
+                what, flip_bt, flip_rng, prev_rng);
+        exit(1);
+    }
+    g_arms++;
+    printf("  %s: the published burn-through %.10g is where the victim's "
+           "own flag turns over, between %.6f m and %.6f m, over %d "
+           "steps of closing\n", what, flip_bt, flip_rng, prev_rng,
+           steps);
+}
+
 static void gate_jammer_capability_(void)
 {
     char so_on[512], so_off[512];
@@ -1407,73 +1539,13 @@ static void gate_jammer_capability_(void)
     printf("  and with that write deleted the victim's statistic is the "
            "control's bit for bit (%.17g)\n", a[i_snr]);
 
-    /* The burn-through channel against the artifact's own detection
-     * crossover. The channel is documented as the range at which this
-     * victim's radar burns through the jamming, and the only thing that
-     * can say whether it does is the victim's own flag. So the two
-     * craft are flown through the crossover rather than compiled
-     * through it: they start outside the published range and close on
-     * it at a fixed rate, and the step where the flag first reads 1 is
-     * the step whose published range has to bracket the published
-     * boundary. Without this the channel could name any range at all
-     * and nothing would notice.
-     *
-     * The separation is taken along the orbit normal so that closing it
-     * is a small out-of-plane rate rather than an orbit change, and the
-     * target's attitude is held so the cross-section the boundary is a
-     * function of does not move while the craft do. */
-    {
-        build_(BURN_KFL, "burn");
-        char so_b[512];
-        so_path_(so_b, sizeof so_b, "burn");
-        RlSpecView vb;
-        spec_of_(so_b, &vb);
-        int b_det = chan_(&vb, "radar_detected");
-        int b_rng = chan_(&vb, "ew_range");
-        int b_bt  = chan_(&vb, "ew_burn_through");
-
-        SkArt c;
-        art_open_(&c, so_b, 4242u, 1u);
-        double act[4] = { 0.0, 0.0, 0.0, 0.0 };
-        double ob[256];
-        double prev_rng = 0.0, flip_rng = -1.0, flip_bt = 0.0;
-        double bt_lo = 1.0e300, bt_hi = -1.0e300;
-        int steps = 0;
-        for (int i = 0; i < 400; i++) {
-            ASSERT(c.s.step(c.env, act) == K26RL_OK);
-            ASSERT(c.s.obs(c.env, ob) == K26RL_OK);
-            steps++;
-            if (ob[b_bt] < bt_lo) bt_lo = ob[b_bt];
-            if (ob[b_bt] > bt_hi) bt_hi = ob[b_bt];
-            if (ob[b_det] == 1.0 && flip_rng < 0.0) {
-                flip_rng = ob[b_rng];
-                flip_bt  = ob[b_bt];
-                break;
-            }
-            prev_rng = ob[b_rng];
-        }
-        art_close_(&c);
-        if (flip_rng < 0.0) {
-            fprintf(stderr, "FAIL: the pair never closed through the "
-                    "crossover in %d steps; the fixture cannot measure "
-                    "the channel\n", steps);
-            exit(1);
-        }
-        /* The flag turned over between the previous step's range and
-         * this one's, so the published boundary has to lie in that
-         * interval. */
-        if (!(flip_bt >= flip_rng && flip_bt <= prev_rng)) {
-            fprintf(stderr, "FAIL: the published burn-through is %.10g "
-                    "and the flag turned over between %.10g and %.10g\n",
-                    flip_bt, flip_rng, prev_rng);
-            exit(1);
-        }
-        g_arms++;
-        printf("  the published burn-through %.10g is where the victim's "
-               "own flag turns over: detected first at %.6f m, undetected "
-               "at %.6f m the step before, over %d steps of closing\n",
-               flip_bt, flip_rng, prev_rng, steps);
-    }
+    burn_crossover_("at two hundred watts", BURN_KFL, "burn");
+    /* And again where the jamming dominates the return by enough that
+     * the quadratic's linear term dominates its constant. The two forms
+     * of the same root agree to seven digits in the regime above and
+     * differ by more than a step's resolution here, so a fixture in one
+     * regime alone cannot tell them apart. */
+    burn_crossover_("at a hundred kilowatts", BURN_FINE_KFL, "burnfine");
 }
 
 /* ---- Gate 5: the decoy changes a payload's capability ---------------- */
@@ -1658,6 +1730,25 @@ static void gate_counter_detection_(void)
     run_obs_(so_t, 1, 0.0, tmax, 256);
     run_obs_(so_tc, 1, 0.0, tskin, 256);
 
+    /* On this fixture the skin signature is the larger of the two, so
+     * an artifact taking the larger publishes exactly what it publishes
+     * with no engagement at all. An artifact combining them any other
+     * way does not, which is what this reads.
+     *
+     * It is read before the perturbation below rather than after it,
+     * for the reason the perturbation below is placed where it is: a
+     * defect that has already made the artifact add would leave that
+     * harness reporting a needle it cannot find in a line the defect
+     * has already written, rather than this line reporting the defect.
+     */
+    if (!(tmax[t_snr] == tskin[t_snr])) {
+        fprintf(stderr, "FAIL: with the skin signature the larger of the "
+                "two, the engaged run publishes %.17g against the "
+                "control's %.17g; the artifact is not taking the larger "
+                "of the two signals\n", tmax[t_snr], tskin[t_snr]);
+        exit(1);
+    }
+
     emit_("tepid");
     mutate_("tepid", "tepid_add",
             "s/^\\( *\\)if (_kfl_cs > _kfl_snr) _kfl_snr = _kfl_cs;$/"
@@ -1668,18 +1759,6 @@ static void gate_counter_detection_(void)
     build_emitted_(WORK_DIR "/tepid_add.cc", so_add);
     double tadd[256];
     run_obs_(so_add, 1, 0.0, tadd, 256);
-
-    /* On this fixture the skin signature is the larger of the two, so
-     * an artifact taking the larger publishes exactly what it publishes
-     * with no engagement at all. An artifact combining them any other
-     * way does not, which is what this reads. */
-    if (!(tmax[t_snr] == tskin[t_snr])) {
-        fprintf(stderr, "FAIL: with the skin signature the larger of the "
-                "two, the engaged run publishes %.17g against the "
-                "control's %.17g; the artifact is not taking the larger "
-                "of the two signals\n", tmax[t_snr], tskin[t_snr]);
-        exit(1);
-    }
     if (!(tadd[t_snr] > tmax[t_snr] * 1.5)) {
         fprintf(stderr, "FAIL: adding the two signals gives %.10g "
                 "against taking the larger's %.10g; the fixture cannot "
@@ -2310,6 +2389,42 @@ static void gate_chaff_(void)
     g_arms++;
     printf("  and with the chaff term zeroed it is the no-chaff "
            "program's bit for bit (%.17g)\n", mut[i_snr]);
+
+    /* The saturation, which is what a drawn strip count past the
+     * routine's range meets. The compile-time refusal can only judge a
+     * literal, so a distribution is the shape that reaches the
+     * conversion, and without the saturation the conversion is
+     * undefined and reads as no cloud at all: a declared cloud that
+     * vanishes. The drawn program must publish what the program written
+     * at the bound publishes, and must not publish what a program
+     * declaring no cloud does. */
+    build_(CHAFF_DRAWN_KFL, "chdrawn");
+    build_(CHAFF_AT_BOUND_KFL, "chbound");
+    char so_d[512], so_bnd[512];
+    so_path_(so_d, sizeof so_d, "chdrawn");
+    so_path_(so_bnd, sizeof so_bnd, "chbound");
+    RlSpecView vd;
+    spec_of_(so_d, &vd);
+    int d_snr = chan_(&vd, "radar_snr");
+    double dr[256], bd[256];
+    run_obs_(so_d, 3, 0.0, dr, 256);
+    run_obs_(so_bnd, 3, 0.0, bd, 256);
+    if (dr[d_snr] != bd[d_snr]) {
+        fprintf(stderr, "FAIL: a drawn strip count past the bound "
+                "publishes %.17g against the bound's own %.17g; it is "
+                "not saturating\n", dr[d_snr], bd[d_snr]);
+        exit(1);
+    }
+    if (!(dr[d_snr] > a[i_snr] * 10.0)) {
+        fprintf(stderr, "FAIL: a drawn strip count past the bound "
+                "publishes %.10g against the no-chaff program's %.10g; "
+                "the cloud has vanished\n", dr[d_snr], a[i_snr]);
+        exit(1);
+    }
+    g_arms++;
+    printf("  and a strip count drawn past the bound saturates to it: "
+           "%.10g, the same as the bound written out, against the "
+           "no-chaff program's %.10g\n", dr[d_snr], a[i_snr]);
 }
 
 /* ---- Gate 9b: one craft, one cross-section --------------------------- */
