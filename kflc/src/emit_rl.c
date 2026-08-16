@@ -303,10 +303,14 @@ static const char *const RL_EFF_JAM_COMP_[RL_EFF_JAM_COMPS] = {
     "_counter_detected"
 };
 
-#define RL_EFF_DEC_COMPS 7
+/* `_deployed` is its own channel rather than something a reader infers
+ * from a zero. A decoy's engagement is bounded by the host's own mass,
+ * so a statement that ran and deployed nothing is a state a program can
+ * reach and has to be able to see. */
+#define RL_EFF_DEC_COMPS 8
 static const char *const RL_EFF_DEC_COMP_[RL_EFF_DEC_COMPS] = {
-    "_engaged", "_effect", "_reached", "_p_discriminated", "_range",
-    "_dv", "_mass_loss"
+    "_engaged", "_deployed", "_effect", "_reached", "_p_discriminated",
+    "_range", "_dv", "_mass_loss"
 };
 
 /* The widest effector channel set, which is the per-payload stride of
@@ -2462,6 +2466,32 @@ static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
             err = 1;
         }
 
+        /* And the strip count against the range the cloud statistics
+         * routine's own parameter has. Past it the conversion is
+         * undefined and what it produces reads as a cloud of no strips,
+         * which is a declared figure nothing reads: the same ground the
+         * pair rule above stands on, and the same ground the history
+         * minimum stands on. A distribution is admissible here and only
+         * a literal can be judged now, so what can be judged is. */
+        if (py->kind == RL_PAY_DETECT_RADAR &&
+            py->attr[RL_PAY_RADAR_CHAFF_N]) {
+            const char *txt = rl_pay_attr_text_(py->attr[RL_PAY_RADAR_CHAFF_N]);
+            char *end = NULL;
+            double v = txt ? strtod(txt, &end) : 0.0;
+            if (txt && end && *end == '\0' &&
+                (v < 0.0 || v > 2147483647.0)) {
+                kflc_diag_errorf(diag,
+                    py->attr[RL_PAY_RADAR_CHAFF_N]->line,
+                    "astro_payload `%s`: `%s=%s` is outside the range the "
+                    "cloud statistics routine counts strips in, which is 0 "
+                    "to 2147483647; a count past it describes a cloud the "
+                    "routine cannot represent and would be read as no "
+                    "cloud at all",
+                    py->name, kd->keys[RL_PAY_RADAR_CHAFF_N].key, txt);
+                err = 1;
+            }
+        }
+
         /* At most one information state per body. It binds through the
          * vehicle's singleton payload slot, so a second evicts the
          * first and the eviction nulls the evicted one's observer: its
@@ -3867,6 +3897,23 @@ static int rl_softkill_reaches_(const RlModel *m, int p, int t,
     return 0;
 }
 
+/* Whether detection payload `p` has a detect observe of body `b`. The
+ * jamming ratio divides by the protected craft's cross-section, and the
+ * chaff keys on a radar payload describe a cloud around *that payload's
+ * reference target*, so the cloud belongs in that ratio exactly when
+ * the craft the jammer protects is the craft the payload is pointed at.
+ * Both are declarations, so this is settled here rather than while
+ * stepping. */
+static int rl_detect_observes_(const RlModel *m, int p, int b)
+{
+    for (int i = 0; i < m->n_observes; i++) {
+        if (rl_observe_form_(m->observes[i]) != RL_OBS_DET) continue;
+        if (m->obs_payload[i] != p) continue;
+        if (m->obs_target[i] == b) return 1;
+    }
+    return 0;
+}
+
 /* The (information state, target) pairs the binding pushes a sample
  * for. One pair per distinct target of each infostate payload, taken
  * in observe declaration order, so the push order is the program's own
@@ -4178,8 +4225,12 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
     /* The degradation store is indexed by (detection payload, body):
      * a countermeasure degrades one victim payload's view of one craft,
      * the craft that carries the countermeasure. Both indices are the
-     * program's own counts, so the store is a handful of doubles for
-     * any program a reader would write. */
+     * program's own counts rather than the compiler's limits, so a
+     * program declaring five payloads over four bodies carries sixty
+     * doubles per environment. At the limits the grammar admits, 32
+     * payloads over 256 bodies, it would be 24576 doubles, which is
+     * 192 kilobytes per environment: worth knowing before a program is
+     * written that large, and not a shape any fixture here reaches. */
     fprintf(out, "#define KFLRL_N_SOFTKILL %d\n",
             rl_n_softkill_engage_(m));
     {
@@ -4383,6 +4434,28 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
             fprintf(out, "    %d,\n", n);
         }
         fputs("};\n\n", out);
+        if (rl_n_chaff_(m) > 0) {
+            fputs(
+"/* A declared chaff strip count, as the count the cloud statistics\n"
+" * routine takes. The key is a scalar like every other, so its value\n"
+" * may be an expression or a per-episode draw and need not land inside\n"
+" * the integer range the routine's parameter has. Converting a double\n"
+" * outside that range is undefined, and what it does here is read as a\n"
+" * cloud of no strips, which is indistinguishable from declaring none:\n"
+" * a declared figure nothing reads. The compiler refuses a literal\n"
+" * outside the range, naming the bound; this is what stops an\n"
+" * expression or a draw from reaching the conversion at all.\n"
+" *\n"
+" * The bound is the routine's own parameter type, and it saturates\n"
+" * rather than wrapping, so a count past it is the largest cloud the\n"
+" * routine can describe rather than no cloud. */\n"
+"static int kflrl_chaff_strips_(double n)\n"
+"{\n"
+"    if (!(n > 0.0)) return 0;\n"
+"    if (n >= 2147483647.0) return 2147483647;\n"
+"    return (int)n;\n"
+"}\n\n", out);
+        }
         fputs(
 "/* The area a target presents along a look direction, the direction\n"
 " * given in the target's own frame. The three convex primitives have\n"
@@ -6173,7 +6246,8 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
              * the cross-section it computed before this key existed. */
             fprintf(out,
         "                _kfl_rcs += k26astro_chaff_mean_rcs(\n"
-        "                    (int)_kfl_pp[%d], _kfl_pp[%d]);\n",
+        "                    kflrl_chaff_strips_(_kfl_pp[%d]),\n"
+        "                    _kfl_pp[%d]);\n",
                 RL_PAY_RADAR_CHAFF_N, RL_PAY_RADAR_CHAFF_SIG);
         }
         fputs(
@@ -7774,7 +7848,22 @@ static void rl_emit_engage_softkill_(FILE *out, const RlModel *m, int e)
         "        const double *vp = payp + %d * KFLRL_PAY_NPARAM;\n"
         "        double _kfl_lam = vp[3] > 0.0 ? (K26A_C / vp[3]) : 0.0;\n"
         "        double _kfl_s = k26astro_signature_rcs_monostatic(\n"
-        "            1, &_kfl_nrm, &_kfl_area, _kfl_look, _kfl_lam);\n"
+        "            1, &_kfl_nrm, &_kfl_area, _kfl_look, _kfl_lam);\n", q);
+                /* The cloud this victim declared around the craft the
+                 * jammer protects belongs in the jamming ratio as well
+                 * as in the radar equation. A cross-section the radar
+                 * sees and the jamming ratio does not would have the
+                 * two equations describing different craft, and the
+                 * ratio would overstate the jamming by whatever the
+                 * cloud returns. */
+                if (m->payloads[q].attr[RL_PAY_RADAR_CHAFF_N] &&
+                    rl_detect_observes_(m, q, host)) {
+                    fprintf(out,
+        "        _kfl_s += k26astro_chaff_mean_rcs(\n"
+        "            kflrl_chaff_strips_(vp[%d]), vp[%d]);\n",
+                        RL_PAY_RADAR_CHAFF_N, RL_PAY_RADAR_CHAFF_SIG);
+                }
+                fprintf(out,
         "        double _kfl_js = k26astro_jammer_js_ratio(_kfl_h,\n"
         "            vp[0], vp[1], _kfl_s, _kfl_rng);\n"
         /* Two jammers on one victim add their power at the receiver,
@@ -7785,11 +7874,45 @@ static void rl_emit_engage_softkill_(FILE *out, const RlModel *m, int e)
         "            if (_kfl_js > _kfl_best) {\n"
         "                _kfl_best = _kfl_js;\n"
         "                _kfl_rcs  = _kfl_s;\n"
-        "                _kfl_bt   = k26astro_jammer_burn_through_range(\n"
-        "                    _kfl_h, vp[0], vp[1], _kfl_s);\n"
+        /* The range at which this victim's radar burns through, which
+         * is the range at which its published statistic crosses its own
+         * threshold under the degradation this binding applies. The
+         * library's own helper answers a different question: it solves
+         * the ratio against the *jammer's* declared threshold and never
+         * sees the victim's, so its figure and this artifact's
+         * detection flag disagree by a factor of the victim's threshold.
+         * A channel a policy steers on has to mean what the flag beside
+         * it means.
+         *
+         * The statistic falls as one over range to the fourth and the
+         * ratio grows as range squared, so writing the degradation law
+         * at the crossover and substituting both gives a quadratic in
+         * range squared whose positive root is the boundary. It is
+         * taken in the form that divides rather than subtracts, the
+         * subtracting form losing every significant digit whenever the
+         * jamming dominates, which is the regime the channel exists
+         * for. */
+        "                double _kfl_snr0 =\n"
+        "                    k26astro_detect_radar_active(\n"
+        "                        vp[0], vp[1], vp[2], vp[3], _kfl_s,\n"
+        "                        _kfl_rng, vp[4], vp[5], vp[6], vp[7],\n"
+        "                        vp[8], NULL).snr;\n"
+        "                double _kfl_r2 = _kfl_rng * _kfl_rng;\n"
+        "                double _kfl_kk = _kfl_snr0 * _kfl_r2 * _kfl_r2;\n"
+        "                double _kfl_jj = _kfl_js / _kfl_r2;\n"
+        "                _kfl_bt = 0.0;\n"
+        "                if (_kfl_kk > 0.0 && vp[8] > 0.0) {\n"
+        "                    double _kfl_bb = _kfl_jj * _kfl_kk;\n"
+        "                    double _kfl_cc = _kfl_kk / vp[8];\n"
+        "                    double _kfl_den = _kfl_bb\n"
+        "                        + sqrt(_kfl_bb * _kfl_bb + 4.0 * _kfl_cc);\n"
+        "                    if (_kfl_den > 0.0) {\n"
+        "                        _kfl_bt = sqrt(2.0 * _kfl_cc / _kfl_den);\n"
+        "                    }\n"
+        "                }\n"
         "            }\n"
         "        }\n"
-        "    }\n", q, q, host);
+        "    }\n", q, host);
             } else if (m->payloads[q].kind == RL_PAY_DETECT_IR) {
                 /* The other edge. A passive infrared observer sees the
                  * thermalised transmit power, and the detection
@@ -7839,10 +7962,24 @@ static void rl_emit_engage_softkill_(FILE *out, const RlModel *m, int e)
      * separation is taken along and therefore the direction the host
      * recoils in.
      *
-     * There is no magazine here either. Each engagement deploys another
-     * decoy and costs another dry mass; a program that models stores
-     * writes the counter and the conditional the grammar already gives
-     * it. */
+     * **The engagement is bounded by conservation rather than by a
+     * declared count.** The momentum the host takes is derived from the
+     * mass that leaves it, so the two cannot be decided separately: a
+     * deploy the host cannot supply must impart no momentum either, or
+     * the statement pays a benefit out of mass that never left. Since
+     * nothing here counts rounds, a program that engages on every step
+     * walks its host down to the declared dry mass, and from there on
+     * the host's own mass is what refuses the deploy. That is a real
+     * magazine derived from what the tier already models, and it is why
+     * this is the one effector kind whose engagements run out.
+     *
+     * Nothing is deployed unless the host is strictly heavier than the
+     * decoy: no momentum, no mass loss, and no degradation on any
+     * victim, since a decoy that never left the craft cannot be
+     * confused with it. The strict comparison is the same rule the
+     * ablated mass follows, a massless body in the integrator not being
+     * a state this layer will produce. A separate channel says so
+     * plainly rather than leaving a reader to read it out of a zero. */
     fputs(
         "    (void)dt;\n"
         "    (void)_kfl_mass;\n"
@@ -7851,24 +7988,29 @@ static void rl_emit_engage_softkill_(FILE *out, const RlModel *m, int e)
         "                             _kfl_d.z / _kfl_rng);\n"
         "    double _kfl_hm = _kfl_eb->mass;\n"
         "    double _kfl_dm = pp[1];\n"
-        "    double _kfl_dv = (_kfl_hm > 0.0 && _kfl_dm > 0.0)\n"
-        "                   ? (_kfl_dm * pp[2] / _kfl_hm) : 0.0;\n"
-        "    _kfl_eb->vel.x -= _kfl_dv * _kfl_u.x;\n"
-        "    _kfl_eb->vel.y -= _kfl_dv * _kfl_u.y;\n"
-        "    _kfl_eb->vel.z -= _kfl_dv * _kfl_u.z;\n"
-        /* The published loss is the mass actually removed. A deploy
-         * that would take the whole craft is outside this model's range
-         * and removes nothing, on the same rule the ablated mass
-         * follows: a massless body in the integrator is not a state
-         * this layer will produce. */
-        "    double _kfl_loss = _kfl_dm;\n"
-        "    if (_kfl_loss < 0.0) _kfl_loss = 0.0;\n"
-        "    if (_kfl_loss >= _kfl_hm) _kfl_loss = 0.0;\n"
-        "    if (_kfl_loss > 0.0) {\n"
+        "    int    _kfl_dep = (_kfl_dm > 0.0 && _kfl_hm > _kfl_dm)\n"
+        "                    ? 1 : 0;\n"
+        "    double _kfl_dv = 0.0, _kfl_loss = 0.0;\n"
+        "    if (_kfl_dep) {\n"
+        /* The separation velocity is between the decoy and the host
+         * after the deploy, which is what makes this exact: writing
+         * momentum conservation with that convention gives the host an
+         * increment of the released mass times the separation velocity
+         * over the mass the host had before it, and no approximation
+         * enters. The alternative convention, the decoy leaving at the
+         * declared speed in the pre-deploy frame, divides by the mass
+         * left behind instead; both are defensible and this one is
+         * chosen because it is the one that closes exactly. */
+        "        _kfl_dv   = _kfl_dm * pp[2] / _kfl_hm;\n"
+        "        _kfl_loss = _kfl_dm;\n"
+        "        _kfl_eb->vel.x -= _kfl_dv * _kfl_u.x;\n"
+        "        _kfl_eb->vel.y -= _kfl_dv * _kfl_u.y;\n"
+        "        _kfl_eb->vel.z -= _kfl_dv * _kfl_u.z;\n"
         "        k26astro_body_set_mass(_kfl_eb, _kfl_hm - _kfl_loss);\n"
         "    }\n"
         "    int    _kfl_reach = 0;\n"
-        "    double _kfl_best = 0.0, _kfl_pd = 0.0;\n", out);
+        "    double _kfl_best = 0.0, _kfl_pd = 0.0;\n"
+        "    if (_kfl_dep) {\n", out);
 
     for (int q = 0; q < m->n_payloads; q++) {
         if (m->payloads[q].body != en->target) continue;
@@ -7895,9 +8037,11 @@ static void rl_emit_engage_softkill_(FILE *out, const RlModel *m, int e)
         "            double *_kfl_sl =\n"
         "                &eng->deg[%d * KFLRL_DEG_STRIDE + %d].dec;\n"
         /* Two decoys against one observer compose the way the
-         * library's own discrimination model composes its channels:
-         * the observer has to see through both, so the probabilities
-         * of not seeing through each multiply. */
+         * library's own discrimination model composes its channels.
+         * The observer must discriminate every decoy to be undeceived,
+         * so the probabilities of discriminating each multiply, and
+         * the confidence the observer keeps is that product: two
+         * decoys leave it less than one does. */
         "            *_kfl_sl = *_kfl_sl + (1.0 - *_kfl_sl) * _kfl_dg;\n"
         "            _kfl_reach++;\n"
         "            if (_kfl_dg > _kfl_best) {\n"
@@ -7909,12 +8053,14 @@ static void rl_emit_engage_softkill_(FILE *out, const RlModel *m, int e)
     }
 
     fputs(
-        "    ch[1] = _kfl_best;\n"
-        "    ch[2] = (double)_kfl_reach;\n"
-        "    ch[3] = _kfl_pd;\n"
-        "    ch[4] = _kfl_rng;\n"
-        "    ch[5] = _kfl_dv;\n"
-        "    ch[6] = _kfl_loss;\n"
+        "    }\n"
+        "    ch[1] = _kfl_dep ? 1.0 : 0.0;\n"
+        "    ch[2] = _kfl_best;\n"
+        "    ch[3] = (double)_kfl_reach;\n"
+        "    ch[4] = _kfl_pd;\n"
+        "    ch[5] = _kfl_rng;\n"
+        "    ch[6] = _kfl_dv;\n"
+        "    ch[7] = _kfl_loss;\n"
         "}\n\n", out);
 }
 

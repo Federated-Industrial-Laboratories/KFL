@@ -465,8 +465,8 @@ static const char *const OBS_SFX_EFF_JAMMER_[] =
       "_burn_through", "_self_signature", "_counter_range",
       "_counter_detected", NULL };
 static const char *const OBS_SFX_EFF_DECOY_[] =
-    { "_engaged", "_effect", "_reached", "_p_discriminated", "_range",
-      "_dv", "_mass_loss", NULL };
+    { "_engaged", "_deployed", "_effect", "_reached",
+      "_p_discriminated", "_range", "_dv", "_mass_loss", NULL };
 
 static int observe_marker_(const KflcNode *n, const char *marker)
 {
