@@ -460,6 +460,13 @@ static const char *const OBS_SFX_EFF_IMPACTOR_[] =
     { "_engaged", "_effect", "_hit", "_closing_speed", "_t_close",
       "_miss", "_fraction", "_cos_angle", "_penetrates",
       "_critical_diameter", "_penetration", "_energy", NULL };
+static const char *const OBS_SFX_EFF_JAMMER_[] =
+    { "_engaged", "_effect", "_reached", "_range", "_rcs",
+      "_burn_through", "_self_signature", "_counter_range",
+      "_counter_detected", NULL };
+static const char *const OBS_SFX_EFF_DECOY_[] =
+    { "_engaged", "_effect", "_reached", "_p_discriminated", "_range",
+      "_dv", "_mass_loss", NULL };
 
 static int observe_marker_(const KflcNode *n, const char *marker)
 {
@@ -516,8 +523,10 @@ static const char *const *observe_suffixes_(const KflcNode *world,
     if (observe_marker_(n, "track"))    return OBS_SFX_TRACK_;
     if (observe_marker_(n, "effect")) {
         const char *k = effect_payload_kind_(world, n);
-        return (k && strcmp(k, "impactor") == 0)
-               ? OBS_SFX_EFF_IMPACTOR_ : OBS_SFX_EFF_LASER_;
+        if (k && strcmp(k, "impactor") == 0) return OBS_SFX_EFF_IMPACTOR_;
+        if (k && strcmp(k, "jammer") == 0)   return OBS_SFX_EFF_JAMMER_;
+        if (k && strcmp(k, "decoy") == 0)    return OBS_SFX_EFF_DECOY_;
+        return OBS_SFX_EFF_LASER_;
     }
     if (observe_marker_(n, "port"))     return OBS_SFX_PORT_;
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
@@ -565,7 +574,9 @@ static size_t observe_as_bound_(void)
                                    OBS_SFX_CON_, OBS_SFX_REL_,
                                    OBS_SFX_PORT_, OBS_SFX_DETECT_,
                                    OBS_SFX_TRACK_, OBS_SFX_EFF_LASER_,
-                                   OBS_SFX_EFF_IMPACTOR_ };
+                                   OBS_SFX_EFF_IMPACTOR_,
+                                   OBS_SFX_EFF_JAMMER_,
+                                   OBS_SFX_EFF_DECOY_ };
     for (size_t i = 0; i < sizeof lists / sizeof lists[0]; i++) {
         for (int k = 0; lists[i][k]; k++) {
             /* `_truth` is what a paired channel inserts, so the

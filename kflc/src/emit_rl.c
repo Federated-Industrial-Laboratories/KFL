@@ -232,6 +232,23 @@ static const char *const RL_TRK_COMP_[RL_TRK_COMPS] = {
     "_vel_z", "_range", "_age"
 };
 
+/* The defense payload kinds, one entry per `kind=` word this grammar
+ * binds. Declared here rather than beside the key tables because an
+ * effect observe's channel set is its payload's kind's, and the widths
+ * are what the agent slices are computed from. */
+typedef enum {
+    RL_PAY_DETECT_IR    = 0,
+    RL_PAY_DETECT_RADAR = 1,
+    RL_PAY_DETECT_LIDAR = 2,
+    RL_PAY_INFOSTATE    = 3,
+    RL_PAY_IMPACTOR     = 4,
+    RL_PAY_LASER        = 5,
+    RL_PAY_DECOY        = 6,
+    RL_PAY_JAMMER       = 7
+} RlPayloadKind;
+
+#define RL_PAY_KINDS 8
+
 /* An effector observe publishes what the last engagement of its
  * payload did. Two channels are common to every effector kind:
  * `_engaged`, which says whether the payload was engaged on this step,
@@ -262,6 +279,34 @@ static const char *const RL_EFF_IMP_COMP_[RL_EFF_IMP_COMPS] = {
     "_engaged", "_effect", "_hit", "_closing_speed", "_t_close",
     "_miss", "_fraction", "_cos_angle", "_penetrates",
     "_critical_diameter", "_penetration", "_energy"
+};
+
+/* The countermeasure kinds publish what they did to another craft's
+ * payloads rather than what they did to its body, which is what makes
+ * them the one effector class whose result is not a change of state.
+ * `_reached` is the count of the victim's detection payloads the
+ * engagement actually wrote to, and it is published rather than
+ * inferred because an engagement aimed at a craft that carries nothing
+ * to degrade is exactly the decoration this surface has to be able to
+ * report. It reads zero on such a step, and the rest of the set reads
+ * zero with it.
+ *
+ * The jammer's set carries both edges. `_effect` and `_reached` are the
+ * benefit, `_self_signature` and the two counter-detection components
+ * the cost: every watt transmitted announces the emitter's position to
+ * a passive infrared observer, so a craft that jams becomes easier to
+ * see while it does so, and both halves are on the same statement. */
+#define RL_EFF_JAM_COMPS 9
+static const char *const RL_EFF_JAM_COMP_[RL_EFF_JAM_COMPS] = {
+    "_engaged", "_effect", "_reached", "_range", "_rcs",
+    "_burn_through", "_self_signature", "_counter_range",
+    "_counter_detected"
+};
+
+#define RL_EFF_DEC_COMPS 7
+static const char *const RL_EFF_DEC_COMP_[RL_EFF_DEC_COMPS] = {
+    "_engaged", "_effect", "_reached", "_p_discriminated", "_range",
+    "_dv", "_mass_loss"
 };
 
 /* The widest effector channel set, which is the per-payload stride of
@@ -315,22 +360,52 @@ static const char *rl_observe_payload_(const KflcNode *n)
     return NULL;
 }
 
-/* Whether an effect observe publishes the impactor channel set. The
- * kind is resolved onto the statement during collection, before the
+/* Which effector kind an effect observe publishes the channel set of.
+ * The kind is resolved onto the statement during collection, before the
  * agent slices are computed, because the width of this form is its
  * payload's kind's and the slices are a function of the widths. An
  * unstamped statement is one whose payload did not resolve, which is
- * an error already reported; the laser set is returned so the widths
+ * an error already reported; the laser kind is returned so the widths
  * stay consistent while the diagnostics are collected. */
-static int rl_observe_eff_is_impactor_(const KflcNode *n)
+/* Defined with the kind table below, which is the one place the `kind=`
+ * words live; declared here because the width of an effect observe is
+ * its payload's kind's and the widths are needed before that point. */
+static int rl_pay_kind_from_name_(const char *s);
+
+static int rl_observe_eff_kind_(const KflcNode *n)
 {
-    if (!n) return 0;
+    if (!n) return RL_PAY_LASER;
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (!a->name || strcmp(a->name, "effect_kind") != 0) continue;
-        if (a->value.kind != KFLV_IDENT || !a->value.u.s) return 0;
-        return strcmp(a->value.u.s, "impactor") == 0;
+        if (a->value.kind != KFLV_IDENT || !a->value.u.s) break;
+        int k = rl_pay_kind_from_name_(a->value.u.s);
+        if (k >= 0) return k;
+        break;
     }
-    return 0;
+    return RL_PAY_LASER;
+}
+
+/* The component table and its width, per effector kind. One switch, so
+ * a kind cannot have a name table without a width or the other way
+ * about. */
+static int rl_eff_comps_(int kind)
+{
+    switch (kind) {
+    case RL_PAY_IMPACTOR: return RL_EFF_IMP_COMPS;
+    case RL_PAY_DECOY:    return RL_EFF_DEC_COMPS;
+    case RL_PAY_JAMMER:   return RL_EFF_JAM_COMPS;
+    default:              return RL_EFF_LAS_COMPS;
+    }
+}
+
+static const char *rl_eff_comp_(int kind, int c)
+{
+    switch (kind) {
+    case RL_PAY_IMPACTOR: return RL_EFF_IMP_COMP_[c];
+    case RL_PAY_DECOY:    return RL_EFF_DEC_COMP_[c];
+    case RL_PAY_JAMMER:   return RL_EFF_JAM_COMP_[c];
+    default:              return RL_EFF_LAS_COMP_[c];
+    }
 }
 
 static int rl_observe_is_attitude_(const KflcNode *n)
@@ -376,8 +451,7 @@ static int rl_observe_base_width_(const KflcNode *n)
     case RL_OBS_PORT: return RL_PORT_COMPS;
     case RL_OBS_DET: return RL_DET_COMPS;
     case RL_OBS_TRK: return RL_TRK_COMPS;
-    case RL_OBS_EFF: return rl_observe_eff_is_impactor_(n)
-                          ? RL_EFF_IMP_COMPS : RL_EFF_LAS_COMPS;
+    case RL_OBS_EFF: return rl_eff_comps_(rl_observe_eff_kind_(n));
     case RL_OBS_LOS: return RL_OBS_COMPS;
     }
     return RL_OBS_COMPS;
@@ -404,8 +478,7 @@ static const char *rl_observe_base_comp_(const KflcNode *n, int c)
     case RL_OBS_PORT: return RL_PORT_COMP_[c];
     case RL_OBS_DET: return RL_DET_COMP_[c];
     case RL_OBS_TRK: return RL_TRK_COMP_[c];
-    case RL_OBS_EFF: return rl_observe_eff_is_impactor_(n)
-                          ? RL_EFF_IMP_COMP_[c] : RL_EFF_LAS_COMP_[c];
+    case RL_OBS_EFF: return rl_eff_comp_(rl_observe_eff_kind_(n), c);
     case RL_OBS_LOS: return RL_OBS_COMP_[c];
     }
     return RL_OBS_COMP_[c];
@@ -530,17 +603,14 @@ typedef struct {
  * models one target class, and a program observing two dissimilar
  * targets declares one payload per class.
  *
- * Radar needs none of them, its cross-section being geometric. */
-typedef enum {
-    RL_PAY_DETECT_IR    = 0,
-    RL_PAY_DETECT_RADAR = 1,
-    RL_PAY_DETECT_LIDAR = 2,
-    RL_PAY_INFOSTATE    = 3,
-    RL_PAY_IMPACTOR     = 4,
-    RL_PAY_LASER        = 5
-} RlPayloadKind;
+ * Radar needs none of them for radiometry, its cross-section being
+ * geometric; it does take the two that describe a chaff cloud around
+ * the target, which raise that cross-section.
+ *
+ * The kind enumeration itself is declared with the effector channel
+ * tables above, because an effect observe's width is its payload's
+ * kind's and the widths are needed before this point. */
 
-#define RL_PAY_KINDS     6
 #define RL_PAY_MAXP     20
 #define RL_MAX_PAYLOADS 32
 
@@ -563,6 +633,28 @@ typedef struct {
     int              n_words;
 } RlPayKey;
 
+/* The set of discriminators the observing craft runs against a decoy.
+ * It is a property of the observer rather than of the decoy, which is
+ * why it is declared on the detection payload and not on the payload
+ * that deploys the countermeasure: two craft looking at one decoy may
+ * run different discriminators and reach different answers about it.
+ *
+ * The words are the enumeration's own names. Nothing in the detection
+ * library carries this: the type is declared in the countermeasure
+ * library's constants header and is taken there by the discrimination
+ * routine alone, so the value has to be declared somewhere, and the
+ * observer's own statement is where it belongs. */
+static const RlPayWord RL_PAY_REGIME_[] = {
+    { "ir_only",      "K26ASTRO_DISC_IR_ONLY" },
+    { "ir_plus_rcs",  "K26ASTRO_DISC_IR_PLUS_RCS" },
+    { "ir_rcs_accel", "K26ASTRO_DISC_IR_RCS_ACCEL" }
+};
+
+#define RL_PAY_REGIME_KEY \
+    { "discriminator_regime", 0, "K26ASTRO_DISC_IR_ONLY", \
+      RL_PAY_REGIME_, \
+      (int)(sizeof RL_PAY_REGIME_ / sizeof RL_PAY_REGIME_[0]) }
+
 static const RlPayKey RL_PAY_IR_[] = {
     { "aperture_m",        1, "0.0", NULL, 0 },
     { "integration_s",     1, "0.0", NULL, 0 },
@@ -579,9 +671,24 @@ static const RlPayKey RL_PAY_IR_[] = {
      * library says so; a program that wants the honest noise floor
      * declares its optics rather than rebuilding the model. */
     { "t_optics_k",        0, "0.0", NULL, 0 },
-    { "optics_emissivity", 0, "0.0", NULL, 0 }
+    { "optics_emissivity", 0, "0.0", NULL, 0 },
+    RL_PAY_REGIME_KEY
 };
 
+/* The two chaff keys are the cloud statistics routine's own parameters
+ * of the same name, prefixed like every other key that describes what
+ * is being looked at rather than the instrument. A chaff cloud is not
+ * a payload of this tier: the countermeasure library gives it four free
+ * functions, no handle and no registry tag, and its only entry point
+ * that takes a generator is the per-sample draw, which this layer never
+ * calls. What it does have is a deterministic mean cross-section, and
+ * that is a property of the target a radar looks at, so it is declared
+ * beside the other reference-target properties.
+ *
+ * Both are optional and the pair is all-or-nothing in one direction:
+ * the strip count is what says a cloud is there, and a dipole
+ * cross-section declared without one would describe strips that do not
+ * exist. */
 static const RlPayKey RL_PAY_RADAR_[] = {
     { "p_tx_w",        1, "0.0", NULL, 0 },
     { "g_tx_db",       1, "0.0", NULL, 0 },
@@ -591,7 +698,11 @@ static const RlPayKey RL_PAY_RADAR_[] = {
     { "bandwidth_hz",  1, "0.0", NULL, 0 },
     { "t_sys_k",       1, "0.0", NULL, 0 },
     { "noise_figure",  1, "0.0", NULL, 0 },
-    { "snr_threshold", 1, "0.0", NULL, 0 }
+    { "snr_threshold", 1, "0.0", NULL, 0 },
+    RL_PAY_REGIME_KEY,
+    { "target_chaff_n_strips",        0, "0.0", NULL, 0 },
+    { "target_chaff_sigma_dipole_m2", 0,
+      "K26ASTRO_SOFTKILL_DIPOLE_RCS_DEFAULT_M2", NULL, 0 }
 };
 
 static const RlPayKey RL_PAY_LIDAR_[] = {
@@ -601,8 +712,21 @@ static const RlPayKey RL_PAY_LIDAR_[] = {
     { "atmospheric_tx",      1, "0.0", NULL, 0 },
     { "detector_efficiency", 1, "0.0", NULL, 0 },
     { "snr_threshold",       1, "0.0", NULL, 0 },
-    { "target_albedo",       1, "0.0", NULL, 0 }
+    { "target_albedo",       1, "0.0", NULL, 0 },
+    RL_PAY_REGIME_KEY
 };
+
+/* Where each detection kind keeps the discriminator regime, since the
+ * three kinds have different key counts and the decoy engagement reads
+ * one slot per victim payload. One place, so a key appended to a kind
+ * above cannot leave the engagement reading a neighbour. */
+#define RL_PAY_IR_REGIME    10
+#define RL_PAY_RADAR_REGIME  9
+#define RL_PAY_LIDAR_REGIME  7
+
+/* The chaff pair's slots on the radar kind, for the same reason. */
+#define RL_PAY_RADAR_CHAFF_N     10
+#define RL_PAY_RADAR_CHAFF_SIG   11
 
 static const RlPayKey RL_PAY_INFO_[] = {
     { "history", 0, "1024", NULL, 0 }
@@ -710,6 +834,59 @@ static const RlPayKey RL_PAY_LASER_[] = {
     { "target_reflectivity", 1, "0.0", NULL, 0 }
 };
 
+/* The decoy's modality, which selects the discrimination table the
+ * probability is read from: a cold balloon and a heated, thrusting
+ * surrogate are caught by different discriminators at very different
+ * rates. The words are the enumeration's own names. */
+static const RlPayWord RL_PAY_DECOY_MODE_[] = {
+    { "passive", "K26ASTRO_DECOY_MODE_PASSIVE" },
+    { "active",  "K26ASTRO_DECOY_MODE_ACTIVE" }
+};
+
+/* The decoy. Every key is the constructor's own parameter of the same
+ * name. There are no `target_` keys: what a decoy has to match is its
+ * own host, which it is deployed from, and the match qualities are how
+ * well it does so on each of the three discriminator channels. */
+static const RlPayKey RL_PAY_DECOY_[] = {
+    { "mode", 1, "0.0",
+      RL_PAY_DECOY_MODE_,
+      (int)(sizeof RL_PAY_DECOY_MODE_ / sizeof RL_PAY_DECOY_MODE_[0]) },
+    { "dry_mass_kg",         1, "0.0", NULL, 0 },
+    { "deploy_dv_mps",       1, "0.0", NULL, 0 },
+    { "ir_match_quality",    1, "0.0", NULL, 0 },
+    { "rcs_match_quality",   1, "0.0", NULL, 0 },
+    { "accel_match_quality", 1, "0.0", NULL, 0 }
+};
+
+/* The jammer's waveform. The words are the enumeration's own names. */
+static const RlPayWord RL_PAY_JAMMER_MODE_[] = {
+    { "noise",       "K26ASTRO_JAMMER_MODE_NOISE" },
+    { "cover_pulse", "K26ASTRO_JAMMER_MODE_COVER_PULSE" },
+    { "deception",   "K26ASTRO_JAMMER_MODE_DECEPTION" }
+};
+
+/* The jammer. The first six keys are the constructor's own parameters
+ * of the same name. `radiator_temp_k` is not any constructor's: it is
+ * the emitter radiator temperature the counter-detection routine takes,
+ * and it is required rather than optional because it is what prices the
+ * engagement. A jammer announces its own position with every watt it
+ * transmits, and a payload that published the benefit and let the cost
+ * be left undeclared would model an advantage that costs nothing. */
+static const RlPayKey RL_PAY_JAMMER_[] = {
+    { "mode", 1, "0.0",
+      RL_PAY_JAMMER_MODE_,
+      (int)(sizeof RL_PAY_JAMMER_MODE_ / sizeof RL_PAY_JAMMER_MODE_[0]) },
+    { "p_j_w",           1, "0.0", NULL, 0 },
+    { "g_j_db",          1, "0.0", NULL, 0 },
+    { "freq_hz",         1, "0.0", NULL, 0 },
+    { "bandwidth_hz",    1, "0.0", NULL, 0 },
+    { "snr_threshold",   1, "0.0", NULL, 0 },
+    { "radiator_temp_k", 1, "0.0", NULL, 0 }
+};
+
+/* The jammer's own slots, read by the engagement. */
+#define RL_PAY_JAMMER_RADIATOR 6
+
 typedef struct {
     const char     *name;         /* the `kind=` value */
     const char     *tag;          /* the registry's own tag name */
@@ -717,28 +894,64 @@ typedef struct {
     int             n_keys;
     int             is_detect;
     int             is_effector;  /* the registry's effector class */
+    /* An effector whose result lands on another payload's capability
+     * rather than on a body. The two are not exclusive: a decoy also
+     * takes mass off its host. */
+    int             is_softkill;
 } RlPayKindDesc;
 
 static const RlPayKindDesc RL_PAY_KIND_[RL_PAY_KINDS] = {
     { "detect_ir",    "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
       RL_PAY_IR_,    (int)(sizeof RL_PAY_IR_    / sizeof RL_PAY_IR_[0]),
-      1, 0 },
+      1, 0, 0 },
     { "detect_radar", "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
       RL_PAY_RADAR_, (int)(sizeof RL_PAY_RADAR_ / sizeof RL_PAY_RADAR_[0]),
-      1, 0 },
+      1, 0, 0 },
     { "detect_lidar", "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
       RL_PAY_LIDAR_, (int)(sizeof RL_PAY_LIDAR_ / sizeof RL_PAY_LIDAR_[0]),
-      1, 0 },
+      1, 0, 0 },
     { "infostate",    "K26ASTRO_DEFENSE_KIND_INFOSTATE",
       RL_PAY_INFO_,  (int)(sizeof RL_PAY_INFO_  / sizeof RL_PAY_INFO_[0]),
-      0, 0 },
+      0, 0, 0 },
     { "impactor",     "K26ASTRO_DEFENSE_KIND_IMPACTOR",
       RL_PAY_IMPACTOR_,
-      (int)(sizeof RL_PAY_IMPACTOR_ / sizeof RL_PAY_IMPACTOR_[0]), 0, 1 },
+      (int)(sizeof RL_PAY_IMPACTOR_ / sizeof RL_PAY_IMPACTOR_[0]),
+      0, 1, 0 },
     { "laser",        "K26ASTRO_DEFENSE_KIND_LASER",
       RL_PAY_LASER_,
-      (int)(sizeof RL_PAY_LASER_ / sizeof RL_PAY_LASER_[0]), 0, 1 }
+      (int)(sizeof RL_PAY_LASER_ / sizeof RL_PAY_LASER_[0]), 0, 1, 0 },
+    { "decoy",        "K26ASTRO_DEFENSE_KIND_DECOY",
+      RL_PAY_DECOY_,
+      (int)(sizeof RL_PAY_DECOY_ / sizeof RL_PAY_DECOY_[0]), 0, 1, 1 },
+    { "jammer",       "K26ASTRO_DEFENSE_KIND_JAMMER",
+      RL_PAY_JAMMER_,
+      (int)(sizeof RL_PAY_JAMMER_ / sizeof RL_PAY_JAMMER_[0]), 0, 1, 1 }
 };
+
+/* A kind the tier's registry names and no library in the tree
+ * implements. The registry allocates its tag and reserves it against
+ * reassignment, and the effector-class range includes it, so a reader
+ * of that header would reasonably expect to be able to write it. There
+ * is no constructor, no evaluator and no event struct behind it, so
+ * this grammar refuses it with what is actually the matter rather than
+ * with the message for a misspelling. */
+typedef struct {
+    const char *name;
+    const char *tag;
+} RlPayUnimplemented;
+
+static const RlPayUnimplemented RL_PAY_UNIMPLEMENTED_[] = {
+    { "dazzler", "K26ASTRO_DEFENSE_KIND_DAZZLER" }
+};
+
+static int rl_pay_kind_from_name_(const char *s)
+{
+    if (!s) return -1;
+    for (int k = 0; k < RL_PAY_KINDS; k++) {
+        if (strcmp(RL_PAY_KIND_[k].name, s) == 0) return k;
+    }
+    return -1;
+}
 
 /* The library type a payload handle points at, and the function that
  * frees it. One place, so the construction and the teardown of a kind
@@ -749,6 +962,8 @@ static const char *rl_pay_ctype_(int kind)
     case RL_PAY_INFOSTATE: return "K26AstroInfostate";
     case RL_PAY_IMPACTOR:  return "K26AstroImpactor";
     case RL_PAY_LASER:     return "K26AstroLaser";
+    case RL_PAY_DECOY:     return "K26AstroDecoy";
+    case RL_PAY_JAMMER:    return "K26AstroJammer";
     default:               return "K26AstroDetectSensor";
     }
 }
@@ -759,6 +974,8 @@ static const char *rl_pay_dtor_(int kind)
     case RL_PAY_INFOSTATE: return "k26astro_infostate_destroy";
     case RL_PAY_IMPACTOR:  return "k26astro_impactor_destroy";
     case RL_PAY_LASER:     return "k26astro_laser_destroy";
+    case RL_PAY_DECOY:     return "k26astro_decoy_destroy";
+    case RL_PAY_JAMMER:    return "k26astro_jammer_destroy";
     default:               return "k26astro_detect_sensor_destroy";
     }
 }
@@ -767,7 +984,8 @@ static const char *rl_pay_dtor_(int kind)
  * One string rather than a sentence per refusal, so a kind added to
  * the table above cannot be missing from half the messages. */
 #define RL_PAY_KIND_LIST \
-    "detect_ir, detect_radar, detect_lidar, infostate, impactor and laser"
+    "detect_ir, detect_radar, detect_lidar, infostate, impactor, laser, " \
+    "decoy and jammer"
 
 typedef struct {
     const KflcNode *node;
@@ -2040,13 +2258,36 @@ static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
                 "this grammar binds are " RL_PAY_KIND_LIST, py->name);
             err = 1;
         } else {
-            for (int k = 0; k < RL_PAY_KINDS; k++) {
-                if (strcmp(RL_PAY_KIND_[k].name, kind_s) == 0) py->kind = k;
-            }
+            py->kind = rl_pay_kind_from_name_(kind_s);
             if (py->kind < 0) {
-                kflc_diag_errorf(diag, py->line,
-                    "astro_payload `%s`: unknown kind `%s`; the kinds this "
-                    "grammar binds are " RL_PAY_KIND_LIST, py->name, kind_s);
+                /* A kind the tier's own registry names and no library
+                 * in the tree implements is answered with that, rather
+                 * than with the message for a misspelling: a reader who
+                 * found the tag in the registry header did not get the
+                 * name wrong, and telling them it is unknown would send
+                 * them back to check a spelling that is correct. */
+                const char *unimp = NULL;
+                for (int u = 0;
+                     u < (int)(sizeof RL_PAY_UNIMPLEMENTED_ /
+                               sizeof RL_PAY_UNIMPLEMENTED_[0]); u++) {
+                    if (strcmp(RL_PAY_UNIMPLEMENTED_[u].name, kind_s) == 0) {
+                        unimp = RL_PAY_UNIMPLEMENTED_[u].tag;
+                    }
+                }
+                if (unimp) {
+                    kflc_diag_errorf(diag, py->line,
+                        "astro_payload `%s`: kind `%s` is named by the "
+                        "defense kind registry as `%s`, but no library in "
+                        "this tree implements it: there is no constructor, "
+                        "no evaluator and no event for it, so this grammar "
+                        "does not offer the kind. The kinds it binds are "
+                        RL_PAY_KIND_LIST, py->name, kind_s, unimp);
+                } else {
+                    kflc_diag_errorf(diag, py->line,
+                        "astro_payload `%s`: unknown kind `%s`; the kinds "
+                        "this grammar binds are " RL_PAY_KIND_LIST,
+                        py->name, kind_s);
+                }
                 err = 1;
             }
         }
@@ -2200,6 +2441,25 @@ static int rl_finish_payloads_(RlModel *m, const KflcNode *form,
                     err = 1;
                 }
             }
+        }
+
+        /* The chaff pair, on the same rule as the swarm keys: a dipole
+         * cross-section without a strip count describes strips that do
+         * not exist, and the mean cross-section of nought strips is
+         * nought whatever each one of them would have returned, so the
+         * declared figure would be a number nothing reads. The strip
+         * count alone is admitted, taking the library's own X-band
+         * default for the dipole. */
+        if (py->kind == RL_PAY_DETECT_RADAR &&
+            py->attr[RL_PAY_RADAR_CHAFF_SIG] &&
+            !py->attr[RL_PAY_RADAR_CHAFF_N]) {
+            kflc_diag_errorf(diag, py->attr[RL_PAY_RADAR_CHAFF_SIG]->line,
+                "astro_payload `%s`: `%s=` describes one strip of a chaff "
+                "cloud and this payload declares no `%s=`, so there is no "
+                "cloud for it to describe and nothing would read it",
+                py->name, kd->keys[RL_PAY_RADAR_CHAFF_SIG].key,
+                kd->keys[RL_PAY_RADAR_CHAFF_N].key);
+            err = 1;
         }
 
         /* At most one information state per body. It binds through the
@@ -2576,10 +2836,20 @@ static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
             continue;
         }
         if (!rl_body_has_assembly_(m, en->target)) {
+            /* The reason differs by class and the diagnostic says
+             * which. A kinetic or directed-energy effector acts on the
+             * area the target presents; a countermeasure acts on the
+             * target's payloads, and a body with no assembly carries no
+             * vehicle and therefore no payload at all. */
             kflc_diag_errorf(diag, en->line,
-                "engage %s at `%s`: `%s` declares no `assembly=`, so it "
-                "presents no geometry for an effector to act on", pn,
-                tn, tn);
+                kd->is_softkill
+                    ? "engage %s at `%s`: `%s` declares no `assembly=`, "
+                      "so it carries no vehicle and no payload for a "
+                      "countermeasure to reach"
+                    : "engage %s at `%s`: `%s` declares no `assembly=`, "
+                      "so it presents no geometry for an effector to "
+                      "act on",
+                pn, tn, tn);
             err = 1;
             continue;
         }
@@ -2618,7 +2888,29 @@ static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
             if (m->obs_target[i] == b) wanted = 1;
         }
         for (int e = 0; e < m->n_engages; e++) {
-            if (m->engages[e].target != b) continue;
+            const RlEngage *en = &m->engages[e];
+            if (en->payload < 0 || m->payloads[en->payload].kind < 0) {
+                continue;
+            }
+            const RlPayKindDesc *ekd =
+                &RL_PAY_KIND_[m->payloads[en->payload].kind];
+            /* A countermeasure acts on the victim's payloads and takes
+             * no area of the victim at all. What the jammer does take
+             * an area of is its own host: the jamming-to-signal ratio
+             * divides by the radar cross-section of the craft the
+             * jammer is protecting, which is the silhouette that craft
+             * presents to the victim. */
+            int host = m->payloads[en->payload].body;
+            if (ekd->is_softkill) {
+                if (en->payload >= 0 &&
+                    m->payloads[en->payload].kind == RL_PAY_JAMMER &&
+                    host == b) {
+                    if (!wanted) why = "engage of a jammer carried by";
+                    wanted = 1;
+                }
+                continue;
+            }
+            if (en->target != b) continue;
             if (!wanted) why = "engage ... at";
             wanted = 1;
         }
@@ -2642,8 +2934,8 @@ static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
             kflc_diag_errorf(diag, m->bodies[b].body->line,
                 "%s `%s`: the assembly `%s` declares no `collider`, so "
                 "`%s` presents no area along a line of sight and its "
-                "silhouette would be zero at every aspect; a body a "
-                "defense payload is pointed at needs at least one "
+                "silhouette would be zero at every aspect; a body whose "
+                "silhouette a defense payload takes needs at least one "
                 "collision primitive", why, m->bodies[b].body->name,
                 path, m->bodies[b].body->name);
             err = 1;
@@ -3516,6 +3808,65 @@ static int rl_n_effector_(const RlModel *m)
     return n;
 }
 
+/* Radar payloads that declared a chaff cloud around their reference
+ * target. The count decides whether the cloud's contribution is
+ * computed at all: a payload that declared no strip count has no chaff
+ * term in the emitted source, so its cross-section is the expression it
+ * was before this surface existed, which is what makes this addition
+ * provably additive rather than additive by arithmetic. */
+static int rl_n_chaff_(const RlModel *m)
+{
+    int n = 0;
+    for (int p = 0; p < m->n_payloads; p++) {
+        if (m->payloads[p].kind != RL_PAY_DETECT_RADAR) continue;
+        if (m->payloads[p].attr[RL_PAY_RADAR_CHAFF_N]) n++;
+    }
+    return n;
+}
+
+/* Engagements whose result lands on another payload rather than on a
+ * body. The count decides whether the per-step block carries the
+ * degradation store at all: a program that engages no countermeasure
+ * has the store absent rather than present and empty, so its detection
+ * channels are computed by exactly the code they were computed by
+ * before this surface existed. */
+static int rl_n_softkill_engage_(const RlModel *m)
+{
+    int n = 0;
+    for (int e = 0; e < m->n_engages; e++) {
+        int p = m->engages[e].payload;
+        if (p < 0 || m->payloads[p].kind < 0) continue;
+        if (RL_PAY_KIND_[m->payloads[p].kind].is_softkill) n++;
+    }
+    return n;
+}
+
+/* Whether a countermeasure engagement can reach detection payload `p`
+ * observing body `t`. A countermeasure degrades the victim's view of
+ * the craft that carries it, so the pair is reached when some
+ * engagement of a countermeasure hosted on `t` is aimed at the body
+ * that carries `p`. Both halves are fixed at compile time, which is
+ * what keeps the read out of every program that cannot have one.
+ *
+ * `want_jammer` selects the class: a jammer reaches radar and infrared
+ * payloads by different routes, a decoy reaches every detection kind. */
+static int rl_softkill_reaches_(const RlModel *m, int p, int t,
+                                int want_jammer)
+{
+    if (p < 0 || t < 0) return 0;
+    for (int e = 0; e < m->n_engages; e++) {
+        int ep = m->engages[e].payload;
+        if (ep < 0 || m->payloads[ep].kind < 0) continue;
+        int k = m->payloads[ep].kind;
+        if (!RL_PAY_KIND_[k].is_softkill) continue;
+        if (want_jammer != (k == RL_PAY_JAMMER)) continue;
+        if (m->payloads[ep].body != t) continue;
+        if (m->engages[e].target != m->payloads[p].body) continue;
+        return 1;
+    }
+    return 0;
+}
+
 /* The (information state, target) pairs the binding pushes a sample
  * for. One pair per distinct target of each infostate payload, taken
  * in observe declaration order, so the push order is the program's own
@@ -3823,7 +4174,20 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
     fprintf(out, "#define KFLRL_N_TRACKPAIR %d\n", n_pairs);
     fprintf(out, "#define KFLRL_N_SIG %d\n", m->n_sig);
     fprintf(out, "#define KFLRL_N_EFFECTOR %d\n", rl_n_effector_(m));
-    fprintf(out, "#define KFLRL_EFF_STRIDE %d\n\n", RL_EFF_MAX_COMPS);
+    fprintf(out, "#define KFLRL_EFF_STRIDE %d\n", RL_EFF_MAX_COMPS);
+    /* The degradation store is indexed by (detection payload, body):
+     * a countermeasure degrades one victim payload's view of one craft,
+     * the craft that carries the countermeasure. Both indices are the
+     * program's own counts, so the store is a handful of doubles for
+     * any program a reader would write. */
+    fprintf(out, "#define KFLRL_N_SOFTKILL %d\n",
+            rl_n_softkill_engage_(m));
+    {
+        int stride = m->n_bodies > 0 ? m->n_bodies : 1;
+        int n_deg = m->n_payloads * stride;
+        fprintf(out, "#define KFLRL_DEG_STRIDE %d\n", stride);
+        fprintf(out, "#define KFLRL_N_DEG %d\n\n", n_deg > 0 ? n_deg : 1);
+    }
     fputs(
 "/* This environment's slice of the payload handle array and of the\n"
 " * parameter store. Both are macros so a program with no payload\n"
@@ -3880,6 +4244,27 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
 "               ? KFLRL_N_PAYLOAD * KFLRL_EFF_STRIDE : 1];\n"
 "    uint8_t used[KFLRL_N_PAYLOAD > 0 ? KFLRL_N_PAYLOAD : 1];\n"
 "    uint8_t fault;\n"
+"#if KFLRL_N_SOFTKILL > 0\n"
+"    /* What a countermeasure engaged on this step did to another\n"
+"     * craft's detection payloads, indexed by (payload, body): the\n"
+"     * victim payload whose view is degraded, and the craft it is\n"
+"     * degraded about, which is the craft carrying the countermeasure.\n"
+"     *\n"
+"     * `js` is the jamming-to-signal ratio delivered at that payload's\n"
+"     * receiver, `ctr` the range at which that payload detects the\n"
+"     * jammer's own emission, and `dec` the confidence degradation a\n"
+"     * decoy delivered, in [0, 1). All three are zero when nothing was\n"
+"     * engaged, which the clear at the top of every step and at every\n"
+"     * reset is what provides: a degradation is an act of one step and\n"
+"     * is not in force on the next.\n"
+"     *\n"
+"     * The engagement runs in the step body, before the world\n"
+"     * advances, and the observation is computed after it, so a\n"
+"     * degradation written here is still in force when the victim's\n"
+"     * detection observe is evaluated later in the same step. That is\n"
+"     * the same relation a body state write has. */\n"
+"    struct { double js, ctr, dec; } deg[KFLRL_N_DEG];\n"
+"#endif\n"
 "} KflrlEng;\n\n", out);
     if (m->n_payloads == 0) return 0;
 
@@ -4206,8 +4591,28 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
               "#include <k26astro_infostate/infostate_consts.h>\n"
               "#include <k26astro_core/epoch.h>\n", out);
     }
-    if (rl_n_detect_(m) > 0) {
+    /* The signature and counter-detection routines live in the
+     * detection library, and a jammer engagement reads both: the radar
+     * cross-section of the craft it protects, and the range at which
+     * the victim's own infrared observer sees the jammer's emission. So
+     * a program with a jammer takes that header whether or not it
+     * declares a detection payload of its own. */
+    if (rl_n_detect_(m) > 0 || rl_n_pay_kind_(m, RL_PAY_JAMMER) > 0) {
         fputs("#include <k26astro_detect/detect.h>\n", out);
+    }
+    /* The countermeasure library. Its constants header carries the
+     * discriminator-regime enumeration and the default dipole
+     * cross-section, both of which a detection payload's own keys name,
+     * so a program with a detection payload takes the constants even
+     * when it declares no countermeasure. Nothing is linked for that:
+     * the constants are compile-time and the archive follows the
+     * payload rather than the header. */
+    if (rl_n_pay_kind_(m, RL_PAY_DECOY) > 0 ||
+        rl_n_pay_kind_(m, RL_PAY_JAMMER) > 0 ||
+        rl_n_chaff_(m) > 0) {
+        fputs("#include <k26astro_softkill/softkill.h>\n", out);
+    } else if (rl_n_detect_(m) > 0) {
+        fputs("#include <k26astro_softkill/softkill_consts.h>\n", out);
     }
     if (rl_n_pay_kind_(m, RL_PAY_IMPACTOR) > 0) {
         fputs("#include <k26astro_impactor/impactor.h>\n"
@@ -5073,6 +5478,35 @@ static int rl_emit_payload_build_(FILE *out, const RlModel *m,
             "            k26astro_laser_destroy(_kfl_h);\n"
             "            return -1;\n"
             "        }\n", out);
+        } else if (py->kind == RL_PAY_DECOY) {
+            /* The constructor takes all six keys: the modality, the
+             * mass and separation the deploy costs its host, and the
+             * three match qualities the discrimination dispatch
+             * couples with the observer's regime. */
+            fputs(
+            "        K26AstroDecoy *_kfl_h = k26astro_decoy_new(\n"
+            "            (K26AstroDecoyMode)(int)_kfl_pp[0],\n"
+            "            _kfl_pp[1], _kfl_pp[2], _kfl_pp[3],\n"
+            "            _kfl_pp[4], _kfl_pp[5]);\n"
+            "        if (!_kfl_h) return -1;\n"
+            "        if (k26astro_decoy_bind(_kfl_h, _kfl_ov) != 0) {\n"
+            "            k26astro_decoy_destroy(_kfl_h);\n"
+            "            return -1;\n"
+            "        }\n", out);
+        } else if (py->kind == RL_PAY_JAMMER) {
+            /* The constructor takes the first six keys; the radiator
+             * temperature sits above them in the store and is read by
+             * the counter-detection routine at engagement. */
+            fputs(
+            "        K26AstroJammer *_kfl_h = k26astro_jammer_new(\n"
+            "            (K26AstroJammerMode)(int)_kfl_pp[0],\n"
+            "            _kfl_pp[1], _kfl_pp[2], _kfl_pp[3],\n"
+            "            _kfl_pp[4], _kfl_pp[5]);\n"
+            "        if (!_kfl_h) return -1;\n"
+            "        if (k26astro_jammer_bind(_kfl_h, _kfl_ov) != 0) {\n"
+            "            k26astro_jammer_destroy(_kfl_h);\n"
+            "            return -1;\n"
+            "        }\n", out);
         } else {
             const char *fn =
                 py->kind == RL_PAY_DETECT_IR    ? "k26astro_detect_sensor_new_ir"
@@ -5481,6 +5915,97 @@ static int rl_emit_apply_draws_(FILE *out, const RlModel *m,
  * channels in the environment's engagement block. Reading them here
  * puts an effector's result in the same vector, at the same step
  * boundary, as every other observation. */
+/* What a countermeasure engaged earlier in this step did to this
+ * detection payload's view of this target.
+ *
+ * Nothing is emitted unless some engagement in this program can reach
+ * the pair, which is a compile-time question: a countermeasure degrades
+ * its victim's view of the craft that carries it, and both bodies are
+ * declarations. So a program with no countermeasure, or one whose
+ * countermeasures are aimed elsewhere, publishes the channels it
+ * published before this surface existed, computed by the same
+ * expressions.
+ *
+ * Three effects, applied in a fixed order and the threshold taken once
+ * at the end:
+ *
+ *   the counter-detection signal, which raises the statistic rather
+ *   than lowering it. A jammer's thermalised transmit power is a
+ *   separate signal in the same band as the target's own emission, and
+ *   the observer detects on whichever is stronger; the library's
+ *   counter-detection range is the range at which that signal sits at
+ *   this observer's threshold, and its own derivation is the
+ *   shot-noise regime in which the statistic falls as one over range,
+ *   which is what the scaling below is;
+ *
+ *   the jamming, which raises the noise. The library returns the
+ *   jamming-to-signal ratio at the receiver, and a statistic of signal
+ *   over noise becomes signal over noise plus jamming, which in terms
+ *   of that ratio is the expression below and nothing else;
+ *
+ *   the decoy, which lowers confidence rather than signal. The library
+ *   returns the probability the observer's discriminators correctly
+ *   identify the decoy, and the derate is the complement: an observer
+ *   that always tells the decoy from the craft loses nothing, one that
+ *   never does loses all of it. That mapping from a discrimination
+ *   probability onto a detection statistic is this layer's, not the
+ *   library's, which is why it is written down here. */
+static void rl_emit_detect_degrade_(FILE *out, const RlModel *m,
+                                    int p, int tgt, int kind)
+{
+    int jam = rl_softkill_reaches_(m, p, tgt, 1);
+    int dec = rl_softkill_reaches_(m, p, tgt, 0);
+    if (!jam && !dec) return;
+
+    int thr = kind == RL_PAY_DETECT_RADAR ? 8 : 5;
+    int any = 0;
+
+    if (jam && kind == RL_PAY_DETECT_IR) {
+        fprintf(out,
+        "                {\n"
+        "                    double _kfl_cr =\n"
+        "                        eng->deg[%d * KFLRL_DEG_STRIDE + %d].ctr;\n"
+        "                    if (_kfl_cr > 0.0) {\n"
+        "                        double _kfl_cs = _kfl_pp[%d] * _kfl_cr\n"
+        "                                       / _kfl_rng;\n"
+        "                        if (_kfl_cs > _kfl_snr) _kfl_snr = _kfl_cs;\n"
+        "                    }\n"
+        "                }\n", p, tgt, thr);
+        any = 1;
+    }
+    if (jam && kind == RL_PAY_DETECT_RADAR) {
+        fprintf(out,
+        "                {\n"
+        "                    double _kfl_j =\n"
+        "                        eng->deg[%d * KFLRL_DEG_STRIDE + %d].js;\n"
+        "                    if (_kfl_j > 0.0 && _kfl_snr > 0.0) {\n"
+        "                        _kfl_snr = _kfl_snr\n"
+        "                                 / (1.0 + _kfl_j * _kfl_snr);\n"
+        "                    }\n"
+        "                }\n", p, tgt);
+        any = 1;
+    }
+    if (dec) {
+        fprintf(out,
+        "                {\n"
+        "                    double _kfl_dc =\n"
+        "                        eng->deg[%d * KFLRL_DEG_STRIDE + %d].dec;\n"
+        "                    if (_kfl_dc > 0.0) {\n"
+        "                        _kfl_snr *= (1.0 - _kfl_dc);\n"
+        "                    }\n"
+        "                }\n", p, tgt);
+        any = 1;
+    }
+    if (!any) return;
+    /* The flag rests on the statistic, so it is taken again after the
+     * statistic has moved. Leaving the library's own decision in place
+     * would publish a detection whose continuous quantity is below the
+     * threshold it was taken at. */
+    fprintf(out,
+        "                _kfl_det = (_kfl_snr >= _kfl_pp[%d])\n"
+        "                         ? 1.0 : 0.0;\n", thr);
+}
+
 static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
                                      int i, int off)
 {
@@ -5632,7 +6157,26 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
         "                double _kfl_rcs =\n"
         "                    k26astro_signature_rcs_monostatic(\n"
         "                        1, &_kfl_nrm, &_kfl_area, _kfl_look,\n"
-        "                        _kfl_lam);\n"
+        "                        _kfl_lam);\n", out);
+        if (py->attr[RL_PAY_RADAR_CHAFF_N]) {
+            /* A chaff cloud around the target returns as well as the
+             * target does, and the strips are uncorrelated, so the two
+             * cross-sections add: the cloud's mean is the strip count
+             * times one strip's, which is what the library's
+             * deterministic mean returns. Its sampling entry point,
+             * which takes a generator, is not called: an imperfection
+             * on a detection channel arrives through the declared
+             * sensor layer, at coordinates a replay reproduces.
+             *
+             * The term is emitted only where a strip count was
+             * declared, so a program that declares no cloud computes
+             * the cross-section it computed before this key existed. */
+            fprintf(out,
+        "                _kfl_rcs += k26astro_chaff_mean_rcs(\n"
+        "                    (int)_kfl_pp[%d], _kfl_pp[%d]);\n",
+                RL_PAY_RADAR_CHAFF_N, RL_PAY_RADAR_CHAFF_SIG);
+        }
+        fputs(
         "                K26AstroDetectRadarEvent _kfl_ev =\n"
         "                    k26astro_detect_radar_active(\n"
         "                        _kfl_pp[0], _kfl_pp[1], _kfl_pp[2],\n"
@@ -5665,6 +6209,8 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
         "                _kfl_snr = _kfl_ev.snr;\n"
         "                _kfl_det = _kfl_ev.detected ? 1.0 : 0.0;\n", out);
     }
+
+    rl_emit_detect_degrade_(out, m, p, tgt, py->kind);
 
     fprintf(out,
         "            }\n"
@@ -7164,6 +7710,214 @@ static int rl_agent_scan_stmts_(const RlModel *m, KflcNode *stmts,
  * generator: an imperfection on an effector channel arrives through
  * the declared sensor layer, at the coordinates a replay reproduces.
  */
+/* The body of a countermeasure engagement, which is the one effector
+ * class whose result lands on another payload rather than on a body.
+ *
+ * Both kinds write into the per-step degradation store, indexed by the
+ * victim payload and by the craft the countermeasure protects, and the
+ * victim's own detection observe reads it later in the same step. The
+ * engagement runs before the world advances and the observation is
+ * computed after it, so a degradation written here is in force for that
+ * step's observation and for no other: the store is cleared at the top
+ * of every step and at every reset.
+ *
+ * Which victim payloads an engagement can reach is fixed at compile
+ * time, since a payload's body and an engagement's target are both
+ * declarations, so the loop below is unrolled here and nothing is
+ * searched for while stepping. What is not fixed is how many it
+ * actually reached, which is published: a countermeasure aimed at a
+ * craft that carries nothing to degrade reaches none, and that is the
+ * decoration this class has to be able to report rather than hide. */
+static void rl_emit_engage_softkill_(FILE *out, const RlModel *m, int e)
+{
+    const RlEngage  *en = &m->engages[e];
+    const RlPayload *py = &m->payloads[en->payload];
+    int host = py->body;
+
+    if (py->kind == RL_PAY_JAMMER) {
+        fputs(
+        "    (void)dt;\n"
+        "    (void)_kfl_mass;\n"
+        /* Every watt transmitted announces the emitter's position, and
+         * the library publishes that power as its own quantity. It is
+         * the input to the counter-detection range below and it is
+         * published beside it, so a program can see what jamming costs
+         * on the same statement that shows what it buys. */
+        "    double _kfl_self = k26astro_jammer_self_signature_W(_kfl_h);\n"
+        "    K26V3 _kfl_u = k26m3d_v3(_kfl_d.x / _kfl_rng,\n"
+        "                             _kfl_d.y / _kfl_rng,\n"
+        "                             _kfl_d.z / _kfl_rng);\n"
+        /* The cross-section in the jamming-to-signal ratio is the
+         * protected craft's, which for self-protection jamming is the
+         * jammer's own host: this library exposes that geometry and
+         * says so. It is the silhouette the host presents along the
+         * line the victim looks down, taken in the host's own frame, so
+         * a craft that turns changes both what it returns to the radar
+         * and how well its jammer masks that return. */
+        "    K26V3 _kfl_look = k26m3d_quat_rotate_v3(\n"
+        "        k26m3d_quat_conj(_kfl_eb->attitude),\n"
+        "        k26m3d_v3(-_kfl_u.x, -_kfl_u.y, -_kfl_u.z));\n", out);
+        fprintf(out,
+        "    double _kfl_area = kflrl_sig_area_(%d, _kfl_look);\n", host);
+        fputs(
+        "    K26V3 _kfl_nrm = k26m3d_v3(-_kfl_look.x, -_kfl_look.y,\n"
+        "                               -_kfl_look.z);\n"
+        "    int    _kfl_reach = 0;\n"
+        "    double _kfl_best = 0.0, _kfl_rcs = 0.0, _kfl_bt = 0.0;\n"
+        "    double _kfl_ctr = 0.0;\n", out);
+
+        for (int q = 0; q < m->n_payloads; q++) {
+            if (m->payloads[q].body != en->target) continue;
+            if (m->payloads[q].kind == RL_PAY_DETECT_RADAR) {
+                fprintf(out,
+        "    {\n"
+        "        const double *vp = payp + %d * KFLRL_PAY_NPARAM;\n"
+        "        double _kfl_lam = vp[3] > 0.0 ? (K26A_C / vp[3]) : 0.0;\n"
+        "        double _kfl_s = k26astro_signature_rcs_monostatic(\n"
+        "            1, &_kfl_nrm, &_kfl_area, _kfl_look, _kfl_lam);\n"
+        "        double _kfl_js = k26astro_jammer_js_ratio(_kfl_h,\n"
+        "            vp[0], vp[1], _kfl_s, _kfl_rng);\n"
+        /* Two jammers on one victim add their power at the receiver,
+         * so the ratios add. */
+        "        if (_kfl_js > 0.0) {\n"
+        "            eng->deg[%d * KFLRL_DEG_STRIDE + %d].js += _kfl_js;\n"
+        "            _kfl_reach++;\n"
+        "            if (_kfl_js > _kfl_best) {\n"
+        "                _kfl_best = _kfl_js;\n"
+        "                _kfl_rcs  = _kfl_s;\n"
+        "                _kfl_bt   = k26astro_jammer_burn_through_range(\n"
+        "                    _kfl_h, vp[0], vp[1], _kfl_s);\n"
+        "            }\n"
+        "        }\n"
+        "    }\n", q, q, host);
+            } else if (m->payloads[q].kind == RL_PAY_DETECT_IR) {
+                /* The other edge. A passive infrared observer sees the
+                 * thermalised transmit power, and the detection
+                 * library's counter-detection routine returns the range
+                 * at which that observer's own aperture, dwell,
+                 * pass-band, throughput and threshold put it at its
+                 * detection threshold. The largest such range over the
+                 * victim's infrared payloads is what the engagement
+                 * publishes, and each payload's own range is what that
+                 * payload's observation is raised by. */
+                fprintf(out,
+        "    {\n"
+        "        const double *vp = payp + %d * KFLRL_PAY_NPARAM;\n"
+        "        double _kfl_rc = k26astro_counter_detect_ir_range(\n"
+        "            _kfl_self, pp[%d], vp[0], vp[1], vp[2], vp[3],\n"
+        "            vp[4], vp[5]);\n"
+        "        if (_kfl_rc > 0.0) {\n"
+        "            double *_kfl_sl =\n"
+        "                &eng->deg[%d * KFLRL_DEG_STRIDE + %d].ctr;\n"
+        "            if (_kfl_rc > *_kfl_sl) *_kfl_sl = _kfl_rc;\n"
+        "            _kfl_reach++;\n"
+        "            if (_kfl_rc > _kfl_ctr) _kfl_ctr = _kfl_rc;\n"
+        "        }\n"
+        "    }\n", q, RL_PAY_JAMMER_RADIATOR, q, host);
+            }
+        }
+
+        fputs(
+        "    ch[1] = _kfl_best;\n"
+        "    ch[2] = (double)_kfl_reach;\n"
+        "    ch[3] = _kfl_rng;\n"
+        "    ch[4] = _kfl_rcs;\n"
+        "    ch[5] = _kfl_bt;\n"
+        "    ch[6] = _kfl_self;\n"
+        "    ch[7] = _kfl_ctr;\n"
+        "    ch[8] = (_kfl_ctr > 0.0 && _kfl_rng <= _kfl_ctr)\n"
+        "          ? 1.0 : 0.0;\n"
+        "}\n\n", out);
+        return;
+    }
+
+    /* The decoy, whose engagement is two effects rather than one. The
+     * deploy is a change to the craft that carries it: a mass leaves at
+     * a separation velocity, so the host takes the opposite momentum
+     * and loses that mass. The decoy is placed between the host and the
+     * observer it is meant to fool, which fixes the direction the
+     * separation is taken along and therefore the direction the host
+     * recoils in.
+     *
+     * There is no magazine here either. Each engagement deploys another
+     * decoy and costs another dry mass; a program that models stores
+     * writes the counter and the conditional the grammar already gives
+     * it. */
+    fputs(
+        "    (void)dt;\n"
+        "    (void)_kfl_mass;\n"
+        "    K26V3 _kfl_u = k26m3d_v3(_kfl_d.x / _kfl_rng,\n"
+        "                             _kfl_d.y / _kfl_rng,\n"
+        "                             _kfl_d.z / _kfl_rng);\n"
+        "    double _kfl_hm = _kfl_eb->mass;\n"
+        "    double _kfl_dm = pp[1];\n"
+        "    double _kfl_dv = (_kfl_hm > 0.0 && _kfl_dm > 0.0)\n"
+        "                   ? (_kfl_dm * pp[2] / _kfl_hm) : 0.0;\n"
+        "    _kfl_eb->vel.x -= _kfl_dv * _kfl_u.x;\n"
+        "    _kfl_eb->vel.y -= _kfl_dv * _kfl_u.y;\n"
+        "    _kfl_eb->vel.z -= _kfl_dv * _kfl_u.z;\n"
+        /* The published loss is the mass actually removed. A deploy
+         * that would take the whole craft is outside this model's range
+         * and removes nothing, on the same rule the ablated mass
+         * follows: a massless body in the integrator is not a state
+         * this layer will produce. */
+        "    double _kfl_loss = _kfl_dm;\n"
+        "    if (_kfl_loss < 0.0) _kfl_loss = 0.0;\n"
+        "    if (_kfl_loss >= _kfl_hm) _kfl_loss = 0.0;\n"
+        "    if (_kfl_loss > 0.0) {\n"
+        "        k26astro_body_set_mass(_kfl_eb, _kfl_hm - _kfl_loss);\n"
+        "    }\n"
+        "    int    _kfl_reach = 0;\n"
+        "    double _kfl_best = 0.0, _kfl_pd = 0.0;\n", out);
+
+    for (int q = 0; q < m->n_payloads; q++) {
+        if (m->payloads[q].body != en->target) continue;
+        int slot;
+        switch (m->payloads[q].kind) {
+        case RL_PAY_DETECT_IR:    slot = RL_PAY_IR_REGIME;    break;
+        case RL_PAY_DETECT_RADAR: slot = RL_PAY_RADAR_REGIME; break;
+        case RL_PAY_DETECT_LIDAR: slot = RL_PAY_LIDAR_REGIME; break;
+        default: continue;
+        }
+        /* The regime is the victim payload's own declaration, so two
+         * observers running different discriminators against one decoy
+         * reach different answers about it, which is what the library's
+         * dispatch is for. */
+        fprintf(out,
+        "    {\n"
+        "        const double *vp = payp + %d * KFLRL_PAY_NPARAM;\n"
+        "        double _kfl_pdq =\n"
+        "            k26astro_decoy_probability_discriminated(_kfl_h,\n"
+        "                (K26AstroDiscriminatorRegime)(int)vp[%d]);\n"
+        "        double _kfl_dg = 1.0 - _kfl_pdq;\n"
+        "        if (_kfl_dg < 0.0) _kfl_dg = 0.0;\n"
+        "        if (_kfl_dg > 0.0) {\n"
+        "            double *_kfl_sl =\n"
+        "                &eng->deg[%d * KFLRL_DEG_STRIDE + %d].dec;\n"
+        /* Two decoys against one observer compose the way the
+         * library's own discrimination model composes its channels:
+         * the observer has to see through both, so the probabilities
+         * of not seeing through each multiply. */
+        "            *_kfl_sl = *_kfl_sl + (1.0 - *_kfl_sl) * _kfl_dg;\n"
+        "            _kfl_reach++;\n"
+        "            if (_kfl_dg > _kfl_best) {\n"
+        "                _kfl_best = _kfl_dg;\n"
+        "                _kfl_pd   = _kfl_pdq;\n"
+        "            }\n"
+        "        }\n"
+        "    }\n", q, slot, q, host);
+    }
+
+    fputs(
+        "    ch[1] = _kfl_best;\n"
+        "    ch[2] = (double)_kfl_reach;\n"
+        "    ch[3] = _kfl_pd;\n"
+        "    ch[4] = _kfl_rng;\n"
+        "    ch[5] = _kfl_dv;\n"
+        "    ch[6] = _kfl_loss;\n"
+        "}\n\n", out);
+}
+
 static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
 {
     const RlEngage  *en = &m->engages[e];
@@ -7207,6 +7961,11 @@ static void rl_emit_engage_one_(FILE *out, const RlModel *m, int e)
         en->node->name ? en->node->name : "?",
         m->bodies[tb].body->name, en->line, e, p, p, p,
         eb, tb, rl_pay_ctype_(py->kind), rl_pay_ctype_(py->kind), p, p);
+
+    if (py->kind == RL_PAY_DECOY || py->kind == RL_PAY_JAMMER) {
+        rl_emit_engage_softkill_(out, m, e);
+        return;
+    }
 
     if (!imp) {
         fputs(
