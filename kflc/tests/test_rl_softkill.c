@@ -123,6 +123,17 @@ static int g_base_ok;          /* the base compiler built */
     " vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0" \
     " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.05\n"
 
+/* The same craft separated along all three axes rather than almost
+ * purely along one. A unit vector whose other two components are of
+ * order 1e-10 multiplies a sign error in them by nearly zero, so a
+ * direction arm on such a fixture is blind to two of the three
+ * components it exists to check. */
+#define SK_MOVER_3AX \
+    "    astro_body mover assembly=\"calibration_box.k26asm\"" \
+    " parent=earth pos_x=7.008e6 pos_y=2.0e4 pos_z=1.2e4 vel_x=0.0" \
+    " vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0" \
+    " quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.05\n"
+
 /* A third craft carrying nothing, for the arm that drives the reach
  * count to zero. */
 #define SK_BYSTANDER \
@@ -737,6 +748,55 @@ static void gate_refusals_(void)
                                   NULL };
         must_refuse_("a distribution on the decoy's mode", src, n);
     }
+
+    /* The strip count against the range the cloud statistics routine
+     * counts strips in. Past it the conversion is undefined and what it
+     * produces reads as no cloud at all, which is a declared figure
+     * nothing reads. Both ends are driven, and the value exactly at the
+     * bound is accepted, since a rule that refused the bound itself
+     * would be a different rule. */
+    snprintf(src, sizeof src,
+        "form SKR18\n"
+        "fn world w\n"
+        SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+        SK_RADAR_BASE("rf", " target_chaff_n_strips=2.2e9")
+        SK_EPISODE SK_ACTION
+        "    observe detect rf of mover as radar\n"
+        "    objective\n        reward radar_snr\n    end\n"
+        "end\nend\n");
+    {
+        const char *const n[] = { "outside the range the cloud statistics "
+                                  "routine counts strips in",
+                                  "0 to 2147483647", NULL };
+        must_refuse_("a chaff strip count past the routine's range",
+                     src, n);
+    }
+
+    snprintf(src, sizeof src,
+        "form SKR19\n"
+        "fn world w\n"
+        SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+        SK_RADAR_BASE("rf", " target_chaff_n_strips=-5.0")
+        SK_EPISODE SK_ACTION
+        "    observe detect rf of mover as radar\n"
+        "    objective\n        reward radar_snr\n    end\n"
+        "end\nend\n");
+    {
+        const char *const n[] = { "outside the range the cloud statistics "
+                                  "routine counts strips in", NULL };
+        must_refuse_("a negative chaff strip count", src, n);
+    }
+
+    snprintf(src, sizeof src,
+        "form SKR20\n"
+        "fn world w\n"
+        SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+        SK_RADAR_BASE("rf", " target_chaff_n_strips=2147483647.0")
+        SK_EPISODE SK_ACTION
+        "    observe detect rf of mover as radar\n"
+        "    objective\n        reward radar_snr\n    end\n"
+        "end\nend\n");
+    must_accept_check_("a chaff strip count exactly at the bound", src);
 }
 
 /* ---- The fixtures the behaviour arms drive --------------------------- */
@@ -969,6 +1029,134 @@ static const char *const CHAFF_2X_KFL =
     CHAFF_KFL("SKCH2", " target_chaff_n_strips=4.0e7"
                        " target_chaff_sigma_dipole_m2=1.0e-3");
 
+/* The decoy against a three-axis separation, so a sign error in any
+ * one component of the recoil is a sign error the arm can see. */
+static const char *const DEC_3AX_KFL =
+    "form SKDEC3\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER SK_MOVER_3AX
+    SK_RADAR("rf", "ir_only", "")
+    SK_DECOY("flare", "active", "0.8")
+    SK_EPISODE SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    observe effect flare as dec\n"
+    "    on_step\n        engage flare at watcher\n    end\n"
+    "    objective\n        reward dec_effect\n    end\n"
+    "end\n"
+    "end\n";
+
+static const char *const DEC_3AX_CTRL_KFL =
+    "form SKDEC3C\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER SK_MOVER_3AX
+    SK_RADAR("rf", "ir_only", "")
+    SK_DECOY("flare", "active", "0.8")
+    SK_EPISODE SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    observe effect flare as dec\n"
+    "    on_step\n"
+    "        watcher.vel_x = watcher.vel_x + nudge * 0.0\n"
+    "    end\n"
+    "    objective\n        reward dec_effect\n    end\n"
+    "end\n"
+    "end\n";
+
+/* The supply fixture. A decoy of three hundred kilograms against a
+ * thousand-kilogram host runs the host out after three deploys, which
+ * is short enough to drive and long enough to hold both states. The
+ * engagement is conditional on the action, so one artifact carries both
+ * a run that engages throughout and a run that stops after three: if
+ * the deploy really stops when the host cannot supply it, the two runs
+ * are the same world from the fourth step on. */
+#define SK_DECOY_HEAVY(nm) \
+    "    astro_payload " nm " body=mover kind=decoy mode=active" \
+    " dry_mass_kg=300.0 deploy_dv_mps=2.0 ir_match_quality=0.8" \
+    " rcs_match_quality=0.7 accel_match_quality=0.1\n"
+
+static const char *const SUPPLY_KFL =
+    "form SKSUP\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+    SK_RADAR("rf", "ir_only", "")
+    SK_DECOY_HEAVY("flare")
+    SK_EPISODE SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    observe effect flare as dec\n"
+    "    on_step\n"
+    "        if nudge > 0.5\n"
+    "            engage flare at watcher\n"
+    "        end\n"
+    "    end\n"
+    "    objective\n        reward radar_snr + dec_effect\n    end\n"
+    "end\n"
+    "end\n";
+
+/* The counter-detection signal against a target warm enough that its
+ * own skin signature is the same size. Taking the larger of the two and
+ * adding them then differ by nearly a factor of two, and they differ in
+ * the published flag as well: a fixture where one of them dominates
+ * cannot tell the two apart at all, which is the third
+ * gate-credibility rule. The emitter is quiet for the same reason. */
+#define SK_IR_TEPID(nm) \
+    "    astro_payload " nm " body=watcher kind=detect_ir" \
+    " aperture_m=0.05 integration_s=0.02 passband_lo_um=3.0" \
+    " passband_hi_um=12.0 throughput=0.5 snr_threshold=5.0" \
+    " target_temp_k=230.0 target_emissivity=0.02 t_optics_k=290.0" \
+    " optics_emissivity=0.3\n"
+
+#define CTR_TEPID_KFL(form_name, body) \
+    "form " form_name "\n" \
+    "fn world w\n" \
+    SK_EARTH SK_WATCHER SK_MOVER("2.0e4") \
+    SK_IR_TEPID("eye") \
+    SK_JAMMER("jam", "1.0e-4") \
+    SK_EPISODE SK_ACTION \
+    "    observe detect eye of mover as ir\n" \
+    "    observe effect jam as ew\n" \
+    "    on_step\n" body "    end\n" \
+    "    objective\n        reward ir_snr + ew_effect\n    end\n" \
+    "end\n" \
+    "end\n"
+
+static const char *const CTR_TEPID_ON_KFL =
+    CTR_TEPID_KFL("SKTEP", "        engage jam at watcher\n");
+static const char *const CTR_TEPID_OFF_KFL =
+    CTR_TEPID_KFL("SKTEPC",
+                  "        watcher.vel_x = watcher.vel_x + nudge * 0.0\n");
+
+/* A jammer whose host is the very craft its victim's radar is pointed
+ * at, with a chaff cloud declared around that craft. The radar equation
+ * and the jamming ratio then describe the same craft, and the arm
+ * measures that they use the same cross-section for it. */
+static const char *const JAM_CHAFF_KFL =
+    "form SKJC\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+    SK_RADAR_BASE("rf", " target_chaff_n_strips=2.0e7"
+                        " target_chaff_sigma_dipole_m2=1.0e-3")
+    SK_JAMMER("jam", "200.0")
+    SK_EPISODE SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    observe effect jam as ew\n"
+    "    on_step\n        engage jam at watcher\n    end\n"
+    "    objective\n        reward radar_snr + ew_effect\n    end\n"
+    "end\n"
+    "end\n";
+
+static const char *const JAM_NOCHAFF_KFL =
+    "form SKJNC\n"
+    "fn world w\n"
+    SK_EARTH SK_WATCHER SK_MOVER("2.0e4")
+    SK_RADAR_BASE("rf", "")
+    SK_JAMMER("jam", "200.0")
+    SK_EPISODE SK_ACTION
+    "    observe detect rf of mover as radar\n"
+    "    observe effect jam as ew\n"
+    "    on_step\n        engage jam at watcher\n    end\n"
+    "    objective\n        reward radar_snr + ew_effect\n    end\n"
+    "end\n"
+    "end\n";
+
 /* An assembly with a mesh and no collision primitive, for the arm that
  * refuses a jammer host with no silhouette. */
 static const char *const BARE_ASM =
@@ -1025,8 +1213,9 @@ static void gate_channels_(void)
         "ew_counter_detected", NULL
     };
     static const char *const DEC_C[] = {
-        "dec_engaged", "dec_effect", "dec_reached", "dec_p_discriminated",
-        "dec_range", "dec_dv", "dec_mass_loss", NULL
+        "dec_engaged", "dec_deployed", "dec_effect", "dec_reached",
+        "dec_p_discriminated", "dec_range", "dec_dv", "dec_mass_loss",
+        NULL
     };
     char so[512];
     RlSpecView v;
@@ -1055,7 +1244,7 @@ static void gate_channels_(void)
         }
     }
     g_arms++;
-    printf("  the decoy publishes 7 components in order\n");
+    printf("  the decoy publishes 8 components in order\n");
 
     /* And the checker's own name table agrees with the emitter's. The
      * two live in different files and the arms above read the spec blob,
@@ -1121,6 +1310,16 @@ static void victim_radar_(const char *so_path, const char *stem, int n,
     (void)stem;
 }
 
+static double a_bt_of_(const char *so_path)
+{
+    RlSpecView v;
+    spec_of_(so_path, &v);
+    int i = chan_(&v, "ew_burn_through");
+    double o[256];
+    run_obs_(so_path, 1, 0.0, o, 256);
+    return o[i];
+}
+
 static void gate_jammer_capability_(void)
 {
     char so_on[512], so_off[512];
@@ -1176,6 +1375,66 @@ static void gate_jammer_capability_(void)
     g_arms++;
     printf("  and with that write deleted the victim's statistic is the "
            "control's bit for bit (%.17g)\n", a[i_snr]);
+
+    /* The burn-through channel against the artifact's own detection
+     * crossover. The channel is documented as the range at which this
+     * victim's radar burns through the jamming, and the only thing that
+     * can say whether it does is the victim's own flag: separations are
+     * driven until it flips and the published figure has to sit inside
+     * the bracket the search closes on. Without this the channel could
+     * name any range at all and nothing would notice.
+     *
+     * The bracket is closed by bisection on the declared separation,
+     * each step of which is a whole compile, so the search is coarse by
+     * design: fourteen halvings of twenty kilometres close it to about
+     * a metre and a quarter, which is six parts in ten thousand of the
+     * figure the channel publishes. */
+    {
+        char src[8192];
+        double bt = a_bt_of_(so_on);
+        double lo = 1.0, hi = 20000.0;
+        for (int it = 0; it < 14; it++) {
+            double mid = 0.5 * (lo + hi);
+            char sep[64];
+            snprintf(sep, sizeof sep, "%.6f", mid);
+            snprintf(src, sizeof src,
+                "form SKBT\n"
+                "fn world w\n"
+                SK_EARTH SK_WATCHER
+                "    astro_body mover assembly=\"calibration_box.k26asm\""
+                " parent=earth pos_x=7.0e6 pos_y=%s pos_z=0.0 vel_x=0.0"
+                " vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0"
+                " quat_y=0.0 quat_z=0.0 omega_x=0.0 omega_y=0.0"
+                " omega_z=0.0\n"
+                SK_RADAR("rf", "ir_only", "")
+                SK_JAMMER("jam", "200.0")
+                SK_EPISODE SK_ACTION
+                "    observe detect rf of mover as radar\n"
+                "    observe effect jam as ew\n"
+                "    on_step\n        engage jam at watcher\n    end\n"
+                "    objective\n        reward radar_snr\n    end\n"
+                "end\nend\n", sep);
+            build_(src, "bt");
+            char so_bt[512];
+            so_path_(so_bt, sizeof so_bt, "bt");
+            RlSpecView vb;
+            spec_of_(so_bt, &vb);
+            int i_det = chan_(&vb, "radar_detected");
+            double ob[256];
+            run_obs_(so_bt, 1, 0.0, ob, 256);
+            if (ob[i_det] == 1.0) lo = mid; else hi = mid;
+        }
+        if (!(bt >= lo && bt <= hi)) {
+            fprintf(stderr, "FAIL: the published burn-through is %.10g "
+                    "and the artifact's own detection crossover is "
+                    "between %.10g and %.10g\n", bt, lo, hi);
+            exit(1);
+        }
+        g_arms++;
+        printf("  the published burn-through %.10g sits inside the "
+               "artifact's own detection crossover, bracketed to "
+               "[%.6f, %.6f]\n", bt, lo, hi);
+    }
 }
 
 /* ---- Gate 5: the decoy changes a payload's capability ---------------- */
@@ -1339,10 +1598,14 @@ static void gate_counter_detection_(void)
            "self-signature of %.10g W and a counter range of %.10g m\n",
            off[i_snr], on[i_snr], on[i_ss], on[i_cr]);
 
+    /* The perturbation targets the statement rather than its exact
+     * text, so a defect that has already changed that line leaves the
+     * arm reporting the defect rather than the harness reporting a
+     * missing needle. */
     emit_("ctron");
     mutate_("ctron", "ctron_mut",
-            "s/if (_kfl_cs > _kfl_snr) _kfl_snr = _kfl_cs;//",
-            "_kfl_cs > _kfl_snr", 1, 0);
+            "s/^\\( *\\)if (_kfl_cs [^;]*;$//",
+            "if (_kfl_cs ", 1, 0);
     char so_mut[512];
     snprintf(so_mut, sizeof so_mut, WORK_DIR "/ctron_mut.so");
     build_emitted_(WORK_DIR "/ctron_mut.cc", so_mut);
@@ -1355,6 +1618,62 @@ static void gate_counter_detection_(void)
     }
     g_arms++;
     printf("  and with that raise deleted the victim reads 0 again\n");
+
+    /* Taking the larger of the two signals rather than adding them is a
+     * modelling choice, and on the fixture above it is not a choice at
+     * all: the counter-detection signal is millions of times the skin
+     * signature, so the two implementations agree to the last digits.
+     * A quantity that cannot move under the defect an arm names is a
+     * vacuous arm. This fixture puts the two signals within a factor of
+     * two of each other, where they differ in the published flag and
+     * not only in the statistic. */
+    build_(CTR_TEPID_ON_KFL, "tepid");
+    build_(CTR_TEPID_OFF_KFL, "tepidc");
+    char so_t[512], so_tc[512];
+    so_path_(so_t, sizeof so_t, "tepid");
+    so_path_(so_tc, sizeof so_tc, "tepidc");
+    RlSpecView vt;
+    spec_of_(so_t, &vt);
+    int t_snr = chan_(&vt, "ir_snr");
+    int t_det = chan_(&vt, "ir_detected");
+    double tmax[256], tskin[256];
+    run_obs_(so_t, 1, 0.0, tmax, 256);
+    run_obs_(so_tc, 1, 0.0, tskin, 256);
+
+    emit_("tepid");
+    mutate_("tepid", "tepid_add",
+            "s/^\\( *\\)if (_kfl_cs > _kfl_snr) _kfl_snr = _kfl_cs;$/"
+            "\\1_kfl_snr += _kfl_cs;/",
+            "_kfl_snr += _kfl_cs", 0, 1);
+    char so_add[512];
+    snprintf(so_add, sizeof so_add, WORK_DIR "/tepid_add.so");
+    build_emitted_(WORK_DIR "/tepid_add.cc", so_add);
+    double tadd[256];
+    run_obs_(so_add, 1, 0.0, tadd, 256);
+
+    if (!(tmax[t_snr] == tskin[t_snr])) {
+        fprintf(stderr, "FAIL: the fixture's skin signature does not "
+                "dominate the counter signal, so taking the larger is "
+                "not what is being measured: %.10g against %.10g\n",
+                tmax[t_snr], tskin[t_snr]);
+        exit(1);
+    }
+    if (!(tadd[t_snr] > tmax[t_snr] * 1.5)) {
+        fprintf(stderr, "FAIL: adding the two signals gives %.10g "
+                "against taking the larger's %.10g; the fixture cannot "
+                "tell them apart\n", tadd[t_snr], tmax[t_snr]);
+        exit(1);
+    }
+    if (!(tmax[t_det] == 0.0 && tadd[t_det] == 1.0)) {
+        fprintf(stderr, "FAIL: the two treatments agree on the published "
+                "flag, %.0f and %.0f\n", tmax[t_det], tadd[t_det]);
+        exit(1);
+    }
+    g_arms++;
+    printf("  where the two signals are comparable, taking the larger "
+           "publishes %.10g with the flag 0 and adding them publishes "
+           "%.10g with the flag 1: the choice is measured, not assumed\n",
+           tmax[t_snr], tadd[t_snr]);
 }
 
 /* ---- Gate 7: the decoy's deploy is a body effect ---------------------- */
@@ -1466,22 +1785,93 @@ static void gate_decoy_body_(void)
            "increment of %.10g m/s and a mass loss of %.10g kg\n",
            d, o[i_dv], o[i_ml]);
 
+    /* The increment is the momentum balance itself, not merely
+     * non-zero. Writing conservation with the separation velocity taken
+     * between the decoy and the host after the deploy gives the host an
+     * increment of the released mass times that velocity over the mass
+     * the host had before it, and the host's mass falls by the released
+     * mass at every deploy. So the published increment at the kth
+     * engagement is a closed form in the declared figures alone, and an
+     * increment that had lost the host's mass or divided by the wrong
+     * one of the two would still be non-zero and would still move. */
+    {
+        const double m0 = 1000.0;   /* the fixture asset's own hull mass */
+        const double md = 5.0, vs = 2.0;
+        SkArt c;
+        art_open_(&c, so_on, 4242u, 1u);
+        double act[4] = { 0.0, 0.0, 0.0, 0.0 };
+        double oc[256];
+        for (int k = 1; k <= 5; k++) {
+            ASSERT(c.s.step(c.env, act) == K26RL_OK);
+            ASSERT(c.s.obs(c.env, oc) == K26RL_OK);
+            double want = md * vs / (m0 - md * (double)(k - 1));
+            double rel = fabs(oc[i_dv] - want) / want;
+            if (!(rel < 1.0e-12)) {
+                fprintf(stderr, "FAIL: deploy %d published an increment "
+                        "of %.17g against the balance's %.17g, a relative "
+                        "%.3g\n", k, oc[i_dv], want, rel);
+                exit(1);
+            }
+        }
+        art_close_(&c);
+        g_arms++;
+        printf("  and each increment is the momentum balance to within "
+               "1e-12 relative over five deploys, the host's mass falling "
+               "by the released mass each time\n");
+    }
+
     /* And a magnitude cannot see a sign. The decoy is placed between
      * the host and the observer it is meant to fool, so the host
      * recoils away from that observer; a recoil reversed leaves every
      * published component bit-identical and moves the host the wrong
-     * way, which the distance above cannot tell. */
+     * way, which the distance above cannot tell.
+     *
+     * The fixture separates the two craft along all three axes. With a
+     * separation along one, the other two components of the unit vector
+     * are of order 1e-10 and a sign error in either multiplies by
+     * nearly nothing, so an arm on such a fixture is blind to two of
+     * the three components it exists to check. */
     {
-        double wv[6];
-        run_body_(so_on, 6, 1, wv);
+        char so3[512], so3c[512];
+        build_(DEC_3AX_KFL, "dec3");
+        build_(DEC_3AX_CTRL_KFL, "dec3c");
+        so_path_(so3, sizeof so3, "dec3");
+        so_path_(so3c, sizeof so3c, "dec3c");
+        double h3[6], h3c[6], w3[6];
+        run_body_(so3, 6, 2, h3);
+        run_body_(so3c, 6, 2, h3c);
+        run_body_(so3, 6, 1, w3);
         double dir[3];
-        for (int k = 0; k < 3; k++) dir[k] = wv[k] - on[k];
+        for (int k = 0; k < 3; k++) dir[k] = w3[k] - h3[k];
         double n2 = sqrt(dir[0] * dir[0] + dir[1] * dir[1] +
                          dir[2] * dir[2]);
         ASSERT(n2 > 0.0);
-        double proj = 0.0;
+        /* Every component of the direction has to carry weight, or the
+         * projection below is a one-axis test wearing three axes. */
         for (int k = 0; k < 3; k++) {
-            proj += (on[3 + k] - off[3 + k]) * dir[k] / n2;
+            if (!(fabs(dir[k]) / n2 > 0.1)) {
+                fprintf(stderr, "FAIL: the fixture's separation is %.3g "
+                        "of the whole on axis %d; a sign error there "
+                        "would multiply by nearly zero\n",
+                        fabs(dir[k]) / n2, k);
+                exit(1);
+            }
+        }
+        double proj = 0.0, worst = 0.0;
+        for (int k = 0; k < 3; k++) {
+            double dvk = h3[3 + k] - h3c[3 + k];
+            proj += dvk * dir[k] / n2;
+            /* Each component of the increment must itself lie against
+             * that axis of the direction, which is what makes a sign
+             * error in one component visible when the other two are
+             * right. */
+            double per = dvk * dir[k] / n2;
+            if (per > worst) worst = per;
+            if (!(per < 0.0)) {
+                fprintf(stderr, "FAIL: component %d of the recoil "
+                        "projects %.10g towards the victim\n", k, per);
+                exit(1);
+            }
         }
         if (!(proj < 0.0)) {
             fprintf(stderr, "FAIL: the host's change in velocity projects "
@@ -1490,9 +1880,10 @@ static void gate_decoy_body_(void)
             exit(1);
         }
         g_arms++;
-        printf("  and it recoils away from the victim: the change in "
-               "velocity projects %.10g m/s onto the line towards it\n",
-               proj);
+        printf("  and it recoils away from the victim on every axis: the "
+               "change in velocity projects %.10g m/s onto the line "
+               "towards it, with no component projecting above %.3g\n",
+               proj, worst);
     }
 
     double fv, fm, fb, nv, nm, nb;
@@ -1517,6 +1908,229 @@ static void gate_decoy_body_(void)
            "%.6g near, mass %.6g far and %.6g near, both together %.6g "
            "and %.6g. No ordering between them is asserted\n",
            fv, nv, fm, nm, fb, nb);
+}
+
+/* ---- Gate 7b: the deploy is bounded by the host's own mass ---------- */
+
+/* A decoy's momentum is derived from the mass that leaves the host, so
+ * the two cannot be decided separately. Because nothing here counts
+ * rounds, a program that engages on every step walks its host down to
+ * the declared dry mass, and what happens then is the whole of this
+ * arm: either the host's own mass refuses the deploy, or the statement
+ * pays an increment out of mass that never left and the craft has free
+ * delta-v for as long as it cares to ask.
+ *
+ * One artifact, one seed, two action streams: engaging throughout and
+ * engaging only while the host can supply it. If the bound holds, the
+ * two are the same world from the first refused step on, bit for bit.
+ */
+static void gate_decoy_supply_(void)
+{
+    build_(SUPPLY_KFL, "supply");
+    char so[512];
+    so_path_(so, sizeof so, "supply");
+    RlSpecView v;
+    spec_of_(so, &v);
+    int i_dep = chan_(&v, "dec_deployed");
+    int i_dv  = chan_(&v, "dec_dv");
+    int i_ml  = chan_(&v, "dec_mass_loss");
+    int i_rch = chan_(&v, "dec_reached");
+    int i_eng = chan_(&v, "dec_engaged");
+    int i_snr = chan_(&v, "radar_snr");
+
+    double on[4] = { 1.0, 0.0, 0.0, 0.0 };
+    double off[4] = { 0.0, 0.0, 0.0, 0.0 };
+    double o[256];
+    int n_dep = 0, first_refused = -1;
+    double snr_last_dep = 0.0, snr_first_ref = 0.0;
+
+    SkArt a;
+    art_open_(&a, so, 4242u, 1u);
+    for (int i = 0; i < 12; i++) {
+        ASSERT(a.s.step(a.env, on) == K26RL_OK);
+        ASSERT(a.s.obs(a.env, o) == K26RL_OK);
+        ASSERT(o[i_eng] == 1.0);
+        if (o[i_dep] == 1.0) {
+            n_dep++;
+            ASSERT(o[i_dv] > 0.0 && o[i_ml] > 0.0 && o[i_rch] > 0.0);
+            snr_last_dep = o[i_snr];
+        } else {
+            /* The whole of the deploy stops together: no momentum, no
+             * mass and no degradation on any victim. A momentum that
+             * outlived the mass is exactly the defect. */
+            if (!(o[i_dv] == 0.0 && o[i_ml] == 0.0 && o[i_rch] == 0.0)) {
+                fprintf(stderr, "FAIL: at step %d the deploy was refused "
+                        "and still published dv %.17g, mass %.17g, reach "
+                        "%.0f\n", i + 1, o[i_dv], o[i_ml], o[i_rch]);
+                exit(1);
+            }
+            if (first_refused < 0) {
+                first_refused = i;
+                snr_first_ref = o[i_snr];
+            }
+        }
+    }
+    art_close_(&a);
+    if (n_dep < 2 || first_refused < 0) {
+        fprintf(stderr, "FAIL: the fixture deployed %d times and was "
+                "never refused; it cannot measure the bound\n", n_dep);
+        exit(1);
+    }
+    if (!(snr_first_ref > snr_last_dep * 10.0)) {
+        fprintf(stderr, "FAIL: the victim stayed degraded after the "
+                "deploy was refused: %.10g against %.10g\n",
+                snr_first_ref, snr_last_dep);
+        exit(1);
+    }
+    g_arms++;
+    printf("  the host supplies %d deploys and then refuses: momentum, "
+           "mass and reach all zero together from step %d, and the "
+           "victim returns from %.10g to %.10g\n",
+           n_dep, first_refused + 1, snr_last_dep, snr_first_ref);
+
+    /* And from that step the world is the world of a program that
+     * stopped engaging, bit for bit. */
+    double all_on[6], stop[6];
+    {
+        SkArt b;
+        art_open_(&b, so, 4242u, 1u);
+        for (int i = 0; i < 12; i++) {
+            ASSERT(b.s.step(b.env, on) == K26RL_OK);
+        }
+        double bd[64];
+        ASSERT(b.s.bodies(b.env, 0u, bd, 64u) >= 18);
+        memcpy(all_on, bd + 12, sizeof all_on);
+        art_close_(&b);
+
+        art_open_(&b, so, 4242u, 1u);
+        for (int i = 0; i < 12; i++) {
+            ASSERT(b.s.step(b.env, i < n_dep ? on : off) == K26RL_OK);
+        }
+        ASSERT(b.s.bodies(b.env, 0u, bd, 64u) >= 18);
+        memcpy(stop, bd + 12, sizeof stop);
+        art_close_(&b);
+    }
+    for (int k = 0; k < 6; k++) {
+        if (all_on[k] != stop[k]) {
+            fprintf(stderr, "FAIL: engaging past the supply moved the "
+                    "host: component %d reads %.17g against %.17g\n",
+                    k, all_on[k], stop[k]);
+            exit(1);
+        }
+    }
+    g_arms++;
+    printf("  and engaging past the supply leaves the host's whole state "
+           "identical to stopping at it, bit for bit\n");
+
+    /* The mutation the arm exists for: the increment applied whether or
+     * not the mass left, which is what the code did before. */
+    emit_("supply");
+    mutate_("supply", "supply_mut",
+            "s|^        _kfl_eb->vel\\.\\([xyz]\\) -= _kfl_dv \\* "
+            "_kfl_u\\.\\1;$||;"
+            "s|^    int    _kfl_reach = 0;$|"
+            "    _kfl_dv = _kfl_dm * pp[2] / _kfl_hm;\\n"
+            "    _kfl_eb->vel.x -= _kfl_dv * _kfl_u.x;\\n"
+            "    _kfl_eb->vel.y -= _kfl_dv * _kfl_u.y;\\n"
+            "    _kfl_eb->vel.z -= _kfl_dv * _kfl_u.z;\\n"
+            "    int    _kfl_reach = 0;|",
+            "^        _kfl_eb->vel.x", 1, 0);
+    char so_mut[512];
+    snprintf(so_mut, sizeof so_mut, WORK_DIR "/supply_mut.so");
+    build_emitted_(WORK_DIR "/supply_mut.cc", so_mut);
+    {
+        SkArt b;
+        double bd[64], mut_on[6], mut_stop[6];
+        art_open_(&b, so_mut, 4242u, 1u);
+        for (int i = 0; i < 12; i++) ASSERT(b.s.step(b.env, on) == K26RL_OK);
+        ASSERT(b.s.bodies(b.env, 0u, bd, 64u) >= 18);
+        memcpy(mut_on, bd + 12, sizeof mut_on);
+        art_close_(&b);
+        art_open_(&b, so_mut, 4242u, 1u);
+        for (int i = 0; i < 12; i++) {
+            ASSERT(b.s.step(b.env, i < n_dep ? on : off) == K26RL_OK);
+        }
+        ASSERT(b.s.bodies(b.env, 0u, bd, 64u) >= 18);
+        memcpy(mut_stop, bd + 12, sizeof mut_stop);
+        art_close_(&b);
+        double d = dist6_(mut_on, mut_stop);
+        if (!(d > 0.0)) {
+            fprintf(stderr, "FAIL: with the increment made unconditional "
+                    "the two runs are still identical; the arm above "
+                    "cannot fail on the defect it names\n");
+            exit(1);
+        }
+        g_arms++;
+        printf("  with the increment made unconditional the two runs "
+               "separate by %.6g, which is the free increment the arm "
+               "exists to refuse\n", d);
+    }
+}
+
+/* ---- Gate 7c: the environments are their own ------------------------ */
+
+/* Every other handle in this binary is created at one environment, and
+ * the degradation store is indexed by environment as well as by payload
+ * and body. With one of a thing an index that carries the environment
+ * and one that does not agree, which is the fourth gate-credibility
+ * rule. Two environments driven with different actions separate them.
+ */
+static void gate_environments_(void)
+{
+    char so[512];
+    so_path_(so, sizeof so, "alt");
+    RlSpecView v;
+    spec_of_(so, &v);
+    int i_snr = chan_(&v, "radar_snr");
+    int i_eng = chan_(&v, "ew_engaged");
+    uint32_t w = v.obs_total;
+    ASSERT(w > 0 && w <= 64);
+
+    SkArt a;
+    art_open_(&a, so, 4242u, 2u);
+    /* Environment 0 engages, environment 1 does not. */
+    double act[2] = { 1.0, 0.0 };
+    double o[256];
+    ASSERT(a.s.step(a.env, act) == K26RL_OK);
+    ASSERT(a.s.obs(a.env, o) == K26RL_OK);
+    double e0_snr = o[i_snr];
+    double e1_snr = o[w + (uint32_t)i_snr];
+    double e0_eng = o[i_eng];
+    double e1_eng = o[w + (uint32_t)i_eng];
+    art_close_(&a);
+
+    if (!(e0_eng == 1.0 && e1_eng == 0.0)) {
+        fprintf(stderr, "FAIL: the two environments both read engaged "
+                "%.0f and %.0f\n", e0_eng, e1_eng);
+        exit(1);
+    }
+    if (!(e1_snr > e0_snr * 1.0e3)) {
+        fprintf(stderr, "FAIL: the unengaged environment reads %.10g "
+                "against the engaged one's %.10g; the store is not its "
+                "own\n", e1_snr, e0_snr);
+        exit(1);
+    }
+
+    /* And the unengaged environment reads what a whole handle that
+     * never engages reads, which is what says it carries nothing of its
+     * neighbour rather than merely differing from it. */
+    SkArt b;
+    art_open_(&b, so, 4242u, 2u);
+    double none[2] = { 0.0, 0.0 };
+    double o2[256];
+    ASSERT(b.s.step(b.env, none) == K26RL_OK);
+    ASSERT(b.s.obs(b.env, o2) == K26RL_OK);
+    art_close_(&b);
+    if (o2[w + (uint32_t)i_snr] != e1_snr) {
+        fprintf(stderr, "FAIL: the unengaged environment reads %.17g "
+                "beside an engaged neighbour and %.17g without one\n",
+                e1_snr, o2[w + (uint32_t)i_snr]);
+        exit(1);
+    }
+    g_arms++;
+    printf("  two environments at one handle: the engaged one reads "
+           "%.10g and its neighbour %.10g, which is bit for bit what it "
+           "reads with no neighbour engaging\n", e0_snr, e1_snr);
 }
 
 /* ---- Gate 8: the reach count, and the two together ------------------- */
@@ -1654,6 +2268,62 @@ static void gate_chaff_(void)
            "program's bit for bit (%.17g)\n", mut[i_snr]);
 }
 
+/* ---- Gate 9b: one craft, one cross-section --------------------------- */
+
+/* The jamming ratio divides by the cross-section of the craft the
+ * jammer protects, and the radar equation multiplies by the
+ * cross-section of the craft the radar is pointed at. In a program a
+ * reader would write those are the same craft, so a cloud declared
+ * around it belongs in both or the two equations describe different
+ * craft and the ratio overstates the jamming by whatever the cloud
+ * returns.
+ *
+ * The arm is the ratio's own published cross-section against the one
+ * the detection path uses, which is the same number by construction
+ * once the cloud is in both: with the cloud declared the published
+ * figure must rise by exactly the cloud's mean, and the jamming must
+ * fall because a larger return is harder to mask. */
+static void gate_one_cross_section_(void)
+{
+    char so_c[512], so_n[512];
+    build_(JAM_CHAFF_KFL, "jamchaff");
+    build_(JAM_NOCHAFF_KFL, "jamnochaff");
+    so_path_(so_c, sizeof so_c, "jamchaff");
+    so_path_(so_n, sizeof so_n, "jamnochaff");
+
+    RlSpecView v;
+    spec_of_(so_c, &v);
+    int i_rcs = chan_(&v, "ew_rcs");
+    int i_eff = chan_(&v, "ew_effect");
+    double c[256], n[256];
+    run_obs_(so_c, 1, 0.0, c, 256);
+    run_obs_(so_n, 1, 0.0, n, 256);
+
+    /* The declared cloud: two times ten to the seven strips at a
+     * thousandth of a square metre each, which the library's mean is
+     * the product of. */
+    const double cloud = 2.0e7 * 1.0e-3;
+    double rise = c[i_rcs] - n[i_rcs];
+    double rel = fabs(rise - cloud) / cloud;
+    if (!(rel < 1.0e-12)) {
+        fprintf(stderr, "FAIL: the jamming ratio's cross-section rose by "
+                "%.17g against the cloud's own mean of %.17g, a relative "
+                "%.3g\n", rise, cloud, rel);
+        exit(1);
+    }
+    if (!(c[i_eff] < n[i_eff])) {
+        fprintf(stderr, "FAIL: a larger cross-section did not lower the "
+                "jamming ratio: %.10g against %.10g\n",
+                c[i_eff], n[i_eff]);
+        exit(1);
+    }
+    g_arms++;
+    printf("  the jamming ratio takes the cloud too: the published "
+           "cross-section rises by exactly the cloud's mean (%.10g) and "
+           "the ratio falls from %.10g to %.10g\n",
+           rise, n[i_eff], c[i_eff]);
+}
+
 /* ---- Gate 10: no chaff, no change ------------------------------------ */
 
 /* The addition is additive only if a program that declares none
@@ -1663,11 +2333,7 @@ static void gate_chaff_(void)
  * the same archives, and every channel is compared. */
 static void gate_chaff_additive_(void)
 {
-    if (!g_base_ok) {
-        printf("  base compiler unavailable: the no-chaff identity arm "
-               "stands down\n");
-        return;
-    }
+    ASSERT(g_base_ok);
     build_(CHAFF_NONE_KFL, "ch0b");
     emit_with_(WORK_DIR "/base/kflc/bin/kflc", "ch0b");
     char so_base[512];
@@ -1911,7 +2577,7 @@ static void gate_components_move_(void)
     }
 
     base = chan_(&v, "dec_engaged");
-    spread_(so, base, 7, 12, lo, hi);
+    spread_(so, base, 8, 12, lo, hi);
     for (int i = 0; DEC_MOVES[i]; i++) {
         int c = chan_(&v, DEC_MOVES[i]) - base;
         if (!(hi[c] > lo[c])) {
@@ -1928,6 +2594,12 @@ static void gate_components_move_(void)
         ASSERT(lo[c] == hi[c] && lo[c] == 5.0);
         c = chan_(&v, "dec_dv") - base;
         ASSERT(hi[c] > lo[c]);
+        /* Twelve deploys of five kilograms off a thousand leave the
+         * host well able to supply them, so this fixture holds the
+         * deployed flag at 1 throughout; the arm that drives it to 0 is
+         * the supply one. */
+        c = chan_(&v, "dec_deployed") - base;
+        ASSERT(lo[c] == 1.0 && hi[c] == 1.0);
     }
     g_arms++;
     printf("  the decoy's range and increment move while its mass loss "
@@ -2095,11 +2767,7 @@ static int probe_(const char *kflc, const char *word, int shape)
 
 static void gate_contextual_words_(void)
 {
-    if (!g_base_ok) {
-        printf("  base compiler unavailable: the identifier probes stand "
-               "down\n");
-        return;
-    }
+    ASSERT(g_base_ok);
     int n = 0, regress = 0, newly = 0;
     for (int i = 0; NEW_WORDS[i]; i++) {
         for (int s = 0; s < 3; s++) {
@@ -2132,18 +2800,28 @@ static int run_(const char *cmd)
     return WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
 }
 
+/* Two of this binary's arms measure against the compiler as it stood
+ * before this change, and a run that could not build that compiler
+ * measured nothing. The two outcomes are told apart rather than merged:
+ * a checkout whose history does not reach the base commit is a genuine
+ * skip and the binary exits with the harness's skip code, while a base
+ * commit that is present and will not build is a failure, because a
+ * gate that stands its own arms down and still returns success is the
+ * shape every rule here exists to refuse. */
 static void build_base_(void)
 {
     if (run_("git -C .. rev-parse --verify --quiet " BASE_COMMIT
              "^{commit} > /dev/null 2>&1") != 0) {
-        printf("  base commit " BASE_COMMIT " is not in this checkout's "
-               "history\n");
-        return;
+        printf("test_rl_softkill: %d arm(s) passed, the arms measuring "
+               "against " BASE_COMMIT " stood down (not in this "
+               "checkout's history)\n", g_arms);
+        exit(77);
     }
     if (run_("mkdir -p " WORK_DIR "/base && git -C .. archive "
              BASE_COMMIT " | tar -x -C " WORK_DIR "/base") != 0) {
-        printf("  could not extract " BASE_COMMIT "\n");
-        return;
+        fprintf(stderr, "FAIL: " BASE_COMMIT " is in this history and "
+                "could not be extracted\n");
+        exit(1);
     }
     if (run_("make -C " WORK_DIR "/base/libk26rng > " WORK_DIR
              "/base.log 2>&1") != 0 ||
@@ -2154,8 +2832,10 @@ static void build_base_(void)
         run_("make -C " WORK_DIR "/base/kflc bin/kflc >> " WORK_DIR
              "/base.log 2>&1") != 0) {
         (void)!system("tail -20 " WORK_DIR "/base.log");
-        printf("  the compiler at " BASE_COMMIT " did not build\n");
-        return;
+        fprintf(stderr, "FAIL: the compiler at " BASE_COMMIT " is in "
+                "this history and did not build; the arms that measure "
+                "against it cannot stand down quietly\n");
+        exit(1);
     }
     g_base_ok = 1;
     printf("  the compiler at " BASE_COMMIT " is built\n");
@@ -2186,10 +2866,13 @@ int main(void)
     gate_decoy_capability_();
     gate_counter_detection_();
     gate_decoy_body_();
+    gate_decoy_supply_();
     gate_reach_();
     gate_chaff_();
+    gate_one_cross_section_();
     gate_chaff_additive_();
     gate_clear_();
+    gate_environments_();
     gate_components_move_();
     gate_runtime_second_engage_();
     gate_contextual_words_();
