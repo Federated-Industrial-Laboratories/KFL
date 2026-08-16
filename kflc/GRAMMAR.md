@@ -987,12 +987,22 @@ constructed and a per-episode draw could not reach it.
 
 | `kind=` | Required keys |
 |---|---|
-| `detect_ir` | `aperture_m`, `integration_s`, `passband_lo_um`, `passband_hi_um`, `throughput`, `snr_threshold`, `target_temp_k`, `target_emissivity`; optional `t_optics_k` and `optics_emissivity`, both 0 by default |
-| `detect_radar` | `p_tx_w`, `g_tx_db`, `g_rx_db`, `freq_hz`, `loss_sys_db`, `bandwidth_hz`, `t_sys_k`, `noise_figure`, `snr_threshold` |
-| `detect_lidar` | `pulse_energy_j`, `wavelength_nm`, `aperture_rx_m`, `atmospheric_tx`, `detector_efficiency`, `snr_threshold`, `target_albedo` |
+| `detect_ir` | `aperture_m`, `integration_s`, `passband_lo_um`, `passband_hi_um`, `throughput`, `snr_threshold`, `target_temp_k`, `target_emissivity`; optional `t_optics_k` and `optics_emissivity`, both 0 by default; optional `discriminator_regime` |
+| `detect_radar` | `p_tx_w`, `g_tx_db`, `g_rx_db`, `freq_hz`, `loss_sys_db`, `bandwidth_hz`, `t_sys_k`, `noise_figure`, `snr_threshold`; optional `discriminator_regime`, `target_chaff_n_strips` and `target_chaff_sigma_dipole_m2` |
+| `detect_lidar` | `pulse_energy_j`, `wavelength_nm`, `aperture_rx_m`, `atmospheric_tx`, `detector_efficiency`, `snr_threshold`, `target_albedo`; optional `discriminator_regime` |
 | `infostate` | `history`, optional, 1024 by default; fixed when the payload is constructed, so it takes no distribution, and refused below 2, which is the fewest samples an interpolation needs |
 | `impactor` | See *Effectors* below |
 | `laser` | See *Effectors* below |
+| `decoy` | See *Countermeasures* below |
+| `jammer` | See *Countermeasures* below |
+
+**One kind this grammar does not offer.** The defense kind registry
+allocates a tag for a dazzler and the effector-class range includes it,
+but no library in this tree implements it: there is no constructor, no
+evaluator and no event struct behind the tag. `kind=dazzler` is
+therefore refused, and the refusal says that rather than reporting an
+unknown kind, because a reader who found the tag in the registry did
+not misspell anything.
 
 Every key naming the instrument is a parameter of the library function
 that consumes it, spelled the same way: the constructor's for the six
@@ -1018,6 +1028,43 @@ own thermal emission, which for a warm instrument looking in its own
 emission band sets the noise floor. Both default to 0, which is the
 library's documented cosmic-background-only behaviour; a program
 modelling a real instrument declares them.
+
+**`discriminator_regime`** names the discriminators this observer runs
+against a decoy, and it takes `ir_only`, `ir_plus_rcs` or
+`ir_rcs_accel`, spelled as the countermeasure library's own enumeration
+spells them. It defaults to `ir_only`, the weakest of the three, and it
+takes no distribution form. The regime is declared on the *observer*
+rather than on the decoy because that is whose property it is: two craft
+looking at one decoy may run different discriminators and reach
+different answers about it, and *Countermeasures* below is where the
+answer is used. A program that declares no decoy anywhere may leave the
+key alone; nothing reads it.
+
+**The two chaff keys**, `target_chaff_n_strips` and
+`target_chaff_sigma_dipole_m2`, describe a cloud of dipole strips around
+the reference target and raise the cross-section the radar sees. They
+are the countermeasure library's own parameters of the same name, and
+they are declared here for the reason the other `target_` keys are: they
+describe what is being looked at rather than the instrument. Chaff is
+not a payload of this tier and does not appear as a `kind=`: the library
+gives it free functions, no handle and no registry tag, so there is
+nothing to construct and nothing to bind. What there is, is a
+deterministic mean cloud cross-section, and it composes with the
+geometric cross-section this grammar already derives from the target's
+silhouette by adding to it, the strips being uncorrelated with the skin
+return and with each other.
+
+Both are optional. The strip count is what says a cloud is there:
+`target_chaff_sigma_dipole_m2` declared without it is refused, since it
+would describe strips that do not exist and nothing would read it. A
+strip count declared alone takes the library's own X-band default for a
+single strip. **A payload declaring no chaff key computes exactly the
+cross-section it computed before these keys existed**, the cloud's term
+not being emitted at all, so the addition is additive rather than a
+change to every radar program. The library's per-sample chaff draw,
+which takes a generator, is never called: the mean is deterministic and
+imperfection comes through the sensor layer, as it does for every other
+channel here.
 
 **A body carries any number of detection payloads and at most one
 information state.** A detection sensor binds into the vehicle's
@@ -1152,10 +1199,13 @@ observe effect <payload> as <name>
 a declaration, so it is admissible **inside an `on_step` block and
 nowhere else**, and it is refused elsewhere naming the block it belongs
 in. `<payload>` names an `astro_payload` of an effector kind, and
-`<target>` an `astro_body` of the same world that binds an `assembly=`
-declaring at least one `collider`, since the effector acts on the area
-the target presents and a body with none would present none. An
-effector does not engage the craft that carries it.
+`<target>` an `astro_body` of the same world that binds an `assembly=`,
+since every effector kind needs the target to carry a vehicle. For the
+kinetic and directed-energy kinds that assembly must also declare at
+least one `collider`, because those act on the area the target presents
+and a body with none would present none; the countermeasure kinds act on
+the target's payloads rather than on its geometry and do not require
+one. An effector does not engage the craft that carries it.
 
 `on_step` runs before the world advances, so an engagement lands on the
 state the immediately following advance integrates, and the
@@ -1184,22 +1234,27 @@ because an ablation event and an impact event share no fields.
 |---|---|
 | `impactor` | `pattern`, one of `single` or `swarm`; `projectile_mass_kg` (the whole released mass), `projectile_density_kg_per_m3`, `projectile_diameter_m`; `swarm_count` and `swarm_half_angle_rad`, required for `swarm` and refused for `single`; optional target-structure keys, below |
 | `laser` | `primary_diam_m`, `wavelength_nm`, `p_output_w`, `m_squared`, `pointing_jitter_rad`, `rms_wavefront_m`, `plasma_attn_k`, `target_material`, `target_reflectivity` |
+| `decoy` | `mode`, one of `passive` or `active`; `dry_mass_kg`, `deploy_dv_mps`, `ir_match_quality`, `rcs_match_quality`, `accel_match_quality` |
+| `jammer` | `mode`, one of `noise`, `cover_pulse` or `deception`; `p_j_w`, `g_j_db`, `freq_hz`, `bandwidth_hz`, `snr_threshold`, `radiator_temp_k` |
 
-`pattern` and `target_material` take a word rather than a number,
-because each names a library constant and a program that wrote the
-number would depend on an internal numbering nothing promises it.
-`target_material` takes `aluminum`, `steel`, `titanium`, `copper`,
-`composite` or `fused_silica`, spelled as the library's own table
-spells them. The library also offers a seventh value whose documented
-meaning is a conservative generic-metal anchor rather than an absence
-of material; this grammar does not admit it, because a program writing
-it would reasonably expect no ablation and would get steel's numbers.
-Neither keyword key takes a distribution form.
+`pattern`, `target_material` and the two kinds' `mode` take a word
+rather than a number, because each names a library constant and a
+program that wrote the number would depend on an internal numbering
+nothing promises it. `target_material` takes `aluminum`, `steel`,
+`titanium`, `copper`, `composite` or `fused_silica`, spelled as the
+library's own table spells them. The library also offers a seventh value
+whose documented meaning is a conservative generic-metal anchor rather
+than an absence of material; this grammar does not admit it, because a
+program writing it would reasonably expect no ablation and would get
+steel's numbers. No keyword key takes a distribution form.
 
 As with the detection kinds, the `target_` keys describe what is being
 fired at rather than the payload, so **one effector payload models one
 target class**. Every other key is the library constructor's own
-parameter of the same name.
+parameter of the same name, with one exception: `radiator_temp_k` is the
+emitter radiator temperature the counter-detection routine takes, and it
+is required rather than optional because it is what prices a jammer's
+engagement. See *Countermeasures* below.
 
 ##### The kinetic impactor
 
@@ -1380,20 +1435,140 @@ does move: it is the on-target power scaled by the reflectivity and the
 plasma transmissivity, and both the transmissivity and the encircled
 fraction that set it move with the geometry.
 
-##### Both kinds
+##### Countermeasures
+
+The decoy and the jammer are the one effector class whose result lands
+on **another craft's payloads** rather than on a body. `engage <payload>
+at <victim>` names the craft whose detection payloads are degraded, and
+what they are degraded about is the craft carrying the countermeasure:
+both are declarations, so which payloads an engagement can reach is
+fixed when the program is compiled and nothing is searched for while
+stepping.
+
+`on_step` runs before the world advances and the observation is computed
+after it, so a degradation applied by an engagement is in force for that
+step's observation. It is in force for that step and no other: the store
+it is written into is cleared at the top of every step and at every
+reset, exactly as the effector channels are.
+
+**How many payloads an engagement reached is published**, as
+`<name>_reached`. An engagement aimed at a craft that carries nothing to
+degrade reaches none and reads 0, which is a decoration and is reported
+as one rather than hidden. A victim's own channels are where the effect
+is visible; the countermeasure's own channels say only what it did.
+
+##### The decoy
+
+Seven components:
+
+| Component | Value |
+|---|---|
+| `<name>_engaged` | 1.0 on a step where the payload was engaged. |
+| `<name>_effect` | The largest confidence degradation delivered to one of the victim's detection payloads, in [0, 1); 0.0 when the engagement reached none. |
+| `<name>_reached` | How many of the victim's detection payloads the engagement wrote a degradation to. |
+| `<name>_p_discriminated` | The discrimination probability behind `_effect`; 0.0 when the engagement reached no payload. |
+| `<name>_range` | Host-to-victim distance, in metres. |
+| `<name>_dv` | The velocity increment the deploy imparted to the host, in metres per second. |
+| `<name>_mass_loss` | The mass that left the host, in kilograms. |
+
+**The effect on the victim.** The library returns the probability that
+an observer running a given discriminator regime correctly identifies
+the decoy, and the degradation is its complement: an observer that
+always tells the decoy from the craft loses nothing, and one that never
+does loses all of it. The victim's detection statistic is multiplied by
+one minus that degradation, and the detection flag is then taken again
+on the moved statistic, since a flag that rested on the value before is
+a flag taken at a threshold the published quantity no longer meets. The
+regime is each victim payload's own `discriminator_regime`, so two
+observers of one decoy are degraded differently. Two decoys against one
+observer compose the way the library's own discrimination model composes
+its channels: the observer has to see through both, so the probabilities
+of not seeing through each multiply.
+
+Mapping a discrimination probability onto a detection statistic is this
+grammar's choice and not the library's, which returns the probability
+alone. It is stated here rather than left in the code.
+
+**The effect on the host.** Deploying a decoy is a body effect as well:
+`dry_mass_kg` leaves the host at `deploy_dv_mps`, so the host takes the
+opposite momentum and loses that mass. The decoy is placed between the
+host and the observer it is meant to fool, which is what fixes the
+direction: the host recoils away from the victim. `_mass_loss` reports
+the mass actually removed, and a deploy that would take the whole craft
+removes nothing, on the same rule the ablated mass follows.
+
+**There is no magazine**, here as for the kinetic effector. Each
+engagement deploys another decoy and costs another dry mass; a program
+modelling stores writes the counter and the conditional the grammar
+already gives it.
+
+##### The jammer
+
+Nine components:
+
+| Component | Value |
+|---|---|
+| `<name>_engaged` | 1.0 on a step where the payload was engaged. |
+| `<name>_effect` | The largest jamming-to-signal ratio delivered at one of the victim's radar receivers, dimensionless; 0.0 when the engagement reached none. |
+| `<name>_reached` | How many of the victim's detection payloads the engagement wrote to: the radar payloads jammed, and the infrared payloads given the counter-detection signal below. |
+| `<name>_range` | Jammer-to-victim distance, in metres. |
+| `<name>_rcs` | The radar cross-section the ratio behind `_effect` was computed against: the host's own silhouette along the line the victim looks down, in square metres. |
+| `<name>_burn_through` | The range at which that victim's radar burns through the jamming, in metres. |
+| `<name>_self_signature` | The jammer's own emitted power, in watts. |
+| `<name>_counter_range` | The range at which the victim's most capable passive infrared observer detects that emission, in metres; 0.0 when the victim carries none. |
+| `<name>_counter_detected` | 1.0 when the jammer's host is inside `_counter_range`. |
+
+**The effect on the victim, and the price of it.** This is a
+self-protection geometry, which is what the library exposes: the ratio
+divides by the cross-section of the craft the jammer is protecting,
+which is its own host, so the degradation applies to the victim's view
+of that host and not to its view of anything else. A statistic of signal
+over noise becomes signal over noise plus jamming, and the detection flag
+is taken again on the moved statistic. Two jammers on one victim add
+their power at the receiver, so their ratios add.
+
+The other edge is on the same statement and is not optional. Every watt
+transmitted announces the emitter's position: the transmitted power
+thermalises on the platform's radiator and radiates as heat, and the
+library returns the range at which a passive infrared observer of given
+aperture, dwell, pass-band, throughput and threshold detects it. That
+observer is the victim's own infrared payload, so **engaging a jammer
+makes the engaging craft easier to see**. The victim's infrared
+statistic is raised to whichever is larger, its skin signature or the
+counter-detection signal, the second scaling as one over range from the
+routine's own shot-noise derivation; the two are not added, since they
+come from differently derived noise models.
+
+That is why `radiator_temp_k` is required. A payload that published the
+benefit and let the cost be left undeclared would model an advantage
+that costs nothing.
+
+**A jammer's host needs a silhouette.** The cross-section the ratio
+divides by is the projected area of the host assembly's collision
+primitives, so a jammer carried by a craft whose assembly declares no
+`collider` is refused naming the craft and what is missing. A decoy has
+no such requirement: it takes no area of anything.
+
+##### All four kinds
 
 Each payload is constructed once per environment when the world is
 built, exactly as a detection payload is, and an engagement calls the
-library's evaluator only: both return a value struct and allocate
-nothing.
+library's evaluator only: all of them return a value struct or a scalar
+and allocate nothing.
 
 **These components carry no imperfection of their own**, on the same
 rule as the detection channels: the models compute a noise-free
 quantity, the libraries' own optional generators are not used, and the
-swarm's direction sampler, which takes one, is not called. A program
-that wants a noisy effector channel binds a declared `sensor` to it,
-which puts the draws on this capability's own generator at the
-coordinates a replay reproduces.
+two entry points that take one, the swarm's direction sampler and the
+chaff cloud's per-sample draw, are not called. A program that wants a
+noisy effector channel binds a declared `sensor` to it, which puts the
+draws on this capability's own generator at the coordinates a replay
+reproduces.
+
+**A payload is engaged at most once per step whatever its kind**, and
+the rule above holds for all four: two statements naming one payload are
+refused where they are written, and one statement reached twice faults
+the environment.
 
 ### The `objective` block
 
