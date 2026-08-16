@@ -10,6 +10,16 @@ because a later step's overwrite would corrupt the retained value.
 The run covers an episode ending and its boundary reset, so the
 flag-decode comparison includes the boundary step's rendering.
 
+That run drives the vectorised shape, whose action marshalling batches
+a whole handle at once. The single-environment shape marshals one
+environment's action instead, by a different route and one that the
+vectorised comparison above cannot reach, so a second arm drives it
+against a raw handle in this process over the same mixed action space:
+a box channel and a discrete one, both carrying values that move at
+every step and both reaching the world, compared bitwise. Without it a
+value written to the wrong offset, or altered on the way, would ship
+through the shape a consumer of one environment actually uses.
+
 Skips (77) when the built compiler, the stack archives, or gymnasium
 are absent.
 """
@@ -21,6 +31,9 @@ import _gateutil as g
 
 GATE = "gate10_marshalling"
 SEED = 777
+# A seed of its own for the single-shape arm, so that arm is not
+# reading the one trajectory the vectorised comparison already covers.
+SINGLE_SEED = 778
 N_ENVS = 2
 # Covers the fixture's termination at transition 901 and the boundary
 # reset that follows it.
@@ -109,7 +122,73 @@ def main():
 
     g.check(saw_ending, "the run covered no episode ending")
     g.check(saw_boundary, "the run covered no boundary reset")
+
+    check_single_shape(np, so)
     g.ok(GATE)
+
+
+def check_single_shape(np, so):
+    """The single-environment shape's action marshalling against a raw
+    handle, over the fixture's mixed action space.
+
+    The fixture declares one box channel and one discrete channel and
+    both reach the world, so every value the shape writes onto the flat
+    vector is observable in the next step's observation. The oracle is
+    the frozen getter surface driven with the same seed and the same
+    flat vector, in this process, which needs no history and no second
+    build."""
+    import ctypes
+
+    from k26rl import _abi, _spec
+    from k26rl.env import K26RlEnv
+
+    steps = 60
+    art = _abi.Artifact(so)
+    handle = art.create(SINGLE_SEED, 1)
+    spec = _spec.parse(art.spec_blob(handle))
+    g.check(spec.act_total == 2 and len(spec.act_channels) == 2,
+            "the fixture declares %d action channels, expected 2"
+            % spec.act_total)
+    kinds = sorted(c.kind for c in spec.act_channels)
+    g.check(kinds == [_spec.ACT_KIND_BOX, _spec.ACT_KIND_DISCRETE],
+            "the fixture's action kinds are %s, expected one box and "
+            "one discrete: a comparison over one kind cannot pin the "
+            "other's branch" % kinds)
+
+    obs_buf = np.empty(spec.obs_total, dtype=np.float64)
+    rew_buf = np.empty(1, dtype=np.float64)
+
+    env = K26RlEnv(so, seed=SINGLE_SEED)
+    env.reset()
+    moved = 0
+    for t in range(steps):
+        thrust = g.act_thrust(t, 0)
+        gear = int(g.act_gear(t, 0))
+        obs, reward, _term, _trunc, _info = env.step((thrust, gear))
+        flat = np.array([thrust, gear], dtype=np.float64)
+        art.step(handle, flat.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_double)))
+        art.obs(handle, obs_buf.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_double)))
+        art.reward(handle, rew_buf.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_double)))
+        g.check(obs.tobytes() == obs_buf.tobytes(),
+                "single shape: observation bytes differ from the raw "
+                "handle at step %d" % t)
+        g.check(np.float64(reward).tobytes() == rew_buf.tobytes(),
+                "single shape: reward bytes differ from the raw handle "
+                "at step %d" % t)
+        if gear != 0:
+            moved += 1
+    art.destroy(handle)
+    env.close()
+
+    # A stream that fed the discrete channel its default throughout
+    # would compare two runs of an inert channel and pin nothing about
+    # it, which is what this gate's fixture used to do.
+    g.check(moved >= steps // 2,
+            "the discrete channel left its default on only %d of %d "
+            "steps, too few to pin its branch" % (moved, steps))
 
 
 if __name__ == "__main__":
