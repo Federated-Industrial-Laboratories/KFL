@@ -57,6 +57,10 @@
  *      published components. An increment that lost the target's mass
  *      would still be non-zero and would still move, so a magnitude is
  *      what pins it.
+ *   6f. The release count decides what one arriving unit is. Three
+ *      swarms of equal total mass and different counts: the momentum
+ *      must not move and the penetration must, since the first is the
+ *      landed total's and the second is a unit's.
  *   6e. The bumper's thickness and the rear wall's are different keys
  *      feeding different branches, measured by two fixtures differing
  *      in that one key: the penetration analysis must not move and the
@@ -1875,6 +1879,120 @@ static void gate_increment_arithmetic_(void)
            las[2], want_dv, rel_dv);
 }
 
+/* ---- Gate 6f: the release count decides the unit ---------------------- */
+
+/* Three swarms of the same total mass, the same spread and the same
+ * geometry, differing only in how many units the release is divided
+ * into. The momentum is a property of the landed total and must not
+ * move; the penetration analysis is a question about one arriving
+ * unit and must.
+ *
+ * Without this the count is a required key nothing reads back, which
+ * is what it was: three counts gave bit-identical channels and
+ * bit-identical body state. */
+#define EFF_SWARM_N_KFL(form, count) \
+    "form " form "\n" \
+    "fn world w\n" \
+    EFF_EARTH EFF_SHOOTER("7746.0") \
+    EFF_MOVER("calibration_box.k26asm", "1.5e2", "0.0") \
+    "    astro_payload rock body=shooter kind=impactor pattern=swarm" \
+    " swarm_count=" count " swarm_half_angle_rad=0.02" \
+    " projectile_mass_kg=50.0 projectile_density_kg_per_m3=7800.0" \
+    " projectile_diameter_m=0.2 target_wall_thickness_m=0.002" \
+    " target_bumper_thickness_m=0.0016" \
+    " target_bumper_density_kg_per_m3=2700.0" \
+    " target_bumper_spacing_m=0.1 target_wall_yield_stress_ksi=40.0" \
+    " target_brinell_hardness=95.0 target_density_kg_per_m3=2700.0" \
+    " target_speed_of_sound_m_per_s=5100.0" \
+    " target_monolithic_thickness_m=0.02\n" \
+    EFF_EPISODE EFF_ACTION \
+    "    observe effect rock as kin\n" \
+    "    on_step\n" \
+    "        engage rock at mover\n" \
+    "    end\n" \
+    "    objective\n" \
+    "        reward kin_effect\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+static const char *const SWARM_N2_KFL    = EFF_SWARM_N_KFL("EFFN2", "2");
+static const char *const SWARM_N12_KFL   = EFF_SWARM_N_KFL("EFFN12", "12");
+static const char *const SWARM_N5000_KFL = EFF_SWARM_N_KFL("EFFN5000", "5000");
+
+static void gate_swarm_count_(void)
+{
+    double n2[KIN_N], n12[KIN_N], n5000[KIN_N];
+    char so[512];
+
+    build_(SWARM_N2_KFL, "n2");
+    build_(SWARM_N12_KFL, "n12");
+    build_(SWARM_N5000_KFL, "n5000");
+    so_path_(so, sizeof so, "n2");
+    run_obs_(so, EFF_LAND_STEP, 0.0, n2, KIN_N);
+    so_path_(so, sizeof so, "n12");
+    run_obs_(so, EFF_LAND_STEP, 0.0, n12, KIN_N);
+    so_path_(so, sizeof so, "n5000");
+    run_obs_(so, EFF_LAND_STEP, 0.0, n5000, KIN_N);
+
+    ASSERT(n2[2] == 1.0 && n12[2] == 1.0 && n5000[2] == 1.0);
+
+    /* The momentum is the landed total's, so it does not move with the
+     * count. An arm that only asked for a difference somewhere would
+     * pass on a count that wrongly changed this too. */
+    if (n2[1] != n12[1] || n2[1] != n5000[1]) {
+        fprintf(stderr, "FAIL: the transferred momentum moved with the "
+                "release count: %.17g, %.17g, %.17g at equal total "
+                "mass\n", n2[1], n12[1], n5000[1]);
+        exit(1);
+    }
+
+    /* The penetration depth is a unit's, so it falls as the release is
+     * divided further. */
+    if (!(n2[10] > n12[10] && n12[10] > n5000[10])) {
+        fprintf(stderr, "FAIL: the penetration depth did not fall with "
+                "the release count: %.17g, %.17g, %.17g\n",
+                n2[10], n12[10], n5000[10]);
+        exit(1);
+    }
+
+    /* And far enough down, a unit stops getting through the shield,
+     * which moves the delivered energy with it. */
+    if (!(n2[8] == 1.0 && n5000[8] == 0.0)) {
+        fprintf(stderr, "FAIL: dividing the release into 5000 units did "
+                "not stop it perforating: %.17g against %.17g at two "
+                "units\n", n5000[8], n2[8]);
+        exit(1);
+    }
+    if (!(n5000[11] < n2[11])) {
+        fprintf(stderr, "FAIL: a release that no longer perforates "
+                "delivered %.17g against %.17g\n", n5000[11], n2[11]);
+        exit(1);
+    }
+
+    /* The critical diameter does not move, and that is not an
+     * oversight. The ballistic-limit equation takes the projectile's
+     * density and not its size, so the threshold a unit is compared
+     * against is the same for every division of one release; what
+     * moves is the unit's own diameter on the other side of that
+     * comparison. Asserted so that a change making it move would be
+     * noticed rather than welcomed. */
+    if (n2[9] != n12[9] || n2[9] != n5000[9]) {
+        fprintf(stderr, "FAIL: the critical diameter moved with the "
+                "release count: %.17g, %.17g, %.17g; the ballistic-limit "
+                "equation does not take the projectile's size\n",
+                n2[9], n12[9], n5000[9]);
+        exit(1);
+    }
+    g_arms += 4;
+    printf("  the release count decides the unit: at equal total mass "
+           "the increment holds at %.9g m/s and the critical diameter at "
+           "%.9g m, while the penetration falls %.6g, %.6g, %.6g over "
+           "counts 2, 12 and 5000, perforation stops, and the delivered "
+           "energy falls from %.6g to %.6g J\n",
+           n2[1], n2[9], n2[10], n12[10], n5000[10], n2[11], n5000[11]);
+}
+
 /* ---- Gate 6e: the bumper's thickness is its own key ------------------ */
 
 /* The impact analysis takes the rear wall's thickness and the coupling
@@ -2221,6 +2339,7 @@ int main(void)
     gate_swarm_();
     gate_silhouette_();
     gate_increment_arithmetic_();
+    gate_swarm_count_();
     gate_bumper_key_();
     gate_effect_direction_();
     gate_components_move_();
