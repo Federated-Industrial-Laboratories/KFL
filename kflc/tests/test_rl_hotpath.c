@@ -286,7 +286,8 @@ static const char *const HP_COLL_ASM =
     "end\n";
 
 /* Every payload kind this surface binds, over craft that carry
- * vehicles, with an engagement of each effector inside the step body.
+ * vehicles, with an engagement of each of the four effectors inside
+ * the step body.
  * The information state is what this gate began as: its push is the
  * tier's one function that allocates outside a constructor, and it
  * runs once per sub-advance of every step inside the window. The
@@ -343,6 +344,19 @@ static const char *const HP_PAY_KFL =
     " pointing_jitter_rad=1.0e-6 rms_wavefront_m=5.0e-8"
     " plasma_attn_k=1.0 target_material=aluminum"
     " target_reflectivity=0.2\n"
+    /* The two countermeasure kinds, carried by the mover and aimed
+     * back at the watcher. Their engagements write into a per-step
+     * store indexed by (victim payload, protected craft), and that
+     * store is a fixed array inside the block the step already
+     * carries: what this measures for them is that the indexed write
+     * costs no allocation of its own, and that the victim's detection
+     * observe reading it costs none either. */
+    "    astro_payload jam body=mover kind=jammer mode=noise"
+    " p_j_w=200.0 g_j_db=10.0 freq_hz=1.0e10 bandwidth_hz=1.0e6"
+    " snr_threshold=10.0 radiator_temp_k=320.0\n"
+    "    astro_payload flare body=mover kind=decoy mode=active"
+    " dry_mass_kg=5.0 deploy_dv_mps=2.0 ir_match_quality=0.8"
+    " rcs_match_quality=0.7 accel_match_quality=0.1\n"
     "    episode\n"
     "        control_dt 0.5\n"
     "        horizon 12\n"
@@ -357,6 +371,8 @@ static const char *const HP_PAY_KFL =
     "        observe track picture of drifter modality=ir as trk2\n"
     "        observe effect gun as kin\n"
     "        observe effect torch as las\n"
+    "        observe effect jam as ew\n"
+    "        observe effect flare as dec\n"
     "    end\n"
     "    agent quarry\n"
     "        action dodge box -1.0 1.0 default 0.0\n"
@@ -367,6 +383,8 @@ static const char *const HP_PAY_KFL =
     "        mover.vel_x = mover.vel_x + dodge\n"
     "        engage gun at mover\n"
     "        engage torch at drifter\n"
+    "        engage jam at watcher\n"
+    "        engage flare at watcher\n"
     "    end\n"
     "end\n"
     "end\n";

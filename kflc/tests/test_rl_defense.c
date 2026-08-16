@@ -162,12 +162,16 @@ static const char *const BOX_KFL =
     DEF_HEAD DEF_MOVER("calibration_box.k26asm", "0.05")
     DEF_PAYLOADS DEF_EPISODE DEF_AGENTS;
 
-/* The same world carrying every payload kind this grammar binds, the
- * two effectors included, with an engagement of each in the step body.
- * The two arms that ask a question about the whole tier, the
+/* The same world carrying every payload kind this grammar binds, all
+ * four effectors included, with an engagement of each in the step body.
+ * The kinetic and directed-energy pair are carried by the watcher and
+ * aimed at the mover; the two countermeasures are carried by the mover
+ * and aimed back at the watcher, which is the direction a
+ * countermeasure is used in and which puts the whole tier in one
+ * program. The two arms that ask a question about the whole tier, the
  * single-generator rule and the determinism of the compiled artifact,
  * are driven against this rather than against the detection-only
- * fixture: a claim about the tier that leaves two of its kinds out is
+ * fixture: a claim about the tier that leaves four of its kinds out is
  * a claim about part of it. */
 #define DEF_EFFECTORS \
     "    astro_payload gun body=watcher kind=impactor pattern=swarm" \
@@ -180,7 +184,13 @@ static const char *const BOX_KFL =
     " wavelength_nm=1064.0 p_output_w=1.0e5 m_squared=1.2" \
     " pointing_jitter_rad=1.0e-6 rms_wavefront_m=5.0e-8" \
     " plasma_attn_k=1.0 target_material=aluminum" \
-    " target_reflectivity=0.2\n"
+    " target_reflectivity=0.2\n" \
+    "    astro_payload jam body=mover kind=jammer mode=noise" \
+    " p_j_w=200.0 g_j_db=10.0 freq_hz=1.0e10 bandwidth_hz=1.0e6" \
+    " snr_threshold=10.0 radiator_temp_k=320.0\n" \
+    "    astro_payload flare body=mover kind=decoy mode=active" \
+    " dry_mass_kg=5.0 deploy_dv_mps=2.0 ir_match_quality=0.8" \
+    " rcs_match_quality=0.7 accel_match_quality=0.1\n"
 
 #define DEF_AGENTS_ALL \
     "    agent hunter\n" \
@@ -192,6 +202,8 @@ static const char *const BOX_KFL =
     "        observe track picture of mover modality=radar as trk\n" \
     "        observe effect gun as kin\n" \
     "        observe effect torch as las\n" \
+    "        observe effect jam as ew\n" \
+    "        observe effect flare as dec\n" \
     "        objective\n" \
     "            reward hunter.ir_snr + hunter.kin_effect\n" \
     "        end\n" \
@@ -208,6 +220,8 @@ static const char *const BOX_KFL =
     "        mover.vel_x = mover.vel_x + dodge\n" \
     "        engage gun at mover\n" \
     "        engage torch at mover\n" \
+    "        engage jam at watcher\n" \
+    "        engage flare at watcher\n" \
     "    end\n" \
     "end\n" \
     "end\n"
@@ -1457,6 +1471,11 @@ static const char *const TIER_EVALS[] = {
  * could not see a call that should not have been made. */
 static const char *const TIER_RNG_ENTRIES[] = {
     "k26astro_swarm_sample_direction",
+    /* The chaff cloud's per-sample draw. Its mean cross-section is
+     * deterministic and is what the radar branch takes; this one takes
+     * a generator, and a null there is the mean rather than a draw, so
+     * the rule for it is that it is not called at all. */
+    "k26astro_chaff_sample_rcs",
     NULL
 };
 
@@ -1563,9 +1582,9 @@ static void gate_one_generator_(void)
      * cone but the cone axis, so the rule for it is that it is not
      * called rather than that it is called with a null. */
     int rng_seen = 0;
-    if (!no_rng_entry_(src, &rng_seen) || rng_seen != 1) {
+    if (!no_rng_entry_(src, &rng_seen) || rng_seen != 2) {
         fprintf(stderr, "FAIL: %d generator-taking tier entry point(s) "
-                "inspected, expected 1, and the artifact calls one of "
+                "inspected, expected 2, and the artifact calls one of "
                 "them\n", rng_seen);
         exit(1);
     }
@@ -1620,6 +1639,9 @@ static void gate_one_generator_(void)
            "caught\n");
     free(p2);
 
+    /* One perturbation per named entry point, since a loop proved to
+     * catch a hit on its first name is not proved to inspect its
+     * second. */
     run_or_die_("sed 's/^    double _kfl_frac = 1.0;$/"
                 "    double _kfl_frac = 1.0;\\n    (void)"
                 "k26astro_swarm_sample_direction;/' " WORK_DIR
@@ -1627,14 +1649,30 @@ static void gate_one_generator_(void)
     char *p4 = slurp_(WORK_DIR "/p4.cc");
     ASSERT(count_(p4, "k26astro_swarm_sample_direction") == 1);
     if (no_rng_entry_(p4, &rng_seen)) {
-        fprintf(stderr, "FAIL: a generator-taking tier entry point named "
-                "by the artifact was not caught\n");
+        fprintf(stderr, "FAIL: the swarm direction sampler named by the "
+                "artifact was not caught\n");
         exit(1);
     }
     free(p4);
     g_arms++;
-    printf("  perturbation: a generator-taking tier entry point named by "
-           "the artifact is caught\n");
+    printf("  perturbation: the swarm direction sampler named by the "
+           "artifact is caught\n");
+
+    run_or_die_("sed 's/^    double _kfl_frac = 1.0;$/"
+                "    double _kfl_frac = 1.0;\\n    (void)"
+                "k26astro_chaff_sample_rcs;/' " WORK_DIR
+                "/gen.cc > " WORK_DIR "/p5.cc");
+    char *p5 = slurp_(WORK_DIR "/p5.cc");
+    ASSERT(count_(p5, "k26astro_chaff_sample_rcs") == 1);
+    if (no_rng_entry_(p5, &rng_seen)) {
+        fprintf(stderr, "FAIL: the chaff cloud sampler named by the "
+                "artifact was not caught\n");
+        exit(1);
+    }
+    free(p5);
+    g_arms++;
+    printf("  perturbation: the chaff cloud sampler named by the "
+           "artifact is caught\n");
 
     run_or_die_("sed 's/^    double area = 0.0;$/"
                 "    double area = 0.0;\\n    { K26CRng r; "
