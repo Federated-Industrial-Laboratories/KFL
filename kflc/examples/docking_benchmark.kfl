@@ -69,16 +69,19 @@
 # closing anyway. At the hold point the ceiling asks for less than
 # half of what the brakes could stop.
 #
-# The remaining terms are the four alignment residuals and their four
-# rates, each weighted by the reciprocal of the limit it meets
-# first, so that each costs about one unit of reward per step at
+# What is left is the alignment. The lateral offset, the roll
+# offset, the lateral rate, the pitch and yaw rate and the roll rate
+# are each weighted by the reciprocal of the limit the envelope sets
+# for it, so that each costs about one unit of reward per step at
 # that limit and the angular rates carry the largest coefficients.
-# For three of the residuals and all four rates the limit it meets
-# first is the envelope's own, and that is what makes the reward and
-# the capture test agree about which residual is the binding one.
+# That is what makes the reward and the capture test agree about
+# which residual is the binding one. The closing rate is not among
+# them because the corridor already holds it, and the range still to
+# run is not among them because the envelope sets it no limit.
 #
-# Pitch and yaw are the exception, and the reason is that the port
-# is not at the centre of mass. It sits 3.75 m ahead of it, so an
+# The pitch and yaw offset is the one weighted against a limit the
+# envelope does not state, and the reason is that the port is not at
+# the centre of mass. It sits 3.75 m ahead of it, so an
 # attitude error swings the port sideways and spends the lateral
 # budget as surely as a translation does. The angle whose swing
 # alone spends all 0.10 m of that budget is asin(0.10 / 3.75), which
