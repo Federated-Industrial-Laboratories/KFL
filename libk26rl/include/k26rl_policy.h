@@ -110,7 +110,19 @@
  * working memory the load allocated, so one loaded policy is
  * evaluated by one thread at a time; concurrent evaluation loads one
  * policy per thread, which is the stepping surface's handle rule
- * applied to the same kind of object. */
+ * applied to the same kind of object.
+ *
+ * What a caller working to a deadline can rely on. An evaluation
+ * allocates nothing, performs no I/O and takes no lock, so what it
+ * costs does not depend on what the rest of the process has been
+ * doing. The work is a fixed count of multiplications and additions
+ * set by the policy's shape alone, so the cost grows in proportion to
+ * the parameter count and a policy can be sized against a control
+ * period before it is trained. The first evaluations after a load are
+ * dearer than the ones that follow, because they are the ones that
+ * page the weights in and fill the caches, so a caller with a deadline
+ * evaluates once before its first period rather than paying that
+ * inside one. */
 #ifndef K26RL_POLICY_H
 #define K26RL_POLICY_H
 

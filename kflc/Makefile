@@ -327,8 +327,8 @@ $(RL_ATT_TEST): tests/test_rl_attitude.c $(RL_GATE_DEPS) \
 # artifact stop agreeing bit for bit. This gate measures the decision
 # across repetition, history, arrival order, elapsed wall time and
 # separate processes; measures the rule against the bound it claims,
-# on both sides of it; and measures the divergence it was built to
-# remove.
+# on both sides of it; and measures what the subdivision is worth on a
+# tumble, which is four decades of conserved angular momentum.
 #
 # The rule is the only symbol in its own translation unit inside the
 # attitude library's archive, so a red control that defines that
@@ -430,6 +430,23 @@ $(RL_POLICY_TEST): tests/test_rl_policy.c tests/policy_fixture.h \
                    ../libk26rl/libk26rl.a
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
+
+# What one decision costs. A controller running against a wall clock
+# has a fixed budget per decision, and the policy's own evaluation is
+# what fills it, so the cost is measured here as a distribution rather
+# than as an average and held against that budget. The link wraps the
+# allocator entry points, which is what lets the gate show that a
+# decision allocates nothing: without the wrap the arm would be
+# counting nothing and would pass whatever the evaluator did. The gate
+# needs no compiled world, only the record library.
+RL_POLICY_LATENCY_TEST = tests/test_rl_policy_latency
+$(RL_POLICY_LATENCY_TEST): tests/test_rl_policy_latency.c \
+                   ../libk26rl/include/k26rl_policy.h \
+                   ../libk26rl/include/k26rl_digest.h \
+                   ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free \
+	    ../libk26rl/libk26rl.a -lm
 
 RL_TAP_TEST = tests/test_rl_tap
 $(RL_TAP_TEST): tests/test_rl_tap.c $(RL_GATE_DEPS) \
@@ -593,7 +610,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -623,7 +640,7 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	          $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) \
 	          $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) \
-	          $(RL_POLICY_TEST); do \
+	          $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -743,5 +760,6 @@ clean:
 	      $(ATT_SUBSTEP_TEST) $(ATT_SUBSTEP_RED) \
 	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
+	      $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) \
 	      tests/bench_parse
 	rm -rf bin
