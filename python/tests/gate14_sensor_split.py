@@ -40,10 +40,11 @@ two channels of one kind, a pairing named from one end only, and
 ground truth naming no measurement), and the untagged spec an older
 artifact publishes, whose channels are all measurements.
 
-Against the policy exporter: the declared observation slice is the
-agent's measured run, and an agent whose measured channels are not
-contiguous is refused by name rather than exported with a slice that
-would feed the inference tier the truth.
+Against the policy exporter: the channels it declares are the agent's
+measured ones and no others, interleaved with ground-truth channels
+or not, and an agent with no measured channel at all is refused by
+name rather than exported with a list that would feed the inference
+tier the truth.
 
 Skips (77) when the built compiler, the stack archives, or gymnasium
 are absent. The multi-agent arms need pettingzoo, which is optional;
@@ -558,26 +559,56 @@ def main():
 
     # ---- 8. what the exporter declares -------------------------------
     from k26rl import sb3
+    from k26rl import policy as k26policy
 
-    g.check(sb3._policy_slice(spec, 0, 0, 5) == (0, 5),
-            "the exporter declares %s for a slice whose measured "
-            "channels lead it" % (sb3._policy_slice(spec, 0, 0, 5),))
-    g.check(sb3._policy_slice(spec, 0, 10, 5) == (10, 5),
-            "the exporter declares %s for a slice of measured "
-            "channels" % (sb3._policy_slice(spec, 0, 10, 5),))
+    g.check(sb3._policy_channels(spec, 0, 0, 5) == [0, 1, 2, 3, 4],
+            "the exporter names %s for a slice whose measured "
+            "channels lead it" % (sb3._policy_channels(spec, 0, 0, 5),))
+    g.check(sb3._policy_channels(spec, 0, 10, 5) == [10, 11, 12, 13, 14],
+            "the exporter names %s for a slice of measured "
+            "channels" % (sb3._policy_channels(spec, 0, 10, 5),))
+    # The whole vector: two runs of measured channels with the truth
+    # between them, which no offset and width describes and which the
+    # exporter now names channel by channel.
+    interleaved = sb3._policy_channels(spec, 0, 0, 15)
+    g.check(interleaved == [0, 1, 2, 3, 4, 10, 11, 12, 13, 14],
+            "the exporter names %s for an agent whose measured "
+            "channels are interleaved with ground-truth ones"
+            % (interleaved,))
+    arms += 3
+
+    # And a file carrying that list says so: the header field counts
+    # the channels and the body names them, so what a reader gathers
+    # is the measured half and nothing beside it.
+    written = k26policy.encode(
+        [k26policy.Layer([[0.5] * len(interleaved)], [0.0], "tanh")],
+        obs_total=15, act_total=1, obs_offset=0, obs_width=15,
+        obs_channels=interleaved, provenance="sensor gate")
+    count, = struct.unpack_from("<I", written, 76)
+    g.check(count == len(interleaved),
+            "the written policy declares %d channels for a list of %d"
+            % (count, len(interleaved)))
+    body = 100 + len("sensor gate")
+    listed = list(struct.unpack_from("<%dI" % count, written, body))
+    g.check(listed == interleaved,
+            "the written policy names %s where the exporter named %s"
+            % (listed, interleaved))
+    arms += 2
+
+    # An agent with nothing measured has nothing a policy may read,
+    # and that is a refusal rather than an empty list.
     try:
-        sb3._policy_slice(spec, 0, 0, 15)
+        sb3._policy_channels(spec, 0, 5, 5)
     except K26RlError as exc:
-        g.check("not one contiguous run" in str(exc),
+        g.check("no measured observation channel" in str(exc),
                 "the exporter's refusal reads %r" % str(exc))
     else:
         g.check(False,
-                "the exporter declared a slice for measured channels "
-                "the format cannot name, which would have the "
-                "inference tier feed a policy the ground truth")
-    arms += 3
-    print("%s: the exporter declares the measured run and refuses the "
-          "slice it cannot name" % GATE)
+                "the exporter named channels for an agent whose slice "
+                "carries none a policy may read")
+    arms += 1
+    print("%s: the exporter names the measured channels, interleaved "
+          "or not, and writes them into the file" % GATE)
 
     print("%s: %d arms" % (GATE, arms))
     g.ok(GATE)

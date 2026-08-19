@@ -252,12 +252,18 @@ static unsigned char *build_policy_(uint32_t obs, uint32_t act,
     emit_u32_(act);             /* action total */
     emit_u32_(0u);              /* observation slice offset */
     emit_u32_(obs);             /* observation slice width */
+    emit_u32_(obs);             /* observation channels read */
     emit_u32_(0u);              /* action slice offset */
     emit_u32_(act);             /* action slice width */
     emit_u32_(layers);
     emit_u32_((uint32_t)(sizeof PROVENANCE - 1u));
     emit_u32_(0u);              /* reserved */
     emit_(PROVENANCE, sizeof PROVENANCE - 1u);
+    /* This policy reads its whole slice, so its channel list is that
+     * slice written out. The timing arms are about what an evaluation
+     * costs, and a gather over a list is what one costs now. */
+    for (i = 0; i < obs; i++)
+        emit_u32_(i);
 
     in_width = obs;
     for (i = 0; i < layers; i++) {

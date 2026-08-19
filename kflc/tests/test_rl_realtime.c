@@ -263,12 +263,18 @@ static unsigned char *build_policy_(const Slices *sl, uint32_t hidden,
     emit_u32_(sl->act_total);
     emit_u32_(sl->obs_offset);
     emit_u32_(sl->obs_width);
+    emit_u32_(sl->obs_width);           /* observation channels read */
     emit_u32_(sl->act_offset);
     emit_u32_(sl->act_width);
     emit_u32_(layers);
     emit_u32_((uint32_t)(sizeof PROVENANCE - 1u));
     emit_u32_(0u);                      /* reserved */
     emit_(PROVENANCE, sizeof PROVENANCE - 1u);
+    /* This world declares no sensor, so every channel of the agent's
+     * slice is a measurement and the policy reads all of them; the
+     * list is that slice, channel by channel. */
+    for (i = 0; i < sl->obs_width; i++)
+        emit_u32_(sl->obs_offset + i);
 
     in_width = sl->obs_width;
     for (i = 0; i < layers; i++) {

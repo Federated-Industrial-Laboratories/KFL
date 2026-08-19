@@ -240,6 +240,13 @@ typedef struct {
      * entry the emitter writes so a qualified name arrives whole. */
     char     chan_names[64][96];
     int      n_chan_names;
+    /* Per channel, what it carries and what it is paired with. A
+     * channel the blob publishes no source tag for is a measurement
+     * with nothing beside it, which is what an artifact declaring no
+     * sensor publishes for every channel it has. */
+    uint16_t sources[64];
+    uint32_t pairs[64];
+    int      n_sources;
 } RlSpecView;
 
 static inline uint32_t rl_get_u32_(const uint8_t *p)
@@ -270,6 +277,10 @@ static inline void rl_parse_spec_(const uint8_t *blob, uint32_t len,
                                   RlSpecView *v)
 {
     memset(v, 0, sizeof *v);
+    for (int i = 0; i < 64; i++) {
+        v->sources[i] = K26RL_OBS_SOURCE_MEASURED;
+        v->pairs[i] = K26RL_OBS_PAIR_NONE;
+    }
     uint32_t off = 0;
     while (off + 6 <= len) {
         uint16_t tag = rl_get_u16_(blob + off);
@@ -319,6 +330,15 @@ static inline void rl_parse_spec_(const uint8_t *blob, uint32_t len,
             }
             break;
         }
+        case K26RL_TAG_OBS_CHANNEL_SOURCE: {
+            uint32_t ch = rl_get_u32_(val);
+            if (ch < 64 && l >= 10) {
+                v->sources[ch] = rl_get_u16_(val + 4);
+                v->pairs[ch] = rl_get_u32_(val + 6);
+                if ((int)ch + 1 > v->n_sources) v->n_sources = (int)ch + 1;
+            }
+            break;
+        }
         case K26RL_TAG_EPISODE_FLAGS: v->episode_flags = rl_get_u32_(val); break;
         case K26RL_TAG_OBS_CHANNEL_MODE: {
             uint32_t ch = rl_get_u32_(val);
@@ -344,6 +364,28 @@ static inline void rl_parse_spec_(const uint8_t *blob, uint32_t len,
         off += 6 + l;
     }
     ASSERT(off == len);
+}
+
+/* The measured channels of [offset, offset + count), ascending: the
+ * channels of that slice a policy is entitled to read. Read out of
+ * the blob's own source tags, so a gate comparing a policy against
+ * this is comparing it against the artifact rather than against
+ * whatever the policy reader made of the same bytes. Returns how many
+ * were written. */
+static inline uint32_t rl_measured_channels_(const RlSpecView *v,
+                                             uint32_t offset, uint32_t count,
+                                             uint32_t *out, uint32_t cap)
+{
+    uint32_t n = 0, c;
+
+    for (c = offset; c < offset + count; c++) {
+        ASSERT(c < 64);
+        if (v->sources[c] != K26RL_OBS_SOURCE_MEASURED)
+            continue;
+        ASSERT(n < cap);
+        out[n++] = c;
+    }
+    return n;
 }
 
 /* Whole-file bitwise comparison; returns 1 when equal. */

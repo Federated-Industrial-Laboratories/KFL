@@ -1,11 +1,21 @@
 """Writer for the trained-policy file format.
 
 A ``.k26pol`` file holds a feedforward policy: the weights that turn
-one agent's observation slice into that agent's action slice, plus
-the declarations a loader needs to check the file against the world
-it was trained on and to reproduce its arithmetic. The layout, the
-evaluation rule and the identity rule are the ones the C header
-states; this module writes exactly those bytes and reads nothing.
+the observation channels one agent reads into that agent's action
+slice, plus the declarations a loader needs to check the file against
+the world it was trained on and to reproduce its arithmetic. The
+layout, the evaluation rule and the identity rule are the ones the C
+header states; this module writes exactly those bytes and reads
+nothing.
+
+A policy names its input channel by channel. An agent's observation
+slice is one run of the environment's observation vector, but a world
+that routes an observe through a sensor puts the measured channel a
+policy reads and the ground-truth channel beside it in that run, and
+with more than one such observe the two kinds interleave. So the file
+carries the list of channels the network takes and the order it takes
+them in, and the slice stays beside it as what the world gives the
+agent.
 
 It knows nothing about any training framework. It takes plain
 numbers, in the order the format declares them, and returns bytes.
@@ -30,8 +40,8 @@ from ._errors import K26RlError
 
 MAGIC = b"K26POL\0\0"
 SUFFIX = ".k26pol"
-FORMAT_VERSION = 1
-HEADER_BYTES = 96
+FORMAT_VERSION = 2
+HEADER_BYTES = 100
 DIGEST_OFFSET = 16
 DIGEST_BYTES = 32
 
@@ -96,9 +106,9 @@ class Layer:
 
 
 class Standardisation:
-    """The affine standardisation applied to the observation slice
-    before the first layer: per channel a mean and a variance, then
-    one epsilon and one clip shared by every channel.
+    """The affine standardisation applied before the first layer: per
+    channel the policy reads a mean and a variance, then one epsilon
+    and one clip shared by every channel.
 
     These numbers are part of the policy, not of the environment. The
     network's input is not the world's observation, so a file that
@@ -177,23 +187,36 @@ def _bounds(action_bounds, act_width):
 
 
 def encode(layers, agent_count=1, agent_index=0, obs_total=None,
-           act_total=None, obs_offset=0, act_offset=0, standardisation=None,
-           log_std=None, action_bounds=None, provenance=""):
+           act_total=None, obs_offset=0, obs_width=None, obs_channels=None,
+           act_offset=0, standardisation=None, log_std=None,
+           action_bounds=None, provenance=""):
     """The file's bytes.
 
     Args:
         layers: the dense layers in evaluation order. The first
-            layer's input width is the agent's observation slice
-            width and the last layer's output width is its action
+            layer's input width is how many channels the policy
+            reads and the last layer's output width is its action
             slice width, so neither is restated and neither can
             disagree with the weights.
         agent_count: agents the artifact declares.
         agent_index: which of them this policy drives.
         obs_total: observation doubles per environment; defaults to
-            the policy's own observation slice width, which is the
+            the agent's observation slice width, which is the
             single-agent case.
-        act_total: action doubles per environment; defaults likewise.
+        act_total: action doubles per environment; defaults to the
+            policy's own action slice width, likewise.
         obs_offset: where the agent's observation slice starts.
+        obs_width: how wide that slice is, ground-truth channels
+            included. Defaults to the span the channel list covers
+            from ``obs_offset``, which is the slice exactly when its
+            last channel is one the policy reads; a caller holding
+            the artifact's spec passes the width the artifact
+            publishes.
+        obs_channels: the channels of that slice the policy reads, in
+            the order it reads them. Defaults to the whole slice from
+            ``obs_offset``, which is what a world declaring no sensor
+            gives an agent. Each entry lies inside the slice and each
+            appears once.
         act_offset: where the agent's action slice starts.
         standardisation: a :class:`Standardisation`, or None.
         log_std: per action channel log standard deviation of the
@@ -222,25 +245,51 @@ def encode(layers, agent_count=1, agent_index=0, obs_total=None,
             _refuse("layer %d takes %d inputs but layer %d gives %d outputs"
                     % (i, layers[i].in_width, i - 1, layers[i - 1].out_width))
 
-    obs_width = layers[0].in_width
+    channel_count = layers[0].in_width
     act_width = layers[-1].out_width
-    obs_total = obs_width if obs_total is None else int(obs_total)
-    act_total = act_width if act_total is None else int(act_total)
     agent_count = int(agent_count)
     agent_index = int(agent_index)
     obs_offset = int(obs_offset)
     act_offset = int(act_offset)
+    if obs_offset < 0:
+        _refuse("the observation slice starts at %d" % obs_offset)
+    if obs_channels is None:
+        channels = list(range(obs_offset, obs_offset + channel_count))
+    else:
+        channels = [int(c) for c in obs_channels]
+    if len(channels) != channel_count:
+        _refuse("the policy takes %d inputs and reads %d observation "
+                "channels" % (channel_count, len(channels)))
+    obs_width = (max(channels) + 1 - obs_offset if obs_width is None
+                 else int(obs_width))
+    obs_total = obs_offset + obs_width if obs_total is None else int(obs_total)
+    act_total = act_width if act_total is None else int(act_total)
+    _check_width(obs_width, "observation slice width")
     _check_width(obs_total, "observation total")
     _check_width(act_total, "action total")
     if agent_count < 1 or not 0 <= agent_index < agent_count:
         _refuse("agent index %d is outside an agent count of %d"
                 % (agent_index, agent_count))
-    if obs_offset < 0 or obs_offset + obs_width > obs_total:
+    if obs_offset + obs_width > obs_total:
         _refuse("observation slice [%d, %d) runs past the total %d"
                 % (obs_offset, obs_offset + obs_width, obs_total))
     if act_offset < 0 or act_offset + act_width > act_total:
         _refuse("action slice [%d, %d) runs past the total %d"
                 % (act_offset, act_offset + act_width, act_total))
+    # A repeated channel would give the network two inputs from one
+    # measurement, and one outside the slice would have the policy
+    # read another agent's observation. Both are refused here rather
+    # than written for a loader to refuse.
+    seen = set()
+    for channel in channels:
+        if not obs_offset <= channel < obs_offset + obs_width:
+            _refuse("the policy reads observation channel %d, outside the "
+                    "slice [%d, %d) it declares"
+                    % (channel, obs_offset, obs_offset + obs_width))
+        if channel in seen:
+            _refuse("the policy reads observation channel %d twice"
+                    % channel)
+        seen.add(channel)
 
     flags = 0
     body = bytearray()
@@ -252,6 +301,8 @@ def encode(layers, agent_count=1, agent_index=0, obs_total=None,
                 % (len(text), MAX_PROVENANCE))
     body += text
 
+    body += struct.pack("<%dI" % channel_count, *channels)
+
     for layer in layers:
         body += struct.pack("<IIHH", layer.in_width, layer.out_width,
                             layer.activation, 0)
@@ -260,13 +311,13 @@ def encode(layers, agent_count=1, agent_index=0, obs_total=None,
         body += struct.pack("<%dd" % layer.out_width, *layer.biases)
 
     if standardisation is not None:
-        if len(standardisation.mean) != obs_width:
-            _refuse("standardisation declares %d channels for an "
-                    "observation slice of %d"
-                    % (len(standardisation.mean), obs_width))
+        if len(standardisation.mean) != channel_count:
+            _refuse("standardisation declares %d channels for a policy "
+                    "that reads %d"
+                    % (len(standardisation.mean), channel_count))
         flags |= FLAG_STANDARDISE
-        body += struct.pack("<%dd" % obs_width, *standardisation.mean)
-        body += struct.pack("<%dd" % obs_width, *standardisation.variance)
+        body += struct.pack("<%dd" % channel_count, *standardisation.mean)
+        body += struct.pack("<%dd" % channel_count, *standardisation.variance)
         body += struct.pack("<dd", standardisation.epsilon,
                             standardisation.clip)
 
@@ -290,9 +341,10 @@ def encode(layers, agent_count=1, agent_index=0, obs_total=None,
     header = bytearray(MAGIC)
     header += struct.pack("<II", FORMAT_VERSION, HEADER_BYTES)
     header += b"\0" * DIGEST_BYTES
-    header += struct.pack("<IIIIIIIIIII", flags, agent_count, agent_index,
+    header += struct.pack("<IIIIIIIIIIII", flags, agent_count, agent_index,
                           obs_total, act_total, obs_offset, obs_width,
-                          act_offset, act_width, len(layers), len(text))
+                          channel_count, act_offset, act_width, len(layers),
+                          len(text))
     header += struct.pack("<I", 0)
     if len(header) != HEADER_BYTES:
         raise AssertionError("policy header assembled to %d bytes, not %d"

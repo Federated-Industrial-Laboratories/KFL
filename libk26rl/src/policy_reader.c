@@ -38,11 +38,12 @@
 #define POL_OFF_ACT_TOTAL   64
 #define POL_OFF_OBS_OFFSET  68
 #define POL_OFF_OBS_WIDTH   72
-#define POL_OFF_ACT_OFFSET  76
-#define POL_OFF_ACT_WIDTH   80
-#define POL_OFF_LAYERS      84
-#define POL_OFF_PROVENANCE  88
-#define POL_OFF_RESERVED    92
+#define POL_OFF_OBS_CHANS   76
+#define POL_OFF_ACT_OFFSET  80
+#define POL_OFF_ACT_WIDTH   84
+#define POL_OFF_LAYERS      88
+#define POL_OFF_PROVENANCE  92
+#define POL_OFF_RESERVED    96
 
 /* Per-layer record bytes before the weights. */
 #define POL_LAYER_HEADER 12
@@ -58,8 +59,10 @@ typedef struct {
 struct K26RlPolicy {
     K26RlPolicyInfo info;
     char     *provenance;   /* terminated copy; never null once loaded */
+    uint32_t *channels;     /* the observation channels, in file order */
     PolLayer *layers;
     double   *reals;        /* parameters, statistics, bounds, scratch */
+    uint64_t  gather_at;    /* where act_env gathers the channels it reads */
     uint64_t  mean_at;
     uint64_t  scale_at;     /* sqrt(variance + epsilon), one per input */
     uint64_t  log_std_at;
@@ -118,6 +121,13 @@ const char *k26rl_policy_status_str(K26RlPolicyStatus status)
     case K26RL_POLICY_E_ACT_BOUNDS:  return "the policy's action clamp "
                                             "reaches outside the artifact's "
                                             "declared bounds";
+    case K26RL_POLICY_E_CHANNELS:    return "the observation channel list "
+                                            "repeats a channel or leaves the "
+                                            "declared observation slice";
+    case K26RL_POLICY_E_OBS_CHANNELS: return "the observation channels the "
+                                            "policy reads are not the ones "
+                                            "the artifact publishes for it, "
+                                            "or not in that order";
     }
     return "unknown policy status";
 }
@@ -153,11 +163,46 @@ static void pol_digest_(const uint8_t *b, uint64_t len,
     k26rl_sha256_final(&s, out);
 }
 
+/* Decode and check the observation channel list. Every entry must
+ * lie inside the agent's declared slice and appear once: a repeated
+ * channel would give the network two inputs from one measurement and
+ * two standardisation entries for it, and a channel outside the slice
+ * would have the policy read another agent's observation. The marker
+ * array keeps that to one pass over the list; a file declares its own
+ * channel count, so a hostile one must not be able to buy the square
+ * of the ceiling in comparisons. */
+static K26RlPolicyStatus pol_channels_(const uint8_t *bytes, uint64_t at,
+                                       const K26RlPolicyInfo *in,
+                                       uint32_t *out)
+{
+    unsigned char *seen;
+    K26RlPolicyStatus st = K26RL_POLICY_OK;
+    uint32_t i;
+
+    seen = calloc((size_t)in->obs_width, 1u);
+    if (!seen)
+        return K26RL_POLICY_E_MEMORY;
+    for (i = 0; i < in->obs_channel_count; i++) {
+        uint32_t c = k26rl_get_u32_(bytes + at + (uint64_t)i * 4u);
+
+        if (c < in->obs_offset || c - in->obs_offset >= in->obs_width ||
+            seen[c - in->obs_offset]) {
+            st = K26RL_POLICY_E_CHANNELS;
+            break;
+        }
+        seen[c - in->obs_offset] = 1u;
+        out[i] = c;
+    }
+    free(seen);
+    return st;
+}
+
 static void pol_free_(K26RlPolicy *p)
 {
     if (!p)
         return;
     free(p->provenance);
+    free(p->channels);
     free(p->layers);
     free(p->reals);
     free(p);
@@ -168,6 +213,7 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
 {
     K26RlPolicy *p;
     K26RlPolicyInfo *in;
+    K26RlPolicyStatus st;
     uint8_t computed[K26RL_SHA256_BYTES];
     uint64_t at, reals_n, params_n, scratch_w;
     uint32_t i;
@@ -209,6 +255,7 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
     in->act_total         = k26rl_get_u32_(bytes + POL_OFF_ACT_TOTAL);
     in->obs_offset        = k26rl_get_u32_(bytes + POL_OFF_OBS_OFFSET);
     in->obs_width         = k26rl_get_u32_(bytes + POL_OFF_OBS_WIDTH);
+    in->obs_channel_count = k26rl_get_u32_(bytes + POL_OFF_OBS_CHANS);
     in->act_offset        = k26rl_get_u32_(bytes + POL_OFF_ACT_OFFSET);
     in->act_width         = k26rl_get_u32_(bytes + POL_OFF_ACT_WIDTH);
     in->layer_count       = k26rl_get_u32_(bytes + POL_OFF_LAYERS);
@@ -224,6 +271,7 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
     if (in->layer_count > K26RL_POLICY_MAX_LAYERS ||
         in->provenance_bytes > K26RL_POLICY_MAX_PROVENANCE ||
         !pol_width_ok_(in->obs_width) || !pol_width_ok_(in->act_width) ||
+        !pol_width_ok_(in->obs_channel_count) ||
         !pol_width_ok_(in->obs_total) || !pol_width_ok_(in->act_total))
         POL_FAIL_(K26RL_POLICY_E_SIZE);
     if (in->agent_count < 1u || in->agent_index >= in->agent_count)
@@ -231,6 +279,11 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
     if ((uint64_t)in->obs_offset + in->obs_width > (uint64_t)in->obs_total ||
         (uint64_t)in->act_offset + in->act_width > (uint64_t)in->act_total)
         POL_FAIL_(K26RL_POLICY_E_SLICE);
+    /* Distinct channels of one slice cannot outnumber the slice, so a
+     * count above its width is refused before a byte of the list is
+     * read. */
+    if (in->obs_channel_count > in->obs_width)
+        POL_FAIL_(K26RL_POLICY_E_CHANNELS);
 
     p->layers = calloc(in->layer_count, sizeof *p->layers);
     if (!p->layers)
@@ -243,8 +296,17 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
     at = (uint64_t)K26RL_POLICY_HEADER_BYTES + in->provenance_bytes;
     if (at > len)
         POL_FAIL_(K26RL_POLICY_E_TRUNCATED);
+    if ((uint64_t)in->obs_channel_count * 4u > len - at)
+        POL_FAIL_(K26RL_POLICY_E_TRUNCATED);
+    p->channels = calloc(in->obs_channel_count, sizeof *p->channels);
+    if (!p->channels)
+        POL_FAIL_(K26RL_POLICY_E_MEMORY);
+    st = pol_channels_(bytes, at, in, p->channels);
+    if (st != K26RL_POLICY_OK)
+        POL_FAIL_(st);
+    at += (uint64_t)in->obs_channel_count * 4u;
     params_n = 0;
-    scratch_w = in->obs_width;
+    scratch_w = in->obs_channel_count;
     for (i = 0; i < in->layer_count; i++) {
         PolLayer *l = &p->layers[i];
         uint64_t n;
@@ -260,7 +322,7 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
             POL_FAIL_(K26RL_POLICY_E_SIZE);
         if (!pol_activation_known_(l->activation))
             POL_FAIL_(K26RL_POLICY_E_ACTIVATION);
-        if (l->in_width != (i == 0 ? in->obs_width
+        if (l->in_width != (i == 0 ? in->obs_channel_count
                                    : p->layers[i - 1].out_width))
             POL_FAIL_(K26RL_POLICY_E_LAYERS);
         n = (uint64_t)l->in_width * l->out_width + l->out_width;
@@ -281,13 +343,13 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
     p->mean_at = p->scale_at = p->log_std_at = 0;
     p->lower_at = p->upper_at = 0;
     if (in->flags & K26RL_POLICY_FLAG_STANDARDISE) {
-        uint64_t need = 2u * (uint64_t)in->obs_width + 2u;
+        uint64_t need = 2u * (uint64_t)in->obs_channel_count + 2u;
 
         if (need > (len - at) / 8u)
             POL_FAIL_(K26RL_POLICY_E_TRUNCATED);
         p->mean_at  = reals_n;
-        p->scale_at = reals_n + in->obs_width;
-        reals_n += 2u * (uint64_t)in->obs_width;
+        p->scale_at = reals_n + in->obs_channel_count;
+        reals_n += 2u * (uint64_t)in->obs_channel_count;
         at += need * 8u;
     }
     if (in->flags & K26RL_POLICY_FLAG_LOG_STD) {
@@ -312,6 +374,11 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
     p->scratch_a = reals_n;
     p->scratch_b = reals_n + scratch_w;
     reals_n += 2u * scratch_w;
+    /* Where the whole-vector entry point gathers the channels it
+     * reads. It is part of the load's allocation so that a decision
+     * on a deadline allocates nothing. */
+    p->gather_at = reals_n;
+    reals_n += in->obs_channel_count;
     p->reals = calloc((size_t)reals_n, sizeof *p->reals);
     p->provenance = calloc((size_t)in->provenance_bytes + 1u, 1u);
     if (!p->reals || !p->provenance)
@@ -320,8 +387,11 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
            in->provenance_bytes);
 
     /* Second pass: decode the reals, now that the walk has proved
-     * every one of them lies inside the file. */
-    at = (uint64_t)K26RL_POLICY_HEADER_BYTES + in->provenance_bytes;
+     * every one of them lies inside the file. It restarts at the
+     * first layer record, which is past the provenance text and the
+     * channel list both. */
+    at = (uint64_t)K26RL_POLICY_HEADER_BYTES + in->provenance_bytes +
+         (uint64_t)in->obs_channel_count * 4u;
     for (i = 0; i < in->layer_count; i++) {
         PolLayer *l = &p->layers[i];
         uint64_t n = (uint64_t)l->in_width * l->out_width + l->out_width;
@@ -336,19 +406,21 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
         double epsilon;
         uint32_t j;
 
-        for (j = 0; j < in->obs_width; j++)
+        for (j = 0; j < in->obs_channel_count; j++)
             p->reals[p->mean_at + j] = k26rl_get_f64_(bytes + at + j * 8u);
         epsilon = k26rl_get_f64_(bytes + at +
-                                 (uint64_t)2u * in->obs_width * 8u);
+                                 (uint64_t)2u * in->obs_channel_count * 8u);
         p->clip = k26rl_get_f64_(bytes + at +
-                                 ((uint64_t)2u * in->obs_width + 1u) * 8u);
+                                 ((uint64_t)2u * in->obs_channel_count + 1u) *
+                                 8u);
         if (!(epsilon >= 0.0) || !isfinite(epsilon))
             POL_FAIL_(K26RL_POLICY_E_STATISTICS);
         if (isnan(p->clip) || p->clip <= 0.0)
             POL_FAIL_(K26RL_POLICY_E_STATISTICS);
-        for (j = 0; j < in->obs_width; j++) {
+        for (j = 0; j < in->obs_channel_count; j++) {
             double var = k26rl_get_f64_(bytes + at +
-                                        ((uint64_t)in->obs_width + j) * 8u);
+                                        ((uint64_t)in->obs_channel_count + j) *
+                                        8u);
             double scale;
 
             if (!isfinite(p->reals[p->mean_at + j]) || !isfinite(var) ||
@@ -362,7 +434,7 @@ K26RlPolicyStatus k26rl_policy_parse(const uint8_t *bytes, uint64_t len,
                 POL_FAIL_(K26RL_POLICY_E_STATISTICS);
             p->reals[p->scale_at + j] = scale;
         }
-        at += ((uint64_t)2u * in->obs_width + 2u) * 8u;
+        at += ((uint64_t)2u * in->obs_channel_count + 2u) * 8u;
     }
     if (in->flags & K26RL_POLICY_FLAG_LOG_STD) {
         uint32_t j;
@@ -473,6 +545,16 @@ const char *k26rl_policy_provenance(const K26RlPolicy *policy,
     return policy->provenance;
 }
 
+const uint32_t *k26rl_policy_obs_channels(const K26RlPolicy *policy,
+                                          uint32_t *out_len)
+{
+    if (!policy)
+        return NULL;
+    if (out_len)
+        *out_len = policy->info.obs_channel_count;
+    return policy->channels;
+}
+
 const double *k26rl_policy_log_std(const K26RlPolicy *policy)
 {
     if (!policy || !(policy->info.flags & K26RL_POLICY_FLAG_LOG_STD))
@@ -518,6 +600,96 @@ static int pol_spec_bounds_(const uint8_t *spec, uint32_t spec_len,
         off += 6u + l;
     }
     return 0;
+}
+
+/* What the artifact says observation channel `channel` carries. A
+ * blob that publishes no source tag for it was written before the tag
+ * existed, and every channel of such an artifact is a measurement,
+ * which is also what an artifact declaring no sensor publishes
+ * explicitly. A source kind this version does not know is refused
+ * rather than assumed to be one of the two it does: guessing there
+ * would be guessing which channels a policy may read. */
+static K26RlPolicyStatus pol_spec_source_(const uint8_t *spec,
+                                          uint32_t spec_len,
+                                          uint32_t channel, uint16_t *out)
+{
+    uint32_t off = 0;
+
+    *out = K26RL_OBS_SOURCE_MEASURED;
+    while (off + 6u <= spec_len) {
+        uint16_t tag = k26rl_get_u16_(spec + off);
+        uint32_t l   = k26rl_get_u32_(spec + off + 2);
+
+        if ((uint64_t)off + 6u + l > (uint64_t)spec_len)
+            return K26RL_POLICY_E_SPEC;
+        if (tag == K26RL_TAG_OBS_CHANNEL_SOURCE && l == 10u &&
+            k26rl_get_u32_(spec + off + 6) == channel) {
+            uint16_t source = k26rl_get_u16_(spec + off + 10);
+
+            if (source != K26RL_OBS_SOURCE_MEASURED &&
+                source != K26RL_OBS_SOURCE_TRUTH)
+                return K26RL_POLICY_E_SPEC;
+            *out = source;
+            return K26RL_POLICY_OK;
+        }
+        off += 6u + l;
+    }
+    return K26RL_POLICY_OK;
+}
+
+/* The channels the policy reads against the channels the artifact
+ * publishes to it: the measured ones of the agent's slice, ascending.
+ * A count that disagrees and a position that disagrees are separate
+ * refusals of the same field, because a policy reading five of six
+ * channels and a policy reading the right five in the wrong order are
+ * different defects and a caller cannot act on a code that says only
+ * that something about the channels is wrong. */
+static K26RlPolicyStatus pol_check_channels_(const K26RlPolicy *policy,
+                                             const uint8_t *spec,
+                                             uint32_t spec_len,
+                                             uint32_t obs_offset,
+                                             uint32_t obs_width,
+                                             char *detail,
+                                             uint32_t detail_capacity)
+{
+    const uint32_t declared = policy->info.obs_channel_count;
+    uint32_t measured = 0, bad_at = 0, bad_channel = 0, c;
+    int saw_bad = 0;
+
+    for (c = obs_offset; c < obs_offset + obs_width; c++) {
+        uint16_t source;
+        K26RlPolicyStatus st = pol_spec_source_(spec, spec_len, c, &source);
+
+        if (st != K26RL_POLICY_OK)
+            return st;
+        if (source != K26RL_OBS_SOURCE_MEASURED)
+            continue;
+        if (!saw_bad && measured < declared &&
+            policy->channels[measured] != c) {
+            saw_bad = 1;
+            bad_at = measured;
+            bad_channel = c;
+        }
+        measured++;
+    }
+    if (measured != declared) {
+        if (detail && detail_capacity > 0)
+            snprintf(detail, (size_t)detail_capacity,
+                     "policy reads %lu observation channels, artifact "
+                     "publishes %lu measured channels for this agent",
+                     (unsigned long)declared, (unsigned long)measured);
+        return K26RL_POLICY_E_OBS_CHANNELS;
+    }
+    if (saw_bad) {
+        if (detail && detail_capacity > 0)
+            snprintf(detail, (size_t)detail_capacity,
+                     "policy reads observation channel %lu at position %lu, "
+                     "artifact publishes channel %lu there",
+                     (unsigned long)policy->channels[bad_at],
+                     (unsigned long)bad_at, (unsigned long)bad_channel);
+        return K26RL_POLICY_E_OBS_CHANNELS;
+    }
+    return K26RL_POLICY_OK;
 }
 
 static K26RlPolicyStatus pol_spec_view_(const uint8_t *spec, uint32_t spec_len,
@@ -655,6 +827,13 @@ K26RlPolicyStatus k26rl_policy_check_spec(const K26RlPolicy *policy,
                     in->obs_width, v.obs_width);
         return K26RL_POLICY_E_OBS_WIDTH;
     }
+    /* The slice agreeing does not make the input agree: the policy
+     * reads the measured channels of that slice, and which of them
+     * those are is the artifact's to say. */
+    st = pol_check_channels_(policy, spec, spec_len, v.obs_offset,
+                             v.obs_width, detail, detail_capacity);
+    if (st != K26RL_POLICY_OK)
+        return st;
     if (in->act_offset != v.act_offset) {
         pol_detail_(detail, detail_capacity, "action slice offset",
                     in->act_offset, v.act_offset);
@@ -720,7 +899,7 @@ K26RlPolicyStatus k26rl_policy_act(const K26RlPolicy *policy,
     y = policy->reals + policy->scratch_b;
 
     if (in->flags & K26RL_POLICY_FLAG_STANDARDISE) {
-        for (j = 0; j < in->obs_width; j++) {
+        for (j = 0; j < in->obs_channel_count; j++) {
             double v = (obs[j] - policy->reals[policy->mean_at + j]) /
                        policy->reals[policy->scale_at + j];
 
@@ -731,7 +910,7 @@ K26RlPolicyStatus k26rl_policy_act(const K26RlPolicy *policy,
             x[j] = v;
         }
     } else {
-        for (j = 0; j < in->obs_width; j++)
+        for (j = 0; j < in->obs_channel_count; j++)
             x[j] = obs[j];
     }
 
@@ -775,8 +954,19 @@ K26RlPolicyStatus k26rl_policy_act(const K26RlPolicy *policy,
 K26RlPolicyStatus k26rl_policy_act_env(const K26RlPolicy *policy,
                                        const double *env_obs, double *env_act)
 {
+    double *gathered;
+    uint32_t j;
+
     if (!policy || !env_obs || !env_act)
         return K26RL_POLICY_E_NULL;
-    return k26rl_policy_act(policy, env_obs + policy->info.obs_offset,
+    /* The channels the policy reads, in the order it reads them. The
+     * load proved every index lies inside the agent's slice and so
+     * inside the observation total, and the buffer is the policy's
+     * own, so the gather neither allocates nor reads outside the
+     * vector the caller passed. */
+    gathered = policy->reals + policy->gather_at;
+    for (j = 0; j < policy->info.obs_channel_count; j++)
+        gathered[j] = env_obs[policy->channels[j]];
+    return k26rl_policy_act(policy, gathered,
                             env_act + policy->info.act_offset);
 }

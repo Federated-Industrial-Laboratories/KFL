@@ -44,9 +44,12 @@ Anything the format cannot express is refused by name rather than
 approximated: state-dependent exploration, squashed output, discrete
 or mixed action spaces, non-flat observations, a feature extractor
 that is not the identity, a recurrent policy, an activation outside
-the format's closed list, and an artifact whose measured observation
-channels are not one contiguous run, which the format's single
-observation slice cannot name.
+the format's closed list, and an agent with no measured observation
+channel at all, which leaves a policy nothing it is allowed to read.
+
+Measured channels that interleave with ground-truth ones are not a
+refusal: the file names the channels a policy reads one by one, so a
+world that senses more than one thing exports like any other.
 """
 
 from . import policy as _policy
@@ -105,7 +108,7 @@ def _walk_sequential(net):
     return layers
 
 
-def _statistics(normaliser, obs_width):
+def _statistics(normaliser, input_width):
     """The observation standardisation from a running-statistics
     wrapper, or None when it standardises nothing."""
     if normaliser is None:
@@ -122,17 +125,18 @@ def _statistics(normaliser, obs_width):
                 "format's flat observation slice cannot express")
     rms = normaliser.obs_rms
     mean = list(rms.mean)
-    if len(mean) != obs_width:
+    if len(mean) != input_width:
         _refuse("the observation statistics carry %d channels for a policy "
-                "input of %d" % (len(mean), obs_width))
+                "input of %d" % (len(mean), input_width))
     return _policy.Standardisation(mean, list(rms.var),
                                    float(normaliser.epsilon),
                                    float(normaliser.clip_obs))
 
 
 def _slices(spec, agent):
-    """The agent's slice geometry from a parsed artifact spec, or the
-    single-agent defaults when no spec is given."""
+    """The agent's slice geometry, and the channels of it a policy
+    reads, from a parsed artifact spec; None when no spec is given,
+    which leaves the caller its single-agent defaults."""
     if spec is None:
         return None
     count = spec.agent_count
@@ -149,46 +153,38 @@ def _slices(spec, agent):
     if agent not in obs or agent not in act:
         _refuse("the artifact spec carries no observation or action slice "
                 "for agent %d" % agent)
-    obs_offset, obs_width = _policy_slice(spec, agent, *obs[agent])
     return {
         "agent_count": count,
         "agent_index": agent,
         "obs_total": spec.obs_total,
         "act_total": spec.act_total,
-        "obs_offset": obs_offset,
-        "obs_width": obs_width,
+        "obs_offset": obs[agent][0],
+        "obs_width": obs[agent][1],
+        "obs_channels": _policy_channels(spec, agent, *obs[agent]),
         "act_offset": act[agent][0],
         "act_width": act[agent][1],
     }
 
 
-def _policy_slice(spec, agent, offset, count):
-    """The part of the agent's observation slice a policy reads: its
-    measured channels, as the offset and width the file declares.
+def _policy_channels(spec, agent, offset, count):
+    """The channels of the agent's observation slice a policy reads:
+    its measured ones, ascending, as the file lists them.
 
     The trained network's input is the measured channels, not the
-    whole slice, so the declared slice is theirs; a file declaring the
+    whole slice, so those are what the file names; a file naming the
     whole slice would have the inference tier feed a policy the ground
     truth beside each measurement, in place of the measurements it was
     trained on, with the widths agreeing and nothing raised.
 
-    The format states one contiguous run, so an agent whose measured
-    channels are not contiguous cannot be expressed and is refused by
-    name rather than approximated."""
-    measured, truth = _spec.split_channels(spec, offset, count)
-    if not truth:
-        return offset, count
+    Any arrangement of measured and ground-truth channels is
+    expressible, interleaved ones included, because the file lists
+    channels rather than one run of them. An agent with no measured
+    channel is refused: there is nothing a policy may read."""
+    measured, _truth = _spec.split_channels(spec, offset, count)
     if not measured:
         _refuse("agent %d declares no measured observation channel, so "
                 "there is nothing a policy may read" % agent)
-    span = measured[-1] - measured[0] + 1
-    if span != len(measured):
-        _refuse("agent %d's measured observation channels %s are not one "
-                "contiguous run, and this format declares the policy's "
-                "input as one offset and width; a world whose measured "
-                "channels are interleaved with ground-truth ones cannot "
-                "be expressed by it" % (agent, measured))
-    return measured[0], len(measured)
+    return measured
 
 
 def export_policy(model, path, spec=None, agent=0, normaliser=None,
@@ -205,9 +201,9 @@ def export_policy(model, path, spec=None, agent=0, normaliser=None,
             declares the single-agent geometry, in which the policy's
             own widths are the environment's totals; with one, the
             declared slice geometry is written and a later load can
-            check it field by field. The declared observation slice is
-            the agent's measured channels, which is what the network
-            was trained on and what the inference tier must feed it.
+            check it field by field. The channels the file names are
+            the agent's measured ones, which is what the network was
+            trained on and what the inference tier must feed it.
         agent: which agent of a multi-agent artifact this policy
             drives.
         normaliser: the running observation statistics the model was
@@ -257,11 +253,13 @@ def export_policy(model, path, spec=None, agent=0, normaliser=None,
 
     layers = _walk_sequential(pol.mlp_extractor.policy_net)
     layers.append(_linear_layer(pol.action_net, _policy.ACT_IDENTITY))
-    obs_width = layers[0].in_width
+    # How many channels the policy reads, which is not the width of
+    # the slice they come out of once a world declares a sensor.
+    input_width = layers[0].in_width
     act_width = layers[-1].out_width
-    if obs_width != int(obs_space.shape[0]):
+    if input_width != int(obs_space.shape[0]):
         _refuse("the first layer takes %d inputs for an observation space of "
-                "%d" % (obs_width, int(obs_space.shape[0])))
+                "%d" % (input_width, int(obs_space.shape[0])))
     if act_width != int(space.shape[0]):
         _refuse("the output layer gives %d values for an action space of %d"
                 % (act_width, int(space.shape[0])))
@@ -273,13 +271,14 @@ def export_policy(model, path, spec=None, agent=0, normaliser=None,
     geometry = _slices(spec, agent)
     if geometry is None:
         geometry = {"agent_count": 1, "agent_index": 0,
-                    "obs_total": obs_width, "act_total": act_width,
-                    "obs_offset": 0, "obs_width": obs_width,
+                    "obs_total": input_width, "act_total": act_width,
+                    "obs_offset": 0, "obs_width": input_width,
+                    "obs_channels": list(range(input_width)),
                     "act_offset": 0, "act_width": act_width}
-    if geometry["obs_width"] != obs_width:
-        _refuse("the artifact gives agent %d an observation slice of %d "
-                "measured channels, and the policy takes %d inputs"
-                % (agent, geometry["obs_width"], obs_width))
+    if len(geometry["obs_channels"]) != input_width:
+        _refuse("the artifact gives agent %d %d measured observation "
+                "channels, and the policy takes %d inputs"
+                % (agent, len(geometry["obs_channels"]), input_width))
     if geometry["act_width"] != act_width:
         _refuse("the artifact gives agent %d an action slice of %d, and the "
                 "policy gives %d outputs"
@@ -296,8 +295,10 @@ def export_policy(model, path, spec=None, agent=0, normaliser=None,
         agent_count=geometry["agent_count"],
         agent_index=geometry["agent_index"],
         obs_total=geometry["obs_total"], act_total=geometry["act_total"],
-        obs_offset=geometry["obs_offset"], act_offset=geometry["act_offset"],
-        standardisation=_statistics(normaliser, obs_width),
+        obs_offset=geometry["obs_offset"], obs_width=geometry["obs_width"],
+        obs_channels=geometry["obs_channels"],
+        act_offset=geometry["act_offset"],
+        standardisation=_statistics(normaliser, input_width),
         log_std=log_std,
         action_bounds=(list(space.low), list(space.high)),
         provenance=provenance)
