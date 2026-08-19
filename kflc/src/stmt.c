@@ -1993,11 +1993,16 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * `of` after the name and takes the other branch. */
         /* `observe contact of <body> as <name>` reads the same way and
          * for the same reason: a body reporting a fact about itself,
-         * with no observer to name. The two self-reporting forms share
-         * this branch rather than each growing one, so a third is a
-         * table entry and not a third copy of the parse. */
+         * with no observer to name. `observe propulsion of <body> as
+         * <name>` is the third of them, reporting what the craft has
+         * left to spend. The self-reporting forms share this branch
+         * rather than each growing one, so a fourth is a table entry
+         * and not a fourth copy of the parse. */
+        static const char *const SELF_FORMS_[] = {
+            "attitude", "contact", "propulsion", NULL
+        };
         int attitude_form = 0;
-        int contact_form  = 0;
+        const char *self_marker = NULL;
         /* `observe relative <target> from <chief> as <name>` publishes
          * the target's position and velocity in the chief's own
          * local-vertical local-horizontal frame, rather than a line of
@@ -2129,21 +2134,24 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             attitude_form = 1;
         }
         /* Not after the relative branch has consumed a target name: a
-         * target that happens to be called `attitude` or `contact` is
-         * a name here, not a form, and re-entering the branch below
-         * would rewrite the target a second time and leave the
-         * diagnostic naming the wrong body. */
+         * target that happens to be called `attitude`, `contact` or
+         * `propulsion` is a name here, not a form, and re-entering the
+         * branch below would rewrite the target a second time and
+         * leave the diagnostic naming the wrong body. */
         if (!relative_form && !port_form && !defense_form &&
-            (strcmp(target_ident, "attitude") == 0 ||
-             strcmp(target_ident, "contact") == 0) &&
             is_ident_named(cur, "of"))
         {
-            contact_form = strcmp(target_ident, "contact") == 0;
+            for (int k = 0; SELF_FORMS_[k]; k++) {
+                if (strcmp(target_ident, SELF_FORMS_[k]) == 0) {
+                    self_marker = SELF_FORMS_[k];
+                }
+            }
+        }
+        if (self_marker) {
             advance(L, cur, had_error);
             if (cur->kind != T_IDENT) {
                 kflc_diag_errorf(diag, line0,
-                    "observe %s of: expected a body name",
-                    contact_form ? "contact" : "attitude");
+                    "observe %s of: expected a body name", self_marker);
                 *had_error = 1;
                 while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
                 if (at_nl(cur)) advance(L, cur, had_error);
@@ -2210,7 +2218,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                                : defense_form == 1 ? "detect"
                                : defense_form == 2 ? "track"
                                : defense_form == 3 ? "effect"
-                               : contact_form    ? "contact" : "attitude";
+                               : self_marker     ? self_marker : "attitude";
             stmt_append_attr(arena, n, marker, kv, line0);
         }
 

@@ -624,6 +624,69 @@ derivation is the one source of that number. `examples/assets/` holds
 worked assets; every key the format takes is documented in the
 compiler's own assembly reader.
 
+A thruster is declared with a position, a direction, a maximum thrust
+and a specific impulse:
+
+```
+    thruster main
+        at -3.0 0.0 0.0
+        dir 1.0 0.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+```
+
+`isp_s` is the specific impulse in seconds, and it is what prices the
+thrust: the exhaust leaves at that figure times standard gravity,
+9.80665 m/s^2 exactly, and the propellant the thruster spends is its
+throttled thrust divided by that speed. It is declared per thruster
+because a craft's attitude thrusters and its main engine differ, often
+by a factor of two, and one figure averaged over both would misprice
+exactly the manoeuvres the specific impulse is there to price.
+Standard gravity here is a defined constant and not a measurement, and
+it is not the local gravitational acceleration anywhere.
+
+The propellant a thruster draws on is a component of the assembly like
+any other, marked as the one whose mass varies:
+
+```
+    component tank
+        mass 400.0
+        at 0.0 1.25 0.0
+        collider box 0.4 0.3 0.2
+        propellant
+    end
+```
+
+Its declared mass is a full tank. The vehicle's mass, centre of mass
+and inertia tensor are derived from the same closed forms at any fill,
+with that component at whatever it now holds, and three things follow.
+The mass falls by exactly what was spent, and the gravitational
+parameter with it. The centre of mass moves, unless the tank sits on
+it, so a craft's attitude authority changes as it burns: thruster
+torques are taken about the centre of mass. The inertia tensor falls.
+At most one component may carry the mark, and a thruster on an
+assembly that carries one must declare an `isp_s`.
+
+An assembly may declare thrusters and no tank. Its thrusters then
+spend nothing and its mass never falls, which is a usable calibration
+article and is not a craft; the compiler reports it rather than
+refusing it, so the difference is stated rather than left to be
+inferred from an absent component.
+
+An empty tank produces no thrust, no torque and no consumption
+whatever throttle is commanded. It is not an error and it does not end
+an episode: it is the craft being out of fuel, which is a state a
+controller has to be able to be in and to observe. The sub-interval a
+tank runs out in is apportioned rather than truncated or overrun:
+every firing thruster is scaled by the same fraction of the interval
+there was propellant for, thrust and torque are applied at that
+fraction, and the rest of the interval is unpowered.
+
+The rocket equation is not implemented anywhere. It is a consequence
+of the above, and the compiler's own gates measure that it comes out
+rather than that it was written in.
+
 A docking port is declared in the assembly and named by the port
 observe form below:
 
@@ -765,6 +828,39 @@ than given three channels that could never be anything but zero.
 A contact ends an episode only if the program says so, through an
 ordinary `terminated when` predicate over these channels. It is not a
 fault.
+
+#### Propulsion
+
+```
+observe propulsion of <body> as <name>
+```
+
+Publishes what a craft has left to spend. There is no observer and no
+correction of any kind. Four components:
+
+| Component                      | Value                                                                        |
+|--------------------------------|-------------------------------------------------------------------------------|
+| `<name>_propellant_kg`         | Propellant remaining, kilograms.                                             |
+| `<name>_propellant_fraction`   | The same over the capacity declared at construction, from 1.0 down to 0.0.   |
+| `<name>_mass_kg`               | The craft's current total mass, kilograms.                                   |
+| `<name>_delta_v_remaining`     | Specific impulse times standard gravity times the log of current mass over the mass with an empty tank, metres per second. |
+
+The body must declare an `assembly=` holding propellant, since a craft
+with no tank has nothing to report and would publish four channels
+that could never be anything but zero.
+
+The fourth component is the rocket equation read forwards, and it is
+published because it is what a planner reasons with: a manoeuvre is
+affordable or it is not. Where a craft's thrusters differ in specific
+impulse the figure is taken at the thrust-weighted mean of them, which
+is a constant of the assembly since the weights are the declared
+maxima.
+
+Like every other channel these may be routed through a declared
+sensor, and a propellant gauge is a real instrument with a real error.
+A craft that knows its remaining mass exactly is a craft that does not
+exist, so a task meant to be hard should say `through` and let the
+policy budget under an uncertain reading.
 
 **What a contact does to the craft** is declared once per episode:
 

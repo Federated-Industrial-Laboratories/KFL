@@ -1384,7 +1384,12 @@ static void mass_routes_(const char *src, const char *stem,
     mutate_(stem, a,
             "s/^        k26astro_body_set_mass(_kfl_tb, _kfl_mass - "
             "_kfl_loss);$/        (void)0;/",
-            "k26astro_body_set_mass", 3, 2);
+            /* The needle names the ablation's own mass write and not
+             * every call to that entry: the emitted source has other
+             * callers, and a count over all of them would move when
+             * one of those changed and leave this arm asserting
+             * something about a site it does not mutate. */
+            "k26astro_body_set_mass(_kfl_tb", 1, 0);
     snprintf(cc, sizeof cc, WORK_DIR "/%s.cc", a);
     snprintf(mso, sizeof mso, WORK_DIR "/%s.so", a);
     build_emitted_(cc, mso);
@@ -1402,7 +1407,12 @@ static void mass_routes_(const char *src, const char *stem,
     mutate_(b, c,
             "s/^        k26astro_body_set_mass(_kfl_tb, _kfl_mass - "
             "_kfl_loss);$/        (void)0;/",
-            "k26astro_body_set_mass", 3, 2);
+            /* The needle names the ablation's own mass write and not
+             * every call to that entry: the emitted source has other
+             * callers, and a count over all of them would move when
+             * one of those changed and leave this arm asserting
+             * something about a site it does not mutate. */
+            "k26astro_body_set_mass(_kfl_tb", 1, 0);
     snprintf(cc, sizeof cc, WORK_DIR "/%s.cc", c);
     snprintf(mso, sizeof mso, WORK_DIR "/%s.so", c);
     build_emitted_(cc, mso);

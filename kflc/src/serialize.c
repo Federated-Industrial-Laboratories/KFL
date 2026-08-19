@@ -597,8 +597,18 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
          * of sight printed its marker as a `key=value` pair, which
          * does not parse back: a round trip must reproduce the
          * spelling, not merely the fields. */
-        const int m_att = find_attr_(n->attrs, "attitude") != NULL;
-        const int m_con = find_attr_(n->attrs, "contact") != NULL;
+        /* The self-reporting forms, whose marker is the word the
+         * statement was written with: a body reporting a fact about
+         * itself, with no observer to name. */
+        static const char *const SELF_MARKERS_[] = {
+            "attitude", "contact", "propulsion", NULL
+        };
+        const char *m_self = NULL;
+        for (int k = 0; SELF_MARKERS_[k]; k++) {
+            if (find_attr_(n->attrs, SELF_MARKERS_[k])) {
+                m_self = SELF_MARKERS_[k];
+            }
+        }
         const int m_rel = find_attr_(n->attrs, "relative") != NULL;
         const KflcAttr *m_port = find_attr_(n->attrs, "port");
         /* The two defense forms name a payload and a target, so their
@@ -625,8 +635,8 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
                     (m_port->value.kind == KFLV_IDENT && m_port->value.u.s)
                         ? m_port->value.u.s : "?",
                     n->name ? n->name : "?");
-        } else if (m_att || m_con) {
-            fprintf(out, "observe %s of %s", m_con ? "contact" : "attitude",
+        } else if (m_self) {
+            fprintf(out, "observe %s of %s", m_self,
                     n->name ? n->name : "?");
         } else if (m_rel) {
             fprintf(out, "observe relative %s from %s",
@@ -646,6 +656,7 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
             if (strcmp(a->name, "truth") == 0) continue;
             if (strcmp(a->name, "attitude") == 0) continue;
             if (strcmp(a->name, "contact") == 0) continue;
+            if (strcmp(a->name, "propulsion") == 0) continue;
             if (strcmp(a->name, "relative") == 0) continue;
             if (strcmp(a->name, "port") == 0) continue;
             if (strcmp(a->name, "detect") == 0) continue;

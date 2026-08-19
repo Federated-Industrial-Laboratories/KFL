@@ -127,6 +127,10 @@ static uint16_t rl_observe_mode_(const KflcNode *n)
          * no observer and no light time, so geometric is the only true
          * answer among the published modes. */
         if (strcmp(k->name, "effect") == 0) return 0;
+        /* A propulsion observe reports a craft's own remaining
+         * propellant and mass. There is no observer and nothing is
+         * corrected, so geometric is the only true answer here too. */
+        if (strcmp(k->name, "propulsion") == 0) return 0;
     }
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "mode") == 0 &&
@@ -173,6 +177,21 @@ static const char *const RL_ATT_COMP_[RL_ATT_COMPS] = {
 #define RL_CON_COMPS 3
 static const char *const RL_CON_COMP_[RL_CON_COMPS] = {
     "_hit", "_fraction", "_speed"
+};
+
+/* A propulsion observe publishes what a craft has left to spend. The
+ * fraction is beside the kilograms because it is the scale-free form
+ * a policy conditions on more readily, and the current mass is beside
+ * both because a craft's acceleration per unit of thrust is a
+ * function of it. The fourth is the rocket equation read forwards:
+ * specific impulse times standard gravity times the log of current
+ * mass over the mass with an empty tank, which is what a planner
+ * actually reasons with, since a manoeuvre is affordable or it is
+ * not. */
+#define RL_PROP_COMPS 4
+static const char *const RL_PROP_COMP_[RL_PROP_COMPS] = {
+    "_propellant_kg", "_propellant_fraction", "_mass_kg",
+    "_delta_v_remaining"
 };
 
 /* A relative observe publishes where the target is from the chief and
@@ -328,7 +347,8 @@ typedef enum {
     RL_OBS_PORT = 4,
     RL_OBS_DET  = 5,
     RL_OBS_TRK  = 6,
-    RL_OBS_EFF  = 7
+    RL_OBS_EFF  = 7,
+    RL_OBS_PROP = 8
 } RlObserveForm;
 
 static RlObserveForm rl_observe_form_(const KflcNode *n)
@@ -340,6 +360,7 @@ static RlObserveForm rl_observe_form_(const KflcNode *n)
         if (strcmp(a->name, "track") == 0)    return RL_OBS_TRK;
         if (strcmp(a->name, "effect") == 0)   return RL_OBS_EFF;
         if (strcmp(a->name, "attitude") == 0) return RL_OBS_ATT;
+        if (strcmp(a->name, "propulsion") == 0) return RL_OBS_PROP;
         if (strcmp(a->name, "contact") == 0)  return RL_OBS_CON;
         if (strcmp(a->name, "relative") == 0) return RL_OBS_REL;
         if (strcmp(a->name, "port") == 0)     return RL_OBS_PORT;
@@ -450,6 +471,7 @@ static int rl_observe_base_width_(const KflcNode *n)
 {
     switch (rl_observe_form_(n)) {
     case RL_OBS_ATT: return RL_ATT_COMPS;
+    case RL_OBS_PROP: return RL_PROP_COMPS;
     case RL_OBS_CON: return RL_CON_COMPS;
     case RL_OBS_REL: return RL_REL_COMPS;
     case RL_OBS_PORT: return RL_PORT_COMPS;
@@ -477,6 +499,7 @@ static const char *rl_observe_base_comp_(const KflcNode *n, int c)
 {
     switch (rl_observe_form_(n)) {
     case RL_OBS_ATT: return RL_ATT_COMP_[c];
+    case RL_OBS_PROP: return RL_PROP_COMP_[c];
     case RL_OBS_CON: return RL_CON_COMP_[c];
     case RL_OBS_REL: return RL_REL_COMP_[c];
     case RL_OBS_PORT: return RL_PORT_COMP_[c];
@@ -1051,6 +1074,7 @@ typedef struct {
     char   name[KFLC_ASM_NAME_MAX];
     double at[3], dir[3];
     double max_thrust;
+    double isp_s;
 } RlThruster;
 
 /* One docking port that named a capture envelope, copied out of its
@@ -1193,6 +1217,23 @@ typedef struct {
     int         n_ports;
     double      veh_com[RL_MAX_VEH][3];
     double      veh_bound[RL_MAX_VEH];
+    /* Per vehicle, the mass properties as a function of the
+     * propellant left, copied out of its assembly. A vehicle whose
+     * assembly declares no tank has a capacity of zero, aggregates
+     * covering the whole of it, and never enters the consumption
+     * path. `veh_isp` is the thrust-weighted mean specific impulse of
+     * the vehicle's thrusters, which is the figure the published
+     * remaining velocity change is taken at where they differ; it is
+     * a constant because the weights are the declared maxima. */
+    double      veh_prop_cap[RL_MAX_VEH];
+    double      veh_struct_mass[RL_MAX_VEH];
+    double      veh_struct_moment[RL_MAX_VEH][3];
+    double      veh_struct_inertia[RL_MAX_VEH][6];
+    double      veh_prop_centroid[RL_MAX_VEH][3];
+    double      veh_prop_inertia[RL_MAX_VEH][6];
+    double      veh_isp[RL_MAX_VEH];
+    int         veh_has_prop[RL_MAX_VEH];
+    int         n_prop_veh;
     int         n_veh;
     RlCollider  colliders[RL_MAX_COLL];
     int         n_colliders;
@@ -1637,6 +1678,23 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
         for (int k = 0; k < 3; k++) m->veh_com[veh][k] = a->com[k];
         m->veh_bound[veh] = a->bound_radius;
 
+        /* The mass properties at any fill, and the tank the fill
+         * belongs to. An assembly with no tank leaves the capacity at
+         * zero and its aggregates covering the whole vehicle, so a
+         * consumer indexes the same tables either way. */
+        m->veh_has_prop[veh]  = a->propellant >= 0;
+        m->veh_prop_cap[veh]  = a->prop_capacity;
+        m->veh_struct_mass[veh] = a->struct_mass;
+        for (int k = 0; k < 3; k++) {
+            m->veh_struct_moment[veh][k]  = a->struct_moment[k];
+            m->veh_prop_centroid[veh][k]  = a->prop_centroid[k];
+        }
+        for (int k = 0; k < 6; k++) {
+            m->veh_struct_inertia[veh][k] = a->struct_inertia[k];
+            m->veh_prop_inertia[veh][k]   = a->prop_inertia[k];
+        }
+        if (a->propellant >= 0) m->n_prop_veh++;
+
         /* The collider set, taken in declaration order, which is the
          * order the narrowphase tests them in and therefore the order
          * the selection rule's tie-break is defined over. The reader
@@ -1748,6 +1806,7 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
                     t->dir[k] = ft->dir[k];
                 }
                 t->max_thrust = ft->thrust;
+                t->isp_s      = ft->isp_s;
             } else if (ft->kind == KFLC_FEAT_PORT && ft->collider >= 0) {
                 /* Only a port that named a capture envelope reaches
                  * here: the reader gives one a mating plane collider
@@ -1804,6 +1863,23 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
                 pt->roll           = kflc_capture_deg_to_rad(env->roll_deg);
                 pt->diameter       = kflc_capture_mm_to_m(env->mating_diameter_mm);
             }
+        }
+
+        /* The specific impulse the vehicle's remaining velocity
+         * change is published at. Thrusters may differ in it, so one
+         * figure has to be chosen and the choice is the thrust
+         * weighted mean: an engine that can spend the tank fastest
+         * weighs most in what the tank is worth. The weights are the
+         * declared maxima, so the figure is a constant of the
+         * assembly and not of the throttle. */
+        {
+            double wsum = 0.0, isum = 0.0;
+            for (int q = 0; q < m->n_thrusters; q++) {
+                if (m->thrusters[q].veh != veh) continue;
+                wsum += m->thrusters[q].max_thrust;
+                isum += m->thrusters[q].max_thrust * m->thrusters[q].isp_s;
+            }
+            m->veh_isp[veh] = wsum > 0.0 ? isum / wsum : 0.0;
         }
 
         /* A magnetorquer works against the local magnetic field, and
@@ -3943,6 +4019,154 @@ static int rl_track_pairs_(const RlModel *m, int *pay, int *veh, int cap)
  * and wheel momenta live in. The tables are what the assemblies
  * declared and never change; the block is state, one per environment,
  * allocated at create and reset with the episode. */
+/* The mass properties of every vehicle as a function of the
+ * propellant it has left, and the one function that evaluates them.
+ *
+ * The assembly derives a vehicle's mass, centre of mass and inertia
+ * from its components by closed form. Those forms are linear in a
+ * component's mass once its geometry is fixed, and the tank's
+ * geometry does not move as it empties, so the whole family follows
+ * from two sets of numbers: the structure's aggregates, and the
+ * tank's per unit of mass. What is emitted are those, not a table of
+ * fills, and the evaluation below is the same closed form the
+ * compiler applied, with the tank at whatever it now holds.
+ *
+ * The tensors are summed about the body-frame origin rather than
+ * about the centre of mass, because the centre of mass is itself a
+ * function of the fill and a tensor taken about it cannot be summed
+ * once and scaled after. The shift at the end takes it to where the
+ * centre of mass has moved to, which is where the rotational equation
+ * wants it.
+ *
+ * A vehicle whose assembly declares no tank has a capacity of zero
+ * and aggregates covering the whole of it, so this evaluates to its
+ * constructed properties for any argument it is ever given. It is
+ * never given one: such a vehicle keeps the constants the assembly
+ * derived, bit for bit.
+ */
+static void rl_emit_mass_tables_(FILE *out, const RlModel *m)
+{
+    fprintf(out,
+        "/* Vehicles carrying propellant. Zero keeps the consumption\n"
+        " * arithmetic out of a program whose craft spend nothing. */\n"
+        "#define KFLRL_N_PROPELLANT %d\n"
+        "/* Standard gravity, the defined constant, exactly. It is what\n"
+        " * makes a specific impulse in seconds mean a speed, and it is\n"
+        " * a definition rather than a measurement: it is not the local\n"
+        " * gravitational acceleration anywhere in this world. */\n"
+        "#define KFLRL_G0 9.80665\n\n", m->n_prop_veh);
+    if (m->n_veh == 0) return;
+
+    fputs("static const double kflrl_veh_prop_cap_[] = {\n", out);
+    for (int i = 0; i < m->n_veh; i++) {
+        fprintf(out, "    %.17g,\n", m->veh_prop_cap[i]);
+    }
+    fputs("};\n", out);
+    fputs("static const double kflrl_veh_struct_mass_[] = {\n", out);
+    for (int i = 0; i < m->n_veh; i++) {
+        fprintf(out, "    %.17g,\n", m->veh_struct_mass[i]);
+    }
+    fputs("};\n", out);
+    fputs("static const double kflrl_veh_isp_[] = {\n", out);
+    for (int i = 0; i < m->n_veh; i++) {
+        fprintf(out, "    %.17g,\n", m->veh_isp[i]);
+    }
+    fputs("};\n", out);
+    fputs("static const double kflrl_veh_struct_moment_[][3] = {\n", out);
+    for (int i = 0; i < m->n_veh; i++) {
+        fprintf(out, "    { %.17g, %.17g, %.17g },\n",
+                m->veh_struct_moment[i][0], m->veh_struct_moment[i][1],
+                m->veh_struct_moment[i][2]);
+    }
+    fputs("};\n", out);
+    fputs("static const double kflrl_veh_prop_centroid_[][3] = {\n", out);
+    for (int i = 0; i < m->n_veh; i++) {
+        fprintf(out, "    { %.17g, %.17g, %.17g },\n",
+                m->veh_prop_centroid[i][0], m->veh_prop_centroid[i][1],
+                m->veh_prop_centroid[i][2]);
+    }
+    fputs("};\n", out);
+    fputs("static const double kflrl_veh_struct_inertia_[][6] = {\n", out);
+    for (int i = 0; i < m->n_veh; i++) {
+        fprintf(out, "    { %.17g, %.17g, %.17g, %.17g, %.17g, %.17g },\n",
+                m->veh_struct_inertia[i][0], m->veh_struct_inertia[i][1],
+                m->veh_struct_inertia[i][2], m->veh_struct_inertia[i][3],
+                m->veh_struct_inertia[i][4], m->veh_struct_inertia[i][5]);
+    }
+    fputs("};\n", out);
+    fputs("static const double kflrl_veh_prop_inertia_[][6] = {\n", out);
+    for (int i = 0; i < m->n_veh; i++) {
+        fprintf(out, "    { %.17g, %.17g, %.17g, %.17g, %.17g, %.17g },\n",
+                m->veh_prop_inertia[i][0], m->veh_prop_inertia[i][1],
+                m->veh_prop_inertia[i][2], m->veh_prop_inertia[i][3],
+                m->veh_prop_inertia[i][4], m->veh_prop_inertia[i][5]);
+    }
+    fputs("};\n\n", out);
+
+    fputs(
+"/* One vehicle's mass, centre of mass and inertia at a given fill.\n"
+" * The inertia is returned in the six-component form the assembly\n"
+" * uses: xx, yy, zz, then the products already negated, about the\n"
+" * centre of mass this same call computes. */\n"
+"static void kflrl_mass_props_(int veh, double prop_kg, double *mass,\n"
+"                              double *com, double *inertia)\n"
+"{\n"
+"    const double *sm = kflrl_veh_struct_moment_[veh];\n"
+"    const double *si = kflrl_veh_struct_inertia_[veh];\n"
+"    const double *pc = kflrl_veh_prop_centroid_[veh];\n"
+"    const double *pi = kflrl_veh_prop_inertia_[veh];\n"
+"    double mtot = kflrl_veh_struct_mass_[veh] + prop_kg;\n"
+"    double c[3];\n"
+"    double I[6];\n"
+"    for (int q = 0; q < 3; q++) c[q] = (sm[q] + prop_kg * pc[q]) / mtot;\n"
+"    for (int q = 0; q < 6; q++) I[q] = si[q] + prop_kg * pi[q];\n"
+"    /* Parallel axis, from the body-frame origin to the centre of\n"
+"     * mass: subtract what a point mass of the whole vehicle sitting\n"
+"     * there would have contributed. */\n"
+"    double dd = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];\n"
+"    I[0] -= mtot * (dd - c[0] * c[0]);\n"
+"    I[1] -= mtot * (dd - c[1] * c[1]);\n"
+"    I[2] -= mtot * (dd - c[2] * c[2]);\n"
+"    I[3] -= mtot * (-c[0] * c[1]);\n"
+"    I[4] -= mtot * (-c[0] * c[2]);\n"
+"    I[5] -= mtot * (-c[1] * c[2]);\n"
+"    *mass = mtot;\n"
+"    for (int q = 0; q < 3; q++) com[q] = c[q];\n"
+"    for (int q = 0; q < 6; q++) inertia[q] = I[q];\n"
+"}\n\n"
+"/* Install those properties on the body and on the vehicle. This is\n"
+" * the one place they are written, so construction, episode reset\n"
+" * and the burn itself cannot disagree about what a given fill\n"
+" * means; the reset restores by recomputing at the declared\n"
+" * capacity rather than by remembering a number, which is what makes\n"
+" * the restoration exact.\n"
+" *\n"
+" * The body carries the mass, and its gravitational parameter\n"
+" * follows through the setter. The vehicle carries the basic mass\n"
+" * its own library reports, the centre of mass every thruster torque\n"
+" * is taken about, and the inertia tensor, whose inverse the\n"
+" * rotational equation needs and which the setter recomputes. */\n"
+"static void kflrl_apply_props_(K26AstroVehicle *v, K26AstroBody *b,\n"
+"                               int veh, double prop_kg, double *com_out)\n"
+"{\n"
+"    double mtot, c[3], I6[6];\n"
+"    kflrl_mass_props_(veh, prop_kg, &mtot, c, I6);\n"
+"    if (b) k26astro_body_set_mass(b, mtot);\n"
+"    if (v) {\n"
+"        k26astro_vehicle_set_dry_mass(v, mtot);\n"
+"        k26astro_vehicle_set_com_offset(v, c[0], c[1], c[2]);\n"
+"        K26M3 I;\n"
+"        I.m[0][0] = I6[0]; I.m[0][1] = I6[3]; I.m[0][2] = I6[4];\n"
+"        I.m[1][0] = I6[3]; I.m[1][1] = I6[1]; I.m[1][2] = I6[5];\n"
+"        I.m[2][0] = I6[4]; I.m[2][1] = I6[5]; I.m[2][2] = I6[2];\n"
+"        k26astro_vehicle_set_inertia_full(v, I);\n"
+"    }\n"
+"    if (com_out) {\n"
+"        com_out[0] = c[0]; com_out[1] = c[1]; com_out[2] = c[2];\n"
+"    }\n"
+"}\n\n", out);
+}
+
 static void rl_emit_actuators_(FILE *out, const RlModel *m)
 {
     fprintf(out,
@@ -3994,22 +4218,14 @@ static void rl_emit_actuators_(FILE *out, const RlModel *m)
             const RlThruster *t = &m->thrusters[i];
             fprintf(out,
                 "    { { %.17g, %.17g, %.17g }, { %.17g, %.17g, %.17g }, "
-                "%.17g, 0.0 },\n",
+                "%.17g, 0.0, %.17g },\n",
                 t->at[0], t->at[1], t->at[2], t->dir[0], t->dir[1],
-                t->dir[2], t->max_thrust);
+                t->dir[2], t->max_thrust, t->isp_s);
         }
         fputs("};\n", out);
         fputs("static const int kflrl_thruster_veh_[] = {\n", out);
         for (int i = 0; i < m->n_thrusters; i++) {
             fprintf(out, "    %d,\n", m->thrusters[i].veh);
-        }
-        fputs("};\n\n", out);
-    }
-    if (m->n_veh > 0) {
-        fputs("static const double kflrl_veh_com_[][3] = {\n", out);
-        for (int i = 0; i < m->n_veh; i++) {
-            fprintf(out, "    { %.17g, %.17g, %.17g },\n",
-                    m->veh_com[i][0], m->veh_com[i][1], m->veh_com[i][2]);
         }
         fputs("};\n\n", out);
     }
@@ -4134,13 +4350,20 @@ static void rl_emit_actuators_(FILE *out, const RlModel *m)
 "/* Build one vehicle's actuator view over the environment's state.\n"
 " * The descriptors are constants and the mutable parts are copied in\n"
 " * and out around the call, so nothing here allocates and the state\n"
-" * stays where the handle can reset it. */\n"
-"static void kflrl_act_view_(KflrlAct *a, int veh,\n"
+" * stays where the handle can reset it.\n"
+" *\n"
+" * The centre of mass is passed in rather than read from a constant\n"
+" * table because it is state: a tank offset from it moves it as the\n"
+" * craft burns, and every thruster torque is taken about it, so a\n"
+" * craft's attitude authority changes over a long burn. */\n"
+"static void kflrl_act_view_(KflrlAct *a, int veh, const double *com,\n"
+"                            double thr_scale,\n"
 "                            K26AstroAttWheel *wh, K26AstroAttTorquer *tq,\n"
 "                            K26AstroAttThruster *th,\n"
 "                            K26AstroAttActuators *out, int *w_map)\n"
 "{\n"
 "    int nw = 0, nq = 0, nt = 0;\n"
+"    (void)veh;\n"
 "#if KFLRL_N_WHEELS > 0\n"
 "    for (int i = 0; i < KFLRL_N_WHEELS; i++) {\n"
 "        if (kflrl_wheel_veh_[i] != veh) continue;\n"
@@ -4163,16 +4386,25 @@ static void rl_emit_actuators_(FILE *out, const RlModel *m)
 "    for (int i = 0; i < KFLRL_N_THRUSTERS; i++) {\n"
 "        if (kflrl_thruster_veh_[i] != veh) continue;\n"
 "        th[nt] = kflrl_thruster_desc_[i];\n"
-"        th[nt].command =\n"
-"            a->cmd[KFLRL_N_WHEELS + KFLRL_N_TORQUERS + i];\n"
+"        /* Clamped here and then scaled, not the other way about: a\n"
+"         * throttle beyond the unit interval is a throttle of one,\n"
+"         * and the fraction of the sub-interval propellant lasted\n"
+"         * applies to that. Scaling first would let an out-of-range\n"
+"         * command buy back the part of the interval the tank could\n"
+"         * not pay for. */\n"
+"        {\n"
+"            double u_ =\n"
+"                a->cmd[KFLRL_N_WHEELS + KFLRL_N_TORQUERS + i];\n"
+"            u_ = u_ < 0.0 ? 0.0 : (u_ > 1.0 ? 1.0 : u_);\n"
+"            th[nt].command = u_ * thr_scale;\n"
+"        }\n"
 "        nt++;\n"
 "    }\n"
 "#endif\n"
 "    out->wheels = wh; out->n_wheels = nw;\n"
 "    out->torquers = tq; out->n_torquers = nq;\n"
 "    out->thrusters = th; out->n_thrusters = nt;\n"
-"    out->com = k26m3d_v3(kflrl_veh_com_[veh][0], kflrl_veh_com_[veh][1],\n"
-"                         kflrl_veh_com_[veh][2]);\n"
+"    out->com = k26m3d_v3(com[0], com[1], com[2]);\n"
 "}\n\n"
 "/* Copy the wheel momenta back, which is the only part of the view\n"
 " * that is state rather than description. */\n"
@@ -4260,8 +4492,25 @@ static int rl_emit_payload_tables_(FILE *out, const RlModel *m)
 "#endif\n"
 "#if KFLRL_N_VEHICLES > 0\n"
 "#define KFLRL_VEHS(h, e) ((h)->vehicles + (size_t)(e) * KFLRL_N_VEHICLES)\n"
+/* The centre of mass and the propellant left are per environment and
+ * per vehicle, because both are state that a burn moves. A program
+ * whose craft carry no tank still holds them: the values never leave
+ * what the assembly derived, and one shape is cheaper to keep right
+ * than two. */
+"#define KFLRL_COM(h, e, v) ((h)->veh_com + \\\n"
+"    ((size_t)(e) * KFLRL_N_VEHICLES + (size_t)(v)) * 3)\n"
+"#define KFLRL_PROP(h, e) ((h)->prop + (size_t)(e) * KFLRL_N_VEHICLES)\n"
+/* The fraction of the current sub-interval this vehicle's thrusters
+ * had propellant for. It is 1.0 everywhere except the sub-interval a
+ * tank runs out in, and it is 1.0 for the whole run of a craft that
+ * carries no tank. */
+"#define KFLRL_THRSC(h, e, v) \\\n"
+"    ((h)->thr_scale[(size_t)(e) * KFLRL_N_VEHICLES + (size_t)(v)])\n"
 "#else\n"
 "#define KFLRL_VEHS(h, e) ((K26AstroVehicle **)0)\n"
+"#define KFLRL_COM(h, e, v) ((const double *)0)\n"
+"#define KFLRL_PROP(h, e) ((const double *)0)\n"
+"#define KFLRL_THRSC(h, e, v) (1.0)\n"
 "#endif\n"
 "#if KFLRL_N_EFFECTOR > 0\n"
 "#define KFLRL_ENG(h, e) (&(h)->eng[(e)])\n"
@@ -4638,6 +4887,7 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
         "#include <k26astro_rt/world.h>\n"
         "#include <k26astro_rt/observer.h>\n"
         "#include <k26astro_rt/world_rng.h>\n"
+        "#include <k26astro_rt/conservation_ledger.h>\n"
         "#include <k26astro_grav/grav.h>\n"
         "#include <k26astro_grav/ias15.h>\n"
         "#include <k26astro_grav/perturb.h>\n"
@@ -5397,6 +5647,13 @@ typedef struct {
     double      mass;
     double      com[3];
     double      inertia[6];
+    /* A vehicle that carries propellant takes its mass properties
+     * from the one function that evaluates them at a fill, so that
+     * construction, reset and the burn cannot come out differently at
+     * the same fill. One that carries none keeps the constants the
+     * assembly derived, unchanged, and never enters that path. */
+    int         has_prop;
+    double      prop_cap;
 } RlVehEmit;
 
 /* World construction: the fn world prefix statements in source order.
@@ -5737,9 +5994,15 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                 kflc_assembly_digest_hex(asmb->digest, hex);
                 fprintf(out, "        /* assembly `%s`, digest %s */\n",
                         asmb->name, hex);
-                fprintf(out,
+                if (asmb->propellant >= 0) {
+                    fprintf(out,
+                        "        kflrl_apply_props_(NULL, &_kfl_b, %d, "
+                        "%.17g, NULL);\n", veh_i, asmb->prop_capacity);
+                } else {
+                    fprintf(out,
                         "        k26astro_body_set_mass(&_kfl_b, %.17g);\n",
                         asmb->mass);
+                }
                 fprintf(out,
                         "        static const double _kfl_asm_com[3] = "
                         "{ %.17g, %.17g, %.17g };\n",
@@ -5810,6 +6073,8 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
                 }
                 veh[veh_i].body_name = s->name;
                 veh[veh_i].mass      = asmb->mass;
+                veh[veh_i].has_prop  = asmb->propellant >= 0;
+                veh[veh_i].prop_cap  = asmb->prop_capacity;
                 memcpy(veh[veh_i].com, asmb->com, sizeof veh[veh_i].com);
                 memcpy(veh[veh_i].inertia, asmb->inertia,
                        sizeof veh[veh_i].inertia);
@@ -5837,26 +6102,33 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
      * order every per-vehicle table in this artifact is written in. */
     for (int i = 0; i < veh_i; i++) {
         const RlVehEmit *ve = &veh[i];
-        fprintf(out,
-            "    {\n"
-            "        K26AstroVehicle *_kfl_v = k26astro_vehicle_new();\n"
-            "        if (!_kfl_v) return -1;\n"
-            "        k26astro_vehicle_set_dry_mass(_kfl_v, %.17g);\n"
-            "        k26astro_vehicle_set_com_offset(_kfl_v, "
-            "%.17g, %.17g, %.17g);\n",
-                ve->mass, ve->com[0], ve->com[1], ve->com[2]);
-        fprintf(out,
-            "        K26M3 _kfl_I;\n"
-            "        _kfl_I.m[0][0] = %.17g; _kfl_I.m[0][1] = %.17g; "
-            "_kfl_I.m[0][2] = %.17g;\n"
-            "        _kfl_I.m[1][0] = %.17g; _kfl_I.m[1][1] = %.17g; "
-            "_kfl_I.m[1][2] = %.17g;\n"
-            "        _kfl_I.m[2][0] = %.17g; _kfl_I.m[2][1] = %.17g; "
-            "_kfl_I.m[2][2] = %.17g;\n"
-            "        k26astro_vehicle_set_inertia_full(_kfl_v, _kfl_I);\n",
-                ve->inertia[0], ve->inertia[3], ve->inertia[4],
-                ve->inertia[3], ve->inertia[1], ve->inertia[5],
-                ve->inertia[4], ve->inertia[5], ve->inertia[2]);
+        fputs("    {\n"
+              "        K26AstroVehicle *_kfl_v = k26astro_vehicle_new();\n"
+              "        if (!_kfl_v) return -1;\n", out);
+        if (ve->has_prop) {
+            fprintf(out,
+                "        kflrl_apply_props_(_kfl_v, NULL, %d, %.17g, "
+                "NULL);\n", i, ve->prop_cap);
+        } else {
+            fprintf(out,
+                "        k26astro_vehicle_set_dry_mass(_kfl_v, %.17g);\n"
+                "        k26astro_vehicle_set_com_offset(_kfl_v, "
+                "%.17g, %.17g, %.17g);\n",
+                    ve->mass, ve->com[0], ve->com[1], ve->com[2]);
+            fprintf(out,
+                "        K26M3 _kfl_I;\n"
+                "        _kfl_I.m[0][0] = %.17g; _kfl_I.m[0][1] = %.17g; "
+                "_kfl_I.m[0][2] = %.17g;\n"
+                "        _kfl_I.m[1][0] = %.17g; _kfl_I.m[1][1] = %.17g; "
+                "_kfl_I.m[1][2] = %.17g;\n"
+                "        _kfl_I.m[2][0] = %.17g; _kfl_I.m[2][1] = %.17g; "
+                "_kfl_I.m[2][2] = %.17g;\n"
+                "        k26astro_vehicle_set_inertia_full(_kfl_v, "
+                "_kfl_I);\n",
+                    ve->inertia[0], ve->inertia[3], ve->inertia[4],
+                    ve->inertia[3], ve->inertia[1], ve->inertia[5],
+                    ve->inertia[4], ve->inertia[5], ve->inertia[2]);
+        }
         fprintf(out,
             "        k26astro_vehicle_bind_body(_kfl_v, "
             "k26astro_world_body_at(world, _kfl_body_%s_idx));\n"
@@ -6319,13 +6591,15 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
           "                           void *const *pay,\n"
           "                           const double *payp,\n"
           "                           K26AstroVehicle *const *veh,\n"
+          "                           const double *prop,\n"
+          "                           const double *coms,\n"
           "                           int64_t t_day, double t_info,\n"
           "                           const KflrlEng *eng)\n"
           "{\n"
           "    (void)world; (void)out_v; (void)ct; (void)jn;\n"
           "    (void)pay; (void)payp; (void)veh; (void)t_day; "
           "(void)t_info;\n"
-          "    (void)eng;\n", out);
+          "    (void)eng; (void)prop; (void)coms;\n", out);
     for (int i = 0; i < m->n_observes; i++) {
         const KflcNode *s = m->observes[i];
         int off = rl_obs_offset_(m->observes, i);
@@ -6436,12 +6710,17 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
                 "            _kfl_ps.v_roll     = ct[%d].v_roll;\n"
                 "        } else if (_kfl_pa && _kfl_pp) {\n"
                 "            K26AstroCollBody _kfl_ba, _kfl_bp;\n"
-                "            kflrl_port_snap_(_kfl_pa, "
-                "kflrl_ports_[%d].com,\n"
+                /* The centres of mass are read from the state
+                 * rather than from the port table: a craft's port
+                 * sits at a declared place in the body frame, and
+                 * where that is with respect to the centre of mass
+                 * moves as the craft burns. */
+                "            kflrl_port_snap_(_kfl_pa,\n"
+                "                k26m3d_v3(coms[%d], coms[%d], coms[%d]),\n"
                 "                k26astro_pos_sub(&_kfl_pa->pos, "
                 "&_kfl_pp->pos), &_kfl_ba);\n"
-                "            kflrl_port_snap_(_kfl_pp, "
-                "kflrl_ports_[%d].com,\n"
+                "            kflrl_port_snap_(_kfl_pp,\n"
+                "                k26m3d_v3(coms[%d], coms[%d], coms[%d]),\n"
                 "                k26m3d_v3(0.0, 0.0, 0.0), &_kfl_bp);\n"
                 "            (void)k26astro_coll_port_state(&_kfl_ba,\n"
                 "                &kflrl_ports_[%d].geom, &_kfl_bp,\n"
@@ -6460,7 +6739,10 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
                 tgt, pbody,
                 aslot, aslot, aslot, aslot, aslot, aslot, aslot, aslot,
                 aslot, aslot,
-                active, passive,
+                3 * m->ports[active].veh, 3 * m->ports[active].veh + 1,
+                3 * m->ports[active].veh + 2,
+                3 * m->ports[passive].veh, 3 * m->ports[passive].veh + 1,
+                3 * m->ports[passive].veh + 2,
                 active, passive,
                 off, off + 1, off + 2, off + 3, off + 4, off + 5,
                 off + 6, off + 7, off + 8);
@@ -6591,6 +6873,67 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
                 "    }\n",
                 chf, tgt, off, off + 1, off + 2, off + 3, off + 4,
                 off + 5);
+            continue;
+        }
+        if (rl_observe_form_(s) == RL_OBS_PROP) {
+            /* A craft reporting what it has left to spend. The body
+             * must bind an assembly that holds propellant: without a
+             * tank there is nothing to report, and four channels that
+             * could only ever read zero are worse than a diagnostic
+             * at the line that asked for them. */
+            int tgt = rl_body_index_of_(m, s->name);
+            if (tgt < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe propulsion of `%s`: no astro_body of that "
+                    "name is declared in this world", s->name);
+                return 1;
+            }
+            int slot = -1, seen = 0;
+            for (int b = 0; b < m->n_bodies; b++) {
+                if (!rl_body_has_assembly_(m, b)) continue;
+                if (b == tgt) slot = seen;
+                seen++;
+            }
+            if (slot < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe propulsion of `%s`: `%s` declares no "
+                    "`assembly=`, so it carries neither thrusters nor "
+                    "propellant", s->name, s->name);
+                return 1;
+            }
+            if (!m->veh_has_prop[slot]) {
+                kflc_diag_errorf(diag, s->line,
+                    "observe propulsion of `%s`: its assembly declares "
+                    "no component holding propellant, so there is no "
+                    "tank to report; mark the component that holds it "
+                    "with `propellant`, whose declared mass is a full "
+                    "tank", s->name);
+                return 1;
+            }
+            /* The remaining velocity change is the rocket equation
+             * read forwards, at the thrust-weighted mean specific
+             * impulse of the craft's thrusters. An empty tank leaves
+             * the log at zero, so the channel reads zero without the
+             * quotient being taken at a mass ratio of one. */
+            fprintf(out,
+                "    {\n"
+                "        double _kfl_pk = prop ? prop[%d] : 0.0;\n"
+                "        double _kfl_cap = %.17g;\n"
+                "        double _kfl_dry = %.17g;\n"
+                "        double _kfl_m = 0.0, _kfl_c[3], _kfl_I6[6];\n"
+                "        kflrl_mass_props_(%d, _kfl_pk, &_kfl_m, _kfl_c,\n"
+                "                          _kfl_I6);\n"
+                "        out_v[%d] = _kfl_pk;\n"
+                "        out_v[%d] = _kfl_pk / _kfl_cap;\n"
+                "        out_v[%d] = _kfl_m;\n"
+                "        out_v[%d] = (_kfl_pk > 0.0 && _kfl_dry > 0.0)\n"
+                "            ? %.17g * KFLRL_G0 * std::log(_kfl_m / "
+                "_kfl_dry)\n"
+                "            : 0.0;\n"
+                "    }\n",
+                slot, m->veh_prop_cap[slot], m->veh_struct_mass[slot],
+                slot, off, off + 1, off + 2, off + 3,
+                m->veh_isp[slot]);
             continue;
         }
         if (rl_observe_is_attitude_(s)) {
@@ -8783,6 +9126,23 @@ static void rl_emit_env_core_(FILE *out)
 "    KflrlContact *contact;\n"
 "    KflrlJoin *join;             /* one per environment */\n"
 "    struct KflrlThrustCtx *thrust_ctx;\n"
+"    /* Propellant remaining and the centre of mass it puts the craft\n"
+"     * at, one of each per vehicle per environment. Both are episode\n"
+"     * state: a burn spends the one and moves the other, and the\n"
+"     * reset puts both back where construction left them. A vehicle\n"
+"     * whose assembly declares no tank holds a capacity of zero here\n"
+"     * and a centre of mass that never moves.\n"
+"     *\n"
+"     * The ledger is the closed-system account of what the burns\n"
+"     * threw overboard: the energy and momentum the propellant left\n"
+"     * with, and the chemistry that put it there. It is registered\n"
+"     * into and never read back, so nothing in the simulation is a\n"
+"     * function of it; one per environment, since the environments\n"
+"     * are separate systems. */\n"
+"    double *prop;                /* n_envs * KFLRL_N_VEHICLES, kg */\n"
+"    double *veh_com;             /* n_envs * KFLRL_N_VEHICLES * 3 */\n"
+"    double *thr_scale;           /* n_envs * KFLRL_N_VEHICLES */\n"
+"    K26AstroRtConservationLedger **ledger;   /* n_envs */\n"
 "    K26AstroBody *baseline;      /* n_envs * KFLRL_N_BODIES */\n"
 "    K26AstroEpoch *baseline_t;   /* n_envs */\n"
 "    uint32_t *episode;\n"
@@ -9044,14 +9404,12 @@ static void rl_emit_env_core_(FILE *out)
 "    fpos = k26m3d_v3(cpos.x + arm.x, cpos.y + arm.y, cpos.z + arm.z);\n"
 "", out);
     fputs(
+"    const double *cc_ = KFLRL_COM(h, e, j->carrier);\n"
+"    const double *cf_ = KFLRL_COM(h, e, j->follower);\n"
 "    K26V3 rc = k26m3d_quat_rotate_v3(cb->attitude,\n"
-"        k26m3d_v3(kflrl_veh_com_[j->carrier][0],\n"
-"                  kflrl_veh_com_[j->carrier][1],\n"
-"                  kflrl_veh_com_[j->carrier][2]));\n"
+"        k26m3d_v3(cc_[0], cc_[1], cc_[2]));\n"
 "    K26V3 rf = k26m3d_quat_rotate_v3(fb->attitude,\n"
-"        k26m3d_v3(kflrl_veh_com_[j->follower][0],\n"
-"                  kflrl_veh_com_[j->follower][1],\n"
-"                  kflrl_veh_com_[j->follower][2]));\n"
+"        k26m3d_v3(cf_[0], cf_[1], cf_[2]));\n"
 "    K26V3 comc = k26m3d_v3(cpos.x + rc.x, cpos.y + rc.y, cpos.z + rc.z);\n"
 "    K26V3 comf = k26m3d_v3(fpos.x + rf.x, fpos.y + rf.y, fpos.z + rf.z);\n"
 "    double mc = cb->mass > 0.0 ? cb->mass : 0.0;\n"
@@ -9247,6 +9605,30 @@ static void rl_emit_env_core_(FILE *out)
 "               sizeof(K26AstroBody) * KFLRL_N_BODIES);\n"
 "    }\n"
 "#endif\n"
+"", out);
+    fputs(
+"#if KFLRL_N_PROPELLANT > 0\n"
+"    /* The tank, and everything that hangs off it. The body baseline\n"
+"     * above carries the mass, but the centre of mass and the inertia\n"
+"     * live on the vehicle rather than on the body and would survive\n"
+"     * a reset untouched: a craft that ended an episode empty would\n"
+"     * start the next one with a full tank and the mass properties of\n"
+"     * an empty one, and episode k+1 would be a function of episode\n"
+"     * k. They are restored by recomputing at the declared capacity,\n"
+"     * which is the same call construction made, so the restored\n"
+"     * values are the constructed ones exactly rather than nearly. */\n"
+"    for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"        double cap = kflrl_veh_prop_cap_[vi];\n"
+"        KFLRL_THRSC(h, e, vi) = 1.0;\n"
+"        if (!(cap > 0.0)) continue;\n"
+"        h->prop[(size_t)e * KFLRL_N_VEHICLES + vi] = cap;\n"
+"        kflrl_apply_props_(\n"
+"            h->vehicles[(size_t)e * KFLRL_N_VEHICLES + vi],\n"
+"            k26astro_world_body_at(\n"
+"                w, kflrl_body_idx_[kflrl_vehicle_body_[vi]]),\n"
+"            vi, cap, KFLRL_COM(h, e, vi));\n"
+"    }\n"
+"#endif\n"
 "    K26AstroGravState *g = k26astro_world_grav(w);\n"
 "    if (g) {\n"
 "        g->t = h->baseline_t[e];\n"
@@ -9293,7 +9675,8 @@ static void rl_emit_env_core_(FILE *out)
 "    kflrl_observe_(w, h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
 "                   &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
 "                   &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
-"                   KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
+"                   KFLRL_VEHS(h, e), KFLRL_PROP(h, e),\n"
+"                   KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),\n"
 "                   KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
 "    kflrl_sense_reset_(h, e, ep,\n"
 "                       h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
@@ -9517,6 +9900,17 @@ static void rl_emit_env_core_(FILE *out)
 "    free(h->contact);\n"
 "    free(h->join);\n"
 "    free(h->thrust_ctx);\n"
+"    free(h->prop);\n"
+"    free(h->veh_com);\n"
+"    free(h->thr_scale);\n"
+"#if KFLRL_N_PROPELLANT > 0\n"
+"    if (h->ledger) {\n"
+"        for (uint32_t e = 0; e < h->n_envs; e++) {\n"
+"            k26astro_rt_ledger_destroy(h->ledger[e]);\n"
+"        }\n"
+"    }\n"
+"#endif\n"
+"    free(h->ledger);\n"
 "#endif\n"
 "    if (h->worlds) {\n"
 "        for (uint32_t e = 0; e < h->n_envs; e++) {\n"
@@ -9575,8 +9969,10 @@ static void rl_emit_env_core_(FILE *out)
 "                                 KFLRL_N_THRUSTERS : 1];\n"
 "        int wmap[KFLRL_N_WHEELS > 0 ? KFLRL_N_WHEELS : 1];\n"
 "        K26AstroAttActuators view;\n"
-"        kflrl_act_view_(&c->h->act[c->e], vi, wbuf, qbuf, tbuf, &view,\n"
-"                        wmap);\n"
+"        kflrl_act_view_(&c->h->act[c->e], vi,\n"
+"                        KFLRL_COM(c->h, c->e, vi),\n"
+"                        KFLRL_THRSC(c->h, c->e, vi), wbuf, qbuf, tbuf,\n"
+"                        &view, wmap);\n"
 "        K26V3 f_body;\n"
 "        if (k26astro_att_thrusters_wrench(&view, &f_body, NULL) !=\n"
 "            K26ASTRO_ATT_OK) continue;\n"
@@ -9641,6 +10037,32 @@ static void rl_emit_env_core_(FILE *out)
 "    h->act = (KflrlAct *)calloc(n_envs, sizeof(*h->act));\n"
 "    h->thrust_ctx = (KflrlThrustCtx *)calloc(n_envs,\n"
 "                                             sizeof(*h->thrust_ctx));\n"
+"    h->prop = (double *)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_VEHICLES, sizeof(double));\n"
+"    h->veh_com = (double *)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_VEHICLES * 3, sizeof(double));\n"
+"    h->thr_scale = (double *)calloc(\n"
+"        (size_t)n_envs * KFLRL_N_VEHICLES, sizeof(double));\n"
+"    h->ledger = (K26AstroRtConservationLedger **)calloc(\n"
+"        n_envs, sizeof(*h->ledger));\n"
+"    if (!h->prop || !h->veh_com || !h->thr_scale || !h->ledger) {\n"
+"        kflrl_free_handle_(h);\n"
+"        return K26RL_E_INTERNAL;\n"
+"    }\n"
+"", out);
+    fputs(
+"#if KFLRL_N_PROPELLANT > 0\n"
+"    /* One ledger per environment, taken here because a burn is\n"
+"     * recorded on the stepping path and that path allocates\n"
+"     * nothing. */\n"
+"    for (uint32_t e = 0; e < n_envs; e++) {\n"
+"        h->ledger[e] = k26astro_rt_ledger_new();\n"
+"        if (!h->ledger[e]) {\n"
+"            kflrl_free_handle_(h);\n"
+"            return K26RL_E_INTERNAL;\n"
+"        }\n"
+"    }\n"
+"#endif\n"
 "#endif\n"
 "    h->baseline = (K26AstroBody *)calloc(\n"
 "        (size_t)n_envs * (KFLRL_N_BODIES ? KFLRL_N_BODIES : 1),\n"
@@ -9755,6 +10177,24 @@ static void rl_emit_env_core_(FILE *out)
 "            kflrl_free_handle_(h);\n"
 "            return K26RL_E_INTERNAL;\n"
 "        }\n"
+"#if KFLRL_N_VEHICLES > 0\n"
+"        /* The tank as built, and the centre of mass it puts the\n"
+"         * craft at. The centre of mass is read back off the vehicle\n"
+"         * rather than recomputed here, so there is one place a\n"
+"         * constructed value comes from whether the assembly carries\n"
+"         * a tank or not. */\n"
+"        for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"            h->prop[(size_t)e * KFLRL_N_VEHICLES + vi] =\n"
+"                kflrl_veh_prop_cap_[vi];\n"
+"            KFLRL_THRSC(h, e, vi) = 1.0;\n"
+"            K26AstroEpoch t0;\n"
+"            memset(&t0, 0, sizeof t0);\n"
+"            K26V3 c0 = k26astro_vehicle_com_at(\n"
+"                h->vehicles[(size_t)e * KFLRL_N_VEHICLES + vi], t0);\n"
+"            double *cs = KFLRL_COM(h, e, vi);\n"
+"            cs[0] = c0.x; cs[1] = c0.y; cs[2] = c0.z;\n"
+"        }\n"
+"#endif\n"
 "#if KFLRL_N_THRUSTERS > 0\n"
 "        /* Registered here rather than at world build because the\n"
 "         * context is the handle and this environment's index, and\n"
@@ -9803,7 +10243,8 @@ static void rl_emit_env_core_(FILE *out)
 "                       h->obs + (size_t)e * KFLRL_OBS_TOTAL,\n"
 "                       &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
 "                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
-"                       KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
+"                       KFLRL_VEHS(h, e), KFLRL_PROP(h, e),\n"
+"                       KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),\n"
 "                       KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
 "    }\n"
 "\n"
@@ -10127,6 +10568,62 @@ static void rl_emit_env_core_(FILE *out)
 "                cquat[vi] = cb->attitude;\n"
 "            }\n"
 "#endif\n"
+"", out);
+    fputs(
+"#if KFLRL_N_PROPELLANT > 0\n"
+"            /* What this sub-interval's thrust costs, decided before\n"
+"             * anything moves, because the answer scales the thrust\n"
+"             * and the torque the advance below applies.\n"
+"             *\n"
+"             * Per thruster: exhaust speed is the specific impulse\n"
+"             * times standard gravity, mass flow is the throttled\n"
+"             * thrust divided by that speed, and what it spends over\n"
+"             * the interval is that flow times the interval. The\n"
+"             * flows are summed over the vehicle's thrusters and the\n"
+"             * tank is debited once, rather than each thruster\n"
+"             * drawing on the tank as it is reached: a tank debited\n"
+"             * in turn would empty part way along the sequence, and\n"
+"             * which thrusters had already been reached when it did\n"
+"             * is an accident of declaration order rather than\n"
+"             * anything the program said.\n"
+"             *\n"
+"             * The sub-interval a tank runs out in is apportioned\n"
+"             * rather than truncated or overrun. Every firing\n"
+"             * thruster is scaled by the same fraction, which is the\n"
+"             * part of the interval there was propellant for, so the\n"
+"             * impulse delivered is exactly the impulse that mass\n"
+"             * could deliver and the rest of the interval is\n"
+"             * unpowered. Letting the interval finish would spend\n"
+"             * propellant the craft does not have, and cutting it\n"
+"             * short would throw away propellant it does. */\n"
+"            double burned[KFLRL_N_VEHICLES];\n"
+"            for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"                burned[vi] = 0.0;\n"
+"                KFLRL_THRSC(h, e, vi) = 1.0;\n"
+"                if (!(kflrl_veh_prop_cap_[vi] > 0.0)) continue;\n"
+"                double left = h->prop[(size_t)e * KFLRL_N_VEHICLES + vi];\n"
+"                double flow = 0.0;\n"
+"#if KFLRL_N_THRUSTERS > 0\n"
+"                for (int i = 0; i < KFLRL_N_THRUSTERS; i++) {\n"
+"                    if (kflrl_thruster_veh_[i] != vi) continue;\n"
+"                    double u = h->act[e].cmd[\n"
+"                        KFLRL_N_WHEELS + KFLRL_N_TORQUERS + i];\n"
+"                    u = u < 0.0 ? 0.0 : (u > 1.0 ? 1.0 : u);\n"
+"                    if (u == 0.0) continue;\n"
+"                    flow += u * kflrl_thruster_desc_[i].max_thrust /\n"
+"                            (kflrl_thruster_desc_[i].isp_s * KFLRL_G0);\n"
+"                }\n"
+"#endif\n"
+"                double demand = flow * step_dt;\n"
+"                if (demand <= 0.0) continue;\n"
+"                if (demand > left) {\n"
+"                    KFLRL_THRSC(h, e, vi) = left / demand;\n"
+"                    burned[vi] = left;\n"
+"                } else {\n"
+"                    burned[vi] = demand;\n"
+"                }\n"
+"            }\n"
+"#endif\n"
 "            rc = k26astro_world_step_exact(h->worlds[e], step_dt);\n"
 "            if (rc != 0) break;\n"
 "            advanced += step_dt;\n", out);
@@ -10173,8 +10670,9 @@ static void rl_emit_env_core_(FILE *out)
 "                                         KFLRL_N_THRUSTERS : 1];\n"
 "                int wmap[KFLRL_N_WHEELS > 0 ? KFLRL_N_WHEELS : 1];\n"
 "                K26AstroAttActuators view;\n"
-"                kflrl_act_view_(&h->act[e], vi, wbuf, qbuf, tbuf,\n"
-"                                &view, wmap);\n"
+"                kflrl_act_view_(&h->act[e], vi, KFLRL_COM(h, e, vi),\n"
+"                                KFLRL_THRSC(h, e, vi),\n"
+"                                wbuf, qbuf, tbuf, &view, wmap);\n"
 "                K26V3 bfield = kflrl_field_body_(h->worlds[e], veh, vi);\n"
 "                ast = k26astro_att_step_actuated(veh, &view, gg[vi],\n"
 "                                                 bfield, step_dt);\n"
@@ -10192,6 +10690,72 @@ static void rl_emit_env_core_(FILE *out)
 "                    : (uint16_t)K26RL_E_ENV_INTERNAL;\n"
 "                break;\n"
 "            }\n"
+"", out);
+    fputs(
+"#if KFLRL_N_PROPELLANT > 0\n"
+"            /* The propellant is gone, and everything that depends on\n"
+"             * it follows: the craft's mass, its gravitational\n"
+"             * parameter, the centre of mass every thruster torque is\n"
+"             * taken about, and the inertia tensor whose inverse the\n"
+"             * rotational equation needs. The tank moves the centre of\n"
+"             * mass unless it sits on it, so a craft's attitude\n"
+"             * authority changes over a long burn; that is the\n"
+"             * arrangement the assembly declared and not an artefact\n"
+"             * of this update.\n"
+"             *\n"
+"             * The debit is taken after the advance rather than\n"
+"             * before it, so the sub-interval is integrated at the\n"
+"             * mass it began with. An advance that did not stand\n"
+"             * leaves the tank alone, on the same terms as the wheel\n"
+"             * momenta above: the interval did not happen, so nothing\n"
+"             * it would have spent did either.\n"
+"             *\n"
+"             * The burn is then registered in the closed-system\n"
+"             * account, one entry per firing thruster carrying that\n"
+"             * thruster's own share of the mass, its own exhaust\n"
+"             * speed and the direction its own exhaust left in. One\n"
+"             * entry for the whole craft would need a single exhaust\n"
+"             * speed where thrusters differ in specific impulse, and\n"
+"             * a single direction, which two opposed thrusters do not\n"
+"             * have: an attitude couple has no net thrust direction\n"
+"             * at all while its exhaust still carries real momentum\n"
+"             * away in two directions. The shares are the same\n"
+"             * arithmetic the debit above summed, so the account and\n"
+"             * the tank agree to rounding. */\n"
+"", out);
+    fputs(
+"            for (int vi = 0; vi < KFLRL_N_VEHICLES; vi++) {\n"
+"                if (!(burned[vi] > 0.0)) continue;\n"
+"                size_t pix = (size_t)e * KFLRL_N_VEHICLES + vi;\n"
+"                double left = h->prop[pix] - burned[vi];\n"
+"                if (left < 0.0) left = 0.0;\n"
+"                h->prop[pix] = left;\n"
+"                K26AstroBody *vb = k26astro_world_body_at(h->worlds[e],\n"
+"                    kflrl_body_idx_[kflrl_vehicle_body_[vi]]);\n"
+"                kflrl_apply_props_(h->vehicles[pix], vb, vi, left,\n"
+"                                   KFLRL_COM(h, e, vi));\n"
+"#if KFLRL_N_THRUSTERS > 0\n"
+"                if (!vb) continue;\n"
+"                double sc = KFLRL_THRSC(h, e, vi);\n"
+"                for (int i = 0; i < KFLRL_N_THRUSTERS; i++) {\n"
+"                    if (kflrl_thruster_veh_[i] != vi) continue;\n"
+"                    double u = h->act[e].cmd[\n"
+"                        KFLRL_N_WHEELS + KFLRL_N_TORQUERS + i];\n"
+"                    u = u < 0.0 ? 0.0 : (u > 1.0 ? 1.0 : u);\n"
+"                    if (u == 0.0) continue;\n"
+"                    double ve = kflrl_thruster_desc_[i].isp_s * KFLRL_G0;\n"
+"                    double dm = u * kflrl_thruster_desc_[i].max_thrust /\n"
+"                                ve * step_dt * sc;\n"
+"                    if (!(dm > 0.0)) continue;\n"
+"                    K26V3 dw = k26m3d_quat_rotate_v3(vb->attitude,\n"
+"                        kflrl_thruster_desc_[i].dir);\n"
+"                    k26astro_rt_ledger_record_burn(h->ledger[e], dm,\n"
+"                        vb->vel.x, vb->vel.y, vb->vel.z, ve,\n"
+"                        -dw.x, -dw.y, -dw.z);\n"
+"                }\n"
+"#endif\n"
+"            }\n"
+"#endif\n"
 "#endif\n"
 "#if KFLRL_N_COLL > 0\n"
 "            /* The collision pass, between the sub-advances. A body\n"
@@ -10228,9 +10792,11 @@ static void rl_emit_env_core_(FILE *out)
 "                    cbody[vi].n_shapes = kflrl_coll_count_[vi];\n"
 "                    cbody[vi].bound_radius = kflrl_veh_bound_[vi];\n"
 "                    cbody[vi].mass = cb->mass;\n"
-"                    cbody[vi].com_offset = k26m3d_v3(\n"
-"                        kflrl_veh_com_[vi][0], kflrl_veh_com_[vi][1],\n"
-"                        kflrl_veh_com_[vi][2]);\n"
+"                    {\n"
+"                        const double *co_ = KFLRL_COM(h, e, vi);\n"
+"                        cbody[vi].com_offset =\n"
+"                            k26m3d_v3(co_[0], co_[1], co_[2]);\n"
+"                    }\n"
 "#if KFLRL_N_PORTS > 1\n"
 "                    /* A joined pair is one body, and the pass tests\n"
 "                     * pairs of bodies, so the follower's primitives\n"
@@ -10465,7 +11031,8 @@ static void rl_emit_env_core_(FILE *out)
 "        kflrl_observe_(h->worlds[e], h->scratch,\n"
 "                       &h->contact[(size_t)e * KFLRL_N_CONTACT],\n"
 "                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
-"                       KFLRL_VEHS(h, e), KFLRL_INFODAY(h, e),\n"
+"                       KFLRL_VEHS(h, e), KFLRL_PROP(h, e),\n"
+"                       KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),\n"
 "                       KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
 "        /* The transition index is the draw index every per-step term\n"
 "         * uses, and h->steps[e] is still the count before this\n"
@@ -11098,6 +11665,11 @@ static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
     arg_ctx.form       = form;
 
     if (rl_emit_prologue_(out, &m, form, diag)) return 1;
+    /* The mass-property tables come before the world is built, not
+     * with the actuators: the world prefix installs a vehicle's
+     * constructed properties through them, and the actuator block is
+     * emitted from inside the per-step body further down. */
+    rl_emit_mass_tables_(out, &m);
     rl_emit_form_args_(out, form);
     if (rl_emit_user_fns_(out, form, arena, user_fn_arr, n_user_fns,
                           diag) ||

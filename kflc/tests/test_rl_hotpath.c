@@ -100,8 +100,9 @@
  * which would leave the fixed requirement unmeasured for everything
  * this phase added rather than proven for it.
  *
- * The assembly carries all three actuator kinds, and the block below
- * commands each of them, for the same reason one step further on.
+ * The assembly carries all three actuator kinds and a propellant
+ * tank, and the block below commands each of them, for the same
+ * reason one step further on.
  * The counts are compile-time constants in the emitted source, so an
  * assembly declaring no wheel compiles the wheel step, the actuator
  * view and the momentum write-back out of the artifact entirely; an
@@ -128,6 +129,28 @@ static const char *const HP_ASM =
     "        mass 1000.0\n"
     "        at 0 0 0\n"
     "        collider box 1.0 0.5 0.5\n"
+    "    end\n"
+    /* A tank, off the centre so its depletion moves the centre of
+     * mass and the inertia tensor as well as the mass, and small
+     * enough that the block below empties it inside the armed window:
+     * the consumption arithmetic, the mass-property update through
+     * the vehicle's own setters, the burn's entry in the
+     * closed-system account, the apportioned sub-interval a tank runs
+     * out in, and the empty-tank branch beyond it are then all inside
+     * the region the counters cover. A craft that never ran dry would
+     * leave the last two of those unmeasured.
+     *
+     * The sizing: the block below holds the two thrusters at 0.5 and
+     * 0.25 of four hundred newtons, which at sixty seconds of
+     * specific impulse is 0.51 kg a second, so a twenty-four period
+     * episode of a tenth of a second each would spend 1.22 kg. The
+     * tank holds one, and runs dry two thirds of the way through
+     * every episode of the drive. */
+    "    component tank\n"
+    "        mass 1.0\n"
+    "        at 0.0 0.6 0.0\n"
+    "        collider box 0.2 0.2 0.2\n"
+    "        propellant\n"
     "    end\n"
     /* Off the coordinate axes, so the frame rotations in the wheel
      * and magnetorquer models are exercised rather than reduced to a
@@ -159,11 +182,13 @@ static const char *const HP_ASM =
     "        at 1.05 0.92 0.0\n"
     "        dir 0.0 -1.0 0.0\n"
     "        thrust 400.0\n"
+    "        isp_s 60.0\n"
     "    end\n"
     "    thruster t_b\n"
     "        at -1.05 -0.92 0.0\n"
     "        dir 0.0 1.0 0.0\n"
     "        thrust 400.0\n"
+    "        isp_s 60.0\n"
     "    end\n"
     "end\n";
 

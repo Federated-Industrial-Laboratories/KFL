@@ -424,6 +424,13 @@ static const char *const OBS_SFX_CON_[] =
     { "_hit", "_fraction", "_speed", NULL };
 static const char *const OBS_SFX_REL_[] =
     { "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z", NULL };
+/* A propulsion observe publishes what a craft has left to spend: the
+ * propellant remaining, the same as a fraction of the tank it was
+ * built with, its current total mass, and the velocity change that
+ * mass ratio still affords, which is four. */
+static const char *const OBS_SFX_PROP_[] =
+    { "_propellant_kg", "_propellant_fraction", "_mass_kg",
+      "_delta_v_remaining", NULL };
 /* A port observe publishes whether the contact it just made was a
  * capture, the four alignment residuals a capture is judged on, and
  * their four rates, which is nine. */
@@ -531,6 +538,7 @@ static const char *const *observe_suffixes_(const KflcNode *world,
     if (observe_marker_(n, "port"))     return OBS_SFX_PORT_;
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
     if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;
+    if (observe_marker_(n, "propulsion")) return OBS_SFX_PROP_;
     if (observe_marker_(n, "relative")) return OBS_SFX_REL_;
     return OBS_SFX_LOS_;
 }
@@ -572,6 +580,7 @@ static size_t observe_as_bound_(void)
     size_t longest = 0;
     const char *const *lists[] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
                                    OBS_SFX_CON_, OBS_SFX_REL_,
+                                   OBS_SFX_PROP_,
                                    OBS_SFX_PORT_, OBS_SFX_DETECT_,
                                    OBS_SFX_TRACK_, OBS_SFX_EFF_LASER_,
                                    OBS_SFX_EFF_IMPACTOR_,
