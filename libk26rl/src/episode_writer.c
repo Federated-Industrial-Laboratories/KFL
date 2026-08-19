@@ -382,6 +382,59 @@ K26RlStatus k26rl_episode_writer_end(K26RlEpisodeWriter *w, uint32_t env,
     return K26RL_OK;
 }
 
+/* Payload bytes before the reference's own. */
+#define PLAN_PREFIX_ 52
+
+K26RlStatus k26rl_episode_writer_plan(K26RlEpisodeWriter *w, uint16_t role,
+                                      uint32_t env, uint32_t episode,
+                                      const uint8_t *digest,
+                                      const uint8_t *ref_bytes,
+                                      uint32_t ref_len)
+{
+    uint8_t head[K26RL_EPISODE_FRAME_HEADER_SIZE];
+    uint8_t pre[PLAN_PREFIX_];
+    uint32_t plen, crc;
+    size_t hn = (size_t)K26RL_EPISODE_FRAME_HEADER_SIZE;
+
+    if (!w || !digest || (ref_len && !ref_bytes))
+        return K26RL_E_NULL;
+    if (role != K26RL_PLAN_ROLE_FLOWN && role != K26RL_PLAN_ROLE_EMITTED)
+        return K26RL_E_GEOMETRY;
+    if (ref_len > K26RL_PLAN_MAX_BYTES)
+        return K26RL_E_GEOMETRY;
+
+    plen = (uint32_t)PLAN_PREFIX_ + ref_len;
+    k26rl_put_u16_(pre, role);
+    k26rl_put_u16_(pre + 2, 0);
+    k26rl_put_u32_(pre + 4, w->rekey_ordinal);
+    k26rl_put_u32_(pre + 8, env);
+    k26rl_put_u32_(pre + 12, episode);
+    memcpy(pre + 16, digest, 32);
+    k26rl_put_u32_(pre + 48, ref_len);
+
+    /* The reference's bytes are the caller's and may be of any size
+     * this format admits, so the frame is checksummed in three pieces
+     * and written in three, rather than assembled into a buffer this
+     * writer would have to own. The checksum is the same function of
+     * the same bytes either way. */
+    k26rl_frame_header_write_(head, K26RL_FRAME_PLAN, plen, w->sequence);
+    crc = k26rl_crc32c(K26RL_CRC32C_INIT, head, hn);
+    crc = k26rl_crc32c(crc, pre, sizeof pre);
+    if (ref_len)
+        crc = k26rl_crc32c(crc, ref_bytes, ref_len);
+    k26rl_put_u32_(head + K26RL_FH_OFF_CRC, crc);
+
+    if (fwrite(head, 1, hn, w->f) != hn)
+        return K26RL_E_INTERNAL;
+    if (fwrite(pre, 1, sizeof pre, w->f) != sizeof pre)
+        return K26RL_E_INTERNAL;
+    if (ref_len && fwrite(ref_bytes, 1, ref_len, w->f) != ref_len)
+        return K26RL_E_INTERNAL;
+    w->sequence++;
+    w->offset += hn + (size_t)plen;
+    return K26RL_OK;
+}
+
 K26RlStatus k26rl_episode_writer_rekey(K26RlEpisodeWriter *w,
                                        uint64_t new_seed,
                                        uint32_t *out_ordinal)

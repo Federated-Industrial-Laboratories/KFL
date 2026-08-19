@@ -52,6 +52,13 @@ struct K26RlEpisodeReader {
     EpEntry_ *eps;
     uint32_t ep_count;
     uint32_t ep_cap;
+    /* File offsets of the plan frames, in file order. The frames are
+     * located during the same pass that reconstructs the episodes and
+     * decoded on demand, because a reference can be large and a
+     * consumer that wants none should pay for none. */
+    uint64_t *plan_offs;
+    uint32_t plan_count;
+    uint32_t plan_cap;
 };
 
 typedef struct {
@@ -111,6 +118,20 @@ static int eps_append_(K26RlEpisodeReader *r, const EpEntry_ *e)
         r->ep_cap = ncap;
     }
     r->eps[r->ep_count++] = *e;
+    return 0;
+}
+
+static int plan_add_(K26RlEpisodeReader *r, uint64_t off)
+{
+    if (r->plan_count == r->plan_cap) {
+        uint32_t ncap = r->plan_cap ? r->plan_cap * 2 : 4;
+        uint64_t *n = realloc(r->plan_offs, (size_t)ncap * sizeof *n);
+        if (!n)
+            return -1;
+        r->plan_offs = n;
+        r->plan_cap = ncap;
+    }
+    r->plan_offs[r->plan_count++] = off;
     return 0;
 }
 
@@ -442,6 +463,18 @@ static K26RlStatus scan_(K26RlEpisodeReader *r, Scratch_ *s,
                 }
                 pe->open = 0;
                 pe->chunk_count = 0;
+            }
+        } else if (kind == K26RL_FRAME_PLAN) {
+            /* Only the offset is kept: the payload is read again when
+             * a caller asks for it, so a scan of a file carrying a
+             * large reference costs the reference once rather than
+             * holding it for the reader's life. */
+            if (plen >= 52 &&
+                (uint64_t)plen - 52u >= (uint64_t)k26rl_get_u32_(s->p + 48)) {
+                if (plan_add_(r, off) != 0) {
+                    st = K26RL_E_INTERNAL;
+                    goto out;
+                }
             }
         } else if (kind == K26RL_FRAME_REKEY) {
             if (plen >= 12) {
@@ -815,6 +848,64 @@ K26RlStatus k26rl_episode_reader_at(const K26RlEpisodeReader *r, uint32_t k,
     return K26RL_OK;
 }
 
+K26RlStatus k26rl_episode_reader_plans(const K26RlEpisodeReader *r,
+                                       uint32_t *out_count)
+{
+    if (!r || !out_count)
+        return K26RL_E_NULL;
+    *out_count = r->plan_count;
+    return K26RL_OK;
+}
+
+K26RlStatus k26rl_episode_reader_plan(K26RlEpisodeReader *r, uint32_t k,
+                                      K26RlEpisodePlan *out)
+{
+    Scratch_ s = { NULL, 0 };
+    uint16_t kind;
+    uint32_t plen, len;
+
+    if (!r || !out)
+        return K26RL_E_NULL;
+    if (k >= r->plan_count)
+        return K26RL_E_GEOMETRY;
+    memset(out, 0, sizeof *out);
+    if (read_frame_at_(r->f, r->file_size, r->plan_offs[k], &s, &kind,
+                       &plen) != 0 ||
+        kind != K26RL_FRAME_PLAN || plen < 52) {
+        free(s.p);
+        return K26RL_E_INTERNAL;
+    }
+    len = k26rl_get_u32_(s.p + 48);
+    if ((uint64_t)plen - 52u < (uint64_t)len) {
+        free(s.p);
+        return K26RL_E_INTERNAL;
+    }
+    out->bytes = alloc_n_(len, 1);
+    if (!out->bytes) {
+        free(s.p);
+        return K26RL_E_INTERNAL;
+    }
+    out->role          = k26rl_get_u16_(s.p);
+    out->rekey_ordinal = k26rl_get_u32_(s.p + 4);
+    out->env           = k26rl_get_u32_(s.p + 8);
+    out->episode       = k26rl_get_u32_(s.p + 12);
+    memcpy(out->digest, s.p + 16, 32);
+    out->len = len;
+    if (len)
+        memcpy(out->bytes, s.p + 52, len);
+    free(s.p);
+    return K26RL_OK;
+}
+
+void k26rl_episode_plan_free(K26RlEpisodePlan *plan)
+{
+    if (!plan)
+        return;
+    free(plan->bytes);
+    plan->bytes = NULL;
+    plan->len = 0;
+}
+
 void k26rl_episode_reader_close(K26RlEpisodeReader *r)
 {
     if (!r)
@@ -823,6 +914,7 @@ void k26rl_episode_reader_close(K26RlEpisodeReader *r)
         fclose(r->f);
     free(r->spec);
     free(r->keys);
+    free(r->plan_offs);
     free_entries_(r->eps, r->ep_count);
     free(r);
 }

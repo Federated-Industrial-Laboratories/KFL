@@ -61,6 +61,30 @@ extern "C" {
 #define K26RL_FRAME_EPISODE_END   ((uint16_t)0x0004)
 #define K26RL_FRAME_INDEX         ((uint16_t)0x0005)
 #define K26RL_FRAME_REKEY         ((uint16_t)0x0006)
+/* A plan frame carries a `.k26ref` reference verbatim, so a run's
+ * plan is recoverable from its recording alone. A recording whose
+ * plan is not in it cannot be replayed or explained, and every
+ * evidence claim this tier makes rests on a recording being
+ * sufficient. Older readers skip the kind by length and lose nothing
+ * they could already read. */
+#define K26RL_FRAME_PLAN          ((uint16_t)0x0007)
+
+/* What a plan frame's reference was to the run that recorded it.
+ *
+ * K26RL_PLAN_ROLE_FLOWN is a plan the run read: it was fixed for the
+ * whole file, so one frame follows the file header and its episode
+ * and environment fields are K26RL_PLAN_ALL.
+ *
+ * K26RL_PLAN_ROLE_EMITTED is a plan the run produced: one frame per
+ * environment per episode, at that episode's end, naming the episode
+ * it came out of.
+ *
+ * The two are distinguished because a file can carry both, and a
+ * consumer asking what a run flew against must not be answered with
+ * what it wrote. */
+#define K26RL_PLAN_ROLE_FLOWN   ((uint16_t)0)
+#define K26RL_PLAN_ROLE_EMITTED ((uint16_t)1)
+#define K26RL_PLAN_ALL          ((uint32_t)0xFFFFFFFFu)
 
 /* Episode end reasons (episode-end frame, uint16). Fault is distinct
  * from termination and truncation: it means the physics could not
@@ -150,6 +174,34 @@ K26RlStatus k26rl_episode_writer_end(K26RlEpisodeWriter *w, uint32_t env,
                                      uint16_t end_reason, uint16_t fault_code,
                                      const double *terminal_adjustments);
 
+/* Emit a plan frame carrying a `.k26ref` reference verbatim.
+ *
+ * `role` is K26RL_PLAN_ROLE_FLOWN or K26RL_PLAN_ROLE_EMITTED; `env`
+ * and `episode` are K26RL_PLAN_ALL for a flown plan and the episode's
+ * own identity for an emitted one, and the rekey ordinal in force is
+ * taken from the writer. `digest` is the reference's own SHA-256 as
+ * the reference format defines it, carried beside the bytes rather
+ * than only inside them: a recording can then be shown to have been
+ * flown against the plan it names rather than against a plan of the
+ * same name, because the two disagree when the bytes are altered.
+ *
+ * The payload is role (uint16), reserved (uint16 zero), rekey ordinal
+ * (uint32), env (uint32), episode (uint32), the 32 digest bytes, the
+ * reference byte count (uint32), then the reference's bytes. The
+ * frame leaves immediately and is not buffered; it is emitted at
+ * open time or at an episode end, never from a step.
+ *
+ * A caller passing more than K26RL_PLAN_MAX_BYTES is refused with
+ * K26RL_E_GEOMETRY rather than growing a frame without bound. */
+K26RlStatus k26rl_episode_writer_plan(K26RlEpisodeWriter *w, uint16_t role,
+                                      uint32_t env, uint32_t episode,
+                                      const uint8_t *digest,
+                                      const uint8_t *ref_bytes,
+                                      uint32_t ref_len);
+
+/* The largest reference a plan frame carries. */
+#define K26RL_PLAN_MAX_BYTES ((uint32_t)4194304)
+
 /* Record a rekey: emits the rekey frame carrying the new seed and the
  * next ordinal, after which episode indices restart at zero under the
  * new key. Returns the new ordinal through out_ordinal when non-null. */
@@ -235,6 +287,32 @@ void k26rl_episode_free(K26RlEpisodeData *data);
 K26RlStatus k26rl_episode_reader_at(const K26RlEpisodeReader *r, uint32_t k,
                                     uint32_t *out_ordinal, uint32_t *out_env,
                                     uint32_t *out_episode);
+
+/* One plan frame, decoded. `bytes` is the reference verbatim and is
+ * allocated by the call; free it with k26rl_episode_plan_free. */
+typedef struct {
+    uint16_t role;
+    uint32_t rekey_ordinal;
+    uint32_t env;
+    uint32_t episode;
+    uint8_t  digest[32];
+    uint32_t len;
+    uint8_t *bytes;
+} K26RlEpisodePlan;
+
+/* How many plan frames the readable prefix carries. */
+K26RlStatus k26rl_episode_reader_plans(const K26RlEpisodeReader *r,
+                                       uint32_t *out_count);
+
+/* The k-th plan frame, in file order. The digest is the one the frame
+ * carries; whether it agrees with the bytes beside it is the caller's
+ * to check, and is the check that separates a recording flown against
+ * the plan it names from one flown against a plan with the same
+ * name. */
+K26RlStatus k26rl_episode_reader_plan(K26RlEpisodeReader *r, uint32_t k,
+                                      K26RlEpisodePlan *out);
+
+void k26rl_episode_plan_free(K26RlEpisodePlan *plan);
 
 void k26rl_episode_reader_close(K26RlEpisodeReader *r);
 
