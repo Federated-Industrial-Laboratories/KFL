@@ -356,6 +356,20 @@ $(RL_SCENE_TEST): tests/test_rl_scene.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The trained-policy file format: the reader, the evaluator, and the
+# check that holds a policy against the world it declares it was
+# trained on. Most of its arms need no compiled world and always run;
+# the arms that hold a policy against a real artifact's spec skip on
+# their own when the sibling stack archives are absent, and say so,
+# rather than taking the format's arms down with them.
+RL_POLICY_TEST = tests/test_rl_policy
+$(RL_POLICY_TEST): tests/test_rl_policy.c tests/policy_fixture.h \
+                   $(RL_GATE_DEPS) \
+                   ../libk26rl/include/k26rl_policy.h \
+                   ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_TAP_TEST = tests/test_rl_tap
 $(RL_TAP_TEST): tests/test_rl_tap.c $(RL_GATE_DEPS) \
                 ../libk26rl/include/k26rl_env.h \
@@ -518,7 +532,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -547,7 +561,8 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	          $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) \
-	          $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST); do \
+	          $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) \
+	          $(RL_POLICY_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
