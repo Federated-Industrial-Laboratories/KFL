@@ -56,10 +56,10 @@
 # the chosen schedule and not by whether they dock. Measured against
 # one, a steady 0.07 m/sec approach that docks from every reset
 # scores below closing at 0.20 m/sec, which docks from none. The
-# corridor puts each of eight scripted profiles that dock from every
-# reset above each of fifteen that dock from none, the closest pair
-# on either side of that split separated by more than four fifths of
-# the capture bonus.
+# corridor puts each of six scripted profiles that dock from every
+# one of twelve resets above each of seventeen that dock from none,
+# the closest pair on either side of that split separated by more
+# than four fifths of the capture bonus.
 #
 # The ceiling's slope is a braking limit and not a schedule. Two
 # 400 N thrusters on ten tonnes brake at 0.08 m/sec^2, so an approach
@@ -91,12 +91,39 @@
 # the port about the docking axis and swings it nowhere, so roll
 # keeps the reciprocal of its own 4.0 deg.
 #
-# Both walls of the corridor are weighted by the same rule against
-# the band's own width, one unit per step at 0.05 m/sec outside the
-# corridor. A flat unit is charged every step so that standing off
-# is never free, and a small range term charges more for standing
-# off far out than close in, which the flat unit alone does not
-# distinguish.
+# The corridor's two walls are 150, which is not the reciprocal of
+# the band's own width and is not meant to be. A wall has to
+# outweigh what leaving the corridor saves, and leaving it on the
+# upper side saves steps, because every other term is collected per
+# step and an approach that closes twice as fast pays about half of
+# them. Measured over scripted constant-rate approaches that all end
+# in contact outside the envelope, closing at 0.20 m/sec pays about
+# 370 units from every term but the walls against about 540 at
+# 0.10 m/sec, while its own excess over the ceiling adds up to only
+# 1.33 m/sec across its steps. At a wall of 20 the faster approach
+# is therefore the cheaper one, and the wall has to be worth more
+# than about 130 before that reverses. It also has to stay light
+# enough to leave the ordering standing, because a wall charges some
+# approaches that dock: a profile that docks from half its resets
+# falls below one that docks from none above about 160. 150 sits
+# inside that window.
+#
+# The lower wall carries the same weight although nothing is saved
+# by drifting under the band, because a corridor with one cheap wall
+# has a cheap way out of it, and holding the rate between the band's
+# two ends is the whole of what the corridor is for.
+#
+# No weight recovers the whole ladder, and the ceiling's own slope
+# is why: a metre out the ceiling has already risen to 0.14 m/sec,
+# so just above the band there is almost nothing left to charge.
+# From the top of the band to about half again as fast the reward
+# stays close to indifferent whatever the walls weigh, and only from
+# twice the band's upper end onward does closing faster reliably
+# cost more.
+#
+# A flat unit is charged every step so that standing off is never
+# free, and a small range term charges more for standing off far out
+# than close in, which the flat unit alone does not distinguish.
 #
 # Every term is a charge and only the capture pays, so an approach
 # that does not dock always ends below zero. The capture is paid once
@@ -174,7 +201,7 @@ fn world docking_world
     observe contact of chaser as touch
 
     objective
-        reward -20.0 * max(0.0, dock_v_axial - (0.10 + 0.04 * dock_axial)) - 20.0 * max(0.0, 0.05 - dock_v_axial) - 1.0 - 0.05 * dock_axial - 10.0 * dock_lateral - 37.5 * dock_pitchyaw - 14.0 * dock_roll - 25.0 * dock_v_lateral - 280.0 * dock_v_pitchyaw - 280.0 * dock_v_roll
+        reward -150.0 * max(0.0, dock_v_axial - (0.10 + 0.04 * dock_axial)) - 150.0 * max(0.0, 0.05 - dock_v_axial) - 1.0 - 0.05 * dock_axial - 10.0 * dock_lateral - 37.5 * dock_pitchyaw - 14.0 * dock_roll - 25.0 * dock_v_lateral - 280.0 * dock_v_pitchyaw - 280.0 * dock_v_roll
         terminal 2000.0 * dock_captured
     end
 end
