@@ -1443,6 +1443,15 @@ int run_gui(Model &model, const DumpOptions &opt)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImPlot::CreateContext();
+    /* Dockable panels, so a person arranges the instrument rather
+     * than accepting the arrangement it was shipped with. What a
+     * viewer is for differs by the hour: a reward curve beside a
+     * scene one day, four observation channels stacked the next, and
+     * a fixed layout serves whichever of those the author happened to
+     * have in mind. Docking is the reason Dear ImGui is vendored here
+     * rather than taken from the system: it is not in the release
+     * branch. */
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 330");
@@ -1460,6 +1469,16 @@ int run_gui(Model &model, const DumpOptions &opt)
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
+
+        /* The dock space covers the window and its centre stays
+         * transparent, because the centre is where the scene is. The
+         * scene is drawn as the backdrop between the interface's
+         * geometry being built and its being rendered, so a dock node
+         * that painted its own background would paint over the
+         * picture the panels exist to annotate. Panels dock around it
+         * or float over it, as they are dragged. */
+        ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(),
+                                     ImGuiDockNodeFlags_PassthruCentralNode);
 
         {
             /* The viewport the model projects with is the framebuffer

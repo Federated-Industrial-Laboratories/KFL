@@ -1,0 +1,28 @@
+Dear ImGui, docking branch.
+
+Upstream:  https://github.com/ocornut/imgui
+Tag:       v1.90.1-docking
+Commit:    2dc85e6e438e6d7f485317c9b76dc153535fed16
+Dated:     2024-01-10
+Taken:     2026-08-19
+Licence:   MIT; full text in LICENSE.txt beside this file, unmodified.
+
+Why this revision. Docking is not in Dear ImGui's release branch: the
+release headers carry the marker `#ifdef IMGUI_HAS_DOCK` with the
+comment that its contents are filled in on the `docking` branch, and
+nothing fills it. The viewer was written against release 1.90.1, so
+this is the docking branch at the same release: the only thing that
+changes from what the viewer built against before is docking itself.
+The vendored plotting library beside this one is pinned to a revision
+of its own and was written against the same Dear ImGui release.
+
+What was taken and what was left. The library's four source files and
+its headers, the three bundled text and packing headers it includes,
+and the two backends the viewer uses: GLFW for the window and OpenGL 3
+for the renderer, with the loader header that second one includes.
+Left behind: the demo source, the documentation tree, the examples,
+the miscellaneous helpers, and the seventeen backends for windowing
+and rendering paths this viewer does not take.
+
+Nothing here is modified. An update is a fresh copy at a new named
+revision, with this file rewritten to name it.

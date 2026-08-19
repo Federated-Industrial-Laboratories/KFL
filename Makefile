@@ -178,10 +178,11 @@ tools: astro
 	@echo "==> tools/k26astro_replay"
 	@$(MAKE) -C tools/k26astro_replay
 	@echo "==> tools/k26rl_view"
-	@if pkg-config --exists imgui glfw3 2>/dev/null; then \
+	@if pkg-config --exists glfw3 gl 2>/dev/null; then \
 	    $(MAKE) -C tools/k26rl_view; \
 	else \
-	    echo "    SKIP: needs libimgui-dev and libglfw3-dev"; \
+	    echo "    SKIP: needs libglfw3-dev and an OpenGL development"; \
+	    echo "          package; the interface libraries are vendored"; \
 	fi
 	@echo "==> tools/k26rl_rtdrive"
 	@$(MAKE) -C tools/k26rl_rtdrive

@@ -102,6 +102,27 @@ Hipparcos-2 bright-star subset
 
 == Vendored interface libraries ==
 
+Dear ImGui (docking branch)
+  Path:      tools/k26rl_view/upstream/imgui/
+  Source:    Omar Cornut (2014-2024), https://github.com/ocornut/imgui
+  Version:   v1.90.1-docking (upstream tag v1.90.1-docking, commit
+             2dc85e6e438e6d7f485317c9b76dc153535fed16, dated
+             2024-01-10; taken 2026-08-19).
+  License:   MIT; full text at
+             tools/k26rl_view/upstream/imgui/LICENSE.txt, unmodified.
+  Scope:     the episode viewer's interface. Built into the k26rl_view
+             tool alone; no library in this distribution links it, and
+             neither does any compiled simulation. It is vendored
+             rather than taken from the system because the viewer's
+             panels dock, and docking is carried on the upstream
+             branch of that name rather than in the release branch.
+             The copy is the library's own sources and headers and the
+             two backends the viewer uses, GLFW and OpenGL 3; the
+             demo, documentation, examples, miscellaneous helpers and
+             other backends are not included. Nothing is modified. The
+             revision and the reason for it are recorded beside the
+             copy at tools/k26rl_view/upstream/imgui/PROVENANCE.
+
 ImPlot
   Path:      tools/k26rl_view/upstream/implot/
   Source:    Evan Pezent (2020-2023), https://github.com/epezent/implot
@@ -112,8 +133,8 @@ ImPlot
   Scope:     plotting widgets for the episode viewer's panels. Built
              into the k26rl_view tool alone; no library in this
              distribution links it, and neither does any compiled
-             simulation. Dear ImGui, which it extends, and GLFW are
-             system dependencies rather than vendored code.
+             simulation. It extends Dear ImGui, which is vendored
+             above; GLFW and OpenGL remain system dependencies.
 
 == Docking interface reference material ==
 
