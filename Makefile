@@ -183,6 +183,8 @@ tools: astro
 	else \
 	    echo "    SKIP: needs libimgui-dev and libglfw3-dev"; \
 	fi
+	@echo "==> tools/k26rl_rtdrive"
+	@$(MAKE) -C tools/k26rl_rtdrive
 
 # ----- Tests -------------------------------------------------------
 

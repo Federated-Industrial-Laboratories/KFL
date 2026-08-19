@@ -76,3 +76,6 @@ packaging/debian/libk26*-dev/
 
 # Python bytecode caches (python/k26rl and its gates)
 __pycache__/
+
+# Built host tools
+tools/k26rl_rtdrive/k26rl_rtdrive
