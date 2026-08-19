@@ -64,6 +64,7 @@ void Model::close()
     index_lookups_ = 0;
     episode_reads_ = 0;
     traj_.clear();
+    det_.clear();
     spec_ = Spec();
     info_ = FileInfo();
 }
@@ -280,6 +281,126 @@ void Model::find_trajectories_()
     }
 }
 
+/* A detection observe publishes seven channels of one base, and the
+ * four this needs are the flag, the direction and the range: the line
+ * of sight is that direction taken out to that range, and the flag
+ * says whether the payload saw anything at this step. The other two
+ * are carried when the file has them, for the panel to read.
+ *
+ * The convention is the file's own naming and not a guess: the
+ * channels of one observe share a base and differ only in the
+ * suffix. */
+void Model::find_detections_()
+{
+    det_.clear();
+    for (size_t i = 0; i < spec_.channels.size(); i++) {
+        std::string base;
+        Detection d;
+        bool x = false, y = false, z = false, r = false;
+
+        if (!suffixed_(spec_.channels[i].name, "_detected", &base))
+            continue;
+        d.base = base;
+        d.detected = spec_.channels[i].index;
+        d.snr = 0;
+        d.aspect = 0;
+        d.has_snr = false;
+        d.has_aspect = false;
+        d.dir_x = d.dir_y = d.dir_z = d.range = 0;
+        for (size_t j = 0; j < spec_.channels.size(); j++) {
+            const std::string &n = spec_.channels[j].name;
+            uint32_t k = spec_.channels[j].index;
+            if (n == base + "_dir_x") { d.dir_x = k; x = true; }
+            if (n == base + "_dir_y") { d.dir_y = k; y = true; }
+            if (n == base + "_dir_z") { d.dir_z = k; z = true; }
+            if (n == base + "_range") { d.range = k; r = true; }
+            if (n == base + "_snr") { d.snr = k; d.has_snr = true; }
+            if (n == base + "_aspect") { d.aspect = k; d.has_aspect = true; }
+        }
+        if (x && y && z && r)
+            det_.push_back(d);
+    }
+}
+
+/* The agent groups, read from the slice tags.
+ *
+ * A file written before the slice tags existed carries none, and a
+ * one-agent file's agent owns the whole vector by the ABI's own
+ * definition, so that case falls back to the totals. With more than
+ * one agent there is no such definition and a missing tag leaves the
+ * group empty, which the group reports rather than filling in.
+ */
+std::vector<AgentGroup> Model::agent_groups() const
+{
+    const uint32_t n = spec_.agent_count ? spec_.agent_count : 1;
+    std::vector<AgentGroup> out;
+
+    for (uint32_t a = 0; a < n; a++) {
+        AgentGroup g;
+        g.index = a;
+        g.obs_offset = 0;
+        g.obs_count = 0;
+        g.act_offset = 0;
+        g.act_count = 0;
+        g.has_obs_slice = false;
+        g.has_act_slice = false;
+        for (size_t k = 0; k < spec_.obs_slices.size(); k++) {
+            if (spec_.obs_slices[k].agent != a)
+                continue;
+            g.obs_offset = spec_.obs_slices[k].offset;
+            g.obs_count = spec_.obs_slices[k].count;
+            g.has_obs_slice = true;
+        }
+        for (size_t k = 0; k < spec_.act_slices.size(); k++) {
+            if (spec_.act_slices[k].agent != a)
+                continue;
+            g.act_offset = spec_.act_slices[k].offset;
+            g.act_count = spec_.act_slices[k].count;
+            g.has_act_slice = true;
+        }
+        if (!g.has_obs_slice && n == 1)
+            g.obs_count = spec_.obs_total;
+        if (!g.has_act_slice && n == 1)
+            g.act_count = spec_.act_total;
+        for (size_t c = 0; c < spec_.channels.size(); c++) {
+            uint32_t idx = spec_.channels[c].index;
+            if (idx >= g.obs_offset && idx - g.obs_offset < g.obs_count)
+                g.channels.push_back(idx);
+        }
+        /* The agent's name, taken from the prefix its channels
+         * publish. It is a label and never a membership test: the
+         * channels above are already chosen, and a group whose
+         * channels disagree about the prefix keeps no name at all
+         * rather than adopting the first one it read. */
+        if (n > 1) {
+            bool agreed = !g.channels.empty();
+            std::string prefix;
+            for (size_t c = 0; c < g.channels.size() && agreed; c++) {
+                std::string nm;
+                size_t dot;
+                for (size_t q = 0; q < spec_.channels.size(); q++) {
+                    if (spec_.channels[q].index == g.channels[c])
+                        nm = spec_.channels[q].name;
+                }
+                dot = nm.find('.');
+                if (dot == std::string::npos || dot == 0) {
+                    agreed = false;
+                    break;
+                }
+                if (c == 0)
+                    prefix = nm.substr(0, dot);
+                else if (nm.compare(0, dot, prefix) != 0 ||
+                         dot != prefix.size())
+                    agreed = false;
+            }
+            if (agreed)
+                g.name = prefix;
+        }
+        out.push_back(g);
+    }
+    return out;
+}
+
 bool Model::open(const std::string &path, std::string *err)
 {
     K26RlEpisodeInfo ei;
@@ -321,6 +442,7 @@ bool Model::open(const std::string &path, std::string *err)
         blob && blob_len)
         parse_spec_(blob, blob_len);
     find_trajectories_();
+    find_detections_();
     return true;
 }
 
@@ -347,6 +469,7 @@ bool Model::attach(const std::string &tap_name, bool from_start,
     if (blob && blob_len)
         parse_spec_(blob, blob_len);
     find_trajectories_();
+    find_detections_();
     /* The decoder needs the widths before it reads a step frame, and
      * they are the spec's, walked once above rather than a second
      * time inside the feed. */

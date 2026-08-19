@@ -164,6 +164,68 @@ enum AssetVerdict {
 AssetVerdict asset_verdict(const Spec &sp, const Asset &a,
                            const AssemblyRef **out);
 
+/* Match an asset against one named body, for a command line that
+ * bound it to that body rather than leaving the name to decide.
+ *
+ * The digest still decides whether it draws. A recording with two
+ * craft in it lets an operator bind the second craft's bytes to the
+ * first body, and the check that catches it is the same check that
+ * catches every other wrong asset: the bytes the recording carries
+ * for *that* body are the bytes that must match.
+ *
+ * @param sp    The recording's spec.
+ * @param a     A loaded asset.
+ * @param body  The body the command line bound it to.
+ * @param out   Receives that body's assembly record when it has one.
+ * @return The verdict.
+ */
+AssetVerdict asset_verdict_at(const Spec &sp, const Asset &a, uint32_t body,
+                              const AssemblyRef **out);
+
+/* No body named, which is the one-body shorthand: the assembly's own
+ * name then decides which body it belongs to. */
+#define ASSET_UNBOUND ((uint32_t)0xFFFFFFFFu)
+
+/* One `--asset` argument, as the command line gave it. */
+struct AssetRequest {
+    std::string name;     /* the body name given, empty for the shorthand */
+    uint32_t body;        /* that name resolved, or ASSET_UNBOUND */
+    std::string path;
+
+    AssetRequest() : body(ASSET_UNBOUND) {}
+};
+
+/* One argument after reading and checking: what was asked for, what
+ * was read, the verdict, and the body it binds when the verdict lets
+ * it draw. */
+struct AssetBound {
+    AssetRequest request;
+    Asset asset;
+    AssetVerdict verdict;
+    uint32_t body;        /* meaningful only when verdict is DRAWABLE */
+
+    AssetBound() : verdict(ASSET_NO_BODY), body(ASSET_UNBOUND) {}
+};
+
+/* Read every requested assembly and take its verdict.
+ *
+ * One implementation for both presenters, for the reason the verdict
+ * itself has one: a window that bound an asset to a different body
+ * from the one the headless dump bound it to would be a window no
+ * gate reaches. A request naming a body is checked against that
+ * body's recorded digest; the shorthand is matched by assembly name
+ * as it always was.
+ *
+ * @param sp    The recording's spec.
+ * @param reqs  The command line's `--asset` arguments, in order.
+ * @return One record per request, in the same order.
+ */
+std::vector<AssetBound> asset_bind(const Spec &sp,
+                                   const std::vector<AssetRequest> &reqs);
+
+/* The verdict's name, for a panel and for a dump field. */
+const char *asset_verdict_name(AssetVerdict v);
+
 }  /* namespace k26rl_view */
 
 #endif /* K26RL_VIEW_ASSET_H */

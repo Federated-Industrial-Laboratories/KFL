@@ -151,6 +151,48 @@ struct Trajectory {
     uint32_t dir_x, dir_y, dir_z, range;
 };
 
+/* One detection observe, found by the published naming convention: a
+ * `_detected` channel with the direction and range channels of the
+ * same base beside it.
+ *
+ * The signal-to-noise ratio and the aspect cosine are optional here
+ * because a viewer that refused a set missing one of them would draw
+ * nothing for a file that carries everything the line of sight needs.
+ * The four that are not optional are the four the line is built
+ * from. */
+struct Detection {
+    std::string base;
+    uint32_t detected;
+    uint32_t dir_x, dir_y, dir_z, range;
+    uint32_t snr;
+    uint32_t aspect;
+    bool has_snr;
+    bool has_aspect;
+};
+
+/* One agent's share of the vectors, as the spec's slice tags publish
+ * it, with the channels that fall inside the observation slice.
+ *
+ * Membership comes from the slice tags and from nothing else. The
+ * names carry an agent prefix as well, and reading membership off the
+ * prefix would be a viewer that disagrees with the ABI the first time
+ * two agents declare a channel of one name.
+ *
+ * `name` is the prefix those qualified names share, which is the only
+ * published source for an agent's name, and it is empty when the
+ * channels in the slice do not agree on one. */
+struct AgentGroup {
+    uint32_t index;
+    std::string name;
+    uint32_t obs_offset;
+    uint32_t obs_count;
+    uint32_t act_offset;
+    uint32_t act_count;
+    bool has_obs_slice;
+    bool has_act_slice;
+    std::vector<uint32_t> channels;   /* channel indices, in slice order */
+};
+
 /* A run of step records the ring overwrote before this viewer read
  * them: the first step number missing and how many. A file source
  * never produces one, because a file records every step. */
@@ -280,6 +322,12 @@ public:
     const FileInfo &info() const { return info_; }
     const Spec &spec() const { return spec_; }
     const std::vector<Trajectory> &trajectories() const { return traj_; }
+    const std::vector<Detection> &detections() const { return det_; }
+
+    /* One group per agent, from the slice tags. Both presenters ask
+     * this one function, so the groups the headless dump reports are
+     * the groups the window draws. */
+    std::vector<AgentGroup> agent_groups() const;
 
     /* Identity of the k-th indexed episode. */
     bool identity(uint32_t k, uint32_t *ordinal, uint32_t *env,
@@ -327,6 +375,7 @@ private:
     FileInfo info_;
     Spec spec_;
     std::vector<Trajectory> traj_;
+    std::vector<Detection> det_;
     Episode current_;
     uint32_t current_k_;
     bool have_;
@@ -335,6 +384,7 @@ private:
 
     void parse_spec_(const uint8_t *blob, uint32_t len);
     void find_trajectories_();
+    void find_detections_();
 };
 
 /* The ending's name, for a panel that distinguishes the three the

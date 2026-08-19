@@ -37,15 +37,21 @@ extern "C" {
 
 namespace k26rl_view {
 
+/* The three standing labels, each shortened to what a reader cannot
+ * get from the reading beside it. The first states a distinction a
+ * depth cue could otherwise be mistaken for; the other two state
+ * where a line is drawn from, which the geometry does not show. */
 const char *const SHADING_LABEL =
-    "shading is a depth cue computed from a view-space light "
-    "direction; it is not an illumination calculation and is not "
-    "derived from any physical source";
+    "depth cue from a view-space light; not an illumination "
+    "calculation";
 
 const char *const SCENE_TRAJECTORY_LABEL =
-    "observer-relative track, as the observation channels recorded "
-    "it, drawn about the reference frame's origin; it coincides with "
-    "the scene's own geometry when the reference body is the observer";
+    "track about the reference origin; exact when the reference body "
+    "is the observer";
+
+const char *const SCENE_DETECTION_LABEL =
+    "line of sight from the reference origin, drawn while detected; "
+    "exact when the reference body carries the payload";
 
 namespace {
 
@@ -58,7 +64,7 @@ const double UP_DEGENERATE = 1.0e-6;
 
 const char *const ELEMENT_NAMES[ELEM_KIND_COUNT] = {
     "wireframe", "collider", "axes", "trajectory", "velocity", "port",
-    "thruster"
+    "thruster", "detection"
 };
 
 K26V3 v3_(const double a[3]) { return k26m3d_v3(a[0], a[1], a[2]); }
@@ -79,6 +85,23 @@ void mat_to_float_(float out[16], const K26M4 *m)
         for (int r = 0; r < 4; r++)
             out[c * 4 + r] = (float)m->m[c][r];
     }
+}
+
+/* The assembly bound to a body, or null.
+ *
+ * The binding is by body index because a recording of two craft has
+ * two of them, and an element built from a list position rather than
+ * from the body it belongs to draws the second craft's shape at the
+ * first craft's place. Every binding reaching here has already passed
+ * its digest verdict. */
+const Asset *asset_for_(const SceneInput &in, uint32_t body)
+{
+    for (size_t i = 0; i < in.assets.size(); i++) {
+        if (in.assets[i].body == body && in.assets[i].asset &&
+            in.assets[i].asset->loaded)
+            return in.assets[i].asset;
+    }
+    return 0;
 }
 
 /* A line set under construction, in one local frame. */
@@ -406,21 +429,24 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
             }
         }
         sc.pose_from_artifact = true;
-        sc.message = "body poses from the artifact's own getters, "
-                     "re-simulated from the recorded action stream";
+        sc.message = "body poses re-simulated from the recorded action "
+                     "stream";
     } else if (in.resim && in.resim->ran) {
-        sc.message = "this artifact publishes no body state for the chosen "
-                     "reference frame, so the geometry is drawn at the "
-                     "reference origin unrotated";
+        sc.message = "this artifact publishes no body state in the chosen "
+                     "reference frame; the geometry is drawn at the "
+                     "reference origin, unrotated";
     } else if (in.resim) {
-        sc.message = "the rebuild that supplies body poses did not run (" +
-                     in.resim->message + "), so the geometry is drawn at "
-                     "the reference origin unrotated";
-    } else {
-        sc.message = "no body pose is available: without an artifact the "
-                     "recording carries no body position or attitude, so "
-                     "the geometry is drawn at the reference origin "
+        sc.message = "the rebuild did not run (" + in.resim->message +
+                     "); the geometry is drawn at the reference origin, "
                      "unrotated";
+    } else {
+        /* Not "no artifact": the window reaches this branch with an
+         * artifact supplied and its rebuild not yet asked for, and a
+         * message naming a cause it has not checked would send a
+         * reader to the wrong place. */
+        sc.message = "no body pose: the recording carries no body position "
+                     "or attitude. The geometry is drawn at the reference "
+                     "origin, unrotated";
     }
     if (in.resim && in.resim->ran && in.resim->has_attitudes &&
         step < in.resim->steps_compared) {
@@ -436,8 +462,8 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
         }
         have_attitudes = true;
     } else if (sc.pose_from_artifact) {
-        sc.message += "; this artifact publishes no attitude getter, so "
-                      "every body is drawn unrotated";
+        sc.message += "; this artifact publishes no attitude, so every "
+                      "body is drawn unrotated";
     }
 
     /* The camera, resolved in the reference frame and in binary64. */
@@ -522,7 +548,8 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
      * pair of them the spec does not name, so the tracks follow. */
     for (uint32_t b = 0; b < bodies; b++) {
         K26M4 model, rot, trans, mv, mvp;
-        bool drawable = in.asset && in.asset->loaded && in.asset_body == b;
+        const Asset *as = asset_for_(in, b);
+        bool drawable = as != 0;
 
         k26m3d_quat_to_mat4(&rot, att[b]);
         k26m3d_mat4_translate(&trans,
@@ -533,39 +560,38 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
         k26m3d_mat4_mul(&mvp, &pv, &model);
 
         if (drawable && o.enabled[ELEM_WIREFRAME] &&
-            !in.asset->edges.empty()) {
+            !as->edges.empty()) {
             SceneElement e;
             Builder bl;
             e.kind = ELEM_WIREFRAME;
             e.body = b;
-            e.name = scene_body_name(sp, b) + "/" + in.asset->name;
-            e.note = "the assembly's meshes, drawn because the bytes on "
-                     "disk digest to the digest the recording carries";
-            for (size_t i = 0; i * 3 + 2 < in.asset->vertices.size(); i++) {
-                bl.point(k26m3d_v3(in.asset->vertices[i * 3],
-                                   in.asset->vertices[i * 3 + 1],
-                                   in.asset->vertices[i * 3 + 2]));
+            e.name = scene_body_name(sp, b) + "/" + as->name;
+            e.note = "the assembly's meshes, digest verified";
+            for (size_t i = 0; i * 3 + 2 < as->vertices.size(); i++) {
+                bl.point(k26m3d_v3(as->vertices[i * 3],
+                                   as->vertices[i * 3 + 1],
+                                   as->vertices[i * 3 + 2]));
             }
-            for (size_t i = 0; i < in.asset->edges.size(); i++)
-                bl.link(in.asset->edges[i].a, in.asset->edges[i].b);
+            for (size_t i = 0; i < as->edges.size(); i++)
+                bl.link(as->edges[i].a, as->edges[i].b);
             finish_(&e, bl, &mv, &mvp, true);
             if (o.shading) {
-                shade_(&e, *in.asset, &mv, o.light);
+                shade_(&e, *as, &mv, o.light);
                 e.note += "; " + std::string(SHADING_LABEL);
             }
             sc.elements.push_back(e);
         }
         if (drawable && o.enabled[ELEM_COLLIDER] &&
-            !in.asset->colliders.empty()) {
+            !as->colliders.empty()) {
             SceneElement e;
             Builder bl;
             e.kind = ELEM_COLLIDER;
             e.body = b;
             e.name = scene_body_name(sp, b) + "/colliders";
-            e.note = "the collision primitives the assembly declares, with "
-                     "each component's placement applied";
-            for (size_t i = 0; i < in.asset->colliders.size(); i++) {
-                const Collider &c = in.asset->colliders[i];
+            e.note = "the declared collision primitives, each "
+                     "component's placement applied";
+            for (size_t i = 0; i < as->colliders.size(); i++) {
+                const Collider &c = as->colliders[i];
                 if (c.kind == COLLIDER_BOX)
                     box_(&bl, v3_(c.centre), c.rot, c.a);
                 else if (c.kind == COLLIDER_SPHERE)
@@ -583,10 +609,9 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
             e.body = b;
             e.name = scene_body_name(sp, b) + "/axes";
             e.note = have_attitudes
-                     ? "the body frame's x, y and z, from the recorded "
-                       "attitude quaternion"
-                     : "the body frame's x, y and z; no attitude is "
-                       "available, so this is the reference frame's own";
+                     ? "body frame x, y and z, from the recorded attitude"
+                     : "body frame x, y and z; no attitude, so these are "
+                       "the reference frame's own";
             for (int c = 0; c < 3; c++) {
                 double d[3] = { 0.0, 0.0, 0.0 };
                 d[c] = o.axis_length;
@@ -595,16 +620,16 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
             finish_(&e, bl, &mv, &mvp, true);
             sc.elements.push_back(e);
         }
-        if (o.enabled[ELEM_PORT] && drawable && !in.asset->ports.empty()) {
+        if (o.enabled[ELEM_PORT] && drawable && !as->ports.empty()) {
             SceneElement e;
             Builder bl;
             e.kind = ELEM_PORT;
             e.body = b;
             e.name = scene_body_name(sp, b) + "/ports";
-            e.note = "docking port geometry, with the mating plane and the "
-                     "capture limits its named envelope publishes";
-            for (size_t i = 0; i < in.asset->ports.size(); i++) {
-                const Port &p = in.asset->ports[i];
+            e.note = "port geometry, with the mating plane and capture "
+                     "limits its named envelope publishes";
+            for (size_t i = 0; i < as->ports.size(); i++) {
+                const Port &p = as->ports[i];
                 K26V3 at = v3_(p.at);
                 K26V3 ax = k26m3d_v3_norm(v3_(p.axis));
                 K26V3 u = v3_(p.roll_ref);
@@ -665,17 +690,16 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
             sc.elements.push_back(e);
         }
         if (o.enabled[ELEM_THRUSTER] && drawable &&
-            !in.asset->thrusters.empty()) {
+            !as->thrusters.empty()) {
             SceneElement e;
             Builder bl;
             e.kind = ELEM_THRUSTER;
             e.body = b;
             e.name = scene_body_name(sp, b) + "/thrusters";
-            e.note = "each thruster's mounting point and the direction of "
-                     "the force it applies, at the declared scale in "
-                     "metres of line per newton";
-            for (size_t i = 0; i < in.asset->thrusters.size(); i++) {
-                const Thruster &t = in.asset->thrusters[i];
+            e.note = "thruster mounting points and force directions, at "
+                     "the declared metres of line per newton";
+            for (size_t i = 0; i < as->thrusters.size(); i++) {
+                const Thruster &t = as->thrusters[i];
                 K26V3 at = v3_(t.at);
                 K26V3 d = k26m3d_v3_norm(v3_(t.dir));
                 bl.line(at, k26m3d_v3_add(at,
@@ -705,10 +729,9 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
             e.body = b;
             e.name = scene_body_name(sp, b) + "/velocity";
             e.note = o.frame == SCENE_ORIGIN
-                     ? "the body's own velocity, over the declared number "
-                       "of seconds"
-                     : "the body's velocity relative to the reference "
-                       "body, over the declared number of seconds";
+                     ? "the body's own velocity, over the declared seconds"
+                     : "velocity relative to the reference body, over the "
+                       "declared seconds";
             bl.line(p, k26m3d_v3_add(p,
                 k26m3d_v3_scale(v, o.velocity_seconds)));
             finish_(&e, bl, &view, &pv, false);
@@ -716,12 +739,17 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
         }
     }
 
-    if (in.asset && in.asset->loaded && in.asset->edges.empty()) {
-        /* The treatment a body with an assembly but no mesh already
-         * gets elsewhere: draw what it does have and say what it does
-         * not, rather than inventing geometry for it. */
-        sc.message += "; this assembly declares no mesh, so it draws its "
-                      "collider outline and its axes and no wireframe";
+    /* The treatment a body with an assembly but no mesh already gets
+     * elsewhere: draw what it does have and say what it does not,
+     * rather than inventing geometry for it. Said once per such
+     * assembly, because a recording may bind more than one. */
+    for (size_t i = 0; i < in.assets.size(); i++) {
+        const Asset *a = in.assets[i].asset;
+        if (a && a->loaded && a->edges.empty()) {
+            sc.message += "; " + scene_body_name(sp, in.assets[i].body) +
+                          " declares no mesh, so it draws its colliders "
+                          "and its axes";
+        }
     }
     if (o.enabled[ELEM_TRAJECTORY] && in.episode) {
         const std::vector<Trajectory> &tr = in.model->trajectories();
@@ -753,6 +781,58 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
             if (bl.empty())
                 continue;
             finish_(&e, bl, &view, &pv, false);
+            sc.elements.push_back(e);
+        }
+    }
+    /* The detection line of sight, which is the element that joins
+     * the scene to the detection channels: it appears and disappears
+     * as a payload gains and loses its target, so a recording plays
+     * back the difficulty of the task in one picture.
+     *
+     * It is built at every step the channels exist for and it is
+     * drawn only where the recorded flag is 1.0. Building it always
+     * and suppressing the segment is deliberate: an element that
+     * vanished would leave a reader unable to tell a target that is
+     * not seen from a toggle that is off or a channel set that is
+     * absent.
+     *
+     * Where it starts is a limit rather than a choice. The recording
+     * publishes the channels of a detection and never the body that
+     * carried the payload, so the line starts at the reference
+     * frame's origin, on the same footing as the track above, and the
+     * note says the condition under which that is the observer. */
+    if (o.enabled[ELEM_DETECTION] && in.episode) {
+        const std::vector<Detection> &dt = in.model->detections();
+        for (size_t d = 0; d < dt.size(); d++) {
+            SceneElement e;
+            Builder bl;
+            Trajectory ray;
+            double xyz[3];
+            double flag;
+            size_t k;
+
+            if (step >= in.episode->step_count)
+                break;
+            ray.base = dt[d].base;
+            ray.dir_x = dt[d].dir_x;
+            ray.dir_y = dt[d].dir_y;
+            ray.dir_z = dt[d].dir_z;
+            ray.range = dt[d].range;
+            Model::point(*in.episode, sp, ray, step, xyz);
+            k = (size_t)step * sp.obs_total + dt[d].detected;
+            flag = k < in.episode->obs.size() ? in.episode->obs[k] : 0.0;
+            e.kind = ELEM_DETECTION;
+            e.body = SCENE_NO_BODY;
+            e.name = dt[d].base;
+            e.note = SCENE_DETECTION_LABEL;
+            bl.line(k26m3d_v3(-eye.x, -eye.y, -eye.z),
+                    k26m3d_v3(xyz[0] - eye.x, xyz[1] - eye.y,
+                              xyz[2] - eye.z));
+            finish_(&e, bl, &view, &pv, false);
+            if (flag != 1.0) {
+                for (size_t s = 0; s < e.segments.size(); s++)
+                    e.segments[s].drawn = false;
+            }
             sc.elements.push_back(e);
         }
     }

@@ -205,6 +205,62 @@ AssetVerdict asset_verdict(const Spec &sp, const Asset &a,
     return ASSET_DRAWABLE;
 }
 
+AssetVerdict asset_verdict_at(const Spec &sp, const Asset &a, uint32_t body,
+                              const AssemblyRef **out)
+{
+    const AssemblyRef *match = 0;
+    for (size_t i = 0; i < sp.assemblies.size(); i++) {
+        if (sp.assemblies[i].body == body)
+            match = &sp.assemblies[i];
+    }
+    if (out)
+        *out = match;
+    if (!match)
+        return ASSET_NO_BODY;
+    if (!match->has_digest)
+        return ASSET_NO_DIGEST;
+    if (memcmp(match->digest, a.digest, K26RL_SHA256_BYTES) != 0)
+        return ASSET_MISMATCH;
+    return ASSET_DRAWABLE;
+}
+
+const char *asset_verdict_name(AssetVerdict v)
+{
+    switch (v) {
+    case ASSET_DRAWABLE:  return "drawable";
+    case ASSET_NO_BODY:   return "unmatched";
+    case ASSET_NO_DIGEST: return "nodigest";
+    default:              return "mismatch";
+    }
+}
+
+std::vector<AssetBound> asset_bind(const Spec &sp,
+                                   const std::vector<AssetRequest> &reqs)
+{
+    std::vector<AssetBound> out;
+
+    for (size_t i = 0; i < reqs.size(); i++) {
+        AssetBound b;
+        const AssemblyRef *match = 0;
+
+        b.request = reqs[i];
+        b.asset = asset_load(reqs[i].path);
+        if (!b.asset.loaded) {
+            b.verdict = ASSET_NO_BODY;
+            out.push_back(b);
+            continue;
+        }
+        if (reqs[i].body == ASSET_UNBOUND)
+            b.verdict = asset_verdict(sp, b.asset, &match);
+        else
+            b.verdict = asset_verdict_at(sp, b.asset, reqs[i].body, &match);
+        if (b.verdict == ASSET_DRAWABLE && match)
+            b.body = match->body;
+        out.push_back(b);
+    }
+    return out;
+}
+
 Asset asset_load(const std::string &path)
 {
     Asset a;

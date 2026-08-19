@@ -53,26 +53,29 @@ static int usage_(const char *prog)
     fprintf(stderr,
         "usage: %s FILE | --tap NAME\n"
         "       %s --dump PANEL [--episode K] [--steps A:B]\n"
-        "               [--artifact PATH] [--asset PATH] [scene options]\n"
-        "               [live options] FILE | --tap NAME\n"
+        "               [--artifact PATH] [--asset [BODY=]PATH]\n"
+        "               [scene options] [live options] FILE | --tap NAME\n"
         "\n"
-        "panels: meta timeline reward obs action traj scrub world\n"
-        "        attitude overlay wireframe scene resim live all\n"
+        "panels: meta timeline reward obs action agents traj scrub\n"
+        "        world attitude overlay wireframe scene resim live all\n"
         "\n"
-        "  --episode K     restrict to the K-th indexed episode\n"
-        "  --steps A:B     restrict to steps [A, B) of each episode\n"
-        "  --artifact PATH the compiled environment, enabling\n"
-        "                  re-simulation, the world frame, the\n"
-        "                  attitude panel and the scene's body poses\n"
-        "  --asset PATH    the vehicle assembly, enabling the wireframe\n"
-        "                  once its digest matches the one recorded\n"
+        "  --episode K     show only episode K\n"
+        "  --steps A:B     show only steps A to B, B excluded\n"
+        "  --artifact PATH the compiled environment. It supplies\n"
+        "                  re-simulation, the world frame, the attitude\n"
+        "                  panel and the scene body poses\n"
+        "  --asset PATH    the vehicle assembly. It supplies the\n"
+        "                  wireframe when its digest is the recorded\n"
+        "                  digest\n"
+        "  --asset BODY=PATH\n"
+        "                  bind that assembly to that body. Give the\n"
+        "                  option once per body\n"
         "\n"
         "scene options:\n"
-        "  --frame BODY            reference body for positions, or\n"
-        "                          `origin` for the world origin\n"
+        "  --frame BODY            reference body, or `origin`\n"
         "  --camera MODE           orbit, chase or free\n"
         "  --camera-target BODY    the body the camera orbits or chases\n"
-        "  --orbit AZ,EL,R         azimuth and elevation in degrees and\n"
+        "  --orbit AZ,EL,R         azimuth and elevation in degrees,\n"
         "                          radius in metres\n"
         "  --chase X,Y,Z           eye offset in the target's own frame\n"
         "  --eye X,Y,Z             free-mode eye, reference frame\n"
@@ -83,8 +86,8 @@ static int usage_(const char *prog)
         "  --ortho-height M        orthographic view height\n"
         "  --clip NEAR,FAR         clip planes in metres\n"
         "  --viewport WxH          viewport in pixels\n"
-        "  --elements LIST         comma-separated element names, or\n"
-        "                          `all` or `none`\n"
+        "  --elements LIST         element names separated by commas,\n"
+        "                          or `all` or `none`\n"
         "  --velocity-seconds S    seconds of velocity the vector shows\n"
         "  --axis-length M         length of the body axis lines\n"
         "  --thruster-scale S      metres of line per newton of thrust\n"
@@ -93,16 +96,14 @@ static int usage_(const char *prog)
         "\n"
         "live options, for a simulation that is still running:\n"
         "  --tap NAME              attach to the named telemetry ring\n"
-        "                          instead of opening a file\n"
-        "  --from-start            join at the ring's oldest surviving\n"
-        "                          frame rather than at the producer's\n"
-        "                          current position, so frames already\n"
-        "                          overwritten are counted and reported\n"
+        "                          instead of a file\n"
+        "  --from-start            join at the ring's oldest frame, not\n"
+        "                          at the producer's position. Frames\n"
+        "                          already overwritten are then counted\n"
         "  --polls N               stop after N rounds of reading\n"
         "  --poll-ms MS            pause between rounds\n"
-        "  --idle-polls N          stop after N rounds that brought\n"
-        "                          nothing from a producer that has not\n"
-        "                          said it finished\n",
+        "  --idle-polls N          stop after N empty rounds while the\n"
+        "                          producer is still open\n",
         prog, prog);
     return 2;
 }
@@ -202,9 +203,23 @@ int main(int argc, char **argv)
             opt.step_hi = (uint32_t)strtoul(colon + 1, 0, 10);
             i++;
         } else if (strcmp(a, "--asset") == 0) {
+            /* `BODY=PATH` binds it to that body; a bare path keeps
+             * the one-body shorthand, where the assembly's own name
+             * decides. The first `=` divides them, because a path may
+             * hold one and a body name may not. */
+            const char *eq;
+            k26rl_view::AssetRequest req;
             if (!v)
                 return usage_(argv[0]);
-            opt.asset = argv[++i];
+            i++;
+            eq = strchr(v, '=');
+            if (eq && eq != v) {
+                req.name.assign(v, (size_t)(eq - v));
+                req.path = eq + 1;
+            } else {
+                req.path = v;
+            }
+            opt.assets.push_back(req);
         } else if (strcmp(a, "--artifact") == 0) {
             if (!v)
                 return usage_(argv[0]);
@@ -380,6 +395,24 @@ int main(int argc, char **argv)
         fprintf(stderr, "%s: no body named `%s` in this recording\n",
                 argv[0], target_name.c_str());
         return 1;
+    }
+    for (size_t k = 0; k < opt.assets.size(); k++) {
+        if (opt.assets[k].name.empty())
+            continue;
+        if (!k26rl_view::scene_body_by_name(model.spec(),
+                                            opt.assets[k].name,
+                                            &opt.assets[k].body)) {
+            fprintf(stderr, "%s: no body named `%s` in this recording\n",
+                    argv[0], opt.assets[k].name.c_str());
+            return 1;
+        }
+        /* `origin` resolves for a reference frame and for a camera
+         * target, and it is not a body an assembly can belong to. */
+        if (opt.assets[k].body == SCENE_ORIGIN) {
+            fprintf(stderr, "%s: `origin` is not a body an assembly can "
+                            "bind to\n", argv[0]);
+            return 1;
+        }
     }
 
     if (headless)

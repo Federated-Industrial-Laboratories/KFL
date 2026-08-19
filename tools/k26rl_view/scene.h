@@ -52,6 +52,7 @@ enum ElementKind {
     ELEM_VELOCITY,        /* the body's velocity, at a declared scale */
     ELEM_PORT,            /* port geometry and its capture envelope */
     ELEM_THRUSTER,        /* thruster positions and directions */
+    ELEM_DETECTION,       /* a detection's line of sight, while it detects */
     ELEM_KIND_COUNT
 };
 
@@ -192,20 +193,28 @@ struct Scene {
               frame(SCENE_ORIGIN) {}
 };
 
+/* One assembly bound to one body. A recording of two craft carries
+ * two assemblies, and an element built from the wrong one draws the
+ * wrong craft, so the binding is a body index and never a position in
+ * a list. The caller has already taken the digest verdict; anything
+ * reaching here draws. */
+struct AssetBinding {
+    const Asset *asset;
+    uint32_t body;
+
+    AssetBinding() : asset(0), body(SCENE_NO_BODY) {}
+};
+
 /* What the scene is built from. `resim` supplies the body poses and
  * may be null, in which case the bodies sit at the reference origin
- * with no attitude and the scene says so. `asset` supplies geometry
- * and is drawn only when `asset_body` names the body that binds it,
- * which the digest check decides. */
+ * with no attitude and the scene says so. */
 struct SceneInput {
     const Model *model;
     const Episode *episode;
     const ResimResult *resim;
-    const Asset *asset;
-    uint32_t asset_body;
+    std::vector<AssetBinding> assets;
 
-    SceneInput() : model(0), episode(0), resim(0), asset(0),
-                   asset_body(SCENE_NO_BODY) {}
+    SceneInput() : model(0), episode(0), resim(0) {}
 };
 
 /* The standing statement the shaded view carries, in the panel and in
@@ -218,6 +227,12 @@ extern const char *const SHADING_LABEL;
 /* The trajectory element's standing statement, for the same reason
  * the plotted trajectory carries one. */
 extern const char *const SCENE_TRAJECTORY_LABEL;
+
+/* The line of sight's standing statement. It carries the same limit
+ * the trajectory carries and for the same reason: the recording names
+ * the channels of a detection but never the body that carried the
+ * payload, so the line starts at the reference frame's origin. */
+extern const char *const SCENE_DETECTION_LABEL;
 
 /* Build the scene at one step. Deterministic in its inputs: the same
  * recording, asset bytes, camera, projection and viewport give the

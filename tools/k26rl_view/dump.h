@@ -11,7 +11,9 @@
 #include <stdio.h>
 
 #include <string>
+#include <vector>
 
+#include "asset.h"
 #include "model.h"
 #include "resim.h"
 #include "scene.h"
@@ -34,14 +36,17 @@ struct LiveOptions {
 
 struct DumpOptions {
     std::string panel;                 /* meta, timeline, reward, obs,
-                                        * action, traj, world, attitude,
-                                        * overlay, wireframe, scene,
-                                        * scrub, resim, all */
+                                        * action, agents, traj, world,
+                                        * attitude, overlay, wireframe,
+                                        * scene, scrub, resim, all */
     uint32_t episode = UINT32_MAX;     /* all indexed episodes by default */
     uint32_t step_lo = 0;
     uint32_t step_hi = UINT32_MAX;     /* to the end of the episode */
     std::string artifact;              /* enables the re-simulation panel */
-    std::string asset;                 /* enables the wireframe panel */
+    /* The assemblies, one per `--asset`. A recording of two craft
+     * binds two, and each says which body it belongs to, because a
+     * list position is not a body. */
+    std::vector<AssetRequest> assets;
     /* The scene view's own state. It is here and not in the window
      * because every one of these settings changes what is projected,
      * and a setting the headless dump cannot reach is a setting no

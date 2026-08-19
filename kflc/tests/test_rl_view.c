@@ -514,11 +514,9 @@ int main(void)
         exp[0] = '\0';
         append_(&exp, &len, &cap, "k26rl_view dump 1\npanel traj\n");
         append_(&exp, &len, &cap, "trajectory_count 1\n");
-        append_(&exp, &len, &cap, "trajectory_label observer-relative: each"
-                " channel's own mode is published by the spec and stated per"
-                " trajectory below; the reconstruction is the target's"
-                " position exactly under a geometric observe, and an apparent"
-                " direction taken at a geometric range otherwise\n");
+        append_(&exp, &len, &cap, "trajectory_label observer-relative;"
+                " exact under a geometric observe, otherwise an apparent"
+                " direction at a geometric range\n");
         append_(&exp, &len, &cap, "trajectory trk 0 1 2 3\n");
         append_(&exp, &len, &cap, "trajectory_mode trk geometric\n");
         for (uint32_t k = 0; k < info.episode_count; k++) {
@@ -1244,13 +1242,13 @@ int main(void)
                         WORK_DIR "/rich_box.k26asm "
                         WORK_DIR "/view_asm.k26epi", WORK_DIR "/wf.txt");
             wf2 = slurp_(WORK_DIR "/wf.txt", NULL);
-            ASSERT(find_line_(wf2, "wireframe_digest match ", found,
+            ASSERT(find_line_(wf2, "wireframe_digest 0 match ", found,
                               sizeof found));
             ASSERT(find_line_(wf2, "wireframe_body ", found, sizeof found));
-            ASSERT(strcmp(found, "wireframe_body 1 craft") == 0);
+            ASSERT(strcmp(found, "wireframe_body 0 1 craft") == 0);
             ASSERT(find_line_(wf2, "wireframe_meshes ", found,
                               sizeof found));
-            ASSERT(strcmp(found, "wireframe_meshes 2") == 0);
+            ASSERT(strcmp(found, "wireframe_meshes 0 2") == 0);
 
             for (int ci = 0; ci < 2; ci++) {
                 char *mesh = slurp_(comp[ci].mesh, NULL);
@@ -1275,11 +1273,11 @@ int main(void)
                         w[0] = v[0] + qw * t[0] + (qy * t[2] - qz * t[1]);
                         w[1] = v[1] + qw * t[1] + (qz * t[0] - qx * t[2]);
                         w[2] = v[2] + qw * t[2] + (qx * t[1] - qy * t[0]);
-                        snprintf(key, sizeof key, "wireframe_vertex %u ",
+                        snprintf(key, sizeof key, "wireframe_vertex 0 %u ",
                                  vbase + local);
                         ASSERT(find_line_(wf2, key, got_line,
                                           sizeof got_line));
-                        snprintf(want, sizeof want, "wireframe_vertex %u "
+                        snprintf(want, sizeof want, "wireframe_vertex 0 %u "
                                  "%016" PRIx64 " %016" PRIx64
                                  " %016" PRIx64, vbase + local,
                                  bits_(w[0] + comp[ci].at[0]),
@@ -1322,10 +1320,10 @@ int main(void)
                 }
                 for (uint32_t j = 0; j < ne; j++) {
                     char key[64], line2[128], want[128];
-                    snprintf(key, sizeof key, "wireframe_edge %u ",
+                    snprintf(key, sizeof key, "wireframe_edge 0 %u ",
                              edges + j);
                     ASSERT(find_line_(wf2, key, line2, sizeof line2));
-                    snprintf(want, sizeof want, "wireframe_edge %u %u %u",
+                    snprintf(want, sizeof want, "wireframe_edge 0 %u %u %u",
                              edges + j, ea[j], eb[j]);
                     ASSERT(strcmp(line2, want) == 0);
                 }
@@ -1340,7 +1338,7 @@ int main(void)
                               sizeof found));
             {
                 char want[128];
-                snprintf(want, sizeof want, "wireframe_counts %u %u %u",
+                snprintf(want, sizeof want, "wireframe_counts 0 %u %u %u",
                          verts, edges, tris);
                 ASSERT(strcmp(found, want) == 0);
             }
@@ -1366,10 +1364,10 @@ int main(void)
                         WORK_DIR "/spoiled.k26asm "
                         WORK_DIR "/view_asm.k26epi", WORK_DIR "/wf_bad.txt");
             wf = slurp_(WORK_DIR "/wf_bad.txt", NULL);
-            ASSERT(find_line_(wf, "wireframe_digest mismatch ", found,
+            ASSERT(find_line_(wf, "wireframe_digest 0 mismatch ", found,
                               sizeof found));
-            ASSERT(strstr(wf, "\nwireframe_vertex ") == NULL);
-            ASSERT(strstr(wf, "\nwireframe_counts ") == NULL);
+            ASSERT(strstr(wf, "\nwireframe_vertex 0 ") == NULL);
+            ASSERT(strstr(wf, "\nwireframe_counts 0 ") == NULL);
             printf("gate 9: an asset whose bytes are not the recording's is"
                    " reported and not drawn: OK\n");
             free(wf);

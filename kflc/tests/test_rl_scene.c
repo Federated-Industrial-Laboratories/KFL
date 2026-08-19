@@ -393,7 +393,7 @@ static void asset_vertex_(const char *text, unsigned v, double p3[3])
     const char *p;
     int i;
 
-    snprintf(pre, sizeof pre, "wireframe_vertex %u ", v);
+    snprintf(pre, sizeof pre, "wireframe_vertex 0 %u ", v);
     p = line_(text, pre);
     ASSERT(p != NULL);
     ASSERT(sscanf(p, "%23s %23s %23s", h[0], h[1], h[2]) == 3);
@@ -1280,7 +1280,7 @@ int main(void)
         ASSERT((size_t)w < sizeof full);
         run_viewer_(full, WORK_DIR "/g7.txt");
         scene = slurp_(WORK_DIR "/g7.txt", NULL);
-        ASSERT(line_(scene, "scene_asset_verdict mismatch") != NULL);
+        ASSERT(line_(scene, "scene_asset_verdict 0 mismatch") != NULL);
         ASSERT(element_index_(scene, K, STEP, "wireframe", "chaser") < 0);
         ASSERT(element_index_(scene, K, STEP, "collider", "chaser") < 0);
         ASSERT(element_index_(scene, K, STEP, "port", "chaser") < 0);
@@ -1302,7 +1302,8 @@ int main(void)
         ASSERT((size_t)w < sizeof full);
         run_viewer_(full, WORK_DIR "/g7b.txt");
         scene = slurp_(WORK_DIR "/g7b.txt", NULL);
-        ASSERT(line_(scene, "scene_asset_verdict drawable target") != NULL);
+        ASSERT(line_(scene, "scene_asset_verdict 0 drawable - target")
+               != NULL);
         ASSERT(element_index_(scene, K, STEP, "wireframe", "target") < 0);
         ASSERT(element_index_(scene, K, STEP, "collider", "target") >= 0);
         ASSERT(element_index_(scene, K, STEP, "port", "target") >= 0);

@@ -69,8 +69,12 @@ namespace {
 struct Ui {
     Model *model;
     std::string artifact;
-    std::string asset_path;
-    Asset asset;
+    /* The assemblies the command line asked for, read once and bound
+     * once, because reading them per frame would read a file per
+     * frame. The bindings are the model's own answer, taken through
+     * the same function the headless dump calls. */
+    std::vector<AssetRequest> asset_reqs;
+    std::vector<AssetBound> assets;
     bool asset_tried;
     uint32_t episode_index;
     uint32_t step;
@@ -98,6 +102,106 @@ struct Ui {
     LiveOptions live;
 };
 
+/* The palette.
+ *
+ * Grey chrome with one amber accent, and a red reserved for a
+ * failure. Hue carries meaning only where something is an accent or
+ * an error, so nothing else in the interface introduces one: a
+ * reading is told apart from its neighbours by position and weight
+ * rather than by colour, which is what lets a panel drop the sentence
+ * explaining what it is.
+ *
+ * The field wells are dark, and deliberately. Dear ImGui takes one
+ * text colour per frame, so a light well under this text colour
+ * renders at a contrast ratio near one and the field is unreadable
+ * without pushing a colour around every widget in the tree.
+ *
+ * The values are display-encoded bytes over 255, straight alpha.
+ */
+ImVec4 rgb_(unsigned hex, float a = 1.0f)
+{
+    return ImVec4((float)((hex >> 16) & 0xFFu) / 255.0f,
+                  (float)((hex >> 8) & 0xFFu) / 255.0f,
+                  (float)(hex & 0xFFu) / 255.0f, a);
+}
+
+const unsigned COL_WINDOW_BG       = 0x101012u;
+const unsigned COL_SURFACE_BG      = 0x595957u;
+const unsigned COL_BORDER          = 0x8e8e8cu;
+const unsigned COL_TEXT            = 0xc8c8ccu;
+const unsigned COL_TEXT_DIM        = 0x9a9a98u;
+const unsigned COL_ACCENT          = 0xfbbf24u;
+const unsigned COL_ACCENT_SECOND   = 0xb46a00u;
+const unsigned COL_INPUT_BG        = 0x2a2a2cu;
+const unsigned COL_ERROR           = 0xef4444u;
+const unsigned COL_HOVER           = 0x6a6a68u;
+
+/* Every slot is written before the named ones, so a colour this build
+ * does not name can never bleed a default through. */
+void apply_theme_(ImGuiStyle &st)
+{
+    for (int i = 0; i < ImGuiCol_COUNT; i++)
+        st.Colors[i] = rgb_(COL_TEXT);
+    st.Colors[ImGuiCol_Text]                  = rgb_(COL_TEXT);
+    st.Colors[ImGuiCol_TextDisabled]          = rgb_(COL_TEXT_DIM);
+    st.Colors[ImGuiCol_WindowBg]              = rgb_(COL_WINDOW_BG);
+    st.Colors[ImGuiCol_ChildBg]               = rgb_(COL_WINDOW_BG, 0.0f);
+    st.Colors[ImGuiCol_PopupBg]               = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_Border]                = rgb_(COL_BORDER);
+    st.Colors[ImGuiCol_BorderShadow]          = rgb_(COL_WINDOW_BG, 0.0f);
+    st.Colors[ImGuiCol_FrameBg]               = rgb_(COL_INPUT_BG);
+    st.Colors[ImGuiCol_FrameBgHovered]        = rgb_(COL_INPUT_BG, 0.85f);
+    st.Colors[ImGuiCol_FrameBgActive]         = rgb_(COL_ACCENT_SECOND, 0.55f);
+    st.Colors[ImGuiCol_TitleBg]               = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_TitleBgActive]         = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_TitleBgCollapsed]      = rgb_(COL_SURFACE_BG, 0.85f);
+    st.Colors[ImGuiCol_MenuBarBg]             = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_ScrollbarBg]           = rgb_(COL_WINDOW_BG);
+    st.Colors[ImGuiCol_ScrollbarGrab]         = rgb_(COL_BORDER);
+    st.Colors[ImGuiCol_ScrollbarGrabHovered]  = rgb_(COL_TEXT_DIM);
+    st.Colors[ImGuiCol_ScrollbarGrabActive]   = rgb_(COL_ACCENT);
+    st.Colors[ImGuiCol_CheckMark]             = rgb_(COL_ACCENT);
+    st.Colors[ImGuiCol_SliderGrab]            = rgb_(COL_TEXT_DIM);
+    st.Colors[ImGuiCol_SliderGrabActive]      = rgb_(COL_ACCENT);
+    st.Colors[ImGuiCol_Button]                = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_ButtonHovered]         = rgb_(COL_HOVER);
+    st.Colors[ImGuiCol_ButtonActive]          = rgb_(COL_ACCENT_SECOND, 0.55f);
+    st.Colors[ImGuiCol_Header]                = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_HeaderHovered]         = rgb_(COL_HOVER);
+    st.Colors[ImGuiCol_HeaderActive]          = rgb_(COL_BORDER, 0.85f);
+    st.Colors[ImGuiCol_Separator]             = rgb_(COL_BORDER);
+    st.Colors[ImGuiCol_SeparatorHovered]      = rgb_(COL_TEXT_DIM);
+    st.Colors[ImGuiCol_SeparatorActive]       = rgb_(COL_ACCENT);
+    st.Colors[ImGuiCol_ResizeGrip]            = rgb_(COL_BORDER, 0.35f);
+    st.Colors[ImGuiCol_ResizeGripHovered]     = rgb_(COL_TEXT_DIM, 0.55f);
+    st.Colors[ImGuiCol_ResizeGripActive]      = rgb_(COL_ACCENT, 0.55f);
+    st.Colors[ImGuiCol_Tab]                   = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_TabHovered]            = rgb_(COL_HOVER);
+    st.Colors[ImGuiCol_TabActive]             = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_TabUnfocused]          = rgb_(COL_WINDOW_BG);
+    st.Colors[ImGuiCol_TabUnfocusedActive]    = rgb_(COL_SURFACE_BG, 0.85f);
+    /* The docking chrome. The central node is left transparent
+     * because the scene is drawn behind it, so the node's own
+     * background must not paint over the picture. */
+    st.Colors[ImGuiCol_DockingPreview]        = rgb_(COL_ACCENT, 0.35f);
+    st.Colors[ImGuiCol_DockingEmptyBg]        = rgb_(COL_WINDOW_BG, 0.0f);
+    st.Colors[ImGuiCol_PlotLines]             = rgb_(COL_TEXT);
+    st.Colors[ImGuiCol_PlotLinesHovered]      = rgb_(COL_ACCENT);
+    st.Colors[ImGuiCol_PlotHistogram]         = rgb_(COL_TEXT);
+    st.Colors[ImGuiCol_PlotHistogramHovered]  = rgb_(COL_ACCENT);
+    st.Colors[ImGuiCol_TableHeaderBg]         = rgb_(COL_SURFACE_BG);
+    st.Colors[ImGuiCol_TableBorderStrong]     = rgb_(COL_BORDER);
+    st.Colors[ImGuiCol_TableBorderLight]      = rgb_(COL_BORDER, 0.55f);
+    st.Colors[ImGuiCol_TableRowBg]            = rgb_(COL_WINDOW_BG, 0.0f);
+    st.Colors[ImGuiCol_TableRowBgAlt]         = rgb_(COL_SURFACE_BG, 0.35f);
+    st.Colors[ImGuiCol_TextSelectedBg]        = rgb_(COL_ACCENT_SECOND, 0.35f);
+    st.Colors[ImGuiCol_DragDropTarget]        = rgb_(COL_ACCENT);
+    st.Colors[ImGuiCol_NavHighlight]          = rgb_(COL_ACCENT);
+    st.Colors[ImGuiCol_NavWindowingHighlight] = rgb_(COL_ACCENT, 0.55f);
+    st.Colors[ImGuiCol_NavWindowingDimBg]     = rgb_(COL_WINDOW_BG, 0.55f);
+    st.Colors[ImGuiCol_ModalWindowDimBg]      = rgb_(COL_WINDOW_BG, 0.55f);
+}
+
 void glfw_error_(int code, const char *desc)
 {
     fprintf(stderr, "k26rl_view: glfw error %d: %s\n", code, desc);
@@ -124,10 +228,10 @@ const char *flag_marks_(uint32_t f, char *buf, size_t n)
 ImVec4 ending_colour_(uint16_t reason)
 {
     switch (reason) {
-    case K26RL_END_TERMINATED: return ImVec4(0.45f, 0.85f, 0.45f, 1.0f);
-    case K26RL_END_TRUNCATED:  return ImVec4(0.95f, 0.80f, 0.35f, 1.0f);
-    case K26RL_END_FAULT:      return ImVec4(0.95f, 0.40f, 0.40f, 1.0f);
-    default:                   return ImVec4(0.7f, 0.7f, 0.7f, 1.0f);
+    case K26RL_END_TERMINATED: return rgb_(COL_TEXT);
+    case K26RL_END_TRUNCATED:  return rgb_(COL_ACCENT);
+    case K26RL_END_FAULT:      return rgb_(COL_ERROR);
+    default:                   return rgb_(COL_TEXT_DIM);
     }
 }
 
@@ -141,7 +245,7 @@ void panel_timeline_(Ui &ui, const Episode &ep)
     else
         ImGui::Text("file %s", ui.model->info().path.c_str());
     if (!ui.model->live() && !ui.model->info().clean_close) {
-        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f),
+        ImGui::TextColored(rgb_(COL_ACCENT),
                            "unclean close: readable prefix ends at byte %llu "
                            "of %llu",
                            (unsigned long long)ui.model->info().readable_bytes,
@@ -170,30 +274,29 @@ void panel_timeline_(Ui &ui, const Episode &ep)
         uint32_t missing = 0;
         for (size_t g = 0; g < ep.gaps.size(); g++)
             missing += ep.gaps[g].count;
-        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f),
-                           "%u step records of this episode were "
-                           "overwritten before this window read them, in "
-                           "%u run%s; the track is drawn through what "
-                           "arrived and not through them",
+        ImGui::TextColored(rgb_(COL_ACCENT),
+                           "%u step records were overwritten before this "
+                           "window read them, in %u run%s. The track "
+                           "skips them",
                            (unsigned)missing, (unsigned)ep.gaps.size(),
                            ep.gaps.size() == 1 ? "" : "s");
         for (size_t g = 0; g < ep.gaps.size() && g < 8; g++) {
-            ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f),
+            ImGui::TextColored(rgb_(COL_ACCENT),
                                "    missing steps %u to %u",
                                ep.gaps[g].first,
                                ep.gaps[g].first + ep.gaps[g].count - 1);
         }
     }
     if (!ep.start_seen) {
-        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f),
-                           "this episode's opening record never arrived: "
-                           "its initial observation and its randomisation "
-                           "draws are not known and are not shown");
+        ImGui::TextColored(rgb_(COL_ACCENT),
+                           "the opening record never arrived, so the "
+                           "initial observation and the randomisation "
+                           "draws are not known");
     }
     if (ui.model->live())
         ImGui::Text("step %u of this episode", ep.step_at(ui.step));
     if (!ep.complete) {
-        ImGui::TextColored(ImVec4(0.55f, 0.80f, 0.95f, 1.0f),
+        ImGui::TextColored(rgb_(COL_TEXT_DIM),
                            "this episode is still running");
     } else {
         ImGui::TextColored(ending_colour_(ep.end_reason),
@@ -202,8 +305,8 @@ void panel_timeline_(Ui &ui, const Episode &ep)
     if (ep.complete && ep.end_reason == K26RL_END_FAULT) {
         ImGui::SameLine();
         ImGui::TextColored(ending_colour_(ep.end_reason),
-                           "(reason code %u; the final record is the one "
-                           "step record that is not a transition)",
+                           "reason code %u; the final record is not a "
+                           "transition",
                            (unsigned)ep.fault_code);
     }
     if (ImGui::Button("jump to ending"))
@@ -222,7 +325,44 @@ void panel_timeline_(Ui &ui, const Episode &ep)
     ImGui::End();
 }
 
-void panel_reward_(Ui &ui, const Episode &ep)
+/* The per-agent grouping the observation, action and reward panels
+ * take when a recording carries more than one agent.
+ *
+ * Which channels and which action offsets belong to an agent is the
+ * model's answer, read from the spec's slice tags, and this file asks
+ * for it rather than working it out: the channel names carry an agent
+ * prefix, grouping by that prefix would be easy, and it would put a
+ * channel under the wrong agent the first time two agents declare one
+ * name. The header shows the name those qualified names publish.
+ */
+std::string agent_header_(const AgentGroup &g)
+{
+    char buf[64];
+    if (!g.name.empty())
+        return g.name;
+    snprintf(buf, sizeof buf, "agent %u", g.index);
+    return buf;
+}
+
+/* One agent's slice, as a reading: where it starts and how wide it
+ * is, on each vector. */
+void agent_slices_(const AgentGroup &g)
+{
+    if (g.has_obs_slice)
+        ImGui::Text("obs %u+%u", g.obs_offset, g.obs_count);
+    else
+        ImGui::TextUnformatted("obs slice not published");
+    ImGui::SameLine();
+    if (g.has_act_slice)
+        ImGui::Text("act %u+%u", g.act_offset, g.act_count);
+    else
+        ImGui::TextUnformatted("act slice not published");
+}
+
+/* One agent's reward and return, at that agent's own index into the
+ * per-step reward array. */
+void plot_reward_(Ui &ui, const Episode &ep, const char *title,
+                  uint32_t agent)
 {
     const uint32_t agents = ui.model->spec().agent_count
                             ? ui.model->spec().agent_count : 1;
@@ -232,111 +372,160 @@ void panel_reward_(Ui &ui, const Episode &ep)
 
     for (uint32_t i = 0; i < ep.step_count; i++)
         xs[i] = (double)i;
+    if (!ImPlot::BeginPlot(title, ImVec2(-1, 200)))
+        return;
+    ImPlot::SetupAxes("step", "reward");
+    for (uint32_t i = 0; i < ep.step_count; i++) {
+        size_t k = (size_t)i * agents + agent;
+        ys[i] = k < ep.rewards.size() ? ep.rewards[k] : 0.0;
+    }
+    if (ep.step_count)
+        ImPlot::PlotLine("reward", &xs[0], &ys[0], (int)ep.step_count);
+    for (uint32_t i = 0; i < ep.step_count; i++) {
+        size_t k = (size_t)i * agents + agent;
+        ys[i] = k < ret.size() ? ret[k] : 0.0;
+    }
+    if (ep.step_count)
+        ImPlot::PlotLine("return", &xs[0], &ys[0], (int)ep.step_count);
+    ImPlot::EndPlot();
+}
+
+void panel_reward_(Ui &ui, const Episode &ep)
+{
+    const uint32_t agents = ui.model->spec().agent_count
+                            ? ui.model->spec().agent_count : 1;
+    std::vector<AgentGroup> g = ui.model->agent_groups();
 
     ImGui::Begin("Reward");
-    if (ImPlot::BeginPlot("per-step reward", ImVec2(-1, 200))) {
-        ImPlot::SetupAxes("step", "reward");
-        for (uint32_t a = 0; a < agents; a++) {
-            char label[32];
-            snprintf(label, sizeof label, "agent %u", a);
-            for (uint32_t i = 0; i < ep.step_count; i++) {
-                size_t k = (size_t)i * agents + a;
-                ys[i] = k < ep.rewards.size() ? ep.rewards[k] : 0.0;
+    if (g.size() > 1) {
+        for (size_t a = 0; a < g.size(); a++) {
+            std::string h = agent_header_(g[a]);
+            ImGui::PushID((int)a);
+            if (ImGui::CollapsingHeader(h.c_str(),
+                                        ImGuiTreeNodeFlags_DefaultOpen)) {
+                plot_reward_(ui, ep, "##reward", g[a].index);
+                if (g[a].index < ep.terminal_adjustments.size())
+                    ImGui::Text("terminal adjustment %g",
+                                ep.terminal_adjustments[g[a].index]);
             }
-            if (ep.step_count)
-                ImPlot::PlotLine(label, &xs[0], &ys[0], (int)ep.step_count);
+            ImGui::PopID();
         }
-        ImPlot::EndPlot();
+        ImGui::End();
+        return;
     }
-    if (ImPlot::BeginPlot("episode return", ImVec2(-1, 200))) {
-        ImPlot::SetupAxes("step", "return");
-        for (uint32_t a = 0; a < agents; a++) {
-            char label[32];
-            snprintf(label, sizeof label, "agent %u", a);
-            for (uint32_t i = 0; i < ep.step_count; i++) {
-                size_t k = (size_t)i * agents + a;
-                ys[i] = k < ret.size() ? ret[k] : 0.0;
-            }
-            if (ep.step_count)
-                ImPlot::PlotLine(label, &xs[0], &ys[0], (int)ep.step_count);
-        }
-        ImPlot::EndPlot();
-    }
+    plot_reward_(ui, ep, "reward and return", 0);
     for (uint32_t a = 0; a < agents && a < ep.terminal_adjustments.size(); a++)
-        ImGui::Text("terminal adjustment, agent %u: %g", a,
-                    ep.terminal_adjustments[a]);
+        ImGui::Text("terminal adjustment %g", ep.terminal_adjustments[a]);
     ImGui::End();
+}
+
+/* The traces of a set of channels, given as spec positions so the
+ * per-channel toggles keep working inside a group. */
+void plot_channels_(Ui &ui, const Episode &ep, const char *title,
+                    const std::vector<size_t> &pos)
+{
+    const Spec &sp = ui.model->spec();
+    std::vector<double> xs(ep.step_count), ys(ep.step_count);
+
+    for (uint32_t i = 0; i < ep.step_count; i++)
+        xs[i] = (double)i;
+    for (size_t q = 0; q < pos.size(); q++) {
+        size_t c = pos[q];
+        bool on = ui.channel_on[c] != 0;
+        if (ImGui::Checkbox(sp.channels[c].name.c_str(), &on))
+            ui.channel_on[c] = on ? 1 : 0;
+        if ((q % 3) != 2 && q + 1 < pos.size())
+            ImGui::SameLine();
+    }
+    if (!ImPlot::BeginPlot(title, ImVec2(-1, 260)))
+        return;
+    ImPlot::SetupAxes("step", "value");
+    for (size_t q = 0; q < pos.size(); q++) {
+        size_t c = pos[q];
+        uint32_t idx = sp.channels[c].index;
+        if (!ui.channel_on[c])
+            continue;
+        for (uint32_t i = 0; i < ep.step_count; i++) {
+            size_t k = (size_t)i * sp.obs_total + idx;
+            ys[i] = k < ep.obs.size() ? ep.obs[k] : 0.0;
+        }
+        if (ep.step_count)
+            ImPlot::PlotLine(sp.channels[c].name.c_str(), &xs[0], &ys[0],
+                             (int)ep.step_count);
+        /* A measured channel is drawn with the truth beside it when
+         * the file says it has one. Which channels those are is the
+         * model's own answer, the same one the headless dump gets,
+         * rather than a predicate written again here: a window
+         * overlaying a different pair from the one the gate checks is
+         * a window nothing checks. */
+        {
+            uint32_t t = ui.model->truth_pair_of(idx);
+            const char *tname = "truth";
+            if (t == K26RL_OBS_PAIR_NONE)
+                continue;
+            for (size_t d = 0; d < sp.channels.size(); d++) {
+                if (sp.channels[d].index == t)
+                    tname = sp.channels[d].name.c_str();
+            }
+            for (uint32_t i = 0; i < ep.step_count; i++) {
+                size_t k = (size_t)i * sp.obs_total + t;
+                ys[i] = k < ep.obs.size() ? ep.obs[k] : 0.0;
+            }
+            if (ep.step_count)
+                ImPlot::PlotLine(tname, &xs[0], &ys[0], (int)ep.step_count);
+        }
+    }
+    ImPlot::EndPlot();
 }
 
 void panel_obs_(Ui &ui, const Episode &ep)
 {
     const Spec &sp = ui.model->spec();
-    std::vector<double> xs(ep.step_count), ys(ep.step_count);
-
-    for (uint32_t i = 0; i < ep.step_count; i++)
-        xs[i] = (double)i;
+    std::vector<AgentGroup> g = ui.model->agent_groups();
+    std::vector<size_t> pos;
 
     ImGui::Begin("Observations");
-    ImGui::TextUnformatted("channels");
-    for (size_t c = 0; c < sp.channels.size(); c++) {
-        bool on = ui.channel_on[c] != 0;
-        if (ImGui::Checkbox(sp.channels[c].name.c_str(), &on))
-            ui.channel_on[c] = on ? 1 : 0;
-        if ((c % 3) != 2 && c + 1 < sp.channels.size())
-            ImGui::SameLine();
-    }
-    if (ImPlot::BeginPlot("observation channels", ImVec2(-1, 260))) {
-        ImPlot::SetupAxes("step", "value");
-        for (size_t c = 0; c < sp.channels.size(); c++) {
-            if (!ui.channel_on[c])
-                continue;
-            uint32_t idx = sp.channels[c].index;
-            for (uint32_t i = 0; i < ep.step_count; i++) {
-                size_t k = (size_t)i * sp.obs_total + idx;
-                ys[i] = k < ep.obs.size() ? ep.obs[k] : 0.0;
-            }
-            if (ep.step_count)
-                ImPlot::PlotLine(sp.channels[c].name.c_str(), &xs[0], &ys[0],
-                                 (int)ep.step_count);
-            /* A measured channel is drawn with the truth beside it
-             * when the file says it has one. Which channels those are
-             * is the model's own answer, the same one the headless
-             * dump gets, rather than a predicate written again here:
-             * a window overlaying a different pair from the one the
-             * gate checks is a window nothing checks. */
-            uint32_t t = ui.model->truth_pair_of(sp.channels[c].index);
-            if (t != K26RL_OBS_PAIR_NONE) {
-                const char *tname = "truth";
-                for (size_t d = 0; d < sp.channels.size(); d++) {
-                    if (sp.channels[d].index == t)
-                        tname = sp.channels[d].name.c_str();
+    if (g.size() > 1) {
+        for (size_t a = 0; a < g.size(); a++) {
+            std::string h = agent_header_(g[a]);
+            ImGui::PushID((int)a);
+            if (ImGui::CollapsingHeader(h.c_str(),
+                                        ImGuiTreeNodeFlags_DefaultOpen)) {
+                agent_slices_(g[a]);
+                pos.clear();
+                for (size_t c = 0; c < sp.channels.size(); c++) {
+                    for (size_t q = 0; q < g[a].channels.size(); q++) {
+                        if (sp.channels[c].index == g[a].channels[q])
+                            pos.push_back(c);
+                    }
                 }
-                for (uint32_t i = 0; i < ep.step_count; i++) {
-                    size_t k = (size_t)i * sp.obs_total + t;
-                    ys[i] = k < ep.obs.size() ? ep.obs[k] : 0.0;
-                }
-                if (ep.step_count)
-                    ImPlot::PlotLine(tname, &xs[0], &ys[0],
-                                     (int)ep.step_count);
+                plot_channels_(ui, ep, "##obs", pos);
             }
+            ImGui::PopID();
         }
-        ImPlot::EndPlot();
+        ImGui::End();
+        return;
     }
+    for (size_t c = 0; c < sp.channels.size(); c++)
+        pos.push_back(c);
+    plot_channels_(ui, ep, "observation channels", pos);
     ImGui::End();
 }
 
-void panel_action_(Ui &ui, const Episode &ep)
+/* The action traces of one contiguous run of offsets, with each
+ * channel's declared bounds drawn as the limits they are, so a trace
+ * riding its bound is visible as such. */
+void plot_actions_(Ui &ui, const Episode &ep, const char *title,
+                   uint32_t off, uint32_t count)
 {
     const Spec &sp = ui.model->spec();
     std::vector<double> xs(ep.step_count), ys(ep.step_count);
 
     for (uint32_t i = 0; i < ep.step_count; i++)
         xs[i] = (double)i;
-
-    ImGui::Begin("Actions");
-    if (ImPlot::BeginPlot("action channels", ImVec2(-1, 260))) {
+    if (ImPlot::BeginPlot(title, ImVec2(-1, 260))) {
         ImPlot::SetupAxes("step", "value");
-        for (uint32_t j = 0; j < sp.act_total; j++) {
+        for (uint32_t j = off; j < off + count && j < sp.act_total; j++) {
             char label[48];
             const ActionDecl *decl = 0;
             for (size_t k = 0; k < sp.actions.size(); k++) {
@@ -353,17 +542,15 @@ void panel_action_(Ui &ui, const Episode &ep)
             }
             if (ep.step_count)
                 ImPlot::PlotLine(label, &xs[0], &ys[0], (int)ep.step_count);
-            /* The declared bounds, drawn as the limits they are, so a
-             * trace riding its bound is visible as such. */
             if (decl && decl->has_bounds && ep.step_count) {
                 double bx[2] = { 0.0, (double)(ep.step_count - 1) };
                 double lo[2] = { decl->lo, decl->lo };
                 double hi[2] = { decl->hi, decl->hi };
                 char blabel[64];
                 snprintf(blabel, sizeof blabel, "action %u bounds", j);
-                ImPlot::SetNextLineStyle(ImVec4(0.6f, 0.6f, 0.6f, 0.8f));
+                ImPlot::SetNextLineStyle(rgb_(COL_TEXT_DIM, 0.8f));
                 ImPlot::PlotLine(blabel, bx, lo, 2);
-                ImPlot::SetNextLineStyle(ImVec4(0.6f, 0.6f, 0.6f, 0.8f));
+                ImPlot::SetNextLineStyle(rgb_(COL_TEXT_DIM, 0.8f));
                 ImPlot::PlotLine(blabel, bx, hi, 2);
             }
         }
@@ -371,11 +558,39 @@ void panel_action_(Ui &ui, const Episode &ep)
     }
     for (size_t k = 0; k < sp.actions.size(); k++) {
         const ActionDecl &a = sp.actions[k];
+        if (a.offset < off || a.offset >= off + count)
+            continue;
         if (a.has_kind && a.kind == K26RL_ACT_KIND_DISCRETE)
-            ImGui::Text("action %u: discrete, arity %u", a.offset, a.arity);
+            ImGui::Text("action %u discrete, arity %u", a.offset, a.arity);
         else if (a.has_bounds)
-            ImGui::Text("action %u: box [%g, %g]", a.offset, a.lo, a.hi);
+            ImGui::Text("action %u box [%g, %g]", a.offset, a.lo, a.hi);
     }
+}
+
+void panel_action_(Ui &ui, const Episode &ep)
+{
+    const Spec &sp = ui.model->spec();
+    std::vector<AgentGroup> g = ui.model->agent_groups();
+
+    ImGui::Begin("Actions");
+    if (g.size() > 1) {
+        for (size_t a = 0; a < g.size(); a++) {
+            std::string h = agent_header_(g[a]);
+            ImGui::PushID((int)a);
+            if (ImGui::CollapsingHeader(h.c_str(),
+                                        ImGuiTreeNodeFlags_DefaultOpen)) {
+                if (g[a].act_count)
+                    plot_actions_(ui, ep, "##act", g[a].act_offset,
+                                  g[a].act_count);
+                else
+                    ImGui::TextUnformatted("no action channel");
+            }
+            ImGui::PopID();
+        }
+        ImGui::End();
+        return;
+    }
+    plot_actions_(ui, ep, "action channels", 0, sp.act_total);
     ImGui::End();
 }
 
@@ -402,8 +617,8 @@ void panel_traj_(Ui &ui, const Episode &ep)
     }
     if (tr.empty()) {
         ImGui::TextUnformatted(
-            "no channel set matches the drawable naming convention; "
-            "every channel is plotted in the observation panel");
+            "no channel set matches the drawable naming convention. "
+            "See the observation panel");
         ImGui::End();
         return;
     }
@@ -475,15 +690,14 @@ void panel_world_(Ui &ui, const Episode &ep)
     (void)ep;
     ImGui::Begin("World frame");
     if (ui.artifact.empty()) {
-        ImGui::TextWrapped("the file records observation channels, not world "
-                           "states; supply an artifact to reconstruct the "
-                           "bodies");
+        ImGui::TextWrapped("no artifact: the file records observation "
+                           "channels, not world states");
         ImGui::End();
         return;
     }
     if (!ui.resim_done || !ui.resim.ran || !ui.resim.has_bodies) {
-        ImGui::TextWrapped("run the re-simulation panel's reconstruction to "
-                           "populate this view");
+        ImGui::TextWrapped("run the reconstruction in the re-simulation "
+                           "panel");
         ImGui::End();
         return;
     }
@@ -526,9 +740,9 @@ void panel_attitude_(Ui &ui, const Episode &ep)
     (void)ep;
     ImGui::Begin("Attitude");
     if (ui.artifact.empty()) {
-        ImGui::TextWrapped("supply an artifact: a body's orientation is not "
-                           "an observation channel unless the programme "
-                           "declared one");
+        ImGui::TextWrapped("no artifact: a body's orientation is an "
+                           "observation channel only when the programme "
+                           "declares one");
         ImGui::End();
         return;
     }
@@ -571,74 +785,89 @@ void panel_attitude_(Ui &ui, const Episode &ep)
 /* The craft's own wireframe, drawn only when the asset on disk
  * digests to what the recording says produced it. A mismatch is
  * reported and nothing is drawn: a wireframe beside a recording is a
- * claim about what flew. */
+ * claim about what flew.
+ *
+ * One plot per bound assembly, because a recording of two craft binds
+ * two and each is a different shape. */
 void panel_wireframe_(Ui &ui, const Episode &ep)
 {
     (void)ep;
     const Spec &sp = ui.model->spec();
 
     ImGui::Begin("Wireframe");
-    if (ui.asset_path.empty()) {
-        ImGui::TextWrapped("supply an assembly with --asset; the recording "
-                           "carries its digest but not its geometry");
+    if (ui.asset_reqs.empty()) {
+        ImGui::TextWrapped("no assembly supplied. The recording carries "
+                           "the digest and not the geometry; run with "
+                           "--asset PATH");
         ImGui::End();
         return;
     }
     if (!ui.asset_tried) {
-        ui.asset = asset_load(ui.asset_path);
+        ui.assets = asset_bind(sp, ui.asset_reqs);
         ui.asset_tried = true;
     }
-    if (!ui.asset.loaded) {
-        ImGui::TextWrapped("%s", ui.asset.error.c_str());
-        ImGui::End();
-        return;
-    }
-    {
-        /* The same verdict function the headless dump calls, so the
+    for (size_t k = 0; k < ui.assets.size(); k++) {
+        const Asset &as = ui.assets[k].asset;
+        const AssemblyRef *match = 0;
+        char title[128];
+
+        ImGui::PushID((int)k);
+        if (!as.loaded) {
+            ImGui::TextWrapped("%s", as.error.c_str());
+            ImGui::PopID();
+            continue;
+        }
+        /* The same binding function the headless dump calls, so the
          * window cannot draw a craft the dump would refuse. This
          * panel's one safety property is that a craft whose bytes are
          * not the recorded bytes is never drawn, and a property with
-         * two implementations holds in whichever was last looked at. */
-        const AssemblyRef *match = 0;
-        AssetVerdict v = asset_verdict(sp, ui.asset, &match);
-        if (v == ASSET_NO_BODY) {
-            ImGui::TextWrapped("no body in this recording binds an assembly "
-                               "named %s", ui.asset.name.c_str());
-            ImGui::End();
-            return;
+         * two implementations holds in whichever was last looked
+         * at. */
+        if (ui.assets[k].request.body == ASSET_UNBOUND)
+            asset_verdict(sp, as, &match);
+        else
+            asset_verdict_at(sp, as, ui.assets[k].request.body, &match);
+        if (ui.assets[k].verdict == ASSET_NO_BODY) {
+            ImGui::TextWrapped("%s: no body binds an assembly of that name",
+                               as.name.c_str());
+            ImGui::PopID();
+            continue;
         }
-        if (v != ASSET_DRAWABLE) {
-            ImGui::TextWrapped("this asset is not the one that flew: the "
-                               "recording carries digest %s and the file on "
-                               "disk digests to %s",
-                               v == ASSET_NO_DIGEST
+        if (ui.assets[k].verdict != ASSET_DRAWABLE) {
+            ImGui::TextWrapped("%s: not the assembly that flew. Recorded "
+                               "digest %s, file digest %s",
+                               as.name.c_str(),
+                               ui.assets[k].verdict == ASSET_NO_DIGEST
                                    ? "none"
                                    : digest_hex(match->digest).c_str(),
-                               digest_hex(ui.asset.digest).c_str());
-            ImGui::End();
-            return;
+                               digest_hex(as.digest).c_str());
+            ImGui::PopID();
+            continue;
         }
-        ImGui::Text("%s, %u vertices and %u edges over %u triangles",
-                    ui.asset.name.c_str(), ui.asset.mesh_vertices,
-                    (unsigned)ui.asset.edges.size(), ui.asset.mesh_triangles);
-        if (ImPlot::BeginPlot("wireframe, body frame", ImVec2(-1, 320),
-                              ImPlotFlags_Equal)) {
+        ImGui::Text("%s on %s, %u vertices, %u edges, %u triangles",
+                    as.name.c_str(),
+                    scene_body_name(sp, ui.assets[k].body).c_str(),
+                    as.mesh_vertices, (unsigned)as.edges.size(),
+                    as.mesh_triangles);
+        snprintf(title, sizeof title, "%s, body frame", as.name.c_str());
+        if (ImPlot::BeginPlot(title, ImVec2(-1, 320), ImPlotFlags_Equal)) {
             ImPlot::SetupAxes("x (m)", "y (m)");
-            for (size_t e = 0; e < ui.asset.edges.size(); e++) {
+            for (size_t e = 0; e < as.edges.size(); e++) {
                 double lx[2], ly[2];
-                size_t a = (size_t)ui.asset.edges[e].a * 3;
-                size_t b = (size_t)ui.asset.edges[e].b * 3;
-                if (a + 2 >= ui.asset.vertices.size() ||
-                    b + 2 >= ui.asset.vertices.size())
+                size_t a = (size_t)as.edges[e].a * 3;
+                size_t b = (size_t)as.edges[e].b * 3;
+                if (a + 2 >= as.vertices.size() ||
+                    b + 2 >= as.vertices.size())
                     continue;
-                lx[0] = ui.asset.vertices[a];
-                ly[0] = ui.asset.vertices[a + 1];
-                lx[1] = ui.asset.vertices[b];
-                ly[1] = ui.asset.vertices[b + 1];
+                lx[0] = as.vertices[a];
+                ly[0] = as.vertices[a + 1];
+                lx[1] = as.vertices[b];
+                ly[1] = as.vertices[b + 1];
                 ImPlot::PlotLine("##edge", lx, ly, 2);
             }
             ImPlot::EndPlot();
         }
+        ImGui::PopID();
     }
     ImGui::End();
 }
@@ -854,7 +1083,8 @@ void scene_colour_(ElementKind k, size_t segment, float *rgba)
         { 0.40f, 0.80f, 0.95f, 1.0f },   /* trajectory */
         { 0.55f, 0.95f, 0.55f, 1.0f },   /* velocity */
         { 0.95f, 0.85f, 0.35f, 1.0f },   /* port */
-        { 0.95f, 0.45f, 0.85f, 1.0f }    /* thruster */
+        { 0.95f, 0.45f, 0.85f, 1.0f },   /* thruster */
+        { 0.98f, 0.98f, 0.55f, 1.0f }    /* detection line of sight */
     };
     static const float axes[3][4] = {
         { 0.95f, 0.35f, 0.35f, 1.0f },
@@ -1059,9 +1289,8 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
         return;
     }
     if (ui.artifact.empty()) {
-        ImGui::TextWrapped("supply an artifact: the recording carries "
-                           "observation channels, and a body's position and "
-                           "attitude are not among them");
+        ImGui::TextWrapped("no artifact: the recording carries observation "
+                           "channels, not body position or attitude");
     } else if (!ui.scene_resim_done || ui.scene_resim_ref != o.frame ||
                ui.scene_resim_ep != ui.episode_index) {
         if (ImGui::Button("reconstruct body poses in this frame")) {
@@ -1070,9 +1299,6 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
             ui.scene_resim_ref = o.frame;
             ui.scene_resim_ep = ui.episode_index;
         }
-        ImGui::SameLine();
-        ImGui::TextUnformatted("the poses are re-simulated from the "
-                               "recorded action stream");
     }
 
     /* The reference frame, which is the body getter's own reference:
@@ -1176,8 +1402,8 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
             o.axis_length = al;
     }
 
-    if (!ui.asset_tried && !ui.asset_path.empty()) {
-        ui.asset = asset_load(ui.asset_path);
+    if (!ui.asset_tried && !ui.asset_reqs.empty()) {
+        ui.assets = asset_bind(sp, ui.asset_reqs);
         ui.asset_tried = true;
     }
     in.model = ui.model;
@@ -1185,26 +1411,28 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
     if (ui.scene_resim_done && ui.scene_resim_ref == o.frame &&
         ui.scene_resim_ep == ui.episode_index)
         in.resim = &ui.scene_resim;
-    if (ui.asset_tried && ui.asset.loaded) {
-        /* The same verdict function the wireframe panel and the dump
-         * call. A craft whose bytes are not the recorded bytes is
-         * never drawn here either. */
-        const AssemblyRef *match = 0;
-        AssetVerdict v = asset_verdict(sp, ui.asset, &match);
-        if (v == ASSET_DRAWABLE) {
-            in.asset = &ui.asset;
-            in.asset_body = match->body;
-        } else {
-            ImGui::TextWrapped("no geometry is drawn from `%s`: %s",
-                ui.asset_path.c_str(),
-                v == ASSET_NO_BODY ? "no body in this recording binds an "
-                                     "assembly of that name"
-                : v == ASSET_NO_DIGEST ? "the recording carries no digest "
-                                         "for it"
-                : "the bytes on disk are not the bytes that flew");
+    /* The same binding function the wireframe panel and the dump
+     * call. A craft whose bytes are not the recorded bytes is never
+     * drawn here either. */
+    for (size_t k = 0; k < ui.assets.size(); k++) {
+        if (!ui.assets[k].asset.loaded) {
+            ImGui::TextWrapped("%s", ui.assets[k].asset.error.c_str());
+            continue;
         }
-    } else if (ui.asset_tried) {
-        ImGui::TextWrapped("%s", ui.asset.error.c_str());
+        if (ui.assets[k].verdict == ASSET_DRAWABLE) {
+            AssetBinding b;
+            b.asset = &ui.assets[k].asset;
+            b.body = ui.assets[k].body;
+            in.assets.push_back(b);
+            continue;
+        }
+        ImGui::TextWrapped("`%s` draws nothing: %s",
+            ui.assets[k].request.path.c_str(),
+            ui.assets[k].verdict == ASSET_NO_BODY
+                ? "no body binds an assembly of that name"
+            : ui.assets[k].verdict == ASSET_NO_DIGEST
+                ? "the recording carries no digest for it"
+            : "the bytes on disk are not the bytes that flew");
     }
 
     ui.scene = scene_build(in, o, ui.step);
@@ -1243,28 +1471,23 @@ void panel_live_(Ui &ui)
     uint64_t lost = m.frames_lost();
 
     ImGui::Begin("Live");
-    ImGui::Text("attached to ring %s", fi.tap.c_str());
-    ImGui::Text("ring %u slots of %u bytes", m.ring_slot_count(),
+    ImGui::Text("ring %s", fi.tap.c_str());
+    ImGui::Text("%u slots of %u bytes", m.ring_slot_count(),
                 m.ring_slot_size());
-    ImGui::Text("frames accepted %llu", (unsigned long long)m.frames_accepted());
+    ImGui::Text("frames accepted %llu",
+                (unsigned long long)m.frames_accepted());
     if (lost) {
-        ImGui::Text("frames lost to overwrite: %llu",
-                    (unsigned long long)lost);
-        ImGui::TextUnformatted(
-            "the simulation outran this window; the steps behind those "
-            "frames are not held and are not drawn");
+        /* The count is the reading. The line beside it is a limit no
+         * reading here states: those steps are gone, and the track
+         * does not pass through them. */
+        ImGui::Text("frames lost %llu", (unsigned long long)lost);
+        ImGui::TextUnformatted("those steps are not held and not drawn");
     } else {
-        ImGui::TextUnformatted("frames lost to overwrite: none");
+        ImGui::TextUnformatted("frames lost 0");
     }
-    ImGui::Text("episodes seen %u", fi.episode_count);
-    ImGui::TextUnformatted(m.producer_closed()
-        ? "the producer has finished and closed the ring"
-        : "the run is in progress");
+    ImGui::Text("episodes %u", fi.episode_count);
+    ImGui::Text("producer %s", m.producer_closed() ? "closed" : "running");
     ImGui::Checkbox("follow the newest step", &ui.follow);
-    ImGui::Separator();
-    ImGui::TextUnformatted(
-        "this window reads and nothing else: the mapping is read only "
-        "and the run cannot tell that anybody is watching");
     ImGui::End();
 }
 
@@ -1318,9 +1541,8 @@ void panel_resim_(Ui &ui, const Episode &ep)
     ImGui::Begin("Re-simulation");
     if (ui.artifact.empty()) {
         ImGui::TextWrapped(
-            "no artifact supplied; run with --artifact PATH to rebuild "
-            "this episode from its recorded seed and action stream and "
-            "compare the two bitwise");
+            "no artifact. Run with --artifact PATH to rebuild this "
+            "episode from its recorded seed and action stream");
         ImGui::End();
         return;
     }
@@ -1331,22 +1553,19 @@ void panel_resim_(Ui &ui, const Episode &ep)
                                   K26RL_BODY_REF_ORIGIN);
             ui.resim_done = true;
         }
-        ImGui::TextWrapped(
-            "reconstruct and compare only: the recorded action stream is "
-            "replayed as recorded, and nothing here edits it");
         ImGui::End();
         return;
     }
 
     if (!ui.resim.ran) {
-        ImGui::TextColored(ImVec4(0.95f, 0.40f, 0.40f, 1.0f), "failed: %s",
+        ImGui::TextColored(rgb_(COL_ERROR), "failed: %s",
                            ui.resim.message.c_str());
     } else if (ui.resim.equal) {
-        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.45f, 1.0f),
+        ImGui::TextColored(rgb_(COL_ACCENT),
                            "equal bitwise over %u steps",
                            ui.resim.steps_compared);
     } else {
-        ImGui::TextColored(ImVec4(0.95f, 0.40f, 0.40f, 1.0f),
+        ImGui::TextColored(rgb_(COL_ERROR),
                            "diverged at step %u (%s)",
                            ui.resim.first_divergence,
                            ui.resim.divergence_kind.c_str());
@@ -1404,7 +1623,7 @@ int run_gui(Model &model, const DumpOptions &opt)
     ui.follow = true;
     ui.live = opt.live;
     ui.artifact = opt.artifact;
-    ui.asset_path = opt.asset;
+    ui.asset_reqs = opt.assets;
     ui.asset_tried = false;
     ui.episode_index = 0;
     ui.step = 0;
@@ -1452,7 +1671,7 @@ int run_gui(Model &model, const DumpOptions &opt)
      * rather than taken from the system: it is not in the release
      * branch. */
     ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    ImGui::StyleColorsDark();
+    apply_theme_(ImGui::GetStyle());
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 330");
     if (!scene_gl_init_(&gl)) {
@@ -1533,7 +1752,10 @@ int run_gui(Model &model, const DumpOptions &opt)
             int w, h;
             glfwGetFramebufferSize(win, &w, &h);
             glViewport(0, 0, w, h);
-            glClearColor(0.09f, 0.09f, 0.11f, 1.0f);
+            /* The interface's own ground, so the picture
+             * behind the panels sits on the same colour they do. */
+            glClearColor(16.0f / 255.0f, 16.0f / 255.0f, 18.0f / 255.0f,
+                         1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
             /* The scene is the backdrop and the panels float over it,
              * which is what a debugging instrument wants: the picture

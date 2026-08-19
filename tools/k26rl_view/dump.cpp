@@ -36,16 +36,14 @@ static void hx(FILE *f, double v)
     fprintf(f, "%016" PRIx64, bits);
 }
 
-/* The trajectory panel's standing label. The spec publishes no
- * observer mode, so this viewer cannot say which mode produced a
- * channel and does not claim to: it states the construction and the
- * one condition under which the reconstruction is exact, which is
- * what keeps the panel honest without inventing a fact. */
+/* The trajectory panel's standing label, shortened to the limit it
+ * carries. Each channel's own mode is a reading beside it, so the
+ * label no longer repeats that the modes are published; what it keeps
+ * is the condition under which the reconstruction is exact, which is
+ * a fact no reading on the panel states. */
 const char *const TRAJECTORY_LABEL =
-    "observer-relative: each channel's own mode is published by the "
-    "spec and stated per trajectory below; the reconstruction is the "
-    "target's position exactly under a geometric observe, and an "
-    "apparent direction taken at a geometric range otherwise";
+    "observer-relative; exact under a geometric observe, otherwise an "
+    "apparent direction at a geometric range";
 
 /* A trajectory's mode is its channels' mode, which the five channels
  * of one observe share. A file written before the tag existed carries
@@ -599,70 +597,156 @@ static void dump_wireframe(FILE *f, Model &m, const DumpOptions &o)
     }
     if (sp.assemblies.empty())
         fprintf(f, "assembly_none no body in this file binds an assembly\n");
-    if (o.asset.empty()) {
+    if (o.assets.empty()) {
         fprintf(f, "wireframe unavailable no asset supplied\n");
         return;
     }
 
-    Asset as = asset_load(o.asset);
-    if (!as.loaded) {
-        fprintf(f, "wireframe_error %s\n", as.error.c_str());
-        return;
-    }
-    fprintf(f, "wireframe_asset %s %s\n", as.name.c_str(),
-            digest_hex(as.digest).c_str());
-    fprintf(f, "wireframe_meshes %u\n", (unsigned)as.meshes.size());
+    /* One record set per supplied assembly, keyed by the request's
+     * position, because a recording of two craft supplies two and a
+     * reader has to be able to tell them apart. Which body each
+     * belongs to, and whether its bytes are the recorded bytes, are
+     * one question asked in one place, so the window and this dump
+     * cannot answer it differently. */
+    std::vector<AssetBound> bound = asset_bind(sp, o.assets);
+    for (size_t k = 0; k < bound.size(); k++) {
+        const Asset &as = bound[k].asset;
+        const AssemblyRef *match = 0;
+        unsigned n = (unsigned)k;
 
-    /* Which body this asset belongs to, and whether its bytes are the
-     * recorded bytes, are one question asked in one place, so the
-     * window and this dump cannot answer it differently. */
-    const AssemblyRef *match = 0;
-    AssetVerdict v = asset_verdict(sp, as, &match);
-    if (v == ASSET_NO_BODY) {
-        fprintf(f, "wireframe_digest unmatched no body binds an assembly "
-                   "named %s\n", as.name.c_str());
-        return;
-    }
-    fprintf(f, "wireframe_body %u %s\n", match->body,
-            match->body < sp.body_names.size()
-                ? sp.body_names[match->body].c_str() : "?");
-    if (v == ASSET_NO_DIGEST) {
-        fprintf(f, "wireframe_digest absent the file carries no digest for "
-                   "this assembly\n");
-        return;
-    }
-    if (v == ASSET_MISMATCH) {
-        /* Reported, and not drawn. The bytes on disk are not the
-         * bytes that flew, and a picture of them would be a picture
-         * of a different craft. */
-        fprintf(f, "wireframe_digest mismatch %s\n",
-                digest_hex(match->digest).c_str());
-        return;
-    }
-    fprintf(f, "wireframe_digest match %s\n",
-            digest_hex(match->digest).c_str());
-    fprintf(f, "wireframe_counts %u %u %u\n", as.mesh_vertices,
-            (unsigned)as.edges.size(), as.mesh_triangles);
-    for (size_t i = 0; i * 3 + 2 < as.vertices.size(); i++) {
-        fprintf(f, "wireframe_vertex %u", (unsigned)i);
-        for (int c = 0; c < 3; c++) {
-            fprintf(f, " ");
-            hx(f, as.vertices[i * 3 + c]);
+        fprintf(f, "wireframe_request %u %s %s\n", n,
+                bound[k].request.name.empty() ? "-"
+                                              : bound[k].request.name.c_str(),
+                bound[k].request.path.c_str());
+        if (!as.loaded) {
+            fprintf(f, "wireframe_error %u %s\n", n, as.error.c_str());
+            continue;
         }
-        fprintf(f, "\n");
+        fprintf(f, "wireframe_asset %u %s %s\n", n, as.name.c_str(),
+                digest_hex(as.digest).c_str());
+        fprintf(f, "wireframe_meshes %u %u\n", n, (unsigned)as.meshes.size());
+        if (bound[k].request.body == ASSET_UNBOUND)
+            asset_verdict(sp, as, &match);
+        else
+            asset_verdict_at(sp, as, bound[k].request.body, &match);
+        if (bound[k].verdict == ASSET_NO_BODY) {
+            fprintf(f, "wireframe_digest %u unmatched %s\n", n,
+                    as.name.c_str());
+            continue;
+        }
+        fprintf(f, "wireframe_body %u %u %s\n", n, match->body,
+                match->body < sp.body_names.size()
+                    ? sp.body_names[match->body].c_str() : "?");
+        if (bound[k].verdict == ASSET_NO_DIGEST) {
+            fprintf(f, "wireframe_digest %u absent\n", n);
+            continue;
+        }
+        if (bound[k].verdict == ASSET_MISMATCH) {
+            /* Reported, and not drawn. The bytes on disk are not the
+             * bytes that flew, and a picture of them would be a
+             * picture of a different craft. */
+            fprintf(f, "wireframe_digest %u mismatch %s\n", n,
+                    digest_hex(match->digest).c_str());
+            continue;
+        }
+        fprintf(f, "wireframe_digest %u match %s\n", n,
+                digest_hex(match->digest).c_str());
+        fprintf(f, "wireframe_counts %u %u %u %u\n", n, as.mesh_vertices,
+                (unsigned)as.edges.size(), as.mesh_triangles);
+        for (size_t i = 0; i * 3 + 2 < as.vertices.size(); i++) {
+            fprintf(f, "wireframe_vertex %u %u", n, (unsigned)i);
+            for (int c = 0; c < 3; c++) {
+                fprintf(f, " ");
+                hx(f, as.vertices[i * 3 + c]);
+            }
+            fprintf(f, "\n");
+        }
+        for (size_t i = 0; i < as.edges.size(); i++)
+            fprintf(f, "wireframe_edge %u %u %u %u\n", n, (unsigned)i,
+                    as.edges[i].a, as.edges[i].b);
     }
-    for (size_t i = 0; i < as.edges.size(); i++)
-        fprintf(f, "wireframe_edge %u %u %u\n", (unsigned)i, as.edges[i].a,
-                as.edges[i].b);
 }
 
-static const char *scene_verdict_name_(AssetVerdict v)
+/* The per-agent panel groups, and the one thing about them a gate has
+ * to be able to fail on.
+ *
+ * Which channels and which action offsets belong to an agent comes
+ * from the spec's own slice tags. It never comes from the channel
+ * names, even though the names carry an agent prefix and reading the
+ * prefix would be easier: two agents may declare a channel of one
+ * name, and a viewer that grouped by prefix would then disagree with
+ * the ABI about which agent owns which number. This writes both, the
+ * slice the tags gave and the name each channel publishes, so a
+ * comparison can show that the first decided and the second did not.
+ */
+static void dump_agents(FILE *f, Model &m, const DumpOptions &o)
 {
-    switch (v) {
-    case ASSET_DRAWABLE: return "drawable";
-    case ASSET_NO_BODY:  return "unmatched";
-    case ASSET_NO_DIGEST: return "nodigest";
-    default:             return "mismatch";
+    const Spec &sp = m.spec();
+    std::vector<AgentGroup> g = m.agent_groups();
+
+    fprintf(f, "agents %u\n", (unsigned)g.size());
+    for (size_t a = 0; a < g.size(); a++) {
+        fprintf(f, "agent %u %s\n", g[a].index,
+                g[a].name.empty() ? "-" : g[a].name.c_str());
+        fprintf(f, "agent_obs_slice %u %u %u %d\n", g[a].index,
+                g[a].obs_offset, g[a].obs_count, g[a].has_obs_slice ? 1 : 0);
+        fprintf(f, "agent_act_slice %u %u %u %d\n", g[a].index,
+                g[a].act_offset, g[a].act_count, g[a].has_act_slice ? 1 : 0);
+        for (size_t c = 0; c < g[a].channels.size(); c++) {
+            std::string nm;
+            for (size_t q = 0; q < sp.channels.size(); q++) {
+                if (sp.channels[q].index == g[a].channels[c])
+                    nm = sp.channels[q].name;
+            }
+            fprintf(f, "agent_channel %u %u %s\n", g[a].index,
+                    g[a].channels[c], nm.empty() ? "-" : nm.c_str());
+        }
+        for (uint32_t j = 0; j < g[a].act_count; j++) {
+            const ActionDecl *d = 0;
+            uint32_t off = g[a].act_offset + j;
+            for (size_t q = 0; q < sp.actions.size(); q++) {
+                if (sp.actions[q].offset == off)
+                    d = &sp.actions[q];
+            }
+            fprintf(f, "agent_action %u %u %u %u ", g[a].index, off,
+                    d && d->has_kind ? (unsigned)d->kind : 0u,
+                    d ? d->arity : 0u);
+            hx(f, d && d->has_bounds ? d->lo : 0.0);
+            fprintf(f, " ");
+            hx(f, d && d->has_bounds ? d->hi : 0.0);
+            fprintf(f, "\n");
+        }
+    }
+
+    for (uint32_t k = 0; k < m.info().episode_count; k++) {
+        std::string err;
+        const Episode *e;
+        uint32_t lo, hi;
+        uint32_t agents = sp.agent_count ? sp.agent_count : 1;
+
+        if (o.episode != UINT32_MAX && k != o.episode)
+            continue;
+        e = m.load(k, &err);
+        if (!e)
+            continue;
+        dump_episode_header(f, k, *e);
+        range_for(*e, o, &lo, &hi);
+        for (size_t a = 0; a < g.size(); a++) {
+            std::vector<double> ret = Model::returns(*e, agents);
+            for (uint32_t i = lo; i < hi; i++) {
+                size_t j = (size_t)i * agents + g[a].index;
+                fprintf(f, "agent_reward %u %u %u ", k, g[a].index,
+                        e->step_at(i));
+                hx(f, j < e->rewards.size() ? e->rewards[j] : 0.0);
+                fprintf(f, " ");
+                hx(f, j < ret.size() ? ret[j] : 0.0);
+                fprintf(f, "\n");
+            }
+            fprintf(f, "agent_terminal %u %u ", k, g[a].index);
+            hx(f, g[a].index < e->terminal_adjustments.size()
+                   ? e->terminal_adjustments[g[a].index] : 0.0);
+            fprintf(f, "\n");
+        }
     }
 }
 
@@ -731,6 +815,18 @@ static void dump_scene_header_(FILE *f, Model &m, const DumpOptions &o)
     fprintf(f, "\n");
     fprintf(f, "scene_shading_label %s\n", SHADING_LABEL);
     fprintf(f, "scene_trajectory_label %s\n", SCENE_TRAJECTORY_LABEL);
+    fprintf(f, "scene_detection_label %s\n", SCENE_DETECTION_LABEL);
+    /* The detection channel sets the line of sight is built from, so
+     * a reader can hold a drawn line against the flag that governs
+     * it without inferring which channels are which. */
+    {
+        const std::vector<Detection> &dt = m.detections();
+        for (size_t d = 0; d < dt.size(); d++) {
+            fprintf(f, "scene_detection %u %s %u %u %u %u %u\n", (unsigned)d,
+                    dt[d].base.c_str(), dt[d].detected, dt[d].dir_x,
+                    dt[d].dir_y, dt[d].dir_z, dt[d].range);
+        }
+    }
     fprintf(f, "scene_scale ");
     hx(f, s.velocity_seconds);
     fprintf(f, " ");
@@ -807,39 +903,45 @@ static void dump_scene(FILE *f, Model &m, const DumpOptions &o)
 {
     const Spec &sp = m.spec();
     SceneInput in;
-    Asset as;
+    std::vector<AssetBound> bound;
 
     dump_scene_header_(f, m, o);
     for (size_t k = 0; k < sp.body_names.size(); k++)
         fprintf(f, "body %u %s\n", (unsigned)k, sp.body_names[k].c_str());
 
-    /* The asset, and the one check that lets it be drawn. A craft
-     * whose bytes are not the recorded bytes is never drawn, in this
-     * panel exactly as in the wireframe panel and through the same
-     * verdict function, so the two cannot disagree. */
-    if (!o.asset.empty()) {
-        as = asset_load(o.asset);
-        if (!as.loaded) {
-            fprintf(f, "scene_asset_error %s\n", as.error.c_str());
-        } else {
-            const AssemblyRef *match = 0;
-            AssetVerdict v = asset_verdict(sp, as, &match);
-            fprintf(f, "scene_asset %s %s\n", as.name.c_str(),
-                    digest_hex(as.digest).c_str());
-            fprintf(f, "scene_asset_verdict %s %s\n",
-                    scene_verdict_name_(v),
-                    match ? scene_body_name(sp, match->body).c_str() : "-");
-            fprintf(f, "scene_asset_parts %u colliders %u ports %u "
-                       "thrusters %u faces\n",
-                    (unsigned)as.colliders.size(), (unsigned)as.ports.size(),
-                    (unsigned)as.thrusters.size(), (unsigned)as.faces.size());
-            if (v == ASSET_DRAWABLE) {
-                in.asset = &as;
-                in.asset_body = match->body;
-            }
-        }
-    } else {
+    /* The assemblies, and the one check that lets each be drawn. A
+     * craft whose bytes are not the recorded bytes is never drawn, in
+     * this panel exactly as in the wireframe panel and through the
+     * same binding function, so the two cannot disagree. */
+    bound = asset_bind(sp, o.assets);
+    if (bound.empty())
         fprintf(f, "scene_asset none no assembly supplied\n");
+    for (size_t k = 0; k < bound.size(); k++) {
+        const Asset &as = bound[k].asset;
+        unsigned n = (unsigned)k;
+
+        if (!as.loaded) {
+            fprintf(f, "scene_asset_error %u %s\n", n, as.error.c_str());
+            continue;
+        }
+        fprintf(f, "scene_asset %u %s %s\n", n, as.name.c_str(),
+                digest_hex(as.digest).c_str());
+        fprintf(f, "scene_asset_verdict %u %s %s %s\n", n,
+                asset_verdict_name(bound[k].verdict),
+                bound[k].request.name.empty() ? "-"
+                                              : bound[k].request.name.c_str(),
+                bound[k].verdict == ASSET_DRAWABLE
+                    ? scene_body_name(sp, bound[k].body).c_str() : "-");
+        fprintf(f, "scene_asset_parts %u %u colliders %u ports %u "
+                   "thrusters %u faces\n", n,
+                (unsigned)as.colliders.size(), (unsigned)as.ports.size(),
+                (unsigned)as.thrusters.size(), (unsigned)as.faces.size());
+        if (bound[k].verdict == ASSET_DRAWABLE) {
+            AssetBinding b;
+            b.asset = &bound[k].asset;
+            b.body = bound[k].body;
+            in.assets.push_back(b);
+        }
     }
 
     in.model = &m;
@@ -1039,6 +1141,8 @@ int dump(FILE *f, Model &m, const DumpOptions &o)
         dump_obs(f, m, o);
     if (p == "action" || p == "all")
         dump_action(f, m, o);
+    if (p == "agents" || p == "all")
+        dump_agents(f, m, o);
     if (p == "traj" || p == "all")
         dump_traj(f, m, o);
     if (p == "scrub" || p == "all")
@@ -1056,7 +1160,8 @@ int dump(FILE *f, Model &m, const DumpOptions &o)
     if (p == "resim" || p == "all")
         dump_resim(f, m, o);
     if (p != "meta" && p != "timeline" && p != "reward" && p != "obs" &&
-        p != "action" && p != "traj" && p != "scrub" && p != "resim" &&
+        p != "action" && p != "agents" && p != "traj" && p != "scrub" &&
+        p != "resim" &&
         p != "world" && p != "attitude" && p != "overlay" &&
         p != "wireframe" && p != "scene" && p != "live" && p != "all") {
         fprintf(stderr, "k26rl_view: unknown panel `%s`\n", p.c_str());

@@ -2135,6 +2135,36 @@ outline and its axes and the panel says so. Geometry is drawn only when
 the asset on disk digests to the digest the recording carries; on a
 mismatch the viewer reports it and draws nothing from those bytes.
 
+It also draws one line of sight per detection the program declares. The
+line runs from the reference frame's origin to the reconstructed position
+of the target, and it is drawn only on the steps where the recorded
+`_detected` channel is 1.0. The recording publishes the channels of a
+detection and does not publish the body that carried the payload, so the
+line starts at the reference origin, and it coincides with the observer's
+own position when the reference body is the body that carries the
+payload. The element carries that statement.
+
+`--asset` binds an assembly to a body and may be given once per body:
+
+```
+k26rl_view --artifact w.rlenv.so --asset chaser=chaser.k26asm \
+           --asset target=target.k26asm run.k26epi
+```
+
+`--asset PATH` without a body name is the one-body shorthand: the
+assembly's own name then decides which body it belongs to. A binding that
+names a body is checked against the digest the recording carries for
+**that** body, so an assembly bound to the wrong body is reported and
+drawn nowhere.
+
+When a recording carries more than one agent, the observation, action and
+reward panels group by agent: one collapsible group per agent, holding
+that agent's own channels, its own action offsets and its own reward
+stream. The grouping comes from the observation and action slice tags in
+`env_spec`. It does not come from the channel names, which carry an agent
+prefix but cannot separate two agents that declare a channel of one name.
+`--dump agents` writes the same grouping without a display.
+
 Positions are held in binary64 in a reference frame the view chooses, the
 camera eye is subtracted in binary64, and only the result narrows to the
 single precision the pipeline takes. Without that a craft at orbital
