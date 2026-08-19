@@ -341,6 +341,21 @@ $(RL_VIEW_TEST): tests/test_rl_view.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The scene view's own gate: the projection dump driven headlessly and
+# held against coordinates derived here from the camera and projection
+# parameters, plus depth ordering, the behind-the-eye flag, the
+# camera-relative narrowing across a 7000 km translation, one arm per
+# element toggle, the digest refusal, and the property that having the
+# scene open changes nothing else. Skips (77) when the sibling stack
+# archives or the viewer binary are not built.
+RL_SCENE_TEST = tests/test_rl_scene
+$(RL_SCENE_TEST): tests/test_rl_scene.c $(RL_GATE_DEPS) \
+                  ../libk26rl/include/k26rl_env.h \
+                  ../libk26rl/include/k26rl_episode.h \
+                  ../libk26rl/libk26rl.a viewer
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_TAP_TEST = tests/test_rl_tap
 $(RL_TAP_TEST): tests/test_rl_tap.c $(RL_GATE_DEPS) \
                 ../libk26rl/include/k26rl_env.h \
@@ -503,7 +518,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -526,7 +541,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
-	          $(RL_BODIES_TEST) $(RL_ATT_TEST) \
+	          $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) \
 	          $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) \
 	          $(RL_COLL_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
@@ -632,7 +647,8 @@ clean:
 	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
 	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
 	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \
-	      $(RL_VIEW_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) \
+	      $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) \
+	      $(RL_ATT_TEST) \
 	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	      tests/bench_parse
