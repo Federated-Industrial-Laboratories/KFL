@@ -1967,6 +1967,51 @@ reward, and flag streams bitwise.
 uses none of the constructs in this section compiles exactly as before,
 byte for byte, with no trace of the environment machinery.
 
+### The episode viewer
+
+`tools/k26rl_view` reads a recorded episode file and shows what it holds:
+a timeline that scrubs by step index, the observation, action and reward
+streams, the reconstructed observer-relative trajectory, the run and
+episode metadata, and, with the producing artifact supplied, the
+re-simulation comparison and a three-dimensional scene.
+
+Everything the viewer draws is computed in its model rather than in its
+window, and `--dump PANEL` writes any panel's numbers to a stream with no
+display attached. `--dump scene` is that dump for the scene: for a named
+camera pose, a named projection and a named viewport it writes every
+drawn element's vertices in normalised device coordinates, with each
+element's identity, its source body, and a per-vertex flag saying whether
+the vertex is at or behind the eye plane. The values are the single
+precision the graphics pipeline runs in, written as bit patterns, and
+they are reproducible within one build of the viewer from the recording,
+the asset bytes, the camera, the projection and the viewport alone.
+
+The scene draws, per body and each independently toggleable, the
+assembly's wireframe, its collision primitives, its body axes, the
+reconstructed track, its velocity vector at a declared scale, its docking
+ports with the mating plane and capture limits their named envelope
+publishes, and its thrusters with the direction of the force each
+applies. A body whose assembly declares no mesh draws its collider
+outline and its axes and the panel says so. Geometry is drawn only when
+the asset on disk digests to the digest the recording carries; on a
+mismatch the viewer reports it and draws nothing from those bytes.
+
+Positions are held in binary64 in a reference frame the view chooses, the
+camera eye is subtracted in binary64, and only the result narrows to the
+single precision the pipeline takes. Without that a craft at orbital
+distance from the world origin would collapse into the quantisation of
+its own coordinates before it reached the screen.
+
+Shading is optional and off by default. **It is a depth cue computed from
+a view-space light direction. It is not an illumination calculation and
+is not derived from any physical source**, and in particular it is
+unrelated to any detection or signature channel a program declares. The
+panel carries the same statement wherever the shaded view is shown.
+
+The viewer reads. It opens the episode file, the asset bytes and the
+compiled artifact, and it writes to none of them; no control path runs
+from it into any simulation.
+
 ### Worked example
 
 An environment that randomises a craft's initial state each episode,
