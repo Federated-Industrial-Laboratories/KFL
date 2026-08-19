@@ -109,6 +109,7 @@ static int stmts_have_rl_(const KflcNode *stmts, const KflcNode *form)
         case KFLN_STMT_OBJECTIVE:
         case KFLN_STMT_AGENT:
         case KFLN_STMT_ASTRO_PAYLOAD:
+        case KFLN_STMT_PLAN:
             return 1;
         case KFLN_STMT_OBSERVE:
             if (observe_as_name_(s)) return 1;
@@ -431,6 +432,14 @@ static const char *const OBS_SFX_REL_[] =
 static const char *const OBS_SFX_PROP_[] =
     { "_propellant_kg", "_propellant_fraction", "_mass_kg",
       "_delta_v_remaining", NULL };
+/* A reference observe publishes where the craft's plan says it should
+ * be next, as an error against where it is: three position
+ * components, three velocity components, the seconds until the state
+ * is due, and the distance inside which it counts as met, which is
+ * eight. */
+static const char *const OBS_SFX_REF_[] =
+    { "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z",
+      "_time_to", "_tolerance", NULL };
 /* A port observe publishes whether the contact it just made was a
  * capture, the four alignment residuals a capture is judged on, and
  * their four rates, which is nine. */
@@ -539,6 +548,7 @@ static const char *const *observe_suffixes_(const KflcNode *world,
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
     if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;
     if (observe_marker_(n, "propulsion")) return OBS_SFX_PROP_;
+    if (observe_marker_(n, "reference")) return OBS_SFX_REF_;
     if (observe_marker_(n, "relative")) return OBS_SFX_REL_;
     return OBS_SFX_LOS_;
 }
@@ -580,7 +590,7 @@ static size_t observe_as_bound_(void)
     size_t longest = 0;
     const char *const *lists[] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
                                    OBS_SFX_CON_, OBS_SFX_REL_,
-                                   OBS_SFX_PROP_,
+                                   OBS_SFX_PROP_, OBS_SFX_REF_,
                                    OBS_SFX_PORT_, OBS_SFX_DETECT_,
                                    OBS_SFX_TRACK_, OBS_SFX_EFF_LASER_,
                                    OBS_SFX_EFF_IMPACTOR_,

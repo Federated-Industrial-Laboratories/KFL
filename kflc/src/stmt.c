@@ -529,7 +529,8 @@ static int rl_word_is_construct_(Lexer *L, const char *s)
         return peek_kind_(L, &k) && (k == T_NEWLINE || k == T_EOF);
     }
     if (strcmp(s, "sensor") == 0 || strcmp(s, "agent") == 0 ||
-        strcmp(s, "astro_payload") == 0 || strcmp(s, "engage") == 0) {
+        strcmp(s, "astro_payload") == 0 || strcmp(s, "engage") == 0 ||
+        strcmp(s, "plan") == 0) {
         return peek_kind_(L, &k) && k == T_IDENT;
     }
     return 0;
@@ -610,6 +611,230 @@ static void rl_drain_line_(Lexer *L, Token *cur,
  * truncation.
  *
  * `cur` is the `sensor` keyword on entry. */
+/* `plan <name> ... end`, the knot slots a planner emits.
+ *
+ * The block is a declaration of an action space and of where the plan
+ * those actions make is written. Its lines are:
+ *
+ *     file "<prefix>"          required, the path a plan is written to
+ *     frame <body> <kind>      required, `lvlh` or `inertial`
+ *     slots <n>                required
+ *     time <lo> <hi>           required, seconds from the epoch
+ *     position <lo> <hi>       required, metres
+ *     velocity <lo> <hi>       required, metres per second
+ *     tolerance <lo> <hi>      required, metres
+ *     epoch <value>            optional, default 0
+ *     provenance "<text>"      optional
+ *
+ * The block declares eight action channels per slot and appends them
+ * as ordinary `action` statements, chained after this node so the
+ * block builder takes the whole run. Everything downstream therefore
+ * sees a fixed-width action space with declared bounds, and nothing
+ * about a knot slot is a special case in the spec, the agent slicing
+ * or the batch driver.
+ *
+ * The bounds are the block's rather than a convention because a
+ * planner's action space is the mission's scale: a transfer's knots
+ * are megametres apart and a docking approach's are metres apart, and
+ * a single hard-coded pair would be wrong for both. */
+static KflcNode *parse_plan_(Lexer *L, Token *cur,
+                             KflcArena *arena, KflcDiag *diag,
+                             int *had_error)
+{
+    int line0 = cur->line;
+    advance(L, cur, had_error);
+    if (cur->kind != T_IDENT) {
+        kflc_diag_errorf(diag, line0, "plan: expected a name");
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+        return NULL;
+    }
+    KflcNode *n = new_node(arena, KFLN_STMT_PLAN, line0);
+    n->name = cur->str;
+    advance(L, cur, had_error);
+    if (!at_nl(cur) && !at_eof2(cur)) {
+        kflc_diag_errorf(diag, line0,
+            "plan `%s`: expected end of line after the name", n->name);
+        *had_error = 1;
+        rl_drain_line_(L, cur, arena, had_error);
+    } else if (at_nl(cur)) {
+        advance(L, cur, had_error);
+    }
+
+    for (;;) {
+        skip_newlines(L, cur, had_error);
+        if (at_eof2(cur)) {
+            kflc_diag_errorf(diag, line0,
+                "plan `%s`: unexpected EOF (missing `end`)", n->name);
+            *had_error = 1;
+            return n;
+        }
+        if (is_ident_named(cur, "end")) {
+            advance(L, cur, had_error);
+            if (at_nl(cur)) advance(L, cur, had_error);
+            break;
+        }
+        if (cur->kind != T_IDENT) {
+            kflc_diag_errorf(diag, cur->line,
+                "plan `%s`: expected a plan line or `end`", n->name);
+            *had_error = 1;
+            rl_drain_line_(L, cur, arena, had_error);
+            continue;
+        }
+        char *kw = cur->str;
+        int lineK = cur->line;
+        char *rest = take_line_remainder(L, arena);
+        advance(L, cur, had_error);
+        if (at_nl(cur)) advance(L, cur, had_error);
+
+        char *p = trim(rest);
+        if (strcmp(kw, "file") == 0 || strcmp(kw, "provenance") == 0 ||
+            strcmp(kw, "slots") == 0 || strcmp(kw, "epoch") == 0) {
+            KflcValue v;
+            memset(&v, 0, sizeof v);
+            v.kind = KFLV_IDENT;
+            v.u.s  = kflc_arena_strdup(arena, p);
+            if (p[0] == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "plan `%s`: `%s` takes a value", n->name, kw);
+                *had_error = 1;
+                continue;
+            }
+            stmt_append_attr(arena, n, kflc_arena_strdup(arena, kw), v,
+                             lineK);
+            continue;
+        }
+        if (strcmp(kw, "frame") == 0) {
+            char *body = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            if (*p) { *p = '\0'; p++; }
+            char *kind = trim(p);
+            if (body[0] == '\0' || kind[0] == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "plan `%s`: `frame` takes a body name and either "
+                    "`lvlh` or `inertial`", n->name);
+                *had_error = 1;
+                continue;
+            }
+            KflcValue bv, kv;
+            memset(&bv, 0, sizeof bv);
+            memset(&kv, 0, sizeof kv);
+            bv.kind = KFLV_IDENT; bv.u.s = kflc_arena_strdup(arena, body);
+            kv.kind = KFLV_IDENT; kv.u.s = kflc_arena_strdup(arena, kind);
+            stmt_append_attr(arena, n, "frame", bv, lineK);
+            stmt_append_attr(arena, n, "kind", kv, lineK);
+            continue;
+        }
+        if (strcmp(kw, "time") == 0 || strcmp(kw, "position") == 0 ||
+            strcmp(kw, "velocity") == 0 || strcmp(kw, "tolerance") == 0) {
+            char *lo = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            if (*p) { *p = '\0'; p++; }
+            char *hi = trim(p);
+            if (lo[0] == '\0' || hi[0] == '\0') {
+                kflc_diag_errorf(diag, lineK,
+                    "plan `%s`: `%s` takes a lower and an upper bound",
+                    n->name, kw);
+                *had_error = 1;
+                continue;
+            }
+            char key[32];
+            KflcValue lv, hv;
+            memset(&lv, 0, sizeof lv);
+            memset(&hv, 0, sizeof hv);
+            lv.kind = KFLV_IDENT; lv.u.s = kflc_arena_strdup(arena, lo);
+            hv.kind = KFLV_IDENT; hv.u.s = kflc_arena_strdup(arena, hi);
+            snprintf(key, sizeof key, "%s_lo", kw);
+            stmt_append_attr(arena, n, kflc_arena_strdup(arena, key), lv,
+                             lineK);
+            snprintf(key, sizeof key, "%s_hi", kw);
+            stmt_append_attr(arena, n, kflc_arena_strdup(arena, key), hv,
+                             lineK);
+            continue;
+        }
+        kflc_diag_errorf(diag, lineK,
+            "plan `%s`: unknown line `%s`; the block takes `file`, "
+            "`frame`, `slots`, `time`, `position`, `velocity`, "
+            "`tolerance`, `epoch` and `provenance`", n->name, kw);
+        *had_error = 1;
+    }
+
+    /* The action channels this block declares. They are appended to
+     * the chain this statement returns, which the block builder walks
+     * to its end, so the world body carries them as ordinary actions
+     * in the position the plan was written. */
+    {
+        const char *slots_s = NULL;
+        long slots = 0;
+        static const struct { const char *suffix, *bound; } CH_[] = {
+            { "_t",   "time" },      { "_r_x", "position" },
+            { "_r_y", "position" },  { "_r_z", "position" },
+            { "_v_x", "velocity" },  { "_v_y", "velocity" },
+            { "_v_z", "velocity" },  { "_tol", "tolerance" }
+        };
+        for (const KflcAttr *a = n->attrs; a; a = a->next) {
+            if (a->name && strcmp(a->name, "slots") == 0 &&
+                a->value.kind == KFLV_IDENT) {
+                slots_s = a->value.u.s;
+            }
+        }
+        if (slots_s) {
+            char *end = NULL;
+            slots = strtol(slots_s, &end, 10);
+            if (!end || *end != '\0') slots = 0;
+        }
+        if (slots < 1 || slots > 4096) {
+            kflc_diag_errorf(diag, line0,
+                "plan `%s`: `slots` takes a whole number of knot slots "
+                "from 1 to 4096", n->name);
+            *had_error = 1;
+            return n;
+        }
+        KflcNode *tail = n;
+        for (long k = 0; k < slots; k++) {
+            for (int c = 0; c < 8; c++) {
+                char nm[128], lo[8], hi[8];
+                const KflcAttr *alo = NULL, *ahi = NULL;
+
+                snprintf(lo, sizeof lo, "_lo");
+                snprintf(hi, sizeof hi, "_hi");
+                for (const KflcAttr *a = n->attrs; a; a = a->next) {
+                    if (!a->name || a->value.kind != KFLV_IDENT) continue;
+                    size_t bl = strlen(CH_[c].bound);
+                    if (strncmp(a->name, CH_[c].bound, bl) != 0) continue;
+                    if (strcmp(a->name + bl, "_lo") == 0) alo = a;
+                    if (strcmp(a->name + bl, "_hi") == 0) ahi = a;
+                }
+                if (!alo || !ahi) {
+                    kflc_diag_errorf(diag, line0,
+                        "plan `%s`: `%s` bounds are required, since a knot "
+                        "slot is an action channel and an action channel "
+                        "declares its own range", n->name, CH_[c].bound);
+                    *had_error = 1;
+                    return n;
+                }
+                snprintf(nm, sizeof nm, "%s_k%ld%s", n->name, k,
+                         CH_[c].suffix);
+                KflcNode *act = new_node(arena, KFLN_STMT_ACTION, line0);
+                act->name = kflc_arena_strdup(arena, nm);
+                act->position.kind = KFLV_IDENT;
+                act->position.u.s  = kflc_arena_strdup(arena, "box");
+                act->expr  = kflc_parse_expr(alo->value.u.s, arena, diag,
+                                             line0);
+                act->expr2 = kflc_parse_expr(ahi->value.u.s, arena, diag,
+                                             line0);
+                if (!act->expr || !act->expr2) {
+                    *had_error = 1;
+                    return n;
+                }
+                tail->next = act;
+                tail = act;
+            }
+        }
+    }
+    return n;
+}
+
 static KflcNode *parse_sensor_(Lexer *L, Token *cur,
                                KflcArena *arena, KflcDiag *diag,
                                int *had_error)
@@ -1484,6 +1709,8 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                 return parse_agent_(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "astro_payload") == 0)
                 return parse_astro_payload_(L, cur, arena, diag, had_error);
+            if (strcmp(cur->str, "plan") == 0)
+                return parse_plan_(L, cur, arena, diag, had_error);
         }
     }
 
@@ -1995,11 +2222,13 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * for the same reason: a body reporting a fact about itself,
          * with no observer to name. `observe propulsion of <body> as
          * <name>` is the third of them, reporting what the craft has
-         * left to spend. The self-reporting forms share this branch
-         * rather than each growing one, so a fourth is a table entry
-         * and not a fourth copy of the parse. */
+         * left to spend, and `observe reference of <body> as <name>`
+         * the fourth, reporting where the craft's plan says it should
+         * be. The self-reporting forms share this branch rather than
+         * each growing one, so a fifth is a table entry and not a
+         * fifth copy of the parse. */
         static const char *const SELF_FORMS_[] = {
-            "attitude", "contact", "propulsion", NULL
+            "attitude", "contact", "propulsion", "reference", NULL
         };
         int attitude_form = 0;
         const char *self_marker = NULL;
@@ -2134,10 +2363,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             attitude_form = 1;
         }
         /* Not after the relative branch has consumed a target name: a
-         * target that happens to be called `attitude`, `contact` or
-         * `propulsion` is a name here, not a form, and re-entering the
-         * branch below would rewrite the target a second time and
-         * leave the diagnostic naming the wrong body. */
+         * target that happens to be called `attitude`, `contact`,
+         * `propulsion` or `reference` is a name here, not a form, and
+         * re-entering the branch below would rewrite the target a
+         * second time and leave the diagnostic naming the wrong
+         * body. */
         if (!relative_form && !port_form && !defense_form &&
             is_ident_named(cur, "of"))
         {
@@ -3307,6 +3537,10 @@ int kfl_emit_stmt(FILE *out, const KflcNode *s,
         for (const KflcAttr *a = s->attrs; a; a = a->next) {
             if (!a->name) continue;
             if (strcmp(a->name, "assembly") == 0) continue;
+            /* A plan is read when the program is compiled, like an
+             * assembly, and what it contributes lands as constants
+             * rather than as a field on the body. */
+            if (strcmp(a->name, "reference") == 0) continue;
             const char *val = (a->value.kind == KFLV_IDENT && a->value.u.s)
                               ? a->value.u.s : "0";
             /* parent= is a name string → resolve at runtime via find_body

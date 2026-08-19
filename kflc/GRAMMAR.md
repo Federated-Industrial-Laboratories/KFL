@@ -387,7 +387,7 @@ caller sets each step, what that caller observes, and what the reward is.
 The compiler then produces an artifact an outside training loop can drive
 step by step (see *The compiled artifact* below).
 
-Nine constructs carry the surface, all of them statements inside a
+Ten constructs carry the surface, all of them statements inside a
 `fn world` body:
 
 | Construct                     | Purpose                                                    |
@@ -401,6 +401,7 @@ Nine constructs carry the surface, all of them statements inside a
 | `sensor <name>` ... `end`     | An imperfection model bound to observation channels with `through`. |
 | `astro_payload <name> ...`    | A defense payload carried by one craft: a detection sensor, an information state, or an effector. |
 | `engage <payload> at <target>`| Fire an effector at a body. Inside `on_step` only. |
+| `plan <name>` ... `end`       | Knot slots a planner emits, and where the plan they make is written. |
 
 These words bind as keywords only at statement position inside a
 `fn world` body. Everywhere else they stay ordinary identifiers, so
@@ -408,11 +409,11 @@ existing programs that use them as names keep compiling. (`episode`,
 `action`, and `objective` sit on the compiler's reserved-name list, so a
 `let`, `const`, or `arg` that binds one of them draws a warning.)
 
-`agent`, `sensor`, `astro_payload`, `engage`, and `on_step` are not
-reserved, and inside a `fn world` body each opens its construct only
+`agent`, `sensor`, `astro_payload`, `engage`, `plan`, and `on_step` are
+not reserved, and inside a `fn world` body each opens its construct only
 when what follows it is what that construct's form requires: an
-identifier for `agent`, `sensor`, `astro_payload`, and `engage`, the end
-of the line for `on_step`. Written any other way they stay ordinary
+identifier for `agent`, `sensor`, `astro_payload`, `engage`, and `plan`,
+the end of the line for `on_step`. Written any other way they stay ordinary
 identifiers, so a program that binds one of them as a name keeps
 compiling:
 
@@ -428,7 +429,7 @@ end
 
 No statement form in the language has the shape
 `<identifier> <identifier>`, so the two readings never overlap for
-`agent`, `sensor`, `astro_payload`, or `engage`. For `on_step` they
+`agent`, `sensor`, `astro_payload`, `engage`, or `plan`. For `on_step` they
 overlap on one shape, a bare `on_step` alone on a line, which the block
 form takes. `at` and `effect` are read as connectives inside `engage`
 and `observe effect` alone, and are ordinary identifiers everywhere
@@ -861,6 +862,144 @@ sensor, and a propellant gauge is a real instrument with a real error.
 A craft that knows its remaining mass exactly is a craft that does not
 exist, so a task meant to be hard should say `through` and let the
 policy budget under an uncertain reading.
+
+#### A plan a craft flies
+
+```
+astro_body chaser reference="approach.k26ref" ...
+observe reference of <body> as <name>
+```
+
+A `.k26ref` file is a plan: a sequence of states a craft should be in,
+and when. It is written by whatever produces plans and read by
+whatever flies them, and it is the interface between the two, so it is
+versioned, carries a digest over its own bytes, and says what frame it
+is written in. The two need agree on nothing else.
+
+The file is read when the program is compiled, as an assembly is: the
+path resolves against the directory of the source that names it, the
+knots are written into the artifact as constants, and a running
+simulation opens no plan file. A changed plan is therefore a changed
+program, and a plan that has been altered since it was made is refused
+where the program names it rather than flown.
+
+Each knot carries a time offset from the file's epoch, a position, a
+velocity and a tolerance radius. The tolerance is what makes a knot a
+requirement rather than a suggestion: it is the distance inside which
+the craft counts as having met the knot. A knot whose tolerance is
+zero is absent, which is how a producer with a fixed number of slots
+emits fewer knots than it has slots.
+
+The frame names a body and a kind. `lvlh` is that body's own
+local-vertical local-horizontal frame, the frame a close approach is
+written in, and it requires the named body to declare a `parent=`.
+`inertial` is the non-rotating frame centred on the named body, on the
+world's own axes, and it is the frame a transfer is written in. The
+named body may not be the craft reading the plan: every published
+component would then be the plan's own numbers whatever the craft did.
+
+Attitude is deliberately not in a knot. A plan written on the mission
+clock has no business commanding an attitude on the vehicle clock, and
+a controller that must point itself to fly a translation should decide
+that for itself.
+
+The observe publishes eight components. There is no observer and no
+correction of any kind.
+
+| Component                                      | Value                                                       |
+|------------------------------------------------|-------------------------------------------------------------|
+| `<name>_r_x`, `<name>_r_y`, `<name>_r_z`       | Position of the current knot relative to the craft, in the plan's frame, metres. Zero when the craft is on the knot. |
+| `<name>_v_x`, `<name>_v_y`, `<name>_v_z`       | Velocity the current knot asks for, relative to the craft's own, in the same frame, metres per second. |
+| `<name>_time_to`                               | Seconds until the current knot's time. Negative when the craft is late. |
+| `<name>_tolerance`                             | The current knot's tolerance radius, metres.                |
+
+The first six are errors and not absolutes, and that is the point of
+them: a controller conditioned on where it should be relative to where
+it is transfers between missions, while one conditioned on an absolute
+position in a frame learns the mission it was trained on.
+`<name>_time_to` is the scale-free channel among them and
+`<name>_tolerance` is what makes the error interpretable, since it
+separates a state that must be hit from one that may be passed near.
+
+**Only the current knot is published**, whatever the plan's length,
+and the current knot is the earliest whose time has not passed. Three
+things follow and each is why. A controller's input width stays fixed,
+so one network serves plans of any length. A controller cannot learn
+the mission's shape, because it never sees it. And a plan can be
+replaced without the controller knowing or caring.
+
+A knot's time passing without the craft inside its tolerance is not an
+error and ends nothing: the plan advances, the craft is late, and
+`<name>_time_to` goes negative on the knot after it. Whether being
+late costs anything is the task's to say through its own reward and
+its own endings. Once every knot's time has passed the last knot stays
+current, since a plan that has run out is one whose final state is
+still the state asked for.
+
+The clock the times are read on is the episode's: it starts at zero
+at each episode's start and advances by the control period every step,
+so a knot at 30 seconds under a control period of 0.5 is current until
+step 60. The file's own epoch is added to each offset before the
+comparison, so a plan may be written against a clock that does not
+start at its first knot.
+
+Like every other channel these may be routed through a declared
+sensor. A plan arrives over a link and a craft's knowledge of its own
+plan is as imperfect as everything else it knows.
+
+The plan a run flew is written into its episode record, verbatim and
+with its own digest beside it, so a recording is enough to say what
+was flown and to show it was that plan rather than another of the same
+name.
+
+#### A plan a world emits
+
+```
+plan <name>
+    file "<prefix>"          # required
+    frame <body> lvlh        # required; or `inertial`
+    slots <count>            # required
+    time <lo> <hi>           # required, seconds from the epoch
+    position <lo> <hi>       # required, metres
+    velocity <lo> <hi>       # required, metres per second
+    tolerance <lo> <hi>      # required, metres
+    epoch <value>            # optional, default 0
+    provenance "<text>"      # optional
+end
+```
+
+The other side of the interface. A `plan` block declares that this
+world's actions are knots: it adds eight action channels per slot,
+named `<name>_k<i>_t`, `_r_x`, `_r_y`, `_r_z`, `_v_x`, `_v_y`, `_v_z`
+and `_tol`, in that order, with the bounds the block gave. They are
+ordinary action channels in every other respect, published in the
+artifact's spec beside the rest.
+
+The slot count is fixed because a policy with a variable-width output
+is not a policy that trains. A producer wanting fewer knots than it
+has slots gives the remainder a tolerance of zero, which makes them
+absent.
+
+The bounds belong to the block rather than to the format because a
+plan's scale is the mission's: a transfer's knots are megametres apart
+and a docking approach's are metres apart, and one pair of bounds
+would be wrong for both.
+
+At each episode's end the world writes the slots the last step asked
+for to `<prefix>-<ordinal>-<environment>-<episode>.k26ref`, and the
+same bytes into the episode record. Absent slots are dropped, the rest
+are put in time order, and a slot whose time does not strictly advance
+on the one before it is dropped too, since it could never be current:
+every set of slots a fixed-width producer can emit therefore becomes a
+file that reads back.
+
+Two things about the write are worth stating rather than discovering.
+It happens only while episode output is enabled, because that is the
+only point at which this artifact writes anything at all, and a step
+path that wrote files would not be the step path this surface
+describes. And `<prefix>` is a path the running process resolves, not
+one resolved against the source: the source is compiled once and the
+artifact may run anywhere.
 
 **What a contact does to the craft** is declared once per episode:
 

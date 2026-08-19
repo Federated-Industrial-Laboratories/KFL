@@ -41,6 +41,13 @@
  * them. */
 #include "k26sense.h"
 #include "k26rl_env.h"
+/* The plan format's own reader. A `reference=` on a body is read when
+ * the program is compiled, exactly as an assembly is, so the emitted
+ * artifact carries the knots as constants and a running simulation
+ * opens no plan file. One decoder serves the compiler, the record and
+ * any consumer, which is what keeps them from disagreeing about what
+ * a plan says. */
+#include "k26rl_ref.h"
 /* The per-observer target cap the information state documents. The
  * compiler refuses a program that would exceed it, so the limit is
  * read from the library's own header rather than restated here. */
@@ -67,6 +74,9 @@
 #define RL_MAX_WSCAL    256
 #define RL_MAX_BS       128
 #define RL_MAX_AGENTS   64
+/* Bodies that may bind a plan. One plan addresses one craft, so this
+ * bounds the craft under a plan rather than the plans in a file. */
+#define RL_MAX_REF      16
 
 /* The longest an agent name may be, in bytes, and the arithmetic it
  * comes out of. A published channel name entry holds KFLC_OBS_NAME_MAX
@@ -131,6 +141,11 @@ static uint16_t rl_observe_mode_(const KflcNode *n)
          * propellant and mass. There is no observer and nothing is
          * corrected, so geometric is the only true answer here too. */
         if (strcmp(k->name, "propulsion") == 0) return 0;
+        /* A reference observe reports where a craft's plan says it
+         * should be, against where the integrator has put it. Nothing
+         * is observed across a distance and nothing is corrected, so
+         * geometric is the only true answer here as well. */
+        if (strcmp(k->name, "reference") == 0) return 0;
     }
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, "mode") == 0 &&
@@ -192,6 +207,27 @@ static const char *const RL_CON_COMP_[RL_CON_COMPS] = {
 static const char *const RL_PROP_COMP_[RL_PROP_COMPS] = {
     "_propellant_kg", "_propellant_fraction", "_mass_kg",
     "_delta_v_remaining"
+};
+
+/* A reference observe publishes where the craft's plan says it should
+ * be next, as an error against where it is. The first six are errors
+ * and not absolutes on purpose: a controller conditioned on where it
+ * should be relative to where it is transfers between missions, and
+ * one conditioned on an absolute position in a frame learns the
+ * mission it was trained on. `_time_to` is the scale-free channel
+ * among them and goes negative when the craft is late; `_tolerance`
+ * is what makes the error interpretable rather than merely large or
+ * small, since it separates a state that must be hit from one that
+ * may be passed near.
+ *
+ * Only the current knot is published, whatever the plan's length.
+ * That is what keeps the input width fixed, what keeps the controller
+ * ignorant of the mission it is flying, and what lets a plan be
+ * replaced without the controller knowing. */
+#define RL_REF_COMPS 8
+static const char *const RL_REF_COMP_[RL_REF_COMPS] = {
+    "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z",
+    "_time_to", "_tolerance"
 };
 
 /* A relative observe publishes where the target is from the chief and
@@ -348,7 +384,8 @@ typedef enum {
     RL_OBS_DET  = 5,
     RL_OBS_TRK  = 6,
     RL_OBS_EFF  = 7,
-    RL_OBS_PROP = 8
+    RL_OBS_PROP = 8,
+    RL_OBS_REF  = 9
 } RlObserveForm;
 
 static RlObserveForm rl_observe_form_(const KflcNode *n)
@@ -361,6 +398,7 @@ static RlObserveForm rl_observe_form_(const KflcNode *n)
         if (strcmp(a->name, "effect") == 0)   return RL_OBS_EFF;
         if (strcmp(a->name, "attitude") == 0) return RL_OBS_ATT;
         if (strcmp(a->name, "propulsion") == 0) return RL_OBS_PROP;
+        if (strcmp(a->name, "reference") == 0) return RL_OBS_REF;
         if (strcmp(a->name, "contact") == 0)  return RL_OBS_CON;
         if (strcmp(a->name, "relative") == 0) return RL_OBS_REL;
         if (strcmp(a->name, "port") == 0)     return RL_OBS_PORT;
@@ -472,6 +510,7 @@ static int rl_observe_base_width_(const KflcNode *n)
     switch (rl_observe_form_(n)) {
     case RL_OBS_ATT: return RL_ATT_COMPS;
     case RL_OBS_PROP: return RL_PROP_COMPS;
+    case RL_OBS_REF: return RL_REF_COMPS;
     case RL_OBS_CON: return RL_CON_COMPS;
     case RL_OBS_REL: return RL_REL_COMPS;
     case RL_OBS_PORT: return RL_PORT_COMPS;
@@ -500,6 +539,7 @@ static const char *rl_observe_base_comp_(const KflcNode *n, int c)
     switch (rl_observe_form_(n)) {
     case RL_OBS_ATT: return RL_ATT_COMP_[c];
     case RL_OBS_PROP: return RL_PROP_COMP_[c];
+    case RL_OBS_REF: return RL_REF_COMP_[c];
     case RL_OBS_CON: return RL_CON_COMP_[c];
     case RL_OBS_REL: return RL_REL_COMP_[c];
     case RL_OBS_PORT: return RL_PORT_COMP_[c];
@@ -1151,6 +1191,41 @@ typedef struct {
     const KflcAttr *terminal;
 } RlAgent;
 
+/* A plan bound to a body by `reference=`. The file is read here, when
+ * the program is compiled, and what the emitted artifact carries is
+ * the decoded knots as constants beside the file's own bytes: the
+ * knots because the stepping path must open nothing and allocate
+ * nothing, and the bytes because the record has to carry the plan a
+ * run flew against. Both come out of one reader, so the plan the
+ * record names and the plan the craft flew cannot be two things. */
+typedef struct {
+    int             body;        /* the craft the plan addresses */
+    int             frame_body;  /* the body the plan's frame centres on */
+    uint32_t        frame_kind;
+    double          epoch;
+    int             n_knots;
+    const double   *knots;       /* n_knots by 8, arena owned */
+    const uint8_t  *bytes;       /* the file, verbatim, arena owned */
+    uint32_t        len;
+    uint8_t         digest[K26RL_SHA256_BYTES];
+} RlReference;
+
+/* A `plan` block: the knot slots a planner emits and where the plan
+ * they make goes. `act_first` is the index of the first of the
+ * block's action channels in the environment's action vector, which
+ * is where the episode-end write reads its knots from. */
+typedef struct {
+    const KflcNode *node;
+    const char     *name;
+    const char     *file;        /* path prefix, unquoted */
+    const char     *provenance;  /* unquoted, or "" */
+    int             frame_body;
+    uint32_t        frame_kind;
+    int             slots;
+    double          epoch;
+    int             act_first;
+} RlPlanOut;
+
 typedef struct {
     const KflcNode *world;
     const KflcNode *episode;
@@ -1244,6 +1319,13 @@ typedef struct {
      * are -1 for every other form. */
     int         obs_payload[RL_MAX_OBSERVES];
     int         obs_target[RL_MAX_OBSERVES];
+    /* The plans bound to bodies by `reference=`, and, per observe, the
+     * plan a reference observe reads, or -1. */
+    RlReference refs[RL_MAX_REF];
+    int         n_refs;
+    int         obs_ref[RL_MAX_OBSERVES];
+    RlPlanOut   plans[RL_MAX_REF];
+    int         n_plans;
     RlEngage    engages[RL_MAX_ENGAGE];
     int         n_engages;
     RlSigPrim   sig[RL_MAX_SIG];
@@ -3065,6 +3147,12 @@ static int rl_finish_defense_(RlModel *m, KflcDiag *diag)
     return err;
 }
 
+/* Defined below, beside rl_body_index_of_, which it needs: a plan's
+ * frame names a body and the name has to resolve to one. */
+static int rl_collect_references_(RlModel *m, KflcArena *arena,
+                                  KflcDiag *diag);
+static int rl_collect_plans_(RlModel *m, KflcArena *arena, KflcDiag *diag);
+
 static int rl_collect_(RlModel *m, const KflcNode *form,
                        KflcArena *arena, KflcDiag *diag)
 {
@@ -3150,6 +3238,20 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
             break;
         case KFLN_STMT_SENSOR:
             if (rl_collect_sensor_(m, s, diag)) err = 1;
+            break;
+        case KFLN_STMT_PLAN:
+            /* The block's own record. Its action channels were
+             * appended after it by the parser and are collected by
+             * the ordinary action case above, so the only thing kept
+             * here is where the plan goes and what frame it is in. */
+            if (m->n_plans == RL_MAX_REF) {
+                kflc_diag_errorf(diag, s->line,
+                    "too many plan blocks (limit %d)", RL_MAX_REF);
+                return 1;
+            }
+            m->plans[m->n_plans].node = s;
+            m->plans[m->n_plans].name = s->name;
+            m->n_plans++;
             break;
         case KFLN_STMT_ASTRO_PAYLOAD:
             if (m->n_payloads == RL_MAX_PAYLOADS) {
@@ -3390,6 +3492,8 @@ static int rl_collect_(RlModel *m, const KflcNode *form,
 
     if (!err && rl_collect_actuators_(m, diag)) err = 1;
     if (!err && rl_finish_defense_(m, diag)) err = 1;
+    if (!err && rl_collect_references_(m, arena, diag)) err = 1;
+    if (!err && rl_collect_plans_(m, arena, diag)) err = 1;
 
     return err;
 }
@@ -3402,6 +3506,353 @@ static int rl_body_index_of_(const RlModel *m, const char *name)
         if (bn && strcmp(bn, name) == 0) return i;
     }
     return -1;
+}
+
+/* Resolve `path` against the directory of the source file that named
+ * it, which is where every other asset a program names is looked for.
+ * An absolute path is taken as it stands. */
+/* Assembled rather than formatted, so a path that will not fit is
+ * reported as one instead of being quietly cut and then failing to
+ * open under a name nobody wrote. Returns nonzero when it will not
+ * fit. */
+static int rl_ref_resolve_(const char *path, const char *src_path,
+                           char *out, size_t out_sz)
+{
+    const char *slash = src_path ? strrchr(src_path, '/') : NULL;
+    size_t dir, pl;
+
+    if (!path) return 1;
+    pl = strlen(path);
+    if (path[0] == '/' || !slash) {
+        if (pl + 1u > out_sz) return 1;
+        memcpy(out, path, pl + 1u);
+        return 0;
+    }
+    dir = (size_t)(slash - src_path);
+    if (dir + pl + 2u > out_sz) return 1;
+    memcpy(out, src_path, dir);
+    out[dir] = '/';
+    memcpy(out + dir + 1u, path, pl + 1u);
+    return 0;
+}
+
+/* Read every `reference=` a body declares.
+ *
+ * The plan is read here rather than by the running artifact, for the
+ * reason an assembly is: a running simulation opens no asset file, and
+ * a plan whose bytes could change between the build and the run would
+ * make the compiled program's identity a claim about a file nobody
+ * checked. What the emitter carries away is the decoded knots, the
+ * file's own bytes for the record, and its digest.
+ *
+ * Four things are refused where they are written, because each would
+ * otherwise publish eight channels that could only ever be wrong: a
+ * plan the reader will not have, a plan with nothing in it, a frame
+ * naming a body this world does not declare, and a local-vertical
+ * frame on a body that orbits nothing. */
+static int rl_collect_references_(RlModel *m, KflcArena *arena,
+                                  KflcDiag *diag)
+{
+    int err = 0;
+
+    for (int i = 0; i < RL_MAX_OBSERVES; i++) m->obs_ref[i] = -1;
+
+    for (int b = 0; b < m->n_bodies; b++) {
+        const KflcNode *body = m->bodies[b].body;
+        const KflcAttr *a = rl_body_attr_(body, "reference");
+        const char *raw = a ? rl_pay_attr_text_(a) : NULL;
+        char rel[KFLC_ASM_PATH_MAX], full[KFLC_ASM_PATH_MAX];
+        K26RlRef *ref = NULL;
+        K26RlRefInfo info;
+        K26RlRefStatus st;
+        RlReference *r;
+        const char *frame;
+        uint64_t blen = 0;
+        const uint8_t *bytes;
+        double *knots;
+
+        if (!a) continue;
+        if (m->n_refs >= RL_MAX_REF) {
+            kflc_diag_errorf(diag, body->line,
+                "more than %d bodies carry a `reference=`", RL_MAX_REF);
+            return 1;
+        }
+        if (!raw || kflc_assembly_unquote(raw, rel, sizeof rel)) {
+            kflc_diag_errorf(diag, body->line,
+                "astro_body `%s`: `reference=` takes a quoted path to a "
+                "`%s` file", body->name ? body->name : "?",
+                K26RL_REF_SUFFIX);
+            err = 1;
+            continue;
+        }
+        if (rl_ref_resolve_(rel, diag->path, full, sizeof full)) {
+            kflc_diag_errorf(diag, body->line,
+                "astro_body `%s`: the reference path `%s` does not fit "
+                "in %d bytes once resolved against this source file",
+                body->name ? body->name : "?", rel,
+                (int)sizeof full);
+            err = 1;
+            continue;
+        }
+        st = k26rl_ref_open(full, &ref);
+        if (st != K26RL_REF_OK) {
+            kflc_diag_errorf(diag, body->line,
+                "astro_body `%s`: reference `%s` was not read: %s",
+                body->name ? body->name : "?", full,
+                k26rl_ref_status_str(st));
+            err = 1;
+            continue;
+        }
+        (void)k26rl_ref_info(ref, &info);
+        if (info.present_count == 0) {
+            kflc_diag_errorf(diag, body->line,
+                "astro_body `%s`: reference `%s` asks for nothing, since "
+                "every knot it carries has a tolerance of zero and is "
+                "therefore absent", body->name ? body->name : "?", full);
+            k26rl_ref_close(ref);
+            err = 1;
+            continue;
+        }
+        frame = k26rl_ref_frame_name(ref, NULL);
+        r = &m->refs[m->n_refs];
+        memset(r, 0, sizeof *r);
+        r->body       = b;
+        r->frame_body = rl_body_index_of_(m, frame);
+        r->frame_kind = info.frame_kind;
+        r->epoch      = info.epoch;
+        r->n_knots    = (int)info.present_count;
+        memcpy(r->digest, info.digest, K26RL_SHA256_BYTES);
+        if (r->frame_body < 0) {
+            kflc_diag_errorf(diag, body->line,
+                "astro_body `%s`: reference `%s` is written in the frame "
+                "of `%s`, and no astro_body of that name is declared in "
+                "this world", body->name ? body->name : "?", full,
+                frame ? frame : "?");
+            k26rl_ref_close(ref);
+            err = 1;
+            continue;
+        }
+        if (r->frame_body == b) {
+            /* Every published component would then be the knot itself,
+             * whatever the craft did, which is an absolute wearing the
+             * name of an error. */
+            kflc_diag_errorf(diag, body->line,
+                "astro_body `%s`: reference `%s` is written in the frame "
+                "of `%s` itself, so its published components would be "
+                "the plan's own numbers rather than the craft's error "
+                "against them", body->name ? body->name : "?", full,
+                body->name ? body->name : "?");
+            k26rl_ref_close(ref);
+            err = 1;
+            continue;
+        }
+        if (r->frame_kind == K26RL_REF_FRAME_LVLH &&
+            !rl_body_attr_(m->bodies[r->frame_body].body, "parent")) {
+            kflc_diag_errorf(diag, body->line,
+                "astro_body `%s`: reference `%s` is written in the "
+                "local-vertical local-horizontal frame of `%s`, and `%s` "
+                "declares no `parent=`, so the body it orbits is unknown "
+                "and that frame cannot be built",
+                body->name ? body->name : "?", full, frame, frame);
+            k26rl_ref_close(ref);
+            err = 1;
+            continue;
+        }
+
+        bytes = k26rl_ref_bytes(ref, &blen);
+        r->len   = (uint32_t)blen;
+        r->bytes = (const uint8_t *)kflc_arena_alloc(arena, (size_t)blen);
+        memcpy((void *)r->bytes, bytes, (size_t)blen);
+        knots = (double *)kflc_arena_alloc(
+            arena, sizeof(double) * (size_t)r->n_knots * 8u);
+        for (int k = 0; k < r->n_knots; k++) {
+            K26RlRefKnot kn;
+
+            (void)k26rl_ref_knot(ref, (uint32_t)k, &kn);
+            knots[k * 8 + 0] = kn.t;
+            for (int q = 0; q < 3; q++) {
+                knots[k * 8 + 1 + q] = kn.r[q];
+                knots[k * 8 + 4 + q] = kn.v[q];
+            }
+            knots[k * 8 + 7] = kn.tolerance;
+        }
+        r->knots = knots;
+        k26rl_ref_close(ref);
+        m->n_refs++;
+    }
+
+    /* Bind each reference observe to the plan its body carries. A
+     * craft with no plan has nothing to publish, so it is refused
+     * where the statement is written. */
+    for (int i = 0; i < m->n_observes; i++) {
+        const KflcNode *s = m->observes[i];
+        int tgt;
+
+        if (rl_observe_form_(s) != RL_OBS_REF) continue;
+        tgt = rl_body_index_of_(m, s->name);
+        if (tgt < 0) {
+            kflc_diag_errorf(diag, s->line,
+                "observe reference of `%s`: no astro_body of that name is "
+                "declared in this world", s->name ? s->name : "?");
+            err = 1;
+            continue;
+        }
+        for (int k = 0; k < m->n_refs; k++) {
+            if (m->refs[k].body == tgt) m->obs_ref[i] = k;
+        }
+        if (m->obs_ref[i] < 0) {
+            kflc_diag_errorf(diag, s->line,
+                "observe reference of `%s`: `%s` declares no "
+                "`reference=`, so it is flying no plan and there is "
+                "nothing to publish", s->name, s->name);
+            err = 1;
+        }
+    }
+    return err;
+}
+
+/* Strip a pair of quotes, as an assembly path is stripped, so the two
+ * spellings mean the same thing. */
+static const char *rl_unquote_(KflcArena *arena, const char *raw)
+{
+    size_t n = raw ? strlen(raw) : 0;
+    char *out;
+
+    if (!raw) return "";
+    if (n >= 2 && raw[0] == '"' && raw[n - 1] == '"') {
+        out = (char *)kflc_arena_alloc(arena, n - 1);
+        memcpy(out, raw + 1, n - 2);
+        out[n - 2] = '\0';
+        return out;
+    }
+    return raw;
+}
+
+/* Resolve every `plan` block: the frame it writes its knots in, the
+ * slot count, and where the block's own action channels sit in the
+ * environment's action vector.
+ *
+ * The refusals are the reference's own, taken here instead of at load
+ * because a plan this world emits has no file to read yet: a frame
+ * naming a body the world does not declare, and a local-vertical
+ * frame on a body that orbits nothing. */
+static int rl_collect_plans_(RlModel *m, KflcArena *arena, KflcDiag *diag)
+{
+    int err = 0;
+
+    for (int p = 0; p < m->n_plans; p++) {
+        RlPlanOut *po = &m->plans[p];
+        const KflcNode *s = po->node;
+        const char *frame = NULL, *kind = NULL, *slots = NULL;
+        const char *epoch = NULL;
+        char *end = NULL;
+
+        po->file       = "";
+        po->provenance = "";
+        po->epoch      = 0.0;
+        for (const KflcAttr *a = s->attrs; a; a = a->next) {
+            if (!a->name || a->value.kind != KFLV_IDENT) continue;
+            if (strcmp(a->name, "frame") == 0) frame = a->value.u.s;
+            else if (strcmp(a->name, "kind") == 0) kind = a->value.u.s;
+            else if (strcmp(a->name, "slots") == 0) slots = a->value.u.s;
+            else if (strcmp(a->name, "epoch") == 0) epoch = a->value.u.s;
+            else if (strcmp(a->name, "file") == 0)
+                po->file = rl_unquote_(arena, a->value.u.s);
+            else if (strcmp(a->name, "provenance") == 0)
+                po->provenance = rl_unquote_(arena, a->value.u.s);
+        }
+        if (po->file[0] == '\0') {
+            kflc_diag_errorf(diag, s->line,
+                "plan `%s`: `file` is required and names the path a plan "
+                "is written to", po->name ? po->name : "?");
+            err = 1;
+            continue;
+        }
+        if (!frame || !kind) {
+            kflc_diag_errorf(diag, s->line,
+                "plan `%s`: `frame` is required and takes a body name and "
+                "either `lvlh` or `inertial`", po->name ? po->name : "?");
+            err = 1;
+            continue;
+        }
+        if (strcmp(kind, "lvlh") == 0) {
+            po->frame_kind = K26RL_REF_FRAME_LVLH;
+        } else if (strcmp(kind, "inertial") == 0) {
+            po->frame_kind = K26RL_REF_FRAME_INERTIAL;
+        } else {
+            kflc_diag_errorf(diag, s->line,
+                "plan `%s`: frame kind `%s` is not one this format "
+                "carries; it is `lvlh` or `inertial`",
+                po->name ? po->name : "?", kind);
+            err = 1;
+            continue;
+        }
+        po->frame_body = rl_body_index_of_(m, frame);
+        if (po->frame_body < 0) {
+            kflc_diag_errorf(diag, s->line,
+                "plan `%s`: the frame names `%s`, and no astro_body of "
+                "that name is declared in this world",
+                po->name ? po->name : "?", frame);
+            err = 1;
+            continue;
+        }
+        if (po->frame_kind == K26RL_REF_FRAME_LVLH &&
+            !rl_body_attr_(m->bodies[po->frame_body].body, "parent")) {
+            kflc_diag_errorf(diag, s->line,
+                "plan `%s`: the local-vertical local-horizontal frame of "
+                "`%s` cannot be built, because `%s` declares no "
+                "`parent=` and the body it orbits is unknown",
+                po->name ? po->name : "?", frame, frame);
+            err = 1;
+            continue;
+        }
+        po->slots = slots ? (int)strtol(slots, &end, 10) : 0;
+        if (po->slots < 1 || po->slots > (int)K26RL_REF_MAX_KNOTS) {
+            kflc_diag_errorf(diag, s->line,
+                "plan `%s`: `slots` takes a whole number of knot slots "
+                "from 1 to %u", po->name ? po->name : "?",
+                (unsigned)K26RL_REF_MAX_KNOTS);
+            err = 1;
+            continue;
+        }
+        if (epoch) {
+            po->epoch = strtod(epoch, &end);
+            if (!end || *end != '\0') {
+                kflc_diag_errorf(diag, s->line,
+                    "plan `%s`: `epoch` takes a number of seconds",
+                    po->name ? po->name : "?");
+                err = 1;
+                continue;
+            }
+        }
+
+        /* The first of the block's own action channels, found by the
+         * name the block gave it. Its index in the action vector is
+         * what the episode-end write reads from, and the eight
+         * channels of a slot are contiguous because the parser
+         * appended them in that order. */
+        {
+            char first[160];
+            int found = -1;
+
+            snprintf(first, sizeof first, "%s_k0_t",
+                     po->name ? po->name : "?");
+            for (int a = 0; a < m->n_actions; a++) {
+                const char *an = m->actions[a] ? m->actions[a]->name : NULL;
+
+                if (an && strcmp(an, first) == 0) found = a;
+            }
+            if (found < 0) {
+                kflc_diag_errorf(diag, s->line,
+                    "plan `%s`: its action channels were not declared",
+                    po->name ? po->name : "?");
+                err = 1;
+                continue;
+            }
+            po->act_first = found;
+        }
+    }
+    return err;
 }
 
 /* ---- Emit-side helpers ---------------------------------------------- */
@@ -3882,6 +4333,13 @@ static int rl_has_relative_observe_(const RlModel *m)
     for (int i = 0; i < m->n_observes; i++) {
         if (rl_observe_form_(m->observes[i]) == RL_OBS_REL) return 1;
     }
+    /* A plan written in a body's local-vertical local-horizontal frame
+     * is resolved through the same routine the relative observe uses,
+     * so it pulls in the same library on the same terms. A plan in an
+     * inertial frame needs none of it. */
+    for (int k = 0; k < m->n_refs; k++) {
+        if (m->refs[k].frame_kind == K26RL_REF_FRAME_LVLH) return 1;
+    }
     return 0;
 }
 
@@ -4044,6 +4502,202 @@ static int rl_track_pairs_(const RlModel *m, int *pay, int *veh, int cap)
  * never given one: such a vehicle keeps the constants the assembly
  * derived, bit for bit.
  */
+/* The plans this program carries, as constants.
+ *
+ * Two things travel per plan and each has its own reason. The knots
+ * are what the published channels are computed from, so they are here
+ * as a table the stepping path indexes: it opens nothing, allocates
+ * nothing, and takes no branch on whether a file was found. The
+ * file's own bytes are here so that the episode record can carry the
+ * plan a run flew against, which is what makes a recording sufficient
+ * to explain the run; they are read at an episode boundary and never
+ * on a step.
+ *
+ * A knot is eight numbers in the file's order: the time offset from
+ * the plan's epoch, three position components, three velocity
+ * components, and the tolerance radius. */
+static void rl_emit_reference_tables_(FILE *out, const RlModel *m)
+{
+    fprintf(out,
+        "/* Plans bound to craft by `reference=`. Zero keeps every\n"
+        " * plan-related declaration out of a program that flies\n"
+        " * none. */\n"
+        "#define KFLRL_N_REF %d\n\n", m->n_refs);
+    if (m->n_refs == 0) return;
+
+    for (int i = 0; i < m->n_refs; i++) {
+        const RlReference *r = &m->refs[i];
+        char hex[K26RL_SHA256_HEX];
+
+        k26rl_sha256_hex(r->digest, hex);
+        fprintf(out,
+            "/* `%s`, in the %s frame of `%s`, digest %s */\n",
+            m->bodies[r->body].body->name
+                ? m->bodies[r->body].body->name : "?",
+            r->frame_kind == K26RL_REF_FRAME_LVLH
+                ? "local-vertical local-horizontal" : "inertial",
+            m->bodies[r->frame_body].body->name
+                ? m->bodies[r->frame_body].body->name : "?", hex);
+        fprintf(out, "static const double kflrl_ref_knots_%d_[][8] = {\n",
+                i);
+        for (int k = 0; k < r->n_knots; k++) {
+            const double *kn = r->knots + (size_t)k * 8u;
+
+            fprintf(out,
+                "    { %.17g, %.17g, %.17g, %.17g,"
+                " %.17g, %.17g, %.17g, %.17g },\n",
+                kn[0], kn[1], kn[2], kn[3], kn[4], kn[5], kn[6], kn[7]);
+        }
+        fputs("};\n", out);
+        fprintf(out,
+            "static const unsigned char kflrl_ref_bytes_%d_[] = {\n", i);
+        for (uint32_t b = 0; b < r->len; b++) {
+            fprintf(out, "%s0x%02x,", (b % 12u) == 0 ? "    " : " ",
+                    (unsigned)r->bytes[b]);
+            if ((b % 12u) == 11u || b + 1u == r->len) fputc('\n', out);
+        }
+        fputs("};\n", out);
+        fprintf(out,
+            "static const unsigned char kflrl_ref_digest_%d_[32] = {\n",
+            i);
+        for (int b = 0; b < K26RL_SHA256_BYTES; b++) {
+            fprintf(out, "%s0x%02x,", (b % 12) == 0 ? "    " : " ",
+                    (unsigned)r->digest[b]);
+            if ((b % 12) == 11 || b + 1 == K26RL_SHA256_BYTES)
+                fputc('\n', out);
+        }
+        fputs("};\n\n", out);
+    }
+
+    fputs("static const double *const kflrl_ref_knots_[] = {\n", out);
+    for (int i = 0; i < m->n_refs; i++) {
+        fprintf(out, "    &kflrl_ref_knots_%d_[0][0],\n", i);
+    }
+    fputs("};\nstatic const int kflrl_ref_count_[] = {\n", out);
+    for (int i = 0; i < m->n_refs; i++) {
+        fprintf(out, "    %d,\n", m->refs[i].n_knots);
+    }
+    fputs("};\nstatic const double kflrl_ref_epoch_[] = {\n", out);
+    for (int i = 0; i < m->n_refs; i++) {
+        fprintf(out, "    %.17g,\n", m->refs[i].epoch);
+    }
+    fputs("};\nstatic const unsigned char *const kflrl_ref_bytes_[] = {\n",
+          out);
+    for (int i = 0; i < m->n_refs; i++) {
+        fprintf(out, "    kflrl_ref_bytes_%d_,\n", i);
+    }
+    fputs("};\nstatic const unsigned int kflrl_ref_len_[] = {\n", out);
+    for (int i = 0; i < m->n_refs; i++) {
+        fprintf(out, "    %uu,\n", (unsigned)m->refs[i].len);
+    }
+    fputs("};\nstatic const unsigned char *const kflrl_ref_digest_[] = {\n",
+          out);
+    for (int i = 0; i < m->n_refs; i++) {
+        fprintf(out, "    kflrl_ref_digest_%d_,\n", i);
+    }
+    fputs("};\n\n", out);
+
+    fputs(
+"/* The current knot: the earliest whose time has not passed.\n"
+" *\n"
+" * The rule is time and not arrival. A knot's time passing without\n"
+" * the craft inside its tolerance is not an error and ends nothing;\n"
+" * the plan advances, the craft is late, and the seconds-to channel\n"
+" * goes negative on the knot after it. Nothing here reads where the\n"
+" * craft is, which is what makes that true rather than merely\n"
+" * intended.\n"
+" *\n"
+" * When every knot's time has passed the last one stays current: a\n"
+" * plan that has run out is one whose final state is still the state\n"
+" * asked for, and publishing nothing instead would read exactly like\n"
+" * a craft sitting on a knot. */\n"
+"static int kflrl_ref_current_(int r, double t)\n"
+"{\n"
+"    const double *k = kflrl_ref_knots_[r];\n"
+"    int n = kflrl_ref_count_[r];\n"
+"    for (int i = 0; i < n; i++) {\n"
+"        if (kflrl_ref_epoch_[r] + k[(size_t)i * 8] >= t) return i;\n"
+"    }\n"
+"    return n - 1;\n"
+"}\n\n", out);
+}
+
+/* The plan blocks this program emits, as constants.
+ *
+ * A plan a world writes is the actions of the step that ended the
+ * episode, read out of the action vector at the offset this table
+ * carries. The buffers the encode needs are sized here, from the
+ * widest plan the program declares, and allocated once with the
+ * handle: an episode end is an output point, not a place to start
+ * allocating. */
+static void rl_emit_plan_tables_(FILE *out, const RlModel *m)
+{
+    int max_slots = 0;
+    uint64_t max_bytes = 0;
+
+    for (int p = 0; p < m->n_plans; p++) {
+        const RlPlanOut *po = &m->plans[p];
+        uint64_t need = (uint64_t)K26RL_REF_HEADER_BYTES +
+            strlen(m->bodies[po->frame_body].body->name
+                   ? m->bodies[po->frame_body].body->name : "") +
+            strlen(po->provenance) +
+            (uint64_t)po->slots * K26RL_REF_KNOT_BYTES;
+
+        if (po->slots > max_slots) max_slots = po->slots;
+        if (need > max_bytes) max_bytes = need;
+    }
+    fprintf(out,
+        "/* Plans this world emits. Zero keeps every plan-writing\n"
+        " * declaration out of a program that emits none. */\n"
+        "#define KFLRL_N_PLAN %d\n", m->n_plans);
+    if (m->n_plans == 0) {
+        fputs("\n", out);
+        return;
+    }
+    fprintf(out,
+        "#define KFLRL_PLAN_SLOTS %d\n"
+        "#define KFLRL_PLAN_BYTES %lluu\n\n",
+        max_slots, (unsigned long long)max_bytes);
+
+    fputs("static const char *const kflrl_plan_file_[] = {\n", out);
+    for (int p = 0; p < m->n_plans; p++) {
+        fputs("    ", out);
+        rl_emit_string_literal_(out, m->plans[p].file);
+        fputs(",\n", out);
+    }
+    fputs("};\nstatic const char *const kflrl_plan_frame_[] = {\n", out);
+    for (int p = 0; p < m->n_plans; p++) {
+        const char *fn = m->bodies[m->plans[p].frame_body].body->name;
+
+        fputs("    ", out);
+        rl_emit_string_literal_(out, fn ? fn : "");
+        fputs(",\n", out);
+    }
+    fputs("};\nstatic const char *const kflrl_plan_prov_[] = {\n", out);
+    for (int p = 0; p < m->n_plans; p++) {
+        fputs("    ", out);
+        rl_emit_string_literal_(out, m->plans[p].provenance);
+        fputs(",\n", out);
+    }
+    fputs("};\nstatic const unsigned kflrl_plan_kind_[] = {\n", out);
+    for (int p = 0; p < m->n_plans; p++) {
+        fprintf(out, "    %uu,\n", (unsigned)m->plans[p].frame_kind);
+    }
+    fputs("};\nstatic const int kflrl_plan_nslots_[] = {\n", out);
+    for (int p = 0; p < m->n_plans; p++) {
+        fprintf(out, "    %d,\n", m->plans[p].slots);
+    }
+    fputs("};\nstatic const double kflrl_plan_epoch_[] = {\n", out);
+    for (int p = 0; p < m->n_plans; p++) {
+        fprintf(out, "    %.17g,\n", m->plans[p].epoch);
+    }
+    fputs("};\nstatic const int kflrl_plan_act_[] = {\n", out);
+    for (int p = 0; p < m->n_plans; p++) {
+        fprintf(out, "    %d,\n", m->plans[p].act_first);
+    }
+    fputs("};\n\n", out);
+}
+
 static void rl_emit_mass_tables_(FILE *out, const RlModel *m)
 {
     fprintf(out,
@@ -4969,6 +5623,15 @@ static int rl_emit_prologue_(FILE *out, const RlModel *m,
          * consequence of a declaration and not of the tier existing. */
         fputs("#include <k26astro_geomag/geomag.h>\n"
               "#include <k26astro_body/rotation_model.h>\n", out);
+    }
+    if (m->n_plans > 0) {
+        /* A world that emits a plan writes the file through the
+         * unbuffered calls, so that an episode end costs no
+         * allocation; a stream would allocate its buffer. Only such a
+         * program takes these headers. */
+        fputs("#include \"k26rl_ref.h\"\n"
+              "#include <fcntl.h>\n"
+              "#include <unistd.h>\n", out);
     }
     fputs(
         "#include \"k26rl_env.h\"\n"
@@ -5967,6 +6630,9 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
         /* Payloads are constructed after the vehicles exist, so the
          * statement contributes nothing where it is written. */
         case KFLN_STMT_ASTRO_PAYLOAD:
+        /* A plan block declares an action space and a destination for
+         * what that space produces; it builds nothing in the world. */
+        case KFLN_STMT_PLAN:
             continue;
         case KFLN_STMT_OBSERVE:
             if (rl_observe_as_(s)) continue;   /* channel, not a print */
@@ -6018,6 +6684,7 @@ static int rl_emit_build_world_(FILE *out, const RlModel *m,
             for (const KflcAttr *a = s->attrs; a; a = a->next) {
                 if (!a->name) continue;
                 if (strcmp(a->name, "assembly") == 0) continue;
+                if (strcmp(a->name, "reference") == 0) continue;
                 const char *val =
                     (a->value.kind == KFLV_IDENT && a->value.u.s)
                     ? a->value.u.s : "0";
@@ -6594,12 +7261,19 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
           "                           const double *prop,\n"
           "                           const double *coms,\n"
           "                           int64_t t_day, double t_info,\n"
-          "                           const KflrlEng *eng)\n"
+          "                           const KflrlEng *eng,\n"
+          /* The simulated seconds this episode has advanced, which is
+           * the clock a plan's knot times are read on. It is passed in
+           * rather than read back out of the world for the reason the
+           * contact block is: it is a fact about the transition just
+           * taken, and the caller is the only thing that knows how
+           * many have been taken. */
+          "                           double t_ep)\n"
           "{\n"
           "    (void)world; (void)out_v; (void)ct; (void)jn;\n"
           "    (void)pay; (void)payp; (void)veh; (void)t_day; "
           "(void)t_info;\n"
-          "    (void)eng; (void)prop; (void)coms;\n", out);
+          "    (void)eng; (void)prop; (void)coms; (void)t_ep;\n", out);
     for (int i = 0; i < m->n_observes; i++) {
         const KflcNode *s = m->observes[i];
         int off = rl_obs_offset_(m->observes, i);
@@ -6873,6 +7547,107 @@ static int rl_emit_observe_(FILE *out, const RlModel *m,
                 "    }\n",
                 chf, tgt, off, off + 1, off + 2, off + 3, off + 4,
                 off + 5);
+            continue;
+        }
+        if (rl_observe_form_(s) == RL_OBS_REF) {
+            /* A craft reporting where its plan says it should be, as
+             * an error against where it is. Everything this needs was
+             * resolved when the plan was read at compile time, so
+             * there is no diagnostic here: the refusals are at the
+             * `reference=` and at this statement, both taken before
+             * any of the tables below were written.
+             *
+             * Only the current knot is read, and the index of it comes
+             * from the clock alone. That is the whole of what keeps a
+             * controller from seeing past it: there is no expression
+             * below in which a later knot appears, so altering one
+             * cannot move a published number. */
+            const RlReference *rf = &m->refs[m->obs_ref[i]];
+            int ri  = m->obs_ref[i];
+            int tgt = rf->body;
+            int fb  = rf->frame_body;
+
+            fputs(
+                "    {\n"
+                "        double _kfl_qr[3] = { 0.0, 0.0, 0.0 };\n"
+                "        double _kfl_qv[3] = { 0.0, 0.0, 0.0 };\n", out);
+            fprintf(out,
+                "        K26AstroBody *_kfl_qc = k26astro_world_body_at("
+                "world, kflrl_body_idx_[%d]);\n"
+                "        K26AstroBody *_kfl_qf = k26astro_world_body_at("
+                "world, kflrl_body_idx_[%d]);\n", tgt, fb);
+            if (rf->frame_kind == K26RL_REF_FRAME_LVLH) {
+                fputs(
+                "        K26AstroBody *_kfl_qp = (_kfl_qf && "
+                "_kfl_qf->parent_body_idx >= 0)\n"
+                "            ? k26astro_world_body_at(world, "
+                "_kfl_qf->parent_body_idx) : NULL;\n"
+                /* A frame body sitting at its parent's centre, or
+                 * moving straight at it, names no direction of motion
+                 * and so no frame. That is a configuration rather than
+                 * a declaration and cannot be refused when the program
+                 * is compiled, so the six error components read zero,
+                 * which is what the relative form does in the same
+                 * state and for the same reason. Publishing the knot
+                 * unreduced there would be an absolute wearing the
+                 * name of an error. */
+                "        if (_kfl_qc && _kfl_qf && _kfl_qp) {\n"
+                "            K26AstroProxFrame _kfl_qw;\n"
+                "            K26AstroProxRel _kfl_qz;\n"
+                "            if (k26astro_prox_frame(&_kfl_qp->pos, "
+                "_kfl_qp->vel,\n"
+                "                                    &_kfl_qf->pos, "
+                "_kfl_qf->vel,\n"
+                "                                    &_kfl_qw) == "
+                "K26ASTRO_PROX_OK &&\n"
+                "                k26astro_prox_relative(&_kfl_qw,\n"
+                "                    &_kfl_qf->pos, _kfl_qf->vel,\n"
+                "                    &_kfl_qc->pos, _kfl_qc->vel,\n"
+                "                    &_kfl_qz) == K26ASTRO_PROX_OK) {\n"
+                "                _kfl_qr[0] = _kfl_qz.r.x;\n"
+                "                _kfl_qr[1] = _kfl_qz.r.y;\n"
+                "                _kfl_qr[2] = _kfl_qz.r.z;\n"
+                "                _kfl_qv[0] = _kfl_qz.v.x;\n"
+                "                _kfl_qv[1] = _kfl_qz.v.y;\n"
+                "                _kfl_qv[2] = _kfl_qz.v.z;\n"
+                "            }\n"
+                "        }\n", out);
+            } else {
+                fputs(
+                /* The non-rotating frame centred on the named body, on
+                 * the world's own axes. The separation is taken with
+                 * the exact sector-aware subtraction rather than by
+                 * flattening two absolute coordinates, because the
+                 * pair may sit anywhere in the system and the
+                 * separation is the small quantity. */
+                "        if (_kfl_qc && _kfl_qf) {\n"
+                "            K26V3 _kfl_qd = k26astro_pos_sub(&_kfl_qc->pos,"
+                " &_kfl_qf->pos);\n"
+                "            _kfl_qr[0] = _kfl_qd.x;\n"
+                "            _kfl_qr[1] = _kfl_qd.y;\n"
+                "            _kfl_qr[2] = _kfl_qd.z;\n"
+                "            _kfl_qv[0] = _kfl_qc->vel.x - _kfl_qf->vel.x;\n"
+                "            _kfl_qv[1] = _kfl_qc->vel.y - _kfl_qf->vel.y;\n"
+                "            _kfl_qv[2] = _kfl_qc->vel.z - _kfl_qf->vel.z;\n"
+                "        }\n", out);
+            }
+            fprintf(out,
+                "        int _kfl_qi = kflrl_ref_current_(%d, t_ep);\n"
+                "        const double *_kfl_qk = kflrl_ref_knots_[%d]\n"
+                "            + (size_t)_kfl_qi * 8;\n", ri, ri);
+            for (int c = 0; c < 3; c++) {
+                fprintf(out, "        out_v[%d] = _kfl_qk[%d] - "
+                             "_kfl_qr[%d];\n", off + c, 1 + c, c);
+            }
+            for (int c = 0; c < 3; c++) {
+                fprintf(out, "        out_v[%d] = _kfl_qk[%d] - "
+                             "_kfl_qv[%d];\n", off + 3 + c, 4 + c, c);
+            }
+            fprintf(out,
+                "        out_v[%d] = (kflrl_ref_epoch_[%d] + _kfl_qk[0])"
+                " - t_ep;\n"
+                "        out_v[%d] = _kfl_qk[7];\n"
+                "    }\n", off + 6, ri, off + 7);
             continue;
         }
         if (rl_observe_form_(s) == RL_OBS_PROP) {
@@ -7229,6 +8004,7 @@ static const char *rl_step_stmt_why_(const KflcNode *s, const char **what)
     case KFLN_STMT_SENSOR:
     case KFLN_STMT_SENSOR_TERM:
     case KFLN_STMT_AGENT:
+    case KFLN_STMT_PLAN:
         *what = "a reinforcement learning construct";
         return "these are declarations of the environment, not acts of "
                "a step";
@@ -9245,6 +10021,16 @@ static void rl_emit_env_core_(FILE *out)
 "    uint16_t  act_kind[KFLRL_ACT_TOTAL ? KFLRL_ACT_TOTAL : 1];\n"
 "    uint8_t  *spec;\n"
 "    uint32_t  spec_len;\n"
+"#if KFLRL_N_PLAN > 0\n"
+"    /* The scratch a plan write needs, allocated with the handle and\n"
+"     * sized from the widest plan this program declares. An episode\n"
+"     * end is an output point rather than a place to start\n"
+"     * allocating, and a handle is single-threaded, so one set of\n"
+"     * buffers per handle is what the write needs. */\n"
+"    K26RlRefKnot  *plan_slot;\n"
+"    K26RlRefKnot  *plan_scratch;\n"
+"    unsigned char *plan_buf;\n"
+"#endif\n"
 "    K26RlEpisodeWriter *writer;\n"
 "    K26RlTap *tap;               /* the telemetry ring, when enabled */\n"
 "    uint8_t   at_boundary;\n"
@@ -9677,7 +10463,7 @@ static void rl_emit_env_core_(FILE *out)
 "                   &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
 "                   KFLRL_VEHS(h, e), KFLRL_PROP(h, e),\n"
 "                   KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),\n"
-"                   KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
+"                   KFLRL_INFOT(h, e), KFLRL_ENG(h, e), 0.0);\n"
 "    kflrl_sense_reset_(h, e, ep,\n"
 "                       h->obs + (size_t)e * KFLRL_OBS_TOTAL);\n"
 "}\n"
@@ -9846,6 +10632,11 @@ static void rl_emit_env_core_(FILE *out)
 "static void kflrl_free_handle_(K26RlEnv *h)\n"
 "{\n"
 "    if (!h) return;\n"
+"#if KFLRL_N_PLAN > 0\n"
+"    free(h->plan_slot);\n"
+"    free(h->plan_scratch);\n"
+"    free(h->plan_buf);\n"
+"#endif\n"
 "#if KFLRL_N_PAYLOAD > 0\n"
 "    /* Payloads before vehicles: each `_destroy` unlinks itself from\n"
 "     * the vehicle's payload slot before releasing its storage, so\n"
@@ -10088,6 +10879,19 @@ static void rl_emit_env_core_(FILE *out)
 "     * for one that declares a vehicle, because the observation\n"
 "     * function takes it either way and a conditional signature\n"
 "     * would buy nothing but a second shape to keep agreeing. */\n"
+"", out);
+    fputs(
+"#if KFLRL_N_PLAN > 0\n"
+"    h->plan_slot = (K26RlRefKnot *)calloc(KFLRL_PLAN_SLOTS,\n"
+"                                          sizeof(K26RlRefKnot));\n"
+"    h->plan_scratch = (K26RlRefKnot *)calloc(KFLRL_PLAN_SLOTS,\n"
+"                                             sizeof(K26RlRefKnot));\n"
+"    h->plan_buf = (unsigned char *)calloc(KFLRL_PLAN_BYTES, 1);\n"
+"    if (!h->plan_slot || !h->plan_scratch || !h->plan_buf) {\n"
+"        kflrl_free_handle_(h);\n"
+"        return K26RL_E_INTERNAL;\n"
+"    }\n"
+"#endif\n"
 "    h->join = (KflrlJoin *)calloc(n_envs, sizeof(*h->join));\n"
 "    h->contact = (KflrlContact *)calloc(\n"
 "        (size_t)n_envs * KFLRL_N_CONTACT, sizeof(KflrlContact));\n"
@@ -10245,7 +11049,7 @@ static void rl_emit_env_core_(FILE *out)
 "                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
 "                       KFLRL_VEHS(h, e), KFLRL_PROP(h, e),\n"
 "                       KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),\n"
-"                       KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
+"                       KFLRL_INFOT(h, e), KFLRL_ENG(h, e), 0.0);\n"
 "    }\n"
 "\n"
 "    h->spec_len = kflrl_spec_write_(NULL, h);\n", out);
@@ -10337,6 +11141,27 @@ static void rl_emit_env_core_(FILE *out)
 "        path, &geom, h->seed, h->rekey_ordinal, \"3.2\",\n"
 "        K26ASTRO_RT_LIB_VERSION, h->spec, h->spec_len, &h->writer);\n"
 "    if (st != K26RL_OK) return st;\n"
+"#if KFLRL_N_REF > 0\n"
+"    /* Every plan this program flies goes into the record, verbatim\n"
+"     * and with its own digest beside it, immediately after the file\n"
+"     * header. A run whose plan is not recoverable from its recording\n"
+"     * cannot be replayed or explained, and carrying the digest\n"
+"     * separately is what lets a reader tell a recording flown\n"
+"     * against the plan it names from one flown against a plan of the\n"
+"     * same name. A plan is fixed for the whole file, so one frame\n"
+"     * covers every environment and every episode in it. */\n"
+"    for (int r = 0; r < KFLRL_N_REF; r++) {\n"
+"        st = k26rl_episode_writer_plan(\n"
+"            h->writer, K26RL_PLAN_ROLE_FLOWN, K26RL_PLAN_ALL,\n"
+"            K26RL_PLAN_ALL, kflrl_ref_digest_[r], kflrl_ref_bytes_[r],\n"
+"            kflrl_ref_len_[r]);\n"
+"        if (st != K26RL_OK) {\n"
+"            (void)k26rl_episode_writer_close(h->writer);\n"
+"            h->writer = NULL;\n"
+"            return K26RL_E_INTERNAL;\n"
+"        }\n"
+"    }\n"
+"#endif\n"
 "    for (uint32_t e = 0; e < h->n_envs; e++) {\n"
 "        st = k26rl_episode_writer_start(\n"
 "            h->writer, e, h->episode[e],\n"
@@ -10404,6 +11229,81 @@ static void rl_emit_env_core_(FILE *out)
 "\n"
 "", out);
     fputs(
+"#if KFLRL_N_PLAN > 0\n"
+"/* Write the plan the episode's last actions make.\n"
+" *\n"
+" * A planner's actions are its knots, and the plan is what its last\n"
+" * step asked for. The slots are read straight out of the action\n"
+" * vector; which of them are present, what order they go in, and what\n"
+" * the file's bytes are, are the plan format's rules and not this\n"
+" * artifact's, so a plan this world writes is a plan any reader of\n"
+" * that format accepts.\n"
+" *\n"
+" * It runs only where the episode record is being written, which is\n"
+" * the one place this artifact is permitted output at all, and it is\n"
+" * called at an episode end and never from a step. It allocates\n"
+" * nothing: the buffers came with the handle, the encode writes into\n"
+" * them, and the file leaves through the unbuffered calls rather than\n"
+" * through a stream that would allocate one.\n"
+" *\n"
+" * The path carries the episode identity the record uses, so a plan\n"
+" * file and the recording that produced it name each other. */\n"
+"static void kflrl_plan_write_(K26RlEnv *h, uint32_t e,\n"
+"                              const double *aslice)\n"
+"{\n"
+"    for (int p = 0; p < KFLRL_N_PLAN; p++) {\n"
+"        K26RlRefPlan plan;\n"
+"        uint64_t len = 0;\n"
+"        int nslot = kflrl_plan_nslots_[p];\n"
+"        char path[512];\n"
+"        int fd;\n"
+"\n"
+"        for (int k = 0; k < nslot; k++) {\n"
+"            const double *a = aslice + kflrl_plan_act_[p] + k * 8;\n"
+"            h->plan_slot[k].t = a[0];\n"
+"            for (int q = 0; q < 3; q++) {\n"
+"                h->plan_slot[k].r[q] = a[1 + q];\n"
+"                h->plan_slot[k].v[q] = a[4 + q];\n"
+"            }\n"
+"            h->plan_slot[k].tolerance = a[7];\n"
+"        }\n"
+"", out);
+    fputs(
+"        plan.frame_kind = kflrl_plan_kind_[p];\n"
+"        plan.frame_name = kflrl_plan_frame_[p];\n"
+"        plan.provenance = kflrl_plan_prov_[p];\n"
+"        plan.epoch      = kflrl_plan_epoch_[p];\n"
+"        plan.knots      = h->plan_slot;\n"
+"        plan.knot_count = (uint32_t)nslot;\n"
+"        if (k26rl_ref_encode_into(&plan, h->plan_scratch, h->plan_buf,\n"
+"                                  (uint64_t)KFLRL_PLAN_BYTES,\n"
+"                                  &len) != K26RL_REF_OK) {\n"
+"            continue;\n"
+"        }\n"
+"        snprintf(path, sizeof path, \"%s-%lu-%lu-%lu%s\",\n"
+"                 kflrl_plan_file_[p],\n"
+"                 (unsigned long)h->rekey_ordinal, (unsigned long)e,\n"
+"                 (unsigned long)h->episode[e], K26RL_REF_SUFFIX);\n"
+"        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);\n"
+"        if (fd >= 0) {\n"
+"            const unsigned char *b = h->plan_buf;\n"
+"            uint64_t left = len;\n"
+"            while (left > 0) {\n"
+"                ssize_t w = write(fd, b, (size_t)left);\n"
+"                if (w <= 0) break;\n"
+"                b += w;\n"
+"                left -= (uint64_t)w;\n"
+"            }\n"
+"            (void)close(fd);\n"
+"        }\n"
+"        (void)k26rl_episode_writer_plan(\n"
+"            h->writer, K26RL_PLAN_ROLE_EMITTED, e, h->episode[e],\n"
+"            h->plan_buf + K26RL_REF_DIGEST_OFFSET, h->plan_buf,\n"
+"            (uint32_t)len);\n"
+"    }\n"
+"}\n"
+"#endif\n"
+"\n"
 "/* An environment's episode ends by fault: no transition completes,\n"
 " * the public observation slice keeps the pre-step values, the fault\n"
 " * record and episode-end frame travel the file when enabled. */\n"
@@ -11033,7 +11933,11 @@ static void rl_emit_env_core_(FILE *out)
 "                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),\n"
 "                       KFLRL_VEHS(h, e), KFLRL_PROP(h, e),\n"
 "                       KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),\n"
-"                       KFLRL_INFOT(h, e), KFLRL_ENG(h, e));\n"
+"                       KFLRL_INFOT(h, e), KFLRL_ENG(h, e),\n"
+/* The transition has been taken but the count is still the one
+ * before it, so the episode's elapsed time is one control period
+ * more than the count says. */
+"                       (double)(h->steps[e] + 1u) * h->control_dt);\n"
 "        /* The transition index is the draw index every per-step term\n"
 "         * uses, and h->steps[e] is still the count before this\n"
 "         * transition, so the first transition of an episode draws at\n"
@@ -11125,6 +12029,9 @@ static void rl_emit_env_core_(FILE *out)
 "                    term ? K26RL_END_TERMINATED : K26RL_END_TRUNCATED,\n"
 "                    0, tadj);\n"
 "                if (st != K26RL_OK) return K26RL_E_INTERNAL;\n"
+"#if KFLRL_N_PLAN > 0\n"
+"                kflrl_plan_write_(h, e, aslice);\n"
+"#endif\n"
 "            }\n"
 "        }\n"
 "        if (h->tap) {\n"
@@ -11670,6 +12577,8 @@ static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
      * constructed properties through them, and the actuator block is
      * emitted from inside the per-step body further down. */
     rl_emit_mass_tables_(out, &m);
+    rl_emit_reference_tables_(out, &m);
+    rl_emit_plan_tables_(out, &m);
     rl_emit_form_args_(out, form);
     if (rl_emit_user_fns_(out, form, arena, user_fn_arr, n_user_fns,
                           diag) ||

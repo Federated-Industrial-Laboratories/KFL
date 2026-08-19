@@ -78,6 +78,8 @@
 #include <sys/wait.h>
 
 #include "rl_gate_util.h"
+
+#include "k26rl_ref.h"
 #include "k26rl_tap.h"
 #include <time.h>
 
@@ -462,6 +464,7 @@ static const char *const HP_COLL_KFL =
     "    astro_body earth gm=3.986004418e14 mass=5.972e24"
     " ephem_naif_id=399\n"
     "    astro_body alpha assembly=\"hpcoll.k26asm\" parent=earth"
+    " reference=\"hpcoll.k26ref\""
     " pos_x=7.0e6 vel_y=7546.0"
     " quat_w=1.0 omega_x=0.01 omega_y=0.02 omega_z=0.03\n"
     /* Beta faces alpha: the assembly puts its port on the body's
@@ -513,16 +516,24 @@ static const char *const HP_COLL_KFL =
      * finds. Both halves are on the stepping path and both are
      * therefore inside the armed window. */
     "    observe port dock of beta as prt\n"
+    /* A plan bound to alpha, published as an error against where
+     * alpha is. The knots are compiled in as constants, so what runs
+     * inside the armed window is the search for the current knot and
+     * eight subtractions; if either allocated or drew, this is where
+     * it would show. It is declared last so that no channel index
+     * above it moves. */
+    "    observe reference of alpha as plan\n"
     "    objective\n"
-    "        reward hit_hit + trk_range + rel_r_y + prt_axial\n"
+    "        reward hit_hit + trk_range + rel_r_y + prt_axial"
+    " + plan_r_x\n"
     "    end\n"
     "end\n"
     "end\n";
 
 /* Three contact channels, five tracking channels and their five
- * paired truth channels, six relative ones, nine port ones; one
- * action. */
-#define HP_COLL_OBS     28
+ * paired truth channels, six relative ones, nine port ones, eight
+ * reference ones; one action. */
+#define HP_COLL_OBS     36
 #define HP_COLL_HIT      0
 #define HP_COLL_ACT      1
 #define HP_COLL_HORIZON 24
@@ -902,7 +913,8 @@ static int child_main_(void)
             unsigned long a = alloc_total_(), w = write_total_();
             printf("gate 6: %2d episode(s), %3d steps x %d envs,"
                    " an assembly, wheels, a contacting pair, a capture"
-                   " test, a relative observe and a sensor chain:"
+                   " test, a relative observe, a plan and a sensor"
+                   " chain:"
                    " alloc-family %lu"
                    " (malloc %lu calloc %lu realloc %lu free %lu),"
                    " write-family %lu\n",
@@ -1041,6 +1053,33 @@ int main(void)
     ASSERT(rl_file_exists_(WORK_DIR "/hp.rlenv.so"));
 
     rl_write_file_(WORK_DIR "/hpcoll.k26asm", HP_COLL_ASM);
+    /* The plan alpha flies, written here so the fixture is
+     * self-contained. Its knot times straddle the fixture's horizon,
+     * so the current knot advances inside the armed window rather
+     * than being fixed for the whole of it: a window in which the
+     * plan never advanced would not measure the search at all. */
+    {
+        K26RlRefKnot ks[3];
+        K26RlRefPlan plan;
+        int i;
+
+        for (i = 0; i < 3; i++) {
+            ks[i].t = 0.8 * (double)(i + 1);
+            ks[i].r[0] = 2.0 * (double)(i + 1);
+            ks[i].r[1] = -1.0 * (double)(i + 1);
+            ks[i].r[2] = 0.5 * (double)(i + 1);
+            ks[i].v[0] = 0.1; ks[i].v[1] = 0.0; ks[i].v[2] = -0.05;
+            ks[i].tolerance = 1.0 + (double)i;
+        }
+        plan.frame_kind = K26RL_REF_FRAME_LVLH;
+        plan.frame_name = "beta";
+        plan.provenance = "hot path fixture";
+        plan.epoch      = 0.0;
+        plan.knots      = ks;
+        plan.knot_count = 3;
+        ASSERT(k26rl_ref_write(WORK_DIR "/hpcoll.k26ref", &plan) ==
+               K26RL_REF_OK);
+    }
     rl_write_file_(WORK_DIR "/hpcoll.kfl", HP_COLL_KFL);
     rl_compile_(WORK_DIR "/hpcoll.kfl", WORK_DIR "/hpcoll", WORK_DIR);
     ASSERT(rl_file_exists_(WORK_DIR "/hpcoll.rlenv.so"));

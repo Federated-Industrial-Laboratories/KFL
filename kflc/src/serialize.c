@@ -531,6 +531,46 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
         break;
     }
 
+    case KFLN_STMT_PLAN: {
+        /* The block's own spelling, restored from the attrs the parser
+         * left. The action channels it declared are ordinary action
+         * statements in the world body and print themselves. */
+        const KflcAttr *frame = find_attr_(n->attrs, "frame");
+        const KflcAttr *kind  = find_attr_(n->attrs, "kind");
+        static const char *const PAIRS_[] = {
+            "time", "position", "velocity", "tolerance", NULL
+        };
+
+        fprintf(out, "plan %s\n", n->name ? n->name : "?");
+        for (const KflcAttr *a = n->attrs; a; a = a->next) {
+            if (!a->name || a->value.kind != KFLV_IDENT) continue;
+            if (strcmp(a->name, "file") == 0 ||
+                strcmp(a->name, "slots") == 0 ||
+                strcmp(a->name, "epoch") == 0 ||
+                strcmp(a->name, "provenance") == 0) {
+                fprintf(out, "    %s %s\n", a->name, a->value.u.s);
+            }
+        }
+        if (frame && kind) {
+            fprintf(out, "    frame %s %s\n", frame->value.u.s,
+                    kind->value.u.s);
+        }
+        for (int k = 0; PAIRS_[k]; k++) {
+            char lo[32], hi[32];
+            const KflcAttr *al, *ah;
+
+            snprintf(lo, sizeof lo, "%s_lo", PAIRS_[k]);
+            snprintf(hi, sizeof hi, "%s_hi", PAIRS_[k]);
+            al = find_attr_(n->attrs, lo);
+            ah = find_attr_(n->attrs, hi);
+            if (al && ah) {
+                fprintf(out, "    %s %s %s\n", PAIRS_[k], al->value.u.s,
+                        ah->value.u.s);
+            }
+        }
+        fputs("end\n", out);
+        return;
+    }
     case KFLN_STMT_ASTRO_PAYLOAD: {
         indent(out, level);
         fprintf(out, "astro_payload %s", n->name ? n->name : "?");
@@ -601,7 +641,7 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
          * statement was written with: a body reporting a fact about
          * itself, with no observer to name. */
         static const char *const SELF_MARKERS_[] = {
-            "attitude", "contact", "propulsion", NULL
+            "attitude", "contact", "propulsion", "reference", NULL
         };
         const char *m_self = NULL;
         for (int k = 0; SELF_MARKERS_[k]; k++) {
@@ -657,6 +697,7 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
             if (strcmp(a->name, "attitude") == 0) continue;
             if (strcmp(a->name, "contact") == 0) continue;
             if (strcmp(a->name, "propulsion") == 0) continue;
+            if (strcmp(a->name, "reference") == 0) continue;
             if (strcmp(a->name, "relative") == 0) continue;
             if (strcmp(a->name, "port") == 0) continue;
             if (strcmp(a->name, "detect") == 0) continue;

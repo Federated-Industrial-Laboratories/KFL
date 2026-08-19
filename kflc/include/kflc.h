@@ -215,6 +215,16 @@ typedef enum {
      * further payload kind is a new `kind=` value rather than a new
      * statement. */
     KFLN_STMT_ASTRO_PAYLOAD,
+    /* `plan <name> ... end`. The knot slots a planner emits, and where
+     * the plan they make goes. `name` is the plan's name and the base
+     * of every action channel it declares; the attrs carry `file`,
+     * `frame`, `kind`, `slots`, `epoch`, `provenance` and the four
+     * bound pairs, each as verbatim text. The block declares its own
+     * action channels, which the parser appends as ordinary
+     * KFLN_STMT_ACTION statements after it, so everything downstream
+     * sees a fixed-width action space and nothing about the slots is a
+     * special case. */
+    KFLN_STMT_PLAN,
     /* `engage <payload> at <target>`. `name` is the payload engaged;
      * the `at` attr names the body it is aimed at. An engagement is an
      * act rather than a declaration, so the statement is admissible

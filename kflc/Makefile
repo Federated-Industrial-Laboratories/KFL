@@ -312,6 +312,19 @@ $(RL_PROPULSION_TEST): tests/test_rl_propulsion.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The planner-to-executor plan: the eight published components, the
+# error against where the craft is, the advance on the clock, the
+# limit on what an executor can see, the refusals, and the plan's
+# recovery from a recording.
+RL_REFERENCE_TEST = tests/test_rl_reference
+$(RL_REFERENCE_TEST): tests/test_rl_reference.c $(RL_GATE_DEPS) \
+                      ../libk26rl/include/k26rl_env.h \
+                      ../libk26rl/include/k26rl_ref.h \
+                      ../libk26rl/include/k26rl_episode.h \
+                      ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_ATT_TEST = tests/test_rl_attitude
 $(RL_ATT_TEST): tests/test_rl_attitude.c $(RL_GATE_DEPS) \
                 ../libk26rl/include/k26rl_env.h \
@@ -669,7 +682,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -695,6 +708,7 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	          $(RL_SCENE_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) \
 	          $(RL_ATT_TEST) \
 	          $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) \
+	          $(RL_REFERENCE_TEST) \
 	          $(RL_COLL_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
@@ -839,6 +853,7 @@ clean:
 	      $(RL_ATT_TEST) \
 	      $(ATT_SUBSTEP_TEST) $(ATT_SUBSTEP_RED) \
 	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
+	      $(RL_REFERENCE_TEST) \
 	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	      $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) \
 	      $(RL_REALTIME_TEST) \
