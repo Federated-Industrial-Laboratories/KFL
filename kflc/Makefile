@@ -300,6 +300,19 @@ $(RL_COLL_TEST): tests/test_rl_collision.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# What the rest of the world reads on the transition a contact lands.
+# A contact is resolved part way through a sub-advance while every
+# other body stands at its end, so this gate holds the relative
+# observes of two bodies the craft never strikes against the readings
+# they had before and after, and holds that bound against the travel a
+# craft left at the contact instant would owe.
+RL_CONOBS_TEST = tests/test_rl_contact_observe
+$(RL_CONOBS_TEST): tests/test_rl_contact_observe.c $(RL_GATE_DEPS) \
+                 ../libk26rl/include/k26rl_env.h \
+                 ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 # Propellant and mass depletion through the stepping surface: what a
 # burn spends per thruster, the rocket equation coming out of the model
 # at two mass ratios, the centre of mass moving as the tank empties,
@@ -698,7 +711,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_MAVIEW_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_MAVIEW_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -726,7 +739,7 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	          $(RL_ATT_TEST) \
 	          $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) \
 	          $(RL_REFERENCE_TEST) \
-	          $(RL_COLL_TEST) \
+	          $(RL_COLL_TEST) $(RL_CONOBS_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	          $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) \
@@ -870,7 +883,7 @@ clean:
 	      $(RL_BODIES_TEST) \
 	      $(RL_ATT_TEST) \
 	      $(ATT_SUBSTEP_TEST) $(ATT_SUBSTEP_RED) \
-	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
+	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	      $(RL_REFERENCE_TEST) \
 	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	      $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) \
