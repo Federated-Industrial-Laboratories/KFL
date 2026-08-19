@@ -6,6 +6,19 @@ double vector, and the session object that owns the handle, the
 buffers, the seed record, and the fault rendering. The vectorised
 shape in :mod:`k26rl.vector` and the multi-agent shape in
 :mod:`k26rl.parallel` build on the same session.
+
+Every shape returns the measured channels alone. An artifact publishes
+what each observation channel is, and where a program routes an
+observe through a declared sensor it publishes the uncorrupted value
+beside the measured one as a paired ground-truth channel. A policy
+reads its craft and its surroundings through the declared sensors,
+imperfections and all, so the environment shapes here build their
+observation space over the measured channels and return those; the
+ground-truth channels come back beside the observation, under
+:data:`INFO_TRUTH_OBS`, where a privileged critic reads them and a
+policy does not. That is what these shapes do, not what they can be
+asked to do: a rule a trainer has to remember to switch on is a rule
+nothing keeps.
 """
 
 import ctypes
@@ -20,14 +33,32 @@ from ._errors import K26RlError, K26RlFaultError
 
 _SEED_LIMIT = 2 ** 64
 
+#: Info key carrying the ground-truth channels of the observation the
+#: same call returned, in channel order. Present exactly when the
+#: artifact declares at least one ground-truth channel, which is
+#: exactly when ``truth_observation_space`` is not None.
+INFO_TRUTH_OBS = "truth_obs"
+
 
 # ---- spaces from the spec, and nothing else -------------------------
 
 def build_observation_space(spec):
-    """Box(-inf, +inf) over the declared observation total. The spec
-    declares no observation bounds in version 1, so none are
+    """Box(-inf, +inf) over the channels a policy reads: every
+    declared channel except the ground-truth half of a paired one.
+    The spec declares no observation bounds in version 1, so none are
     invented."""
-    return build_observation_space_of(spec.obs_total)
+    measured, _truth = _spec.split_channels(spec, 0, spec.obs_total)
+    return build_observation_space_of(len(measured))
+
+
+def build_truth_observation_space(channels):
+    """Box(-inf, +inf) over a run of ground-truth channels, or None
+    where there are none. The privileged half of an observation is
+    shaped like the rest of it, and a consumer building a critic's
+    input needs its width without counting names."""
+    if not channels:
+        return None
+    return build_observation_space_of(len(channels))
 
 
 def build_observation_space_of(count):
@@ -300,6 +331,18 @@ class _Session:
         self._untouched = True
         self._output_path = None
 
+        # The two halves of the observation vector, as absolute
+        # channel indices. Read once here because they are a property
+        # of the artifact, not of a step, and applied by every shape:
+        # the measured channels are what an observation is, and the
+        # ground-truth channels travel beside it.
+        measured, truth = _spec.split_channels(self.spec, 0,
+                                               self.spec.obs_total)
+        self.policy_channels = tuple(measured)
+        self.truth_channels = tuple(truth)
+        self._policy_index = np.asarray(measured, dtype=np.intp)
+        self._truth_index = np.asarray(truth, dtype=np.intp)
+
         obs_n = n_envs * self.spec.obs_total
         self._obs_buf = np.empty(obs_n, dtype=np.float64)
         self._rew_buf = np.empty(n_envs * self.spec.agent_count,
@@ -333,13 +376,32 @@ class _Session:
         return buf.ctypes.data_as(ctypes.POINTER(ctype))
 
     def read_obs(self):
-        """Fresh copy each call, never a view over the preallocated
+        """The whole declared observation vector, ground-truth
+        channels included; :meth:`policy_obs` and :meth:`truth_obs`
+        cut it into the half a policy reads and the half it does not.
+
+        Fresh copy each call, never a view over the preallocated
         buffer: consumers store returned arrays, and an aliased view
         would be silently overwritten one step later."""
         self.artifact.obs(self._handle,
                           self._ptr(self._obs_buf, ctypes.c_double))
         return self._obs_buf.reshape(
             self.n_envs, self.spec.obs_total).copy()
+
+    def policy_obs(self, obs):
+        """The measured channels of a whole handle's observation, as
+        ``(n_envs, len(policy_channels))``. An artifact with no
+        ground-truth channel drops nothing, and the read's own fresh
+        copy is returned unchanged; otherwise the selection makes
+        one."""
+        if not self.truth_channels:
+            return obs
+        return obs[:, self._policy_index]
+
+    def truth_obs(self, obs):
+        """The ground-truth channels of that same observation, as
+        ``(n_envs, len(truth_channels))`` in channel order."""
+        return obs[:, self._truth_index]
 
     def read_reward(self):
         self.artifact.reward(self._handle,
@@ -473,6 +535,14 @@ class K26RlEnv(gymnasium.Env):
     alone. The environment is live from birth: construction completes
     episode 0's initial reset.
 
+    The observation is the artifact's measured channels. Where the
+    program routed an observe through a declared sensor, the
+    uncorrupted values beside it come back under
+    :data:`INFO_TRUTH_OBS` instead, sized by
+    ``truth_observation_space``; ``policy_channels`` and
+    ``truth_channels`` name which declared channel each component of
+    the two arrays is.
+
     ``on_fault`` selects the fault mode: ``"raise"`` (the default)
     raises :class:`K26RlFaultError` after a faulting step's results
     are formed; ``"truncate"`` returns the same results without
@@ -495,6 +565,8 @@ class K26RlEnv(gymnasium.Env):
         spec = self._session.spec
         self.observation_space = build_observation_space(spec)
         self.action_space = build_action_space(spec)
+        self.truth_observation_space = build_truth_observation_space(
+            self._session.truth_channels)
         self._needs_reset = False
 
     # ---- spec data exposed for consumers and tooling ------------------
@@ -528,6 +600,21 @@ class K26RlEnv(gymnasium.Env):
         return dict(self._session.spec.obs_channel_kinds)
 
     @property
+    def policy_channels(self):
+        """The declared channels this environment's observation
+        carries, in the order it carries them: the measured ones."""
+        self._session.ensure_open()
+        return self._session.policy_channels
+
+    @property
+    def truth_channels(self):
+        """The declared channels the observation does not carry, in
+        the order the ``INFO_TRUTH_OBS`` array carries them: the
+        ground truth paired with the measured channels above."""
+        self._session.ensure_open()
+        return self._session.truth_channels
+
+    @property
     def on_fault(self):
         self._session.ensure_open()
         return self._session.on_fault
@@ -542,6 +629,15 @@ class K26RlEnv(gymnasium.Env):
 
     # ---- the API ------------------------------------------------------
 
+    def _truth_into(self, info, obs):
+        """The ground-truth channels of ``obs`` put beside the
+        measured ones in that call's info mapping. Both halves are cut
+        from the one vector the call read, so they cannot drift a step
+        apart."""
+        if self._session.truth_channels:
+            info[INFO_TRUTH_OBS] = self._session.truth_obs(obs)[0]
+        return info
+
     def reset(self, *, seed=None, options=None):
         self._session.ensure_open()
         check_options(options)
@@ -553,7 +649,8 @@ class K26RlEnv(gymnasium.Env):
         super().reset(seed=seed)
         obs = self._session.reset_routed(seed)
         self._needs_reset = False
-        return obs.reshape(self._session.spec.obs_total), {}
+        return (self._session.policy_obs(obs)[0],
+                self._truth_into({}, obs))
 
     def step(self, action):
         self._session.ensure_open()
@@ -568,7 +665,7 @@ class K26RlEnv(gymnasium.Env):
         word = int(flags[0])
         terminated = bool(word & _abi.FLAG_TERMINATED)
         truncated = bool(word & _abi.FLAG_TRUNCATED)
-        info = {}
+        info = self._truth_into({}, obs)
         faulted = bool(word & _abi.FLAG_FAULT)
         if faulted:
             # A fault is not termination, and the episode ended for a
@@ -584,7 +681,7 @@ class K26RlEnv(gymnasium.Env):
 
         if terminated or truncated:
             self._needs_reset = True
-        results = (obs.reshape(self._session.spec.obs_total),
+        results = (self._session.policy_obs(obs)[0],
                    float(rew[0]), terminated, truncated, info)
         if faulted and self._session.on_fault == "raise":
             raise K26RlFaultError(indices, picked, reasons, results)

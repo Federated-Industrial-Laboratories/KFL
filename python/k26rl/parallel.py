@@ -45,9 +45,11 @@ except ImportError as exc:  # pragma: no cover - dependency probe
 from . import _abi, _spec
 from ._errors import K26RlFaultError
 from .env import (
+    INFO_TRUTH_OBS,
     _Session,
     build_action_space_of,
     build_observation_space_of,
+    build_truth_observation_space,
     check_options,
     check_seed,
     flatten_action_into,
@@ -78,6 +80,12 @@ class K26RlParallelEnv(ParallelEnv):
     ``agents`` and ``possible_agents`` carry the published agent names,
     in agent-index order. ``reset`` and ``step`` take and return
     dictionaries keyed by those names.
+
+    Each agent observes its own measured channels. Where its slice
+    declares a sensor's ground-truth channels beside them, they come
+    back in that agent's info mapping under ``INFO_TRUTH_OBS``, sized
+    by ``truth_observation_spaces``; an agent whose slice declares
+    none carries no such entry.
 
     Termination is per environment rather than per agent: the episode
     ends for every agent at once, on the program's termination
@@ -132,6 +140,25 @@ class K26RlParallelEnv(ParallelEnv):
         self.agents = list(names)
         self._obs_slice = dict(zip(names, obs_slices))
         self._act_slice = dict(zip(names, act_slices))
+        # Each agent's own slice cut into the measured channels its
+        # observation array carries and the ground-truth ones that
+        # travel beside it. The split is per agent because the slices
+        # are: one agent may declare a sensor where another declares
+        # none.
+        split = {name: _spec.split_channels(spec, offset, count)
+                 for name, (offset, count) in self._obs_slice.items()}
+        self._obs_index = {
+            name: np.asarray(measured, dtype=np.intp)
+            for name, (measured, _truth) in split.items()}
+        self._truth_index = {
+            name: np.asarray(truth, dtype=np.intp)
+            for name, (_measured, truth) in split.items()}
+        self.agent_policy_channels = {
+            name: tuple(measured)
+            for name, (measured, _truth) in split.items()}
+        self.agent_truth_channels = {
+            name: tuple(truth)
+            for name, (_measured, truth) in split.items()}
         self._act_channels = {
             name: spec.act_channels[offset:offset + count]
             for name, (offset, count) in self._act_slice.items()}
@@ -142,8 +169,16 @@ class K26RlParallelEnv(ParallelEnv):
         # the same object every call, so that seeding a sampled space
         # sticks.
         self.observation_spaces = {
-            name: build_observation_space_of(count)
-            for name, (_offset, count) in self._obs_slice.items()}
+            name: build_observation_space_of(
+                len(self.agent_policy_channels[name]))
+            for name in names}
+        # The privileged half, by agent: a space over that agent's
+        # ground-truth channels, or None where it declares none, which
+        # is exactly when its info mapping carries no such entry.
+        self.truth_observation_spaces = {
+            name: build_truth_observation_space(
+                self.agent_truth_channels[name])
+            for name in names}
         self.action_spaces = {
             name: build_action_space_of(self._act_channels[name])
             for name in names}
@@ -185,12 +220,20 @@ class K26RlParallelEnv(ParallelEnv):
     @property
     def agent_obs_channel_names(self):
         """Each agent's observation channel names, in the order its own
-        observation array carries them."""
+        observation array carries them: its measured channels."""
         self._session.ensure_open()
         published = self._session.spec.obs_channel_names
-        return {name: [published[c]
-                       for c in range(offset, offset + count)]
-                for name, (offset, count) in self._obs_slice.items()}
+        return {name: [published[c] for c in channels]
+                for name, channels in self.agent_policy_channels.items()}
+
+    @property
+    def agent_truth_channel_names(self):
+        """Each agent's ground-truth channel names, in the order its
+        own ``INFO_TRUTH_OBS`` array carries them."""
+        self._session.ensure_open()
+        published = self._session.spec.obs_channel_names
+        return {name: [published[c] for c in channels]
+                for name, channels in self.agent_truth_channels.items()}
 
     @property
     def on_fault(self):
@@ -230,8 +273,8 @@ class K26RlParallelEnv(ParallelEnv):
         # warnings would otherwise have no way to learn that an
         # explicit request had no effect.
         info = {INFO_IGNORED_OPTIONS: list(ignored)} if ignored else {}
-        return (self._split_obs(obs),
-                {name: dict(info) for name in self.agents})
+        infos = {name: dict(info) for name in self.agents}
+        return self._split_obs(obs), self._truth_into(infos, obs)
 
     def step(self, actions):
         self._session.ensure_open()
@@ -247,7 +290,7 @@ class K26RlParallelEnv(ParallelEnv):
         word = int(flags[_ENV])
         terminated = bool(word & _abi.FLAG_TERMINATED)
         truncated = bool(word & _abi.FLAG_TRUNCATED)
-        infos = {name: {} for name in acting}
+        infos = self._truth_into({name: {} for name in acting}, obs)
         faulted = bool(word & _abi.FLAG_FAULT)
         if faulted:
             # A fault is not termination, and the episode ended for a
@@ -261,8 +304,8 @@ class K26RlParallelEnv(ParallelEnv):
                 self._session.fault_details(fault_mask, codes)
             # One environment, so the one faulted entry is the first.
             for name in acting:
-                infos[name] = {"fault_code": picked[0],
-                               "fault_reason": reasons[0]}
+                infos[name].update({"fault_code": picked[0],
+                                    "fault_reason": reasons[0]})
 
         agent_count = self._session.spec.agent_count
         rewards = {
@@ -304,7 +347,8 @@ class K26RlParallelEnv(ParallelEnv):
 
     def _split_obs(self, obs):
         """The one environment's flat observation vector cut into one
-        array per agent at the published offsets.
+        array per agent: each agent's measured channels, in channel
+        order, from within its own published slice.
 
         Each agent's array is a copy rather than a view onto the cut
         vector. The slices are disjoint, so a view could not corrupt
@@ -313,8 +357,20 @@ class K26RlParallelEnv(ParallelEnv):
         replay buffer with one agent's five components would be holding
         every agent's fifteen, once per stored step."""
         row = obs[_ENV]
-        return {name: row[offset:offset + count].copy()
-                for name, (offset, count) in self._obs_slice.items()}
+        return {name: row[index].copy()
+                for name, index in self._obs_index.items()}
+
+    def _truth_into(self, infos, obs):
+        """Each acting agent's ground-truth channels put beside its
+        observation in its own info mapping, for the agents whose
+        slices declare any. Both halves are cut from the one vector the
+        call read, so they cannot drift a step apart."""
+        row = obs[_ENV]
+        for name in infos:
+            index = self._truth_index[name]
+            if index.size:
+                infos[name][INFO_TRUTH_OBS] = row[index].copy()
+        return infos
 
     def _flatten(self, actions, acting):
         """The per-agent actions onto the one concatenated action

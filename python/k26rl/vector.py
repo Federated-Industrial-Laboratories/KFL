@@ -15,9 +15,11 @@ from gymnasium.vector.utils import batch_space
 
 from . import _abi
 from .env import (
+    INFO_TRUTH_OBS,
     _Session,
     build_action_space,
     build_observation_space,
+    build_truth_observation_space,
     check_options,
     check_seed,
     flatten_action_batch,
@@ -34,6 +36,11 @@ class K26RlVectorEnv(VectorEnv):
     ``seed``, and builds the spaces from the artifact's spec blob
     alone. Buffer geometry is env-major and spec-driven; per-
     environment slicing is arithmetic.
+
+    The observations are the artifact's measured channels, as on the
+    single shape; the ground-truth channels come back under
+    ``INFO_TRUTH_OBS`` as one row per environment, with the presence
+    mask the vector info convention pairs with it.
 
     One integer seed governs the whole handle: per-environment
     independence comes from the artifact's draw coordinates, not from
@@ -57,10 +64,16 @@ class K26RlVectorEnv(VectorEnv):
         self.num_envs = self._session.n_envs
         self.single_observation_space = build_observation_space(spec)
         self.single_action_space = build_action_space(spec)
+        self.single_truth_observation_space = \
+            build_truth_observation_space(self._session.truth_channels)
         self.observation_space = batch_space(
             self.single_observation_space, self.num_envs)
         self.action_space = batch_space(
             self.single_action_space, self.num_envs)
+        self.truth_observation_space = (
+            None if self.single_truth_observation_space is None
+            else batch_space(self.single_truth_observation_space,
+                             self.num_envs))
 
     # ---- spec data exposed for consumers and tooling ------------------
     #
@@ -91,6 +104,21 @@ class K26RlVectorEnv(VectorEnv):
     def obs_channel_kinds(self):
         self._session.ensure_open()
         return dict(self._session.spec.obs_channel_kinds)
+
+    @property
+    def policy_channels(self):
+        """The declared channels this environment's observations
+        carry, in the order they carry them: the measured ones."""
+        self._session.ensure_open()
+        return self._session.policy_channels
+
+    @property
+    def truth_channels(self):
+        """The declared channels the observations do not carry, in the
+        order the ``INFO_TRUTH_OBS`` array carries them: the ground
+        truth paired with the measured channels above."""
+        self._session.ensure_open()
+        return self._session.truth_channels
 
     @property
     def on_fault(self):
@@ -124,7 +152,7 @@ class K26RlVectorEnv(VectorEnv):
         # draw in an environment's life is artifact-side.
         super().reset(seed=seed, options=options)
         obs = self._session.reset_routed(seed)
-        return obs, {}
+        return self._session.policy_obs(obs), self._truth_infos({}, obs)
 
     def step(self, actions):
         self._session.ensure_open()
@@ -136,7 +164,7 @@ class K26RlVectorEnv(VectorEnv):
         terminations = (flags & _abi.FLAG_TERMINATED) != 0
         truncations = (flags & _abi.FLAG_TRUNCATED) != 0
         rewards = rew.astype(np.float64, copy=True)
-        infos = {}
+        infos = self._truth_infos({}, obs)
         faulted = bool(fault_mask.any())
         if faulted:
             # A fault is not termination, and the episode ended for a
@@ -153,13 +181,28 @@ class K26RlVectorEnv(VectorEnv):
                     infos, {"fault_code": code, "fault_reason": reason},
                     i)
 
-        results = (obs, rewards, terminations, truncations, infos)
+        results = (self._session.policy_obs(obs), rewards, terminations,
+                   truncations, infos)
         if faulted and self._session.on_fault == "raise":
             # Raised after the completed call, with the results that
             # already report the truncation: the faulted environment
             # did not abort its neighbours, which all advanced.
             raise K26RlFaultError(indices, picked, reasons, results)
         return results
+
+    def _truth_infos(self, infos, obs):
+        """The ground-truth channels of ``obs`` put beside the measured
+        ones in the vector info mapping, in the shape _add_info builds:
+        the values under the key and the presence mask under the
+        underscored one. Built in one assignment rather than
+        environment by environment because every environment carries
+        this entry, and both halves are cut from the one vector the
+        call read, so they cannot drift a step apart."""
+        if self._session.truth_channels:
+            infos[INFO_TRUTH_OBS] = self._session.truth_obs(obs)
+            infos["_" + INFO_TRUTH_OBS] = np.ones(self.num_envs,
+                                                  dtype=np.bool_)
+        return infos
 
     def set_output(self, path):
         """Enable episode-file emission to path, or disable it with

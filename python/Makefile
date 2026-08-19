@@ -4,7 +4,9 @@
 # absent, so `make test` completes everywhere and reports what it
 # could not check. The multi-agent gate needs pettingzoo, which is an
 # optional dependency of the package, so it is the one gate a
-# consumer of the single-agent shapes alone will see skip.
+# consumer of the single-agent shapes alone will see skip; the sensor
+# gate has multi-agent arms too, and reports those as not run rather
+# than taking its single-agent arms down with them.
 #
 # Every gate runs; the summary line counts passes,
 # skips, and failures, the exit status is nonzero exactly when a
@@ -33,7 +35,8 @@ GATES = tests/gate01_cross_driver.py \
         tests/gate10_marshalling.py \
         tests/gate11_loading.py \
         tests/gate12_environments.py \
-        tests/gate13_parallel.py
+        tests/gate13_parallel.py \
+        tests/gate14_sensor_split.py
 
 .PHONY: test
 test:

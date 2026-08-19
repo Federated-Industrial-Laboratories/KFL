@@ -43,11 +43,14 @@ Refusals
 Anything the format cannot express is refused by name rather than
 approximated: state-dependent exploration, squashed output, discrete
 or mixed action spaces, non-flat observations, a feature extractor
-that is not the identity, a recurrent policy, and an activation
-outside the format's closed list.
+that is not the identity, a recurrent policy, an activation outside
+the format's closed list, and an artifact whose measured observation
+channels are not one contiguous run, which the format's single
+observation slice cannot name.
 """
 
 from . import policy as _policy
+from . import _spec
 from ._errors import K26RlError
 
 #: Torch activation module names this format can express.
@@ -146,16 +149,46 @@ def _slices(spec, agent):
     if agent not in obs or agent not in act:
         _refuse("the artifact spec carries no observation or action slice "
                 "for agent %d" % agent)
+    obs_offset, obs_width = _policy_slice(spec, agent, *obs[agent])
     return {
         "agent_count": count,
         "agent_index": agent,
         "obs_total": spec.obs_total,
         "act_total": spec.act_total,
-        "obs_offset": obs[agent][0],
-        "obs_width": obs[agent][1],
+        "obs_offset": obs_offset,
+        "obs_width": obs_width,
         "act_offset": act[agent][0],
         "act_width": act[agent][1],
     }
+
+
+def _policy_slice(spec, agent, offset, count):
+    """The part of the agent's observation slice a policy reads: its
+    measured channels, as the offset and width the file declares.
+
+    The trained network's input is the measured channels, not the
+    whole slice, so the declared slice is theirs; a file declaring the
+    whole slice would have the inference tier feed a policy the ground
+    truth beside each measurement, in place of the measurements it was
+    trained on, with the widths agreeing and nothing raised.
+
+    The format states one contiguous run, so an agent whose measured
+    channels are not contiguous cannot be expressed and is refused by
+    name rather than approximated."""
+    measured, truth = _spec.split_channels(spec, offset, count)
+    if not truth:
+        return offset, count
+    if not measured:
+        _refuse("agent %d declares no measured observation channel, so "
+                "there is nothing a policy may read" % agent)
+    span = measured[-1] - measured[0] + 1
+    if span != len(measured):
+        _refuse("agent %d's measured observation channels %s are not one "
+                "contiguous run, and this format declares the policy's "
+                "input as one offset and width; a world whose measured "
+                "channels are interleaved with ground-truth ones cannot "
+                "be expressed by it" % (agent, measured))
+    return measured[0], len(measured)
 
 
 def export_policy(model, path, spec=None, agent=0, normaliser=None,
@@ -172,7 +205,9 @@ def export_policy(model, path, spec=None, agent=0, normaliser=None,
             declares the single-agent geometry, in which the policy's
             own widths are the environment's totals; with one, the
             declared slice geometry is written and a later load can
-            check it field by field.
+            check it field by field. The declared observation slice is
+            the agent's measured channels, which is what the network
+            was trained on and what the inference tier must feed it.
         agent: which agent of a multi-agent artifact this policy
             drives.
         normaliser: the running observation statistics the model was
@@ -242,8 +277,8 @@ def export_policy(model, path, spec=None, agent=0, normaliser=None,
                     "obs_offset": 0, "obs_width": obs_width,
                     "act_offset": 0, "act_width": act_width}
     if geometry["obs_width"] != obs_width:
-        _refuse("the artifact gives agent %d an observation slice of %d, "
-                "and the policy takes %d inputs"
+        _refuse("the artifact gives agent %d an observation slice of %d "
+                "measured channels, and the policy takes %d inputs"
                 % (agent, geometry["obs_width"], obs_width))
     if geometry["act_width"] != act_width:
         _refuse("the artifact gives agent %d an action slice of %d, and the "

@@ -30,11 +30,24 @@ TAG_OBS_CHANNEL_NAME = 0x000D
 TAG_OBS_CHANNEL_KIND = 0x000E
 TAG_EPISODE_FLAGS = 0x000F
 TAG_REWARD_COMPONENTS = 0x0010
+TAG_OBS_CHANNEL_SOURCE = 0x0016
 
 ACT_KIND_BOX = 0
 ACT_KIND_DISCRETE = 1
 
 OBS_KIND_VECTOR = 0
+
+# What an observation channel is. A measured channel carries the value
+# a policy is allowed to read: the simulation's value once every
+# declared imperfection has been applied to it, or the simulation's
+# value itself where the program declared no sensor. A ground-truth
+# channel carries the uncorrupted value beside it, for a privileged
+# critic and for the episode record.
+OBS_SOURCE_MEASURED = 0
+OBS_SOURCE_TRUTH = 1
+
+# The paired-channel value of a channel that has no pair.
+OBS_PAIR_NONE = 0xFFFFFFFF
 
 ENDIAN_PROBE_VALUE = 0x01020304
 
@@ -77,6 +90,8 @@ class Spec:
         self.act_kinds = {}
         self.obs_channel_names = {}
         self.obs_channel_kinds = {}
+        self.obs_channel_sources = {}
+        self.obs_channel_pairs = {}
         self.episode_flags = None
         self.act_channels = []
 
@@ -169,6 +184,12 @@ def parse(blob):
             _need_len(tag, length, 6)
             channel, kind = struct.unpack_from("<IH", blob, value_off)
             spec.obs_channel_kinds[channel] = kind
+        elif tag == TAG_OBS_CHANNEL_SOURCE:
+            _need_len(tag, length, 10)
+            channel, source, pair = struct.unpack_from(
+                "<IHI", blob, value_off)
+            spec.obs_channel_sources[channel] = source
+            spec.obs_channel_pairs[channel] = pair
         elif tag == TAG_EPISODE_FLAGS:
             _need_len(tag, length, 4)
             (spec.episode_flags,) = struct.unpack_from("<I", blob,
@@ -188,10 +209,111 @@ def parse(blob):
     return spec
 
 
+# ---- measured channels, and the truth beside them --------------------
+#
+# Every observation channel publishes what it is. A measured channel
+# carries what a policy is allowed to read: the value the simulation
+# produced once every imperfection the program declared has been
+# applied to it, or that value itself where the program declared no
+# sensor. A ground-truth channel carries the uncorrupted value beside
+# a measured one, for a privileged critic and for the episode record,
+# and a policy never reads it.
+#
+# A blob that publishes no source tag for a channel was written before
+# the tag existed; that channel is measured and unpaired, which is
+# what a program declaring no sensor publishes explicitly.
+
+
+def channel_source(spec, channel):
+    """What observation channel ``channel`` carries."""
+    return spec.obs_channel_sources.get(channel, OBS_SOURCE_MEASURED)
+
+
+def channel_pair(spec, channel):
+    """The channel paired with ``channel``, or :data:`OBS_PAIR_NONE`
+    when it has none."""
+    return spec.obs_channel_pairs.get(channel, OBS_PAIR_NONE)
+
+
+def split_channels(spec, offset, count):
+    """The channels of ``[offset, offset + count)`` split into the
+    measured ones a policy reads and the ground-truth ones it does
+    not, each in ascending channel order.
+
+    The range is the whole observation vector for a single-agent
+    shape and one agent's observation slice for the parallel shape."""
+    measured = []
+    truth = []
+    for channel in range(offset, offset + count):
+        if channel_source(spec, channel) == OBS_SOURCE_TRUTH:
+            truth.append(channel)
+        else:
+            measured.append(channel)
+    return measured, truth
+
+
+def _check_channel_sources(spec):
+    """A declared pairing must be a pairing: a source kind this
+    version knows, an in-range partner of the opposite kind, and the
+    partner naming the channel back. Keeping ground truth out of a
+    policy's observation rests entirely on these tags, so they are
+    checked against the blob rather than assumed of it, and a blob
+    that half declares a pair is refused rather than resolved by
+    guesswork."""
+    for channel in sorted(spec.obs_channel_sources):
+        source = spec.obs_channel_sources[channel]
+        if channel >= spec.obs_total:
+            raise K26RlError(
+                None,
+                "a source tag names observation channel %d, outside "
+                "the declared observation total %d"
+                % (channel, spec.obs_total))
+        if source not in (OBS_SOURCE_MEASURED, OBS_SOURCE_TRUTH):
+            raise K26RlError(
+                None,
+                "observation channel %d declares source kind %d, which "
+                "is neither measured (%d) nor ground truth (%d)"
+                % (channel, source, OBS_SOURCE_MEASURED,
+                   OBS_SOURCE_TRUTH))
+        pair = channel_pair(spec, channel)
+        if pair == OBS_PAIR_NONE:
+            if source == OBS_SOURCE_TRUTH:
+                raise K26RlError(
+                    None,
+                    "observation channel %d publishes as ground truth "
+                    "with no measured channel paired with it" % channel)
+            continue
+        if pair >= spec.obs_total:
+            raise K26RlError(
+                None,
+                "observation channel %d is paired with channel %d, "
+                "outside the declared observation total %d"
+                % (channel, pair, spec.obs_total))
+        if pair == channel:
+            raise K26RlError(
+                None,
+                "observation channel %d is paired with itself" % channel)
+        if channel_source(spec, pair) == source:
+            raise K26RlError(
+                None,
+                "observation channels %d and %d are paired and both "
+                "publish source kind %d; a pair is one measured "
+                "channel and the ground truth beside it"
+                % (channel, pair, source))
+        if channel_pair(spec, pair) != channel:
+            raise K26RlError(
+                None,
+                "observation channel %d is paired with channel %d, "
+                "which is paired with %d; a pair names itself from "
+                "both ends"
+                % (channel, pair, channel_pair(spec, pair)))
+
+
 def validate(spec, abi_version, n_envs):
     """Refuse a spec this package cannot honestly serve. The checks
     are the load-time contract: probe, version echo, geometry echo,
-    agent count, slice arithmetic, and auto-reset stepping.
+    agent count, slice arithmetic, channel pairing, and auto-reset
+    stepping.
 
     How many agents a given API shape can serve is that shape's
     question, not this one's: :func:`require_single_agent` and
@@ -228,6 +350,7 @@ def validate(spec, abi_version, n_envs):
                   spec.agent_count)
     _check_slices(spec.agent_act_slices, spec.act_total, "action",
                   spec.agent_count)
+    _check_channel_sources(spec)
     for chan in spec.act_channels:
         if chan.kind == ACT_KIND_DISCRETE and chan.arity < 1:
             raise K26RlError(
