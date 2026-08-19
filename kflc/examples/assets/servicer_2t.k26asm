@@ -1,0 +1,270 @@
+# servicer_2t.k26asm - a two-tonne servicing vehicle that spends what
+# it thrusts and carries a standard docking interface.
+#
+# WHAT THIS IS. A modelled article. Nothing in this file is cited and
+# nothing here is a claim about any vehicle: the dry mass, the tank,
+# the hull, the thruster layout, the specific impulse and the wheels
+# are all chosen, and each is disclosed as chosen on its own
+# provenance line. What the article is for is a servicing approach to
+# an object that does not help, which needs a craft that can find an
+# arbitrary bearing, turn to face it, and run out of propellant if it
+# wastes any.
+#
+# WHY NOT THE ARTICLES BESIDE IT. `crew_vehicle_10t.k26asm` carries
+# mass and inertia from a published standard and its hull was solved
+# to reproduce them, so it cannot be given a tank without moving the
+# derived tensor off the figures it reproduces.
+# `servicing_vehicle.k26asm` has the tank but no docking interface,
+# and it is a ten-tonne article whose transverse moment is 42 000
+# kg m^2. That matters here in a way it does not there: this task
+# starts with the target's interface pointing in a direction the
+# episode draws, so the craft has to slew through as much as half a
+# turn before it can dock, and at 5 N m against 42 000 kg m^2 a half
+# turn takes about five minutes and saturates the wheels doing it. A
+# servicer is a small vehicle in reality and this article is sized
+# accordingly.
+#
+# THE HULL AND THE MASS. A box 2.6 m along the docking axis and 1.9 m
+# across, at 1985 kg dry, with a 15 kg manoeuvre allocation making two
+# tonnes. The box is chosen for what it is: a bus, not a capsule. Its
+# transverse moment about the centre of mass comes out at 1723 kg m^2
+# under this compiler's closed forms and its moment about the docking
+# axis at 1198, both measured back out of a compiled world by
+# commanding a known wheel torque and reading the angular
+# acceleration it produced. The transverse figure is what the wheel
+# sizing below is taken against.
+#
+# THE TANK, AND WHAT IT IS NOT. Fifteen kilogrammes on a two-tonne
+# vehicle, which is three parts in four hundred. That is not a mission
+# load and is not offered as one; it is the allocation for one close
+# approach, and the article is written that way on purpose. At the
+# specific impulse below the whole load is worth
+# 300 * 9.80665 * ln(2000 / 1985), which is 22.1 m/s of velocity
+# change. What that buys against what this approach costs is the
+# environment's business and is measured there rather than asserted
+# here.
+#
+# The tank sits 0.30 m aft of the hull's centre, so the vehicle's
+# centre of mass travels as it empties: at a full tank it is
+# 0.30 * 15 / 2000 aft of the hull's centre, which is 2.25 mm, and at
+# an empty one it is at the hull's centre. Thruster torques are taken
+# about the centre of mass and travel with it, and the consequence is
+# worth stating exactly because it is a load on the wheels rather
+# than a curiosity. The four thrusters along the docking axis are
+# unaffected, since a force along that axis about a centre displaced
+# along the same axis has the same moment arm either way. The eight
+# lateral thrusters are not: each opposed pair is separated along the
+# axis, so a pair that is torque-free on an empty tank leaves a
+# residual couple of 0.0045 N m per newton on a full one, which is
+# 0.18 N m with the pair at full throttle against 1.0 N m of wheel.
+# A pair at the tenth of a throttle a terminal approach uses leaves
+# 0.018 N m, and 200 s of it is 3.6 N m s against a wheel that holds
+# 80.
+#
+# The offset is deliberately small for that reason and deliberately
+# not zero: a centred tank would have hidden the effect entirely
+# rather than shown it small, and an offset large enough to fight the
+# wheels would have made this article's attitude control a study of
+# its own tank rather than of the task.
+#
+# The tank is a box of half extent 0.116 m, which is 0.0125 cubic
+# metres and puts fifteen kilogrammes at about 1201 kg per cubic
+# metre, the order of a storable bipropellant. Its placement and its
+# shape are an arrangement rather than a measurement.
+#
+# THE THRUSTERS. Twelve, at 40 N each, in the two-ring opposed layout
+# the articles beside this one use: two pushing the vehicle toward its
+# interface, two pushing it away, and eight lateral in four groups of
+# two, one forward and one aft of the centre of mass on each side, so
+# that a pair translates and either one alone turns. An opposed pair
+# gives this vehicle 0.04 m/s^2, and the whole set at full throttle
+# spends 0.163 kg/s and empties the tank in 92 s.
+#
+# The specific impulse is 300 s on every thruster, which is the right
+# order for a storable bipropellant and is not read from a source.
+# Every thruster carries the same figure because this article has one
+# kind of thruster, and a spread would make the published delta-v
+# channel depend on which thruster the vehicle last had propellant for
+# rather than on the budget it has.
+#
+# THE WHEELS, AND WHY THEY ARE SIZED TO A SLEW. Three, at 1.0 N m and
+# 80 N m s. The torque is the one that turns this article through half
+# a turn in about a hundred seconds: a bang-bang slew of pi radians at
+# an angular acceleration of 1.0 / 1723 covers it in
+# 2 * sqrt((pi / 2) / (1.0 / 1723)), which is 104 s, and the momentum
+# that slew peaks at is 1723 * 0.0302, which is 52 N m s, so the wheel
+# does not saturate performing the manoeuvre it is sized for. The
+# momentum limit is that peak with about half again in hand. Both
+# figures are chosen against this task's own requirement rather than
+# read from a source, and a wheel of this torque is a large one.
+#
+# The saturation rate follows the convention the articles beside this
+# one use: a spin inertia of 0.08 kg m^2 against 80 N m s saturates at
+# 1000 rad/s.
+#
+# THE INTERFACE. One port on the first body axis, 1.35 m ahead of the
+# hull's centre and therefore 0.05 m ahead of its forward face, so it
+# is the first geometry another craft meets. Its capture envelope is
+# `idss_e`, which this compiler carries from the International Docking
+# System Standard Interface Definition Document, Revision E, October
+# 2016. The envelope is the standard's; where the interface sits is
+# this article's choice.
+#
+# The port arm is 1.35 m, so a pitch or yaw error swings the mating
+# plane sideways by 1.35 times the angle. The envelope allows 0.10 m
+# of lateral misalignment and 4.0 degrees of pitch or yaw, and 4.0
+# degrees on this arm is 0.094 m, so on this article the two limits
+# very nearly coincide: an attitude error at the angular limit spends
+# almost exactly the whole lateral allowance. That is a property of
+# the arm and it is stated because it tells a reader which residual
+# binds first, which on a longer-armed vehicle would be a different
+# one.
+
+assembly servicer_2t
+    frame x_to_port
+
+    provenance mass "chosen: a 1985 kg dry hull and a 15 kg manoeuvre allocation, making a two-tonne servicer; no vehicle is claimed and no figure is cited" modelled
+    provenance hull_geometry "chosen: a box 2.6 m along the docking axis and 1.9 m across, sized as a small servicing bus rather than solved for any figure" modelled
+    provenance inertia "computed: this compiler's closed forms over the declared components at the declared fill" computed
+    provenance tank "a chosen tank placement, held 0.30 m aft of the hull's centre so the centre of mass travels as it empties without loading the wheels; this is an arrangement and not a measurement" modelled
+    provenance isp "a chosen figure of the right order for a storable bipropellant thruster; no source is cited because no article is claimed" modelled
+    provenance thrust "chosen: 40 N a thruster, giving an opposed pair 0.04 m/s^2 on this article, which closes 200 m and stops inside a few minutes without making a control step of one second too coarse to hold a capture band 0.05 m/s wide" modelled
+    provenance thruster_layout "two rings at the hull ends in opposed pairs, chosen and not derived; no thruster position is published for any vehicle this article stands in for" modelled
+    provenance wheel_limits "chosen against this task's own slew: 1.0 N m turns this article's 1723 kg m^2 transverse moment through half a turn in 104 s bang-bang, peaking at 52 N m s, and the momentum limit is that peak with half again in hand" modelled
+    provenance wheel_friction "a chosen friction model of the right order for a wheel of this size; no figure for the viscous, Coulomb or dead-rate terms is published or derived here" modelled
+    provenance port_forward "the mating plane 0.05 m ahead of the hull's forward face so it is the first geometry another craft meets; the standard publishes the offset only in a figure" modelled
+    provenance capture_envelope "International Docking System Standard Interface Definition Document, Revision E, October 2016: the envelope this compiler carries as idss_e" cited
+
+    component hull
+        mass 1985.0
+        at 0.0 0.0 0.0
+        collider box 1.3 0.95 0.95
+    end
+
+    component tank
+        mass 15.0
+        at -0.30 0.0 0.0
+        collider box 0.116 0.116 0.116
+        propellant
+    end
+
+    port forward
+        at 1.35 0.0 0.0
+        axis 1.0 0.0 0.0
+        roll_ref 0.0 1.0 0.0
+        capture idss_e
+    end
+
+    # Two thrusters push the vehicle toward its docking interface and
+    # two push it away. Each pair sits on opposite sides of the hull
+    # at one ring, so firing a pair together is a force through the
+    # centre of mass and firing one alone is a pitch or yaw command.
+    thruster close_yp
+        at -1.3 0.95 0.0
+        dir 1.0 0.0 0.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster close_ym
+        at -1.3 -0.95 0.0
+        dir 1.0 0.0 0.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster brake_yp
+        at 1.3 0.95 0.0
+        dir -1.0 0.0 0.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster brake_ym
+        at 1.3 -0.95 0.0
+        dir -1.0 0.0 0.0
+        thrust 40.0
+        isp_s 300.0
+    end
+
+    # Eight lateral thrusters, four to a plane. Each group of two is
+    # one forward and one aft of the centre of mass with the same
+    # direction, so the pair translates and either one alone turns.
+    thruster lat_yp_fwd
+        at 1.3 -0.95 0.0
+        dir 0.0 1.0 0.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster lat_yp_aft
+        at -1.3 -0.95 0.0
+        dir 0.0 1.0 0.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster lat_ym_fwd
+        at 1.3 0.95 0.0
+        dir 0.0 -1.0 0.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster lat_ym_aft
+        at -1.3 0.95 0.0
+        dir 0.0 -1.0 0.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster lat_zp_fwd
+        at 1.3 0.0 -0.95
+        dir 0.0 0.0 1.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster lat_zp_aft
+        at -1.3 0.0 -0.95
+        dir 0.0 0.0 1.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster lat_zm_fwd
+        at 1.3 0.0 0.95
+        dir 0.0 0.0 -1.0
+        thrust 40.0
+        isp_s 300.0
+    end
+    thruster lat_zm_aft
+        at -1.3 0.0 0.95
+        dir 0.0 0.0 -1.0
+        thrust 40.0
+        isp_s 300.0
+    end
+
+    # Three reaction wheels, which spend nothing. A craft that turns
+    # to face an interface on its wheels rather than on opposed
+    # thrusters keeps its propellant for the approach, and this task
+    # makes that a decision worth taking rather than a preference.
+    wheel wheel_x
+        axis 1.0 0.0 0.0
+        spin_inertia 0.08
+        max_momentum 80.0
+        max_torque 1.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+    wheel wheel_y
+        axis 0.0 1.0 0.0
+        spin_inertia 0.08
+        max_momentum 80.0
+        max_torque 1.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+    wheel wheel_z
+        axis 0.0 0.0 1.0
+        spin_inertia 0.08
+        max_momentum 80.0
+        max_torque 1.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+end

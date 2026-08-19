@@ -1,0 +1,144 @@
+# derelict_satellite.k26asm - an uncooperative object with a standard
+# docking interface and a structure that is in the way.
+#
+# WHAT THIS IS. A modelled article. Nothing in this file is cited and
+# nothing here is a claim about any spacecraft: the bus, the two solar
+# array wings, the two radiator panels, every mass and every dimension
+# is chosen, and each is disclosed as chosen on its own provenance
+# line. What the article is for is a servicing approach in which the
+# thing being approached is the obstacle, so its geometry is the part
+# that had to be got right rather than its mass.
+#
+# WHAT UNCOOPERATIVE MEANS HERE, AND WHAT IT DOES NOT. It means the
+# object does not help. It carries no beacon, no cooperative marker
+# and no relative navigation aid, it holds no attitude, and it does
+# nothing to assist an arriving craft; an environment that flies it
+# draws its orientation and the arriving craft has to find the
+# interface for itself. It does not mean the object has no interface.
+# A docking standard exists so that a vehicle can mate with one it did
+# not launch with, and a stranded or passivated spacecraft carrying a
+# standard interface is exactly the article a servicing or rescue
+# approach is written against. So the port here is a real port with a
+# published capture envelope, and everything else about the object is
+# unhelpful.
+#
+# WHY THE STRUCTURE IS SHAPED THIS WAY. The bus alone would be a small
+# obstacle at the end of a long approach and a craft could ignore it
+# until the last few metres. Two array wings and two radiator panels
+# put structure across four of the six directions the bus can be
+# approached from and leave the two along the docking axis open, so
+# the interface has one way in and the way in is the one the capture
+# envelope already requires. That is not a course laid out to be
+# flown: it is what a satellite with deployed appendages looks like,
+# and the consequence for an approach is a consequence rather than a
+# design.
+#
+# The arrangement is chosen and the article is not a model of any
+# particular spacecraft. The class in mind is a large communications
+# satellite of the kind proposed for on-orbit servicing: a bus of a
+# few cubic metres, two wings on a common axis spanning some tens of
+# metres, and radiators on the axis across it.
+#
+# WHAT THE NUMBERS ARE. The bus is a box 2.8 m along the docking axis
+# and 2.2 m across, at 1200 kg. Each wing is 12 m long, 6 m wide and
+# 0.16 m thick, hung 7.6 m out from the bus centre on the second body
+# axis, at 180 kg, which is 2.5 kg per square metre of array. Each
+# radiator is 6 m by 5 m and the same thickness, 5.9 m out on the
+# third body axis, at 120 kg, which is 4 kg per square metre. The
+# whole article is 1800 kg and spans 27.2 m across the wings and
+# 17.8 m across the radiators.
+#
+# Every collider is a box and the derivation treats each as a solid of
+# uniform density, which is the only mass distribution this article
+# can honestly claim to know. The wings and the radiators are thin
+# plates well off the centre, so the derived inertia is dominated by
+# their placement rather than by their own moments, and that part of
+# it is right for any plate of that mass at that distance.
+#
+# WHAT THE MASS DOES. The article does not thrust and does not turn
+# under its own power, so its inertia matters only through what a
+# contact does to the pair and through the joint body a capture makes.
+# An environment that ends its episode on contact never advances past
+# that moment, so the figures are honest rather than load bearing, and
+# they are stated here so that an environment which does read them
+# knows what it is reading.
+#
+# THE GAPS BETWEEN THE PANELS AND THE BUS ARE NOT A WAY THROUGH. The
+# wings begin 1.6 m out on their axis where the bus ends at 1.1 m, and
+# the radiators begin 2.9 m out where the bus ends at 1.1 m, so there
+# is a 0.5 m slot beside the wings and a 1.8 m slot beside the
+# radiators. The servicing article this is approached by is 2.6 m long
+# and 1.9 m across, so neither slot admits it. The slots are the yokes
+# and booms such appendages are carried on, drawn as empty space
+# because a boom that cannot be flown through is a boom that need not
+# be modelled.
+#
+# THE INTERFACE. One port on the first body axis, 1.45 m ahead of the
+# bus centre and therefore 0.05 m ahead of the bus's forward face, so
+# it is the first geometry an arriving craft meets on that axis. Its
+# capture envelope is `idss_e`, which this compiler carries from the
+# International Docking System Standard Interface Definition Document,
+# Revision E, October 2016. The envelope is the standard's and not
+# this article's; what this article chooses is where the interface
+# sits.
+#
+# The roll reference is the second body axis, which is the axis the
+# wings run along. A docking interface is keyed, so an arriving craft
+# has to match the roll as well as the axis, and putting the reference
+# on the wings makes that residual mean something a reader can see:
+# a craft inside the roll limit has its own reference within four
+# degrees of the wing line.
+
+assembly derelict_satellite
+    frame x_to_port
+
+    provenance mass "chosen: an 1800 kg article made of a 1200 kg bus, two 180 kg array wings and two 120 kg radiators; no spacecraft is claimed and no figure is cited" modelled
+    provenance hull_geometry "chosen: a 2.8 m by 2.2 m by 2.2 m bus, two 12 m by 6 m wings 7.6 m out on the second body axis, and two 6 m by 5 m radiators 5.9 m out on the third" modelled
+    provenance panel_arrangement "chosen so that structure crosses four of the six directions the bus can be approached from and the docking axis is left open; it is what a satellite with deployed appendages looks like and not a course" modelled
+    provenance panel_mass "chosen: 2.5 kg per square metre of solar array and 4 kg per square metre of radiator, which are the order such panels sit at; no panel areal mass is cited here" modelled
+    provenance inertia "computed: this compiler's closed forms over the declared components at uniform density" computed
+    provenance port_dock "the mating plane 0.05 m ahead of the bus's forward face so it is the first geometry an arriving craft meets on that axis; no docking interface coordinate is published for any article this stands in for" modelled
+    provenance capture_envelope "International Docking System Standard Interface Definition Document, Revision E, October 2016: the envelope this compiler carries as idss_e" cited
+
+    component bus
+        mass 1200.0
+        at 0.0 0.0 0.0
+        collider box 1.4 1.1 1.1
+    end
+
+    # The two array wings, on the second body axis. Each is a thin
+    # plate: 0.16 m through, 12 m along the axis it hangs on and 6 m
+    # across the third.
+    component wing_yp
+        mass 180.0
+        at 0.0 7.6 0.0
+        collider box 0.08 6.0 3.0
+    end
+    component wing_ym
+        mass 180.0
+        at 0.0 -7.6 0.0
+        collider box 0.08 6.0 3.0
+    end
+
+    # The two radiators, on the third body axis and across the wings,
+    # so that the structure is not confined to one plane. A craft that
+    # cleared the wings by going over the top would otherwise have
+    # nothing to clear.
+    component radiator_zp
+        mass 120.0
+        at 0.0 0.0 5.9
+        collider box 0.08 2.5 3.0
+    end
+    component radiator_zm
+        mass 120.0
+        at 0.0 0.0 -5.9
+        collider box 0.08 2.5 3.0
+    end
+
+    port dock
+        at 1.45 0.0 0.0
+        axis 1.0 0.0 0.0
+        roll_ref 0.0 1.0 0.0
+        capture idss_e
+    end
+end
