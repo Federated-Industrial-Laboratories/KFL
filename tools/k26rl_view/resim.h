@@ -61,9 +61,18 @@ struct ResimResult {
 /* Load an artifact and rebuild one episode of a model's file.
  * artifact_path is the compiled environment's shared object. The ABI
  * is probed the way every consumer probes it: major must equal the
- * major this build was written against, minor must be at least it. */
+ * major this build was written against, minor must be at least it.
+ *
+ * `reference` is the body the recorded positions come back relative
+ * to, passed straight to the body getter, and K26RL_BODY_REF_ORIGIN
+ * asks it for the world origin. It matters at scale: a
+ * position in the runtime is a sector index and a bounded offset, and
+ * the getter subtracts exactly in that form, while a caller that took
+ * two world-origin positions and subtracted them would have lost what
+ * the sector grid exists to keep before it started. */
 ResimResult resimulate(const Model &model, const Episode &ep,
-                       const std::string &artifact_path);
+                       const std::string &artifact_path,
+                       uint32_t reference);
 
 }  /* namespace k26rl_view */
 

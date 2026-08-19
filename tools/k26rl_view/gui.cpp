@@ -16,18 +16,28 @@
  * opened read-only by the reader beneath, and the re-simulation panel
  * offers no way to alter a recorded action.
  *
- * The trajectory view is drawn with this file's own projection over
- * the shared 3D maths library, not with a scene renderer: version 1
- * plots reconstructed points, and the wireframe scene view belongs to
- * a later version.
+ * The trajectory view plots reconstructed points and stands beside
+ * the scene view rather than being replaced by it.
+ *
+ * The scene view is the three-dimensional one, and it is drawn here
+ * and computed nowhere here. Every transform, projection, cull and
+ * visibility decision behind it lives in the model, which hands this
+ * file a set of local coordinates, one matrix per element, and the
+ * list of segments it decided to draw. What follows is buffer
+ * uploads, uniform writes and draw calls, and the ImGui widgets that
+ * set the view state the model resolves. If a matrix is computed in
+ * this file, the split has been broken.
  */
 #include "gui.h"
 
 #include "asset.h"
+#include "scene.h"
 
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+
+#include <map>
 
 #include "dump.h"
 #include "resim.h"
@@ -61,6 +71,17 @@ struct Ui {
     bool resim_done;
     ResimResult resim;
     std::string error;
+    /* The scene view's state. Its rebuild is its own because its
+     * reference frame is its own: the world-frame panel asks the body
+     * getter for the world origin and the scene asks for whatever
+     * frame the view is set to, and one rebuild cannot answer both. */
+    SceneOptions scene_opt;
+    ResimResult scene_resim;
+    bool scene_resim_done;
+    uint32_t scene_resim_ref;
+    uint32_t scene_resim_ep;
+    Scene scene;
+    bool scene_ready;
 };
 
 void glfw_error_(int code, const char *desc)
@@ -569,6 +590,591 @@ void panel_wireframe_(Ui &ui, const Episode &ep)
     ImGui::End();
 }
 
+/* The scene's draw path: entry points, one shader pair, and buffers.
+ *
+ * The entry points are resolved through the window system rather than
+ * linked, because a 3.3 core context's symbols are the context's and
+ * not the library's; a build that links them directly builds on one
+ * machine and fails to start on another.
+ *
+ * One program does both passes. Attribute 0 is the vertex, attribute
+ * 1 is the shade a face carries; the line pass leaves attribute 1
+ * disabled and sets its constant to one, which is the same shader
+ * with the depth cue turned off rather than a second shader to keep
+ * in step with the first.
+ */
+struct SceneGl {
+    bool ready;
+    std::string error;
+    GLuint program;
+    GLuint vao;
+    GLuint vbo;
+    GLuint ebo;
+    GLuint shade_vbo;
+    GLint u_mvp;
+    GLint u_colour;
+    /* Buffers whose contents are fixed in a body's own frame are
+     * uploaded once and reused, keyed by the element they belong to.
+     * A viewer that re-uploaded a craft's mesh every frame is a
+     * viewer that will be measured re-uploading a craft's mesh every
+     * frame.
+     *
+     * The uploaded floats are kept beside the buffer and compared,
+     * rather than the vertex count alone: a body's axes and its
+     * thrusters are drawn at lengths the view sets, so their
+     * coordinates change while their count does not, and a cache
+     * keyed on the count would show the length the view had when the
+     * craft was first drawn. */
+    std::map<std::string, GLuint> cached;
+    std::map<std::string, std::vector<float> > cached_data;
+
+    PFNGLCREATESHADERPROC CreateShader;
+    PFNGLSHADERSOURCEPROC ShaderSource;
+    PFNGLCOMPILESHADERPROC CompileShader;
+    PFNGLGETSHADERIVPROC GetShaderiv;
+    PFNGLGETSHADERINFOLOGPROC GetShaderInfoLog;
+    PFNGLDELETESHADERPROC DeleteShader;
+    PFNGLCREATEPROGRAMPROC CreateProgram;
+    PFNGLATTACHSHADERPROC AttachShader;
+    PFNGLLINKPROGRAMPROC LinkProgram;
+    PFNGLGETPROGRAMIVPROC GetProgramiv;
+    PFNGLGETPROGRAMINFOLOGPROC GetProgramInfoLog;
+    PFNGLDELETEPROGRAMPROC DeleteProgram;
+    PFNGLUSEPROGRAMPROC UseProgram;
+    PFNGLGETUNIFORMLOCATIONPROC GetUniformLocation;
+    PFNGLUNIFORMMATRIX4FVPROC UniformMatrix4fv;
+    PFNGLUNIFORM4FPROC Uniform4f;
+    PFNGLGENVERTEXARRAYSPROC GenVertexArrays;
+    PFNGLBINDVERTEXARRAYPROC BindVertexArray;
+    PFNGLDELETEVERTEXARRAYSPROC DeleteVertexArrays;
+    PFNGLGENBUFFERSPROC GenBuffers;
+    PFNGLBINDBUFFERPROC BindBuffer;
+    PFNGLBUFFERDATAPROC BufferData;
+    PFNGLDELETEBUFFERSPROC DeleteBuffers;
+    PFNGLENABLEVERTEXATTRIBARRAYPROC EnableVertexAttribArray;
+    PFNGLDISABLEVERTEXATTRIBARRAYPROC DisableVertexAttribArray;
+    PFNGLVERTEXATTRIBPOINTERPROC VertexAttribPointer;
+    PFNGLVERTEXATTRIB1FPROC VertexAttrib1f;
+};
+
+const char *const SCENE_VERT =
+    "#version 330 core\n"
+    "layout(location = 0) in vec3 a_pos;\n"
+    "layout(location = 1) in float a_shade;\n"
+    "uniform mat4 u_mvp;\n"
+    "out float v_shade;\n"
+    "void main()\n"
+    "{\n"
+    "    v_shade = a_shade;\n"
+    "    gl_Position = u_mvp * vec4(a_pos, 1.0);\n"
+    "}\n";
+
+const char *const SCENE_FRAG =
+    "#version 330 core\n"
+    "in float v_shade;\n"
+    "uniform vec4 u_colour;\n"
+    "out vec4 frag;\n"
+    "void main()\n"
+    "{\n"
+    "    frag = vec4(u_colour.rgb * v_shade, u_colour.a);\n"
+    "}\n";
+
+bool gl_load_(void *slot, const char *name, std::string *err)
+{
+    GLFWglproc p = glfwGetProcAddress(name);
+    if (!p) {
+        *err = std::string("the graphics context does not export ") + name;
+        return false;
+    }
+    memcpy(slot, &p, sizeof p);
+    return true;
+}
+
+#define GL_LOAD_(g, f) \
+    if (!gl_load_(&(g)->f, "gl" #f, &(g)->error)) return false
+
+bool scene_gl_procs_(SceneGl *gl)
+{
+    GL_LOAD_(gl, CreateShader);
+    GL_LOAD_(gl, ShaderSource);
+    GL_LOAD_(gl, CompileShader);
+    GL_LOAD_(gl, GetShaderiv);
+    GL_LOAD_(gl, GetShaderInfoLog);
+    GL_LOAD_(gl, DeleteShader);
+    GL_LOAD_(gl, CreateProgram);
+    GL_LOAD_(gl, AttachShader);
+    GL_LOAD_(gl, LinkProgram);
+    GL_LOAD_(gl, GetProgramiv);
+    GL_LOAD_(gl, GetProgramInfoLog);
+    GL_LOAD_(gl, DeleteProgram);
+    GL_LOAD_(gl, UseProgram);
+    GL_LOAD_(gl, GetUniformLocation);
+    GL_LOAD_(gl, UniformMatrix4fv);
+    GL_LOAD_(gl, Uniform4f);
+    GL_LOAD_(gl, GenVertexArrays);
+    GL_LOAD_(gl, BindVertexArray);
+    GL_LOAD_(gl, DeleteVertexArrays);
+    GL_LOAD_(gl, GenBuffers);
+    GL_LOAD_(gl, BindBuffer);
+    GL_LOAD_(gl, BufferData);
+    GL_LOAD_(gl, DeleteBuffers);
+    GL_LOAD_(gl, EnableVertexAttribArray);
+    GL_LOAD_(gl, DisableVertexAttribArray);
+    GL_LOAD_(gl, VertexAttribPointer);
+    GL_LOAD_(gl, VertexAttrib1f);
+    return true;
+}
+
+GLuint scene_shader_(SceneGl *gl, GLenum kind, const char *src)
+{
+    GLuint sh = gl->CreateShader(kind);
+    GLint ok = 0;
+
+    gl->ShaderSource(sh, 1, &src, NULL);
+    gl->CompileShader(sh);
+    gl->GetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    if (!ok) {
+        char log[512];
+        GLsizei n = 0;
+        gl->GetShaderInfoLog(sh, (GLsizei)sizeof log, &n, log);
+        gl->error = std::string("scene shader: ") + log;
+        gl->DeleteShader(sh);
+        return 0;
+    }
+    return sh;
+}
+
+bool scene_gl_init_(SceneGl *gl)
+{
+    GLuint vs, fs;
+    GLint ok = 0;
+
+    gl->ready = false;
+    gl->program = 0;
+    gl->vao = gl->vbo = gl->ebo = gl->shade_vbo = 0;
+    if (!scene_gl_procs_(gl))
+        return false;
+    vs = scene_shader_(gl, GL_VERTEX_SHADER, SCENE_VERT);
+    if (!vs)
+        return false;
+    fs = scene_shader_(gl, GL_FRAGMENT_SHADER, SCENE_FRAG);
+    if (!fs) {
+        gl->DeleteShader(vs);
+        return false;
+    }
+    gl->program = gl->CreateProgram();
+    gl->AttachShader(gl->program, vs);
+    gl->AttachShader(gl->program, fs);
+    gl->LinkProgram(gl->program);
+    gl->GetProgramiv(gl->program, GL_LINK_STATUS, &ok);
+    gl->DeleteShader(vs);
+    gl->DeleteShader(fs);
+    if (!ok) {
+        char log[512];
+        GLsizei n = 0;
+        gl->GetProgramInfoLog(gl->program, (GLsizei)sizeof log, &n, log);
+        gl->error = std::string("scene program: ") + log;
+        gl->DeleteProgram(gl->program);
+        gl->program = 0;
+        return false;
+    }
+    gl->u_mvp = gl->GetUniformLocation(gl->program, "u_mvp");
+    gl->u_colour = gl->GetUniformLocation(gl->program, "u_colour");
+    gl->GenVertexArrays(1, &gl->vao);
+    gl->GenBuffers(1, &gl->vbo);
+    gl->GenBuffers(1, &gl->ebo);
+    gl->GenBuffers(1, &gl->shade_vbo);
+    gl->ready = true;
+    return true;
+}
+
+/* One colour per element kind, and the axes coloured segment by
+ * segment. Colour is the one thing about this picture the window does
+ * decide, a colour being a presentation choice and not a geometric
+ * one. */
+void scene_colour_(ElementKind k, size_t segment, float *rgba)
+{
+    static const float table[ELEM_KIND_COUNT][4] = {
+        { 0.85f, 0.88f, 0.95f, 1.0f },   /* wireframe */
+        { 0.95f, 0.65f, 0.25f, 1.0f },   /* collider */
+        { 0.90f, 0.30f, 0.30f, 1.0f },   /* axes, overridden below */
+        { 0.40f, 0.80f, 0.95f, 1.0f },   /* trajectory */
+        { 0.55f, 0.95f, 0.55f, 1.0f },   /* velocity */
+        { 0.95f, 0.85f, 0.35f, 1.0f },   /* port */
+        { 0.95f, 0.45f, 0.85f, 1.0f }    /* thruster */
+    };
+    static const float axes[3][4] = {
+        { 0.95f, 0.35f, 0.35f, 1.0f },
+        { 0.35f, 0.95f, 0.35f, 1.0f },
+        { 0.45f, 0.55f, 0.95f, 1.0f }
+    };
+    const float *src = (k == ELEM_AXES && segment < 3)
+                       ? axes[segment] : table[k];
+    for (int i = 0; i < 4; i++)
+        rgba[i] = src[i];
+}
+
+/* The buffer a body-frame element's vertices live in, uploaded on
+ * first sight and reused after. Anything already relative to the
+ * camera goes to the shared buffer instead, since its contents change
+ * with the eye. */
+GLuint scene_vertex_buffer_(SceneGl *gl, const SceneElement &e)
+{
+    std::string key;
+    std::map<std::string, GLuint>::iterator it;
+    GLuint buf = 0;
+
+    if (!e.local_static)
+        return gl->vbo;
+    key = std::string(element_name(e.kind)) + "/" + e.name;
+    it = gl->cached.find(key);
+    if (it != gl->cached.end()) {
+        if (gl->cached_data[key] == e.local)
+            return it->second;
+        buf = it->second;
+    } else {
+        gl->GenBuffers(1, &buf);
+    }
+    gl->BindBuffer(GL_ARRAY_BUFFER, buf);
+    gl->BufferData(GL_ARRAY_BUFFER,
+                   (GLsizeiptr)(e.local.size() * sizeof(float)),
+                   e.local.empty() ? NULL : &e.local[0], GL_STATIC_DRAW);
+    gl->cached[key] = buf;
+    gl->cached_data[key] = e.local;
+    return buf;
+}
+
+void scene_draw_(SceneGl *gl, const Scene &sc, int fbw, int fbh)
+{
+    std::vector<GLuint> idx;
+    std::vector<float> tri;
+    std::vector<float> shade;
+
+    if (!gl->ready || !sc.available)
+        return;
+    glViewport(0, 0, fbw, fbh);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glClear(GL_DEPTH_BUFFER_BIT);
+    gl->UseProgram(gl->program);
+    gl->BindVertexArray(gl->vao);
+
+    for (size_t i = 0; i < sc.elements.size(); i++) {
+        const SceneElement &e = sc.elements[i];
+        GLuint buf;
+        float rgba[4];
+
+        if (e.local.empty())
+            continue;
+        buf = scene_vertex_buffer_(gl, e);
+        if (!e.local_static) {
+            gl->BindBuffer(GL_ARRAY_BUFFER, buf);
+            gl->BufferData(GL_ARRAY_BUFFER,
+                           (GLsizeiptr)(e.local.size() * sizeof(float)),
+                           &e.local[0], GL_DYNAMIC_DRAW);
+        }
+        gl->UniformMatrix4fv(gl->u_mvp, 1, GL_FALSE, e.mvp);
+
+        /* The shaded pass first, so the wireframe over it reads as an
+         * outline rather than being hidden by its own faces. */
+        if (!e.faces.empty()) {
+            tri.clear();
+            shade.clear();
+            for (size_t f = 0; f < e.faces.size(); f++) {
+                const SceneFace &sf = e.faces[f];
+                uint32_t v[3] = { sf.a, sf.b, sf.c };
+                if (!sf.drawn)
+                    continue;
+                for (int c = 0; c < 3; c++) {
+                    size_t base = (size_t)v[c] * 3;
+                    if (base + 2 >= e.local.size())
+                        continue;
+                    tri.push_back(e.local[base]);
+                    tri.push_back(e.local[base + 1]);
+                    tri.push_back(e.local[base + 2]);
+                    shade.push_back(sf.intensity);
+                }
+            }
+            if (!tri.empty()) {
+                scene_colour_(e.kind, 0, rgba);
+                gl->Uniform4f(gl->u_colour, rgba[0], rgba[1], rgba[2],
+                              rgba[3]);
+                gl->BindBuffer(GL_ARRAY_BUFFER, gl->vbo);
+                gl->BufferData(GL_ARRAY_BUFFER,
+                               (GLsizeiptr)(tri.size() * sizeof(float)),
+                               &tri[0], GL_DYNAMIC_DRAW);
+                gl->EnableVertexAttribArray(0);
+                gl->VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE,
+                                        3 * sizeof(float), (void *)0);
+                gl->BindBuffer(GL_ARRAY_BUFFER, gl->shade_vbo);
+                gl->BufferData(GL_ARRAY_BUFFER,
+                               (GLsizeiptr)(shade.size() * sizeof(float)),
+                               &shade[0], GL_DYNAMIC_DRAW);
+                gl->EnableVertexAttribArray(1);
+                gl->VertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE,
+                                        sizeof(float), (void *)0);
+                glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(tri.size() / 3));
+                gl->DisableVertexAttribArray(1);
+            }
+        }
+
+        /* The index buffer is rebuilt every frame and the vertex
+         * buffer is not, because the two change for different
+         * reasons: a mesh's coordinates are fixed in its own frame,
+         * while which of its segments survive the model's cull
+         * changes whenever the camera does. */
+        gl->BindBuffer(GL_ARRAY_BUFFER, buf);
+        gl->EnableVertexAttribArray(0);
+        gl->VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float),
+                                (void *)0);
+        gl->DisableVertexAttribArray(1);
+        gl->VertexAttrib1f(1, 1.0f);
+        if (e.kind == ELEM_AXES) {
+            for (size_t sgi = 0; sgi < e.segments.size(); sgi++) {
+                if (!e.segments[sgi].drawn)
+                    continue;
+                idx.clear();
+                idx.push_back(e.segments[sgi].a);
+                idx.push_back(e.segments[sgi].b);
+                scene_colour_(e.kind, sgi, rgba);
+                gl->Uniform4f(gl->u_colour, rgba[0], rgba[1], rgba[2],
+                              rgba[3]);
+                gl->BindBuffer(GL_ELEMENT_ARRAY_BUFFER, gl->ebo);
+                gl->BufferData(GL_ELEMENT_ARRAY_BUFFER,
+                               (GLsizeiptr)(idx.size() * sizeof(GLuint)),
+                               &idx[0], GL_DYNAMIC_DRAW);
+                glDrawElements(GL_LINES, (GLsizei)idx.size(),
+                               GL_UNSIGNED_INT, (void *)0);
+            }
+            continue;
+        }
+        idx.clear();
+        for (size_t sgi = 0; sgi < e.segments.size(); sgi++) {
+            if (!e.segments[sgi].drawn)
+                continue;
+            idx.push_back(e.segments[sgi].a);
+            idx.push_back(e.segments[sgi].b);
+        }
+        if (idx.empty())
+            continue;
+        scene_colour_(e.kind, 0, rgba);
+        gl->Uniform4f(gl->u_colour, rgba[0], rgba[1], rgba[2], rgba[3]);
+        gl->BindBuffer(GL_ELEMENT_ARRAY_BUFFER, gl->ebo);
+        gl->BufferData(GL_ELEMENT_ARRAY_BUFFER,
+                       (GLsizeiptr)(idx.size() * sizeof(GLuint)), &idx[0],
+                       GL_DYNAMIC_DRAW);
+        glDrawElements(GL_LINES, (GLsizei)idx.size(), GL_UNSIGNED_INT,
+                       (void *)0);
+    }
+    gl->BindVertexArray(0);
+    gl->UseProgram(0);
+    glDisable(GL_DEPTH_TEST);
+}
+
+void scene_gl_free_(SceneGl *gl)
+{
+    std::map<std::string, GLuint>::iterator it;
+
+    if (!gl->ready)
+        return;
+    for (it = gl->cached.begin(); it != gl->cached.end(); ++it)
+        gl->DeleteBuffers(1, &it->second);
+    gl->DeleteBuffers(1, &gl->vbo);
+    gl->DeleteBuffers(1, &gl->ebo);
+    gl->DeleteBuffers(1, &gl->shade_vbo);
+    gl->DeleteVertexArrays(1, &gl->vao);
+    gl->DeleteProgram(gl->program);
+    gl->ready = false;
+}
+
+/* The scene panel: the controls that set the view, and what the model
+ * made of them. It computes nothing about the picture; scene_build
+ * does that, and the same call with the same settings is what
+ * `--dump scene` writes. */
+void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
+{
+    const Spec &sp = ui.model->spec();
+    SceneOptions &o = ui.scene_opt;
+    SceneInput in;
+
+    ui.scene_ready = false;
+    ImGui::Begin("Scene");
+    if (!gl.ready) {
+        ImGui::TextWrapped("the scene view is unavailable: %s",
+                           gl.error.c_str());
+        ImGui::End();
+        return;
+    }
+    if (ui.artifact.empty()) {
+        ImGui::TextWrapped("supply an artifact: the recording carries "
+                           "observation channels, and a body's position and "
+                           "attitude are not among them");
+    } else if (!ui.scene_resim_done || ui.scene_resim_ref != o.frame ||
+               ui.scene_resim_ep != ui.episode_index) {
+        if (ImGui::Button("reconstruct body poses in this frame")) {
+            ui.scene_resim = resimulate(*ui.model, ep, ui.artifact, o.frame);
+            ui.scene_resim_done = true;
+            ui.scene_resim_ref = o.frame;
+            ui.scene_resim_ep = ui.episode_index;
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted("the poses are re-simulated from the "
+                               "recorded action stream");
+    }
+
+    /* The reference frame, which is the body getter's own reference:
+     * the scene shows the frame the getter was asked for. */
+    {
+        std::string cur = scene_body_name(sp, o.frame);
+        if (ImGui::BeginCombo("reference frame", cur.c_str())) {
+            if (ImGui::Selectable("origin", o.frame == SCENE_ORIGIN))
+                o.frame = SCENE_ORIGIN;
+            for (size_t b = 0; b < sp.body_names.size(); b++) {
+                if (ImGui::Selectable(sp.body_names[b].c_str(),
+                                      o.frame == b))
+                    o.frame = (uint32_t)b;
+            }
+            ImGui::EndCombo();
+        }
+    }
+    {
+        int mode = (int)o.camera.mode;
+        if (ImGui::Combo("camera", &mode, "orbit\0chase\0free\0"))
+            o.camera.mode = (CameraMode)mode;
+        std::string cur = scene_body_name(sp, o.camera.target);
+        if (ImGui::BeginCombo("camera target", cur.c_str())) {
+            if (ImGui::Selectable("origin", o.camera.target == SCENE_ORIGIN))
+                o.camera.target = SCENE_ORIGIN;
+            for (size_t b = 0; b < sp.body_names.size(); b++) {
+                if (ImGui::Selectable(sp.body_names[b].c_str(),
+                                      o.camera.target == b))
+                    o.camera.target = (uint32_t)b;
+            }
+            ImGui::EndCombo();
+        }
+    }
+    if (o.camera.mode == CAMERA_ORBIT) {
+        float az = (float)o.camera.azimuth_deg;
+        float el = (float)o.camera.elevation_deg;
+        float r = (float)o.camera.radius;
+        if (ImGui::SliderFloat("azimuth (deg)", &az, -180.0f, 180.0f))
+            o.camera.azimuth_deg = az;
+        if (ImGui::SliderFloat("elevation (deg)", &el, -89.0f, 89.0f))
+            o.camera.elevation_deg = el;
+        if (ImGui::DragFloat("radius (m)", &r, r * 0.01f + 0.01f, 0.01f,
+                             1.0e9f, "%.3f"))
+            o.camera.radius = r;
+    } else if (o.camera.mode == CAMERA_CHASE) {
+        float off[3] = { (float)o.camera.chase[0], (float)o.camera.chase[1],
+                         (float)o.camera.chase[2] };
+        if (ImGui::DragFloat3("offset in the body frame (m)", off)) {
+            for (int c = 0; c < 3; c++)
+                o.camera.chase[c] = off[c];
+        }
+    } else {
+        float eye[3] = { (float)o.camera.eye[0], (float)o.camera.eye[1],
+                         (float)o.camera.eye[2] };
+        float look[3] = { (float)o.camera.look[0], (float)o.camera.look[1],
+                          (float)o.camera.look[2] };
+        if (ImGui::DragFloat3("eye (m)", eye)) {
+            for (int c = 0; c < 3; c++)
+                o.camera.eye[c] = eye[c];
+        }
+        if (ImGui::DragFloat3("look at (m)", look)) {
+            for (int c = 0; c < 3; c++)
+                o.camera.look[c] = look[c];
+        }
+    }
+    {
+        int proj = (int)o.camera.projection;
+        if (ImGui::Combo("projection", &proj,
+                         "perspective\0orthographic\0"))
+            o.camera.projection = (ProjectionKind)proj;
+        if (o.camera.projection == PROJECTION_PERSPECTIVE) {
+            float fov = (float)o.camera.fov_y_deg;
+            if (ImGui::SliderFloat("field of view (deg)", &fov, 5.0f, 120.0f))
+                o.camera.fov_y_deg = fov;
+        } else {
+            float h = (float)o.camera.ortho_height;
+            if (ImGui::DragFloat("view height (m)", &h, h * 0.01f + 0.01f,
+                                 0.01f, 1.0e9f, "%.3f"))
+                o.camera.ortho_height = h;
+        }
+    }
+    ImGui::Separator();
+    for (int k = 0; k < ELEM_KIND_COUNT; k++) {
+        bool on = o.enabled[k];
+        if (ImGui::Checkbox(element_name((ElementKind)k), &on))
+            o.enabled[k] = on;
+        if ((k % 3) != 2 && k + 1 < ELEM_KIND_COUNT)
+            ImGui::SameLine();
+    }
+    {
+        bool on = o.shading;
+        float vs = (float)o.velocity_seconds;
+        float al = (float)o.axis_length;
+        if (ImGui::Checkbox("shading", &on))
+            o.shading = on;
+        if (o.shading)
+            ImGui::TextWrapped("%s", SHADING_LABEL);
+        if (ImGui::DragFloat("velocity vector (s)", &vs, 0.1f, 0.0f, 1.0e6f))
+            o.velocity_seconds = vs;
+        if (ImGui::DragFloat("axis length (m)", &al, 0.05f, 0.0f, 1.0e6f))
+            o.axis_length = al;
+    }
+
+    if (!ui.asset_tried && !ui.asset_path.empty()) {
+        ui.asset = asset_load(ui.asset_path);
+        ui.asset_tried = true;
+    }
+    in.model = ui.model;
+    in.episode = &ep;
+    if (ui.scene_resim_done && ui.scene_resim_ref == o.frame &&
+        ui.scene_resim_ep == ui.episode_index)
+        in.resim = &ui.scene_resim;
+    if (ui.asset_tried && ui.asset.loaded) {
+        /* The same verdict function the wireframe panel and the dump
+         * call. A craft whose bytes are not the recorded bytes is
+         * never drawn here either. */
+        const AssemblyRef *match = 0;
+        AssetVerdict v = asset_verdict(sp, ui.asset, &match);
+        if (v == ASSET_DRAWABLE) {
+            in.asset = &ui.asset;
+            in.asset_body = match->body;
+        } else {
+            ImGui::TextWrapped("no geometry is drawn from `%s`: %s",
+                ui.asset_path.c_str(),
+                v == ASSET_NO_BODY ? "no body in this recording binds an "
+                                     "assembly of that name"
+                : v == ASSET_NO_DIGEST ? "the recording carries no digest "
+                                         "for it"
+                : "the bytes on disk are not the bytes that flew");
+        }
+    } else if (ui.asset_tried) {
+        ImGui::TextWrapped("%s", ui.asset.error.c_str());
+    }
+
+    ui.scene = scene_build(in, o, ui.step);
+    ui.scene_ready = true;
+    ImGui::Separator();
+    ImGui::TextWrapped("%s", ui.scene.message.c_str());
+    ImGui::Text("frame %s, %u elements at step %u",
+                ui.scene.frame_name.c_str(),
+                (unsigned)ui.scene.elements.size(), ui.step);
+    ImGui::Text("eye %.3f %.3f %.3f m", ui.scene.eye[0], ui.scene.eye[1],
+                ui.scene.eye[2]);
+    for (size_t i = 0; i < ui.scene.elements.size(); i++) {
+        const SceneElement &e = ui.scene.elements[i];
+        size_t drawn = 0;
+        for (size_t sgi = 0; sgi < e.segments.size(); sgi++)
+            drawn += e.segments[sgi].drawn ? 1 : 0;
+        ImGui::BulletText("%s %s: %u of %u segments drawn",
+                          element_name(e.kind), e.name.c_str(),
+                          (unsigned)drawn, (unsigned)e.segments.size());
+    }
+    ImGui::End();
+}
+
 void panel_meta_(Ui &ui, const Episode &ep)
 {
     const FileInfo &fi = ui.model->info();
@@ -618,7 +1224,8 @@ void panel_resim_(Ui &ui, const Episode &ep)
     ImGui::Text("artifact %s", ui.artifact.c_str());
     if (!ui.resim_done) {
         if (ImGui::Button("reconstruct and compare")) {
-            ui.resim = resimulate(*ui.model, ep, ui.artifact);
+            ui.resim = resimulate(*ui.model, ep, ui.artifact,
+                                  K26RL_BODY_REF_ORIGIN);
             ui.resim_done = true;
         }
         ImGui::TextWrapped(
@@ -671,10 +1278,13 @@ void panel_resim_(Ui &ui, const Episode &ep)
 
 }  /* namespace */
 
-int run_gui(Model &model, const std::string &artifact,
-            const std::string &asset)
+int run_gui(Model &model, const DumpOptions &opt)
 {
     Ui ui;
+    /* Value initialised rather than cleared: the entry-point table
+     * sits beside a string and a map, and a memset over those would
+     * be a memset over their internals. */
+    SceneGl gl = SceneGl();
     GLFWwindow *win;
 
     if (model.info().episode_count == 0) {
@@ -684,8 +1294,8 @@ int run_gui(Model &model, const std::string &artifact,
     }
 
     ui.model = &model;
-    ui.artifact = artifact;
-    ui.asset_path = asset;
+    ui.artifact = opt.artifact;
+    ui.asset_path = opt.asset;
     ui.asset_tried = false;
     ui.episode_index = 0;
     ui.step = 0;
@@ -694,6 +1304,13 @@ int run_gui(Model &model, const std::string &artifact,
     ui.pitch = 0.0f;
     ui.resim_done = false;
     ui.channel_on.assign(model.spec().channels.size(), 1);
+    /* The window starts where the command line asked, so a picture
+     * can be reproduced headlessly by repeating the arguments. */
+    ui.scene_opt = opt.scene;
+    ui.scene_resim_done = false;
+    ui.scene_resim_ref = SCENE_ORIGIN;
+    ui.scene_resim_ep = 0;
+    ui.scene_ready = false;
 
     glfwSetErrorCallback(glfw_error_);
     if (!glfwInit()) {
@@ -720,6 +1337,11 @@ int run_gui(Model &model, const std::string &artifact,
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(win, true);
     ImGui_ImplOpenGL3_Init("#version 330");
+    if (!scene_gl_init_(&gl)) {
+        /* Reported in the scene panel and nowhere else: the rest of
+         * the window is unaffected by a scene that cannot draw. */
+        fprintf(stderr, "k26rl_view: %s\n", gl.error.c_str());
+    }
 
     while (!glfwWindowShouldClose(win)) {
         std::string err;
@@ -730,6 +1352,17 @@ int run_gui(Model &model, const std::string &artifact,
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
+        {
+            /* The viewport the model projects with is the framebuffer
+             * the window will draw into, so the aspect ratio the dump
+             * reports is the aspect ratio on the screen. */
+            int w = 0, h = 0;
+            glfwGetFramebufferSize(win, &w, &h);
+            if (w > 0 && h > 0) {
+                ui.scene_opt.viewport.width = (uint32_t)w;
+                ui.scene_opt.viewport.height = (uint32_t)h;
+            }
+        }
         ep = model.load(ui.episode_index, &err);
         if (ep) {
             if (ui.step >= ep->step_count)
@@ -742,6 +1375,7 @@ int run_gui(Model &model, const std::string &artifact,
             panel_world_(ui, *ep);
             panel_attitude_(ui, *ep);
             panel_wireframe_(ui, *ep);
+            panel_scene_(ui, *ep, gl);
             panel_meta_(ui, *ep);
             panel_resim_(ui, *ep);
         } else {
@@ -757,11 +1391,17 @@ int run_gui(Model &model, const std::string &artifact,
             glViewport(0, 0, w, h);
             glClearColor(0.09f, 0.09f, 0.11f, 1.0f);
             glClear(GL_COLOR_BUFFER_BIT);
+            /* The scene is the backdrop and the panels float over it,
+             * which is what a debugging instrument wants: the picture
+             * is large and the numbers beside it are readable. */
+            if (ui.scene_ready)
+                scene_draw_(&gl, ui.scene, w, h);
         }
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(win);
     }
 
+    scene_gl_free_(&gl);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImPlot::DestroyContext();

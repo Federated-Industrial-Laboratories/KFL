@@ -6,6 +6,10 @@
  * the interface and this dump read the same model, so what is checked
  * here is what the interface draws.
  *
+ * The scene panel is here on the same terms and for a stronger
+ * reason: everything between a body's state and a pixel lives in the
+ * model, and this is what reaches it without a display.
+ *
  * Every double is written as the sixteen hex digits of its IEEE-754
  * binary64 bit pattern. The format's own rule is that values travel
  * as bit patterns and never through decimal text, for the last-ULP
@@ -16,6 +20,7 @@
 #include "dump.h"
 
 #include "asset.h"
+#include "scene.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -363,17 +368,22 @@ static void dump_scrub(FILE *f, Model &m, const DumpOptions &o)
  * the episode so a second panel asking for a different one still gets
  * its own rebuild rather than the previous panel's. */
 static ResimResult rebuild_(Model &m, const Episode &e, uint32_t k,
-                            const DumpOptions &o)
+                            const DumpOptions &o, uint32_t reference)
 {
     static ResimResult cached;
     static uint32_t cached_k = UINT32_MAX;
+    static uint32_t cached_ref = UINT32_MAX;
     static std::string cached_artifact;
     static bool have = false;
 
-    if (have && cached_k == k && cached_artifact == o.artifact)
+    /* The reference is part of the key because it changes the answer:
+     * two panels asking for two frames must not share one rebuild. */
+    if (have && cached_k == k && cached_ref == reference &&
+        cached_artifact == o.artifact)
         return cached;
-    cached = resimulate(m, e, o.artifact);
+    cached = resimulate(m, e, o.artifact, reference);
     cached_k = k;
+    cached_ref = reference;
     cached_artifact = o.artifact;
     have = true;
     return cached;
@@ -401,7 +411,7 @@ static void dump_world(FILE *f, Model &m, const DumpOptions &o)
         if (!e)
             continue;
         dump_episode_header(f, k, *e);
-        ResimResult r = rebuild_(m, *e, k, o);
+        ResimResult r = rebuild_(m, *e, k, o, K26RL_BODY_REF_ORIGIN);
         if (!r.ran || !r.has_bodies) {
             fprintf(f, "world_unavailable %u %s\n", k,
                     r.ran ? "artifact publishes no body getter"
@@ -449,7 +459,7 @@ static void dump_attitude(FILE *f, Model &m, const DumpOptions &o)
         if (!e)
             continue;
         dump_episode_header(f, k, *e);
-        ResimResult r = rebuild_(m, *e, k, o);
+        ResimResult r = rebuild_(m, *e, k, o, K26RL_BODY_REF_ORIGIN);
         if (!r.ran || !r.has_attitudes) {
             fprintf(f, "attitude_unavailable %u %s\n", k,
                     r.ran ? "artifact publishes no attitude getter"
@@ -598,6 +608,229 @@ static void dump_wireframe(FILE *f, Model &m, const DumpOptions &o)
                 as.edges[i].b);
 }
 
+static const char *scene_verdict_name_(AssetVerdict v)
+{
+    switch (v) {
+    case ASSET_DRAWABLE: return "drawable";
+    case ASSET_NO_BODY:  return "unmatched";
+    case ASSET_NO_DIGEST: return "nodigest";
+    default:             return "mismatch";
+    }
+}
+
+static void dump_scene_header_(FILE *f, Model &m, const DumpOptions &o)
+{
+    const Spec &sp = m.spec();
+    const SceneOptions &s = o.scene;
+    const char *mode = s.camera.mode == CAMERA_ORBIT ? "orbit"
+                     : s.camera.mode == CAMERA_CHASE ? "chase" : "free";
+
+    fprintf(f, "scene_frame %s\n", scene_body_name(sp, s.frame).c_str());
+    fprintf(f, "scene_camera %s %s\n", mode,
+            scene_body_name(sp, s.camera.target).c_str());
+    if (s.camera.mode == CAMERA_ORBIT) {
+        fprintf(f, "scene_camera_orbit ");
+        hx(f, s.camera.azimuth_deg);
+        fprintf(f, " ");
+        hx(f, s.camera.elevation_deg);
+        fprintf(f, " ");
+        hx(f, s.camera.radius);
+        fprintf(f, "\n");
+    } else if (s.camera.mode == CAMERA_CHASE) {
+        fprintf(f, "scene_camera_chase");
+        for (int c = 0; c < 3; c++) {
+            fprintf(f, " ");
+            hx(f, s.camera.chase[c]);
+        }
+        fprintf(f, "\n");
+    } else {
+        fprintf(f, "scene_camera_free");
+        for (int c = 0; c < 3; c++) {
+            fprintf(f, " ");
+            hx(f, s.camera.eye[c]);
+        }
+        for (int c = 0; c < 3; c++) {
+            fprintf(f, " ");
+            hx(f, s.camera.look[c]);
+        }
+        fprintf(f, "\n");
+    }
+    fprintf(f, "scene_camera_up");
+    for (int c = 0; c < 3; c++) {
+        fprintf(f, " ");
+        hx(f, s.camera.up[c]);
+    }
+    fprintf(f, "\n");
+    fprintf(f, "scene_projection %s ",
+            s.camera.projection == PROJECTION_PERSPECTIVE ? "perspective"
+                                                          : "orthographic");
+    hx(f, s.camera.projection == PROJECTION_PERSPECTIVE
+           ? s.camera.fov_y_deg : s.camera.ortho_height);
+    fprintf(f, " ");
+    hx(f, s.camera.near_plane);
+    fprintf(f, " ");
+    hx(f, s.camera.far_plane);
+    fprintf(f, "\n");
+    fprintf(f, "scene_viewport %u %u\n", s.viewport.width, s.viewport.height);
+    for (int i = 0; i < ELEM_KIND_COUNT; i++)
+        fprintf(f, "scene_toggle %s %d\n", element_name((ElementKind)i),
+                s.enabled[i] ? 1 : 0);
+    fprintf(f, "scene_shading %d", s.shading ? 1 : 0);
+    for (int c = 0; c < 3; c++) {
+        fprintf(f, " ");
+        hx(f, s.light[c]);
+    }
+    fprintf(f, "\n");
+    fprintf(f, "scene_shading_label %s\n", SHADING_LABEL);
+    fprintf(f, "scene_trajectory_label %s\n", SCENE_TRAJECTORY_LABEL);
+    fprintf(f, "scene_scale ");
+    hx(f, s.velocity_seconds);
+    fprintf(f, " ");
+    hx(f, s.axis_length);
+    fprintf(f, " ");
+    hx(f, s.thruster_scale);
+    fprintf(f, "\n");
+}
+
+static void dump_scene_element_(FILE *f, const Spec &sp, uint32_t k,
+                                uint32_t step, size_t i,
+                                const SceneElement &e)
+{
+    size_t nv = e.local.size() / 3;
+
+    fprintf(f, "scene_element %u %u %u %s %s %u %u %u %s\n", k, step,
+            (unsigned)i, element_name(e.kind),
+            e.body == SCENE_NO_BODY ? "-"
+                                    : scene_body_name(sp, e.body).c_str(),
+            (unsigned)nv, (unsigned)e.segments.size(),
+            (unsigned)e.faces.size(), e.name.c_str());
+    fprintf(f, "scene_note %u %u %u %s\n", k, step, (unsigned)i,
+            e.note.c_str());
+    fprintf(f, "scene_mvp %u %u %u", k, step, (unsigned)i);
+    for (int c = 0; c < 16; c++) {
+        fprintf(f, " ");
+        hx(f, (double)e.mvp[c]);
+    }
+    fprintf(f, "\n");
+    for (size_t v = 0; v < nv; v++) {
+        fprintf(f, "scene_vertex %u %u %u %u", k, step, (unsigned)i,
+                (unsigned)v);
+        for (int c = 0; c < 3; c++) {
+            fprintf(f, " ");
+            hx(f, (double)e.ndc[v * 3 + c]);
+        }
+        fprintf(f, " %u\n", (unsigned)e.behind[v]);
+    }
+    for (size_t sgi = 0; sgi < e.segments.size(); sgi++) {
+        fprintf(f, "scene_segment %u %u %u %u %u %u %d\n", k, step,
+                (unsigned)i, (unsigned)sgi, e.segments[sgi].a,
+                e.segments[sgi].b, e.segments[sgi].drawn ? 1 : 0);
+    }
+    for (size_t fi = 0; fi < e.faces.size(); fi++) {
+        fprintf(f, "scene_face %u %u %u %u %u %u %u ", k, step, (unsigned)i,
+                (unsigned)fi, e.faces[fi].a, e.faces[fi].b, e.faces[fi].c);
+        hx(f, (double)e.faces[fi].intensity);
+        fprintf(f, " %d\n", e.faces[fi].drawn ? 1 : 0);
+    }
+}
+
+/* The projection dump: the scene view made checkable without a
+ * display.
+ *
+ * For a named camera pose, a named projection and a named viewport it
+ * writes every drawn element's vertices in normalised device
+ * coordinates, with the element's identity, its source body, and a
+ * per-vertex behind-the-eye flag. There is no window, no context and
+ * no display anywhere in the path.
+ *
+ * That is the answer to a question a scene view otherwise cannot
+ * answer: whether the arithmetic between a body's state and a pixel
+ * is right. What it does not cover is stated rather than hidden. The
+ * draw calls themselves, and therefore the shaders, need a display
+ * and a framebuffer read-back to check; what this establishes is that
+ * the geometry handed to those calls is right.
+ *
+ * Coordinates are single precision, because single precision is what
+ * the pipeline these numbers are going to runs in, and they are
+ * written as the binary64 bit pattern of that value so the format's
+ * standing rule about decimal text still holds.
+ */
+static void dump_scene(FILE *f, Model &m, const DumpOptions &o)
+{
+    const Spec &sp = m.spec();
+    SceneInput in;
+    Asset as;
+
+    dump_scene_header_(f, m, o);
+    for (size_t k = 0; k < sp.body_names.size(); k++)
+        fprintf(f, "body %u %s\n", (unsigned)k, sp.body_names[k].c_str());
+
+    /* The asset, and the one check that lets it be drawn. A craft
+     * whose bytes are not the recorded bytes is never drawn, in this
+     * panel exactly as in the wireframe panel and through the same
+     * verdict function, so the two cannot disagree. */
+    if (!o.asset.empty()) {
+        as = asset_load(o.asset);
+        if (!as.loaded) {
+            fprintf(f, "scene_asset_error %s\n", as.error.c_str());
+        } else {
+            const AssemblyRef *match = 0;
+            AssetVerdict v = asset_verdict(sp, as, &match);
+            fprintf(f, "scene_asset %s %s\n", as.name.c_str(),
+                    digest_hex(as.digest).c_str());
+            fprintf(f, "scene_asset_verdict %s %s\n",
+                    scene_verdict_name_(v),
+                    match ? scene_body_name(sp, match->body).c_str() : "-");
+            fprintf(f, "scene_asset_parts %u colliders %u ports %u "
+                       "thrusters %u faces\n",
+                    (unsigned)as.colliders.size(), (unsigned)as.ports.size(),
+                    (unsigned)as.thrusters.size(), (unsigned)as.faces.size());
+            if (v == ASSET_DRAWABLE) {
+                in.asset = &as;
+                in.asset_body = match->body;
+            }
+        }
+    } else {
+        fprintf(f, "scene_asset none no assembly supplied\n");
+    }
+
+    in.model = &m;
+    for (uint32_t k = 0; k < m.info().episode_count; k++) {
+        std::string err;
+        const Episode *e;
+        uint32_t lo, hi;
+        ResimResult r;
+
+        if (o.episode != UINT32_MAX && k != o.episode)
+            continue;
+        e = m.load(k, &err);
+        if (!e)
+            continue;
+        dump_episode_header(f, k, *e);
+        if (!o.artifact.empty())
+            r = rebuild_(m, *e, k, o, o.scene.frame);
+        in.episode = e;
+        in.resim = o.artifact.empty() ? 0 : &r;
+        range_for(*e, o, &lo, &hi);
+        for (uint32_t step = lo; step < hi; step++) {
+            Scene sc = scene_build(in, o.scene, step);
+            fprintf(f, "scene_pose %u %u %s %s\n", k, step,
+                    sc.pose_from_artifact ? "artifact" : "synthetic",
+                    sc.message.c_str());
+            fprintf(f, "scene_eye %u %u", k, step);
+            for (int c = 0; c < 3; c++) {
+                fprintf(f, " ");
+                hx(f, sc.eye[c]);
+            }
+            fprintf(f, "\n");
+            fprintf(f, "scene_elements %u %u %u\n", k, step,
+                    (unsigned)sc.elements.size());
+            for (size_t i = 0; i < sc.elements.size(); i++)
+                dump_scene_element_(f, sp, k, step, i, sc.elements[i]);
+        }
+    }
+}
+
 static void dump_resim(FILE *f, Model &m, const DumpOptions &o)
 {
     const uint32_t obs_total = m.spec().obs_total;
@@ -618,7 +851,7 @@ static void dump_resim(FILE *f, Model &m, const DumpOptions &o)
         if (!e)
             continue;
         dump_episode_header(f, k, *e);
-        ResimResult r = rebuild_(m, *e, k, o);
+        ResimResult r = rebuild_(m, *e, k, o, K26RL_BODY_REF_ORIGIN);
         fprintf(f, "resim_abi %u %08x\n", k, r.abi_version);
         fprintf(f, "resim_ran %u %d\n", k, r.ran ? 1 : 0);
         fprintf(f, "resim_verdict %u %s\n", k,
@@ -683,12 +916,14 @@ int dump(FILE *f, Model &m, const DumpOptions &o)
         dump_overlay(f, m, o);
     if (p == "wireframe" || p == "all")
         dump_wireframe(f, m, o);
+    if (p == "scene" || p == "all")
+        dump_scene(f, m, o);
     if (p == "resim" || p == "all")
         dump_resim(f, m, o);
     if (p != "meta" && p != "timeline" && p != "reward" && p != "obs" &&
         p != "action" && p != "traj" && p != "scrub" && p != "resim" &&
         p != "world" && p != "attitude" && p != "overlay" &&
-        p != "wireframe" && p != "all") {
+        p != "wireframe" && p != "scene" && p != "all") {
         fprintf(stderr, "k26rl_view: unknown panel `%s`\n", p.c_str());
         return 2;
     }

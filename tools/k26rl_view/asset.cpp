@@ -1,4 +1,4 @@
-/* asset.cpp: the assembly reader behind the wireframe panel.
+/* asset.cpp: the assembly reader behind the wireframe and the scene.
  *
  * The digest is recomputed through the format library's own function,
  * not through a second implementation of it, so the framing this
@@ -22,6 +22,7 @@
 
 extern "C" {
 #include "k26rl_digest.h"
+#include "capture.h"
 }
 
 namespace k26rl_view {
@@ -143,6 +144,22 @@ void rotate_(const Placement &p, const double v[3], double out[3])
     out[2] = v[2] + w * t[2] + (x * t[1] - y * t[0]);
 }
 
+/* The component's orientation as a matrix, built by rotating the
+ * basis vectors with the same quaternion the vertices use, so a
+ * collider's axes and its mesh's vertices cannot be placed by two
+ * different rotations. */
+void placement_matrix_(const Placement &p, double out[9])
+{
+    for (int c = 0; c < 3; c++) {
+        double e[3] = { 0.0, 0.0, 0.0 };
+        double w[3];
+        e[c] = 1.0;
+        rotate_(p, e, w);
+        for (int r = 0; r < 3; r++)
+            out[r * 3 + c] = w[r];
+    }
+}
+
 void add_edge_(std::map<std::pair<uint32_t, uint32_t>, int> *seen,
                std::vector<Edge> *edges, uint32_t a, uint32_t b)
 {
@@ -208,9 +225,10 @@ Asset asset_load(const std::string &path)
     std::vector<std::string> src;
     lines_(bytes, &src);
 
-    /* Walk the assembly for what a wireframe needs: its name, and
-     * each component's placement and mesh. Everything else is skipped
-     * by name rather than refused, because the compiler has already
+    /* Walk the assembly for what the scene draws: its name, each
+     * component's placement, mesh and colliders, and the ports and
+     * thrusters its features declare. Everything else is skipped by
+     * name rather than refused, because the compiler has already
      * accepted this file and this reader is not a second gate on it.
      *
      * A component's placement is settled at the block's `end` and not
@@ -222,59 +240,204 @@ Asset asset_load(const std::string &path)
      * coordinates while the digest, which is over bytes and says
      * nothing about how they are read, still matched. */
     Placement cur;
-    bool in_component = false;
+    /* Which block the walk is inside. The assembly's own top level is
+     * BLK_NONE; a block this reader draws nothing from is BLK_OTHER,
+     * so its keys cannot be read as the enclosing block's. */
+    enum Block { BLK_NONE, BLK_COMPONENT, BLK_PORT, BLK_THRUSTER, BLK_OTHER };
+    Block blk = BLK_NONE;
     bool have_mesh = false;
     std::string pending_mesh;
     std::vector<Placement> placements;
     std::vector<std::string> mesh_paths;
     std::vector<std::string> tok;
+    /* Colliders wait for their component's `end` for the same reason
+     * the mesh placement does: the placement that bakes them into the
+     * body frame is not settled until then. */
+    std::vector<Collider> pending;
+    Port port = Port();
+    Thruster thruster = Thruster();
 
     for (size_t i = 0; i < src.size(); i++) {
         tokens_(src[i], &tok);
         if (tok.empty())
             continue;
-        if (tok[0] == "assembly" && tok.size() >= 2) {
+        if (tok[0] == "assembly" && tok.size() >= 2 && blk == BLK_NONE) {
             a.name = tok[1];
             continue;
         }
-        if (tok[0] == "component") {
-            in_component = true;
-            have_mesh = false;
-            pending_mesh.clear();
+        if (blk == BLK_NONE &&
+            (tok[0] == "component" || tok[0] == "port" ||
+             tok[0] == "thruster" || tok[0] == "wheel" ||
+             tok[0] == "magnetorquer")) {
             memset(&cur, 0, sizeof cur);
             cur.q[0] = 1.0;
+            have_mesh = false;
+            pending_mesh.clear();
+            pending.clear();
+            if (tok[0] == "component") {
+                blk = BLK_COMPONENT;
+            } else if (tok[0] == "port") {
+                blk = BLK_PORT;
+                port = Port();
+                port.name = tok.size() >= 2 ? tok[1] : "";
+            } else if (tok[0] == "thruster") {
+                blk = BLK_THRUSTER;
+                thruster = Thruster();
+                thruster.name = tok.size() >= 2 ? tok[1] : "";
+            } else {
+                blk = BLK_OTHER;
+            }
             continue;
         }
         if (tok[0] == "end") {
-            if (in_component && have_mesh) {
-                mesh_paths.push_back(pending_mesh);
-                placements.push_back(cur);
+            if (blk == BLK_COMPONENT) {
+                double rot[9];
+                if (have_mesh) {
+                    mesh_paths.push_back(pending_mesh);
+                    placements.push_back(cur);
+                }
+                placement_matrix_(cur, rot);
+                for (size_t k = 0; k < pending.size(); k++) {
+                    Collider c = pending[k];
+                    double w[3];
+                    memcpy(c.rot, rot, sizeof c.rot);
+                    if (c.kind == COLLIDER_BOX) {
+                        /* A box's centre is its component's origin and
+                         * its half extents lie along the component's
+                         * own axes, which `rot` carries. */
+                        for (int q = 0; q < 3; q++)
+                            c.centre[q] = cur.at[q];
+                    } else if (c.kind == COLLIDER_SPHERE) {
+                        rotate_(cur, c.a, w);
+                        for (int q = 0; q < 3; q++)
+                            c.centre[q] = cur.at[q] + w[q];
+                    } else {
+                        double wb[3];
+                        rotate_(cur, c.a, w);
+                        rotate_(cur, c.b, wb);
+                        for (int q = 0; q < 3; q++) {
+                            c.a[q] = cur.at[q] + w[q];
+                            c.b[q] = cur.at[q] + wb[q];
+                            c.centre[q] = 0.5 * (c.a[q] + c.b[q]);
+                        }
+                    }
+                    a.colliders.push_back(c);
+                }
+            } else if (blk == BLK_PORT) {
+                /* The envelope's own figures, from the compiler's
+                 * table: an unknown name is left unresolved rather
+                 * than filled with a guess, and the port then draws
+                 * its axis and its roll reference alone. */
+                if (!port.envelope.empty()) {
+                    const KflcCaptureEnvelope *env =
+                        kflc_capture_envelope(port.envelope.c_str());
+                    if (env) {
+                        port.has_envelope = true;
+                        port.mating_diameter =
+                            kflc_capture_mm_to_m(env->mating_diameter_mm);
+                        port.lateral_limit = env->lateral;
+                        port.pitchyaw_limit_deg = env->pitchyaw_deg;
+                    }
+                }
+                a.ports.push_back(port);
+            } else if (blk == BLK_THRUSTER) {
+                a.thrusters.push_back(thruster);
             }
-            in_component = false;
+            blk = BLK_NONE;
             have_mesh = false;
+            pending.clear();
             continue;
         }
-        if (!in_component)
-            continue;
-        if (tok[0] == "at" && tok.size() >= 4) {
-            for (int c = 0; c < 3; c++) {
-                if (!number_(tok[1 + c], &cur.at[c])) {
-                    a.error = "malformed `at` in `" + path + "`";
+        if (blk == BLK_COMPONENT) {
+            if (tok[0] == "at" && tok.size() >= 4) {
+                for (int c = 0; c < 3; c++) {
+                    if (!number_(tok[1 + c], &cur.at[c])) {
+                        a.error = "malformed `at` in `" + path + "`";
+                        return a;
+                    }
+                }
+            } else if (tok[0] == "rotate" && tok.size() >= 5) {
+                for (int c = 0; c < 4; c++) {
+                    if (!number_(tok[1 + c], &cur.q[c])) {
+                        a.error = "malformed `rotate` in `" + path + "`";
+                        return a;
+                    }
+                }
+            } else if (tok[0] == "mesh" && tok.size() >= 2) {
+                /* A second mesh line replaces the first, which is what
+                 * the compiler's own single-valued field does. */
+                pending_mesh = tok[1];
+                have_mesh = true;
+            } else if (tok[0] == "collider" && tok.size() >= 2) {
+                Collider c;
+                size_t need;
+                memset(&c, 0, sizeof c);
+                if (tok[1] == "sphere") {
+                    c.kind = COLLIDER_SPHERE;
+                    need = 6;
+                } else if (tok[1] == "capsule") {
+                    c.kind = COLLIDER_CAPSULE;
+                    need = 9;
+                } else if (tok[1] == "box") {
+                    c.kind = COLLIDER_BOX;
+                    need = 5;
+                } else {
+                    a.error = "`" + tok[1] + "` is not a collider shape in `" +
+                              path + "`";
+                    return a;
+                }
+                if (tok.size() < need) {
+                    a.error = "malformed `collider` in `" + path + "`";
+                    return a;
+                }
+                bool ok = true;
+                for (int q = 0; q < 3; q++)
+                    ok = ok && number_(tok[2 + q], &c.a[q]);
+                if (c.kind == COLLIDER_CAPSULE) {
+                    for (int q = 0; q < 3; q++)
+                        ok = ok && number_(tok[5 + q], &c.b[q]);
+                    ok = ok && number_(tok[8], &c.radius);
+                } else if (c.kind == COLLIDER_SPHERE) {
+                    ok = ok && number_(tok[5], &c.radius);
+                }
+                if (!ok) {
+                    a.error = "malformed `collider` in `" + path + "`";
+                    return a;
+                }
+                pending.push_back(c);
+            }
+        } else if (blk == BLK_PORT) {
+            double *vec = tok[0] == "at" ? port.at
+                        : tok[0] == "axis" ? port.axis
+                        : tok[0] == "roll_ref" ? port.roll_ref : 0;
+            if (vec && tok.size() >= 4) {
+                for (int c = 0; c < 3; c++) {
+                    if (!number_(tok[1 + c], &vec[c])) {
+                        a.error = "malformed `" + tok[0] + "` in `" + path +
+                                  "`";
+                        return a;
+                    }
+                }
+            } else if (tok[0] == "capture" && tok.size() >= 2) {
+                port.envelope = tok[1];
+            }
+        } else if (blk == BLK_THRUSTER) {
+            double *vec = tok[0] == "at" ? thruster.at
+                        : tok[0] == "dir" ? thruster.dir : 0;
+            if (vec && tok.size() >= 4) {
+                for (int c = 0; c < 3; c++) {
+                    if (!number_(tok[1 + c], &vec[c])) {
+                        a.error = "malformed `" + tok[0] + "` in `" + path +
+                                  "`";
+                        return a;
+                    }
+                }
+            } else if (tok[0] == "thrust" && tok.size() >= 2) {
+                if (!number_(tok[1], &thruster.thrust)) {
+                    a.error = "malformed `thrust` in `" + path + "`";
                     return a;
                 }
             }
-        } else if (tok[0] == "rotate" && tok.size() >= 5) {
-            for (int c = 0; c < 4; c++) {
-                if (!number_(tok[1 + c], &cur.q[c])) {
-                    a.error = "malformed `rotate` in `" + path + "`";
-                    return a;
-                }
-            }
-        } else if (tok[0] == "mesh" && tok.size() >= 2) {
-            /* A second mesh line replaces the first, which is what
-             * the compiler's own single-valued field does. */
-            pending_mesh = tok[1];
-            have_mesh = true;
         }
     }
 
@@ -343,11 +506,16 @@ Asset asset_load(const std::string &path)
                 }
             }
             uint32_t f[3];
+            Face face;
             for (int c = 0; c < 3; c++)
                 f[c] = base + (uint32_t)idx[c] - 1u;
             add_edge_(&seen, &a.edges, f[0], f[1]);
             add_edge_(&seen, &a.edges, f[1], f[2]);
             add_edge_(&seen, &a.edges, f[2], f[0]);
+            face.a = f[0];
+            face.b = f[1];
+            face.c = f[2];
+            a.faces.push_back(face);
             a.mesh_triangles++;
         }
     }

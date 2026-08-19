@@ -60,7 +60,7 @@ bool resolve_(void *so, const char *name, void *slot, std::string *err)
 }  /* namespace */
 
 ResimResult resimulate(const Model &model, const Episode &ep,
-                       const std::string &artifact_path)
+                       const std::string &artifact_path, uint32_t reference)
 {
     ResimResult r;
     Surface s;
@@ -163,7 +163,7 @@ ResimResult resimulate(const Model &model, const Episode &ep,
 
     std::vector<double> body_buf;
     if (s.bodies) {
-        int32_t need = s.bodies(env, K26RL_BODY_REF_ORIGIN, 0, 0);
+        int32_t need = s.bodies(env, reference, 0, 0);
         if (need > 0 && n && (uint32_t)need % (n * 6u) == 0) {
             body_buf.resize((size_t)need);
             r.body_count = (uint32_t)need / (n * 6u);
@@ -227,7 +227,7 @@ ResimResult resimulate(const Model &model, const Episode &ep,
         /* The world frame, taken at the same instant as the streams
          * above so a viewer can draw them together. */
         if (r.has_bodies &&
-            s.bodies(env, K26RL_BODY_REF_ORIGIN, &body_buf[0],
+            s.bodies(env, reference, &body_buf[0],
                      (uint32_t)body_buf.size()) > 0) {
             size_t base = (size_t)ep.env * r.body_count * 6;
             r.bodies.insert(r.bodies.end(), body_buf.begin() + base,

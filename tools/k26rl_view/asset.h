@@ -15,14 +15,17 @@
  * craft that flew.
  *
  * What is read here is a subset of what the compiler reads, and
- * deliberately so: the viewer needs the assembly's name, the meshes
- * its components reference in the order the compiler contributes
- * them, and the geometry those meshes hold. It does not need
- * colliders, actuators, ports, or mass properties, and does not
- * derive any. A subset reader can disagree with the compiler about
- * what an assembly references, and the consequence of disagreeing is
- * bounded by construction: the digest then fails to match and the
- * viewer refuses to draw. It cannot draw the wrong craft quietly.
+ * deliberately so: the viewer needs what it draws. That is the
+ * assembly's name, the meshes its components reference in the order
+ * the compiler contributes them and the geometry those meshes hold,
+ * and the shapes the scene view draws beside them, which are the
+ * collision primitives, the docking ports and the thrusters. It does
+ * not read masses, inertias, or momentum devices, and it derives no
+ * mass property of any kind. A subset reader can disagree with the
+ * compiler about what an assembly references, and the consequence of
+ * disagreeing is bounded by construction: the digest then fails to
+ * match and the viewer refuses to draw. It cannot draw the wrong
+ * craft quietly.
  */
 #ifndef K26RL_VIEW_ASSET_H
 #define K26RL_VIEW_ASSET_H
@@ -42,6 +45,68 @@ struct Edge {
     uint32_t b;
 };
 
+/* One triangle, in the winding the mesh declared it in. The edges
+ * above lose the winding, and a face normal has no sign without one,
+ * so the shaded depth cue reads its faces from here instead. */
+struct Face {
+    uint32_t a;
+    uint32_t b;
+    uint32_t c;
+};
+
+/* The three collision primitives version 1 of the assembly format
+ * carries. */
+enum ColliderKind {
+    COLLIDER_SPHERE  = 1,
+    COLLIDER_CAPSULE = 2,
+    COLLIDER_BOX     = 3
+};
+
+/* One collision primitive, in the assembly's body frame.
+ *
+ * A collider is declared inside a component and in that component's
+ * frame; the compiler bakes the component placement in before
+ * anything compares two components' colliders, and this does the same
+ * for the same reason, a scene drawing one craft rather than one
+ * component at a time. The bake is the placement this reader already
+ * applies to the mesh vertices beside it. */
+struct Collider {
+    ColliderKind kind;
+    double centre[3];     /* body frame */
+    double a[3];          /* capsule end A, body frame; box half extents */
+    double b[3];          /* capsule end B, body frame */
+    double radius;        /* sphere and capsule; unused for a box */
+    double rot[9];        /* body from component, row major */
+};
+
+/* One docking port, in the body frame, with what its named capture
+ * envelope publishes.
+ *
+ * The envelope's figures are read from the compiler's own envelope
+ * table rather than transcribed here: a port's mating plane is the
+ * envelope's diameter and not the author's, and a second copy of that
+ * number is a picture that disagrees with the program the moment
+ * either moves. */
+struct Port {
+    std::string name;
+    double at[3];
+    double axis[3];
+    double roll_ref[3];
+    std::string envelope;       /* the name the port declared */
+    bool has_envelope;          /* whether that name resolved */
+    double mating_diameter;     /* m */
+    double lateral_limit;       /* m, capture misalignment limit */
+    double pitchyaw_limit_deg;  /* deg, capture misalignment limit */
+};
+
+/* One thruster, in the body frame. */
+struct Thruster {
+    std::string name;
+    double at[3];
+    double dir[3];
+    double thrust;              /* N */
+};
+
 /* An assembly read from disk: what it is called, what its bytes
  * digest to, and the wireframe its meshes make.
  *
@@ -59,6 +124,10 @@ struct Asset {
     uint32_t mesh_triangles = 0;
     std::vector<double> vertices;       /* 3 per vertex, body frame */
     std::vector<Edge> edges;            /* unique, undirected */
+    std::vector<Face> faces;            /* as declared, winding kept */
+    std::vector<Collider> colliders;    /* body frame, placement baked */
+    std::vector<Port> ports;            /* body frame */
+    std::vector<Thruster> thrusters;    /* body frame */
 };
 
 /* Read an assembly and every mesh it references, recompute the

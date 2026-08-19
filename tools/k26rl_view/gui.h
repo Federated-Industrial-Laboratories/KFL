@@ -8,20 +8,23 @@
 #ifndef K26RL_VIEW_GUI_H
 #define K26RL_VIEW_GUI_H
 
-#include <string>
-
+#include "dump.h"
 #include "model.h"
 
 namespace k26rl_view {
 
-/* Open the replay window over an already-opened model. artifact is
- * the compiled environment enabling the re-simulation comparison,
- * the world frame and the attitude panel, or empty when none was
- * supplied; asset is the vehicle assembly the wireframe panel draws
- * once its digest matches the one the recording carries. Returns a
- * process exit status. */
-int run_gui(Model &model, const std::string &artifact,
-            const std::string &asset);
+/* Open the replay window over an already-opened model.
+ *
+ * The options are the same ones the headless dump takes, and
+ * deliberately: the artifact enables the re-simulation comparison,
+ * the world frame, the attitude panel and the scene's body poses; the
+ * asset enables the wireframe and the scene's geometry once its
+ * digest matches the one the recording carries; and the scene
+ * settings start the view where the command line asked for it, so a
+ * picture can be reproduced headlessly by repeating the arguments.
+ *
+ * Returns a process exit status. */
+int run_gui(Model &model, const DumpOptions &opt);
 
 }  /* namespace k26rl_view */
 
