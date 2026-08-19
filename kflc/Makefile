@@ -319,6 +319,67 @@ $(RL_ATT_TEST): tests/test_rl_attitude.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
 
+# The attitude advance subdivides its own interval by the rate it is
+# given, so how much arithmetic it performs is decided by the state it
+# is integrating. That is admissible only while the decision is a pure
+# function of that state: the same state must give the same count on
+# every run, in every process and on every host, or two runs of one
+# artifact stop agreeing bit for bit. This gate measures the decision
+# across repetition, history, arrival order, elapsed wall time and
+# separate processes; measures the rule against the bound it claims,
+# on both sides of it; and measures the divergence it was built to
+# remove.
+#
+# The rule is the only symbol in its own translation unit inside the
+# attitude library's archive, so a red control that defines that
+# symbol is linked in its place and the archive's copy is never
+# extracted. Each red control below is required to be rejected by the
+# arm named beside it, run on its own, so every arm is shown failing
+# on a defect it names rather than one arm covering for the rest. A
+# gate that only shows two runs agreeing proves nothing about a rule
+# nobody made impure.
+ATT_ARCHIVE      = ../libk26astro_att/libk26astro_att.a
+ATT_SUBSTEP_LIBS = $(ATT_ARCHIVE) \
+                   ../libk26astro_vehicle/libk26astro_vehicle.a \
+                   ../libk26astro_body/libk26astro_body.a \
+                   ../libk26astro_ephem/libk26astro_ephem.a \
+                   ../libk26astro_core/libk26astro_core.a \
+                   ../libk26m3d/libk26m3d.a
+ATT_SUBSTEP_INC  = -I../libk26astro_att/include \
+                   -I../libk26astro_body/include \
+                   -I../libk26astro_vehicle/include \
+                   -I../libk26astro_core/include \
+                   -I../libk26m3d/include
+ATT_SUBSTEP_TEST = tests/test_att_substep
+ATT_SUBSTEP_RED  = tests/test_att_substep_red1 tests/test_att_substep_red2 \
+                   tests/test_att_substep_red3 tests/test_att_substep_red4 \
+                   tests/test_att_substep_red5 tests/test_att_substep_red6 \
+                   tests/test_att_substep_red7
+# Each red control paired with the arm that must reject it: a clock
+# with elapsed time, a call counter with repetition, an error carried
+# between calls with history, an input from outside the state with the
+# process arm, a budget of work with arrival order, a rule that never
+# subdivides with both the bound and the tumble, and a rule that
+# subdivides ordinary flight with the arm that pins it unchanged.
+ATT_SUBSTEP_PAIRS = 1:elapsed 2:repetition 3:history 4:process 5:order \
+                    6:bound 6:tumble 7:unchanged
+
+$(ATT_SUBSTEP_TEST): tests/test_att_substep.c $(ATT_SUBSTEP_LIBS)
+	$(CC) $(CFLAGS) $(ATT_SUBSTEP_INC) -o $@ $< $(ATT_SUBSTEP_LIBS) -lm
+
+tests/test_att_substep_red%: tests/test_att_substep.c $(ATT_SUBSTEP_LIBS)
+	$(CC) $(CFLAGS) $(ATT_SUBSTEP_INC) -DATT_SUBSTEP_INJECT=$* -o $@ $< \
+	    $(ATT_SUBSTEP_LIBS) -lm
+
+# Built only where the attitude library's archive exists, on the same
+# terms as the drive gates above, so a tree without the sibling
+# libraries reports a skip instead of dying at link.
+ifneq ($(wildcard $(ATT_ARCHIVE)),)
+ATT_SUBSTEP_GATES = $(ATT_SUBSTEP_TEST) $(ATT_SUBSTEP_RED)
+else
+ATT_SUBSTEP_GATES =
+endif
+
 # The viewer's own gate drives the viewer binary, so the binary is
 # built here before the gate runs rather than left to whatever a
 # previous build put there: a gate run against a stale viewer measures
@@ -537,7 +598,7 @@ else
 RL_DRIVE_GATES =
 endif
 
-test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_PURITY_TEST) $(RL_DRIVE_GATES) $(RL_CTXKW_TEST) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
+test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_PURITY_TEST) $(RL_DRIVE_GATES) $(RL_CTXKW_TEST) $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(BIN)
 	./$(TEST_BIN) $(TEST_EXAMPLES)
 	./$(TEST_BIN) integration_tests/astro_w8.kfl
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
@@ -597,6 +658,21 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	     echo 'test_rl_31_baseline: SKIP (base commit not in history)'; \
 	 elif [ $$rc -ne 0 ]; then \
 	     exit $$rc; \
+	 fi
+	@if [ -z "$(ATT_SUBSTEP_GATES)" ]; then \
+	     echo 'test_att_substep: SKIP (attitude library not built)'; \
+	 else \
+	     ./$(ATT_SUBSTEP_TEST) || exit 1; \
+	     for pair in $(ATT_SUBSTEP_PAIRS); do \
+	         n=$${pair%%:*}; arm=$${pair##*:}; \
+	         if ./tests/test_att_substep_red$$n --arm=$$arm >/dev/null 2>&1; \
+	         then \
+	             echo "  red control $$n passed the $$arm arm, which is the"; \
+	             echo "  one thing it cannot do: the arm measures nothing"; \
+	             exit 1; \
+	         fi; \
+	         echo "  red control $$n rejected by the $$arm arm, as it must"; \
+	     done; \
 	 fi
 	@printf 'form PROBE\n    fn double f()\n        return 1.0\n    end\nend\n' \
 	     > /tmp/kflc_flags_probe.kfl; \
@@ -664,6 +740,7 @@ clean:
 	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \
 	      $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) \
 	      $(RL_ATT_TEST) \
+	      $(ATT_SUBSTEP_TEST) $(ATT_SUBSTEP_RED) \
 	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	      tests/bench_parse

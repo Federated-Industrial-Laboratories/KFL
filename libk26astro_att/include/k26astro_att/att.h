@@ -78,6 +78,74 @@ typedef enum {
  */
 const char *k26astro_att_status_str(K26AstroAttStatus s);
 
+/* ---- How finely an advance subdivides itself --------------------- *
+ *
+ * The angle, in radians, that the body may turn in one sub-interval
+ * of an advance, and the ceiling on how many sub-intervals one
+ * advance will spend. The angle is the accuracy knob and the ceiling
+ * is only what makes the loop terminate: a state whose rate would ask
+ * for more than the ceiling is one turning more than a hundred
+ * revolutions in a single interval, and the advance reports what it
+ * finds there rather than pricing the run for it.
+ *
+ * The angle was chosen by measurement, at the point where the answer
+ * stops moving. A ten tonne crew vehicle driven by a search over its
+ * own actuators, twelve thrusters and three wheels held at extremes
+ * for a fifteen minute horizon, reports a worst excursion, meaning
+ * the furthest an observation flies outside the range ordinary
+ * control reaches, that falls as this bound falls and then stops:
+ *
+ *     bound, rad    1.0    0.6    0.3    0.15   0.10   0.05   0.02
+ *     excursion     fault  7558   302    77     57     48.6   49.0
+ *
+ * At one radian the integration diverges outright. From a tenth of a
+ * radian down the excursion is converging on the answer the fine
+ * integrations agree about, and the last two columns agree to one
+ * part in a hundred, so 0.05 is where the integration stops inflating
+ * the state it reports and further subdivision buys nothing. The
+ * measurement is retained with the work rather than asserted here.
+ *
+ * A consequence worth stating plainly: a program whose craft turns
+ * faster than this bound in one of its declared sub-intervals
+ * integrates differently than it did before this rule existed, and
+ * that is the whole content of the change rather than a side effect
+ * of it. Below the bound nothing moves at all, bit for bit, which is
+ * gated.
+ */
+#define K26ASTRO_ATT_SUBSTEP_ANGLE 0.05
+#define K26ASTRO_ATT_SUBSTEP_MAX   4096
+
+/**
+ * @brief How many sub-intervals one advance of `dt` will spend.
+ * @param omega_body The body-frame angular velocity at the start of
+ *                   the interval, radians per second.
+ * @param dt         The interval, seconds.
+ * @return At least 1, at most K26ASTRO_ATT_SUBSTEP_MAX.
+ * @note  The count bounds the angle the body turns in one
+ *        sub-interval by K26ASTRO_ATT_SUBSTEP_ANGLE, which is what
+ *        keeps the explicit rate update from feeding itself. It is a
+ *        pure function of its two arguments: no clock, no elapsed
+ *        time, no budget of work already spent, no error carried
+ *        between calls, and no state of any kind held across them.
+ *        That is a requirement and not a style, because the count
+ *        decides the arithmetic the advance performs and two runs of
+ *        one artifact are required to agree bit for bit.
+ *
+ *        The interval is subdivided by the rate the advance is
+ *        entered with, so a rate a torque raises inside one interval
+ *        is resolved from the next interval onward. The angle that
+ *        can be missed is the rate change a torque produces over one
+ *        interval times that interval, which for the craft this
+ *        library is exercised on is four orders below the bound; a
+ *        vehicle light enough for one interval to matter is resolved
+ *        on the interval after it rather than never.
+ *
+ *        A non-finite rate returns 1: no subdivision resolves a state
+ *        that is not a number, and the advance reports it as
+ *        divergence instead.
+ */
+int k26astro_att_substep_count(K26V3 omega_body, double dt);
+
 /**
  * @brief Advance one vehicle's attitude by dt under a body-frame torque.
  * @param v      The vehicle; its Ext attitude state carries the

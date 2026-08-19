@@ -92,7 +92,21 @@ K26AstroAttStatus k26astro_att_step(K26AstroVehicle *v, K26V3 torque,
     if (!isfinite(n2) || n2 == 0.0) return K26ASTRO_ATT_E_DIVERGED;
     a->q = k26m3d_quat_norm(a->q);
 
-    k26astro_attitude_step_torque_ext(a, torque, dt);
+    /* The interval is subdivided by the rate it is entered with, so
+     * a body turning fast pays for the resolution it needs and a body
+     * in ordinary flight pays nothing: at a count of one this is the
+     * single step it always was, operation for operation. The last
+     * sub-interval takes the remainder rather than the quotient, so
+     * the durations sum to dt exactly however the division rounded,
+     * which is the same rule the caller applies to its own
+     * subdivision of a control period. */
+    int m = k26astro_att_substep_count(w0, dt);
+    double advanced = 0.0;
+    for (int k = 0; k < m; k++) {
+        double h = (k + 1 == m) ? (dt - advanced) : (dt / (double)m);
+        k26astro_attitude_step_torque_ext(a, torque, h);
+        advanced += h;
+    }
 
     if (!att_finite_quat_(a->q) || !att_finite_v3_(a->omega_body)) {
         /* Leave the state as it was, so the last honest orientation

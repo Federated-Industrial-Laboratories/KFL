@@ -216,58 +216,92 @@ K26AstroAttStatus k26astro_att_step_actuated(K26AstroVehicle *v,
     K26Quat q0 = a->q;
     K26V3   w0 = a->omega_body;
 
-    K26V3 wheel_torque, stored, mag_torque, thr_torque;
-    K26AstroAttStatus s = k26astro_att_wheels_step(act, dt, &wheel_torque,
-                                                   &stored);
-    if (s != K26ASTRO_ATT_OK) return s;
-    s = k26astro_att_torquers_torque(act, b_body, &mag_torque);
-    if (s != K26ASTRO_ATT_OK) return s;
-    s = k26astro_att_thrusters_wrench(act, NULL, &thr_torque);
-    if (s != K26ASTRO_ATT_OK) return s;
+    /* The interval is subdivided by the rate the advance is entered
+     * with, so a craft a policy has set tumbling resolves its own
+     * rotation and a craft in ordinary flight pays nothing for the
+     * provision: at a count of one what follows is the single step it
+     * always was, operation for operation. The commands are held
+     * across the sub-intervals, which is what they are held across
+     * the control period for, so the zero-order hold is unchanged.
+     * The last sub-interval takes the remainder rather than the
+     * quotient, so the durations sum to dt exactly however the
+     * division rounded. */
+    int m = k26astro_att_substep_count(w0, dt);
+    double advanced = 0.0;
+    K26AstroAttStatus s = K26ASTRO_ATT_OK;
 
-    /* The applied torque: everything external, plus the actuators
-     * that act on the body directly, plus the wheels' reaction, which
-     * is the negated rate of change of their stored momentum. */
-    K26V3 tau = {
-        extra.x + mag_torque.x + thr_torque.x + wheel_torque.x,
-        extra.y + mag_torque.y + thr_torque.y + wheel_torque.y,
-        extra.z + mag_torque.z + thr_torque.z + wheel_torque.z
-    };
+    for (int k = 0; k < m; k++) {
+        double sub_dt = (k + 1 == m) ? (dt - advanced) : (dt / (double)m);
+        K26V3 wk = a->omega_body;
 
-    /* The gyroscopic term carries the stored momentum with the
-     * body's own, which is the other half of what a wheel does. */
-    K26V3 Iw;
-    Iw.x = a->inertia.m[0][0] * w0.x + a->inertia.m[0][1] * w0.y
-         + a->inertia.m[0][2] * w0.z;
-    Iw.y = a->inertia.m[1][0] * w0.x + a->inertia.m[1][1] * w0.y
-         + a->inertia.m[1][2] * w0.z;
-    Iw.z = a->inertia.m[2][0] * w0.x + a->inertia.m[2][1] * w0.y
-         + a->inertia.m[2][2] * w0.z;
-    K26V3 total = { Iw.x + stored.x, Iw.y + stored.y, Iw.z + stored.z };
-    K26V3 gyro  = k26m3d_v3_cross(w0, total);
-    K26V3 rhs   = { tau.x - gyro.x, tau.y - gyro.y, tau.z - gyro.z };
+        K26V3 wheel_torque, stored, mag_torque, thr_torque;
+        s = k26astro_att_wheels_step(act, sub_dt, &wheel_torque, &stored);
+        if (s != K26ASTRO_ATT_OK) break;
+        s = k26astro_att_torquers_torque(act, b_body, &mag_torque);
+        if (s != K26ASTRO_ATT_OK) break;
+        s = k26astro_att_thrusters_wrench(act, NULL, &thr_torque);
+        if (s != K26ASTRO_ATT_OK) break;
 
-    K26V3 wdot;
-    wdot.x = a->inertia_inverse.m[0][0] * rhs.x
-           + a->inertia_inverse.m[0][1] * rhs.y
-           + a->inertia_inverse.m[0][2] * rhs.z;
-    wdot.y = a->inertia_inverse.m[1][0] * rhs.x
-           + a->inertia_inverse.m[1][1] * rhs.y
-           + a->inertia_inverse.m[1][2] * rhs.z;
-    wdot.z = a->inertia_inverse.m[2][0] * rhs.x
-           + a->inertia_inverse.m[2][1] * rhs.y
-           + a->inertia_inverse.m[2][2] * rhs.z;
+        /* The applied torque: everything external, plus the actuators
+         * that act on the body directly, plus the wheels' reaction,
+         * which is the negated rate of change of their stored
+         * momentum. */
+        K26V3 tau = {
+            extra.x + mag_torque.x + thr_torque.x + wheel_torque.x,
+            extra.y + mag_torque.y + thr_torque.y + wheel_torque.y,
+            extra.z + mag_torque.z + thr_torque.z + wheel_torque.z
+        };
 
-    a->omega_body.x = w0.x + wdot.x * dt;
-    a->omega_body.y = w0.y + wdot.y * dt;
-    a->omega_body.z = w0.z + wdot.z * dt;
+        /* The gyroscopic term carries the stored momentum with the
+         * body's own, which is the other half of what a wheel does. */
+        K26V3 Iw;
+        Iw.x = a->inertia.m[0][0] * wk.x + a->inertia.m[0][1] * wk.y
+             + a->inertia.m[0][2] * wk.z;
+        Iw.y = a->inertia.m[1][0] * wk.x + a->inertia.m[1][1] * wk.y
+             + a->inertia.m[1][2] * wk.z;
+        Iw.z = a->inertia.m[2][0] * wk.x + a->inertia.m[2][1] * wk.y
+             + a->inertia.m[2][2] * wk.z;
+        K26V3 total = { Iw.x + stored.x, Iw.y + stored.y, Iw.z + stored.z };
+        K26V3 gyro  = k26m3d_v3_cross(wk, total);
+        K26V3 rhs   = { tau.x - gyro.x, tau.y - gyro.y, tau.z - gyro.z };
 
-    K26V3 theta = {
-        a->omega_body.x * dt, a->omega_body.y * dt, a->omega_body.z * dt
-    };
-    a->q = k26m3d_quat_norm(
-        k26m3d_quat_mul(a->q, k26astro_quat_exp_half(theta)));
+        K26V3 wdot;
+        wdot.x = a->inertia_inverse.m[0][0] * rhs.x
+               + a->inertia_inverse.m[0][1] * rhs.y
+               + a->inertia_inverse.m[0][2] * rhs.z;
+        wdot.y = a->inertia_inverse.m[1][0] * rhs.x
+               + a->inertia_inverse.m[1][1] * rhs.y
+               + a->inertia_inverse.m[1][2] * rhs.z;
+        wdot.z = a->inertia_inverse.m[2][0] * rhs.x
+               + a->inertia_inverse.m[2][1] * rhs.y
+               + a->inertia_inverse.m[2][2] * rhs.z;
 
+        a->omega_body.x = wk.x + wdot.x * sub_dt;
+        a->omega_body.y = wk.y + wdot.y * sub_dt;
+        a->omega_body.z = wk.z + wdot.z * sub_dt;
+
+        K26V3 theta = {
+            a->omega_body.x * sub_dt,
+            a->omega_body.y * sub_dt,
+            a->omega_body.z * sub_dt
+        };
+        a->q = k26m3d_quat_norm(
+            k26m3d_quat_mul(a->q, k26astro_quat_exp_half(theta)));
+
+        advanced += sub_dt;
+    }
+
+    /* A sub-interval that failed leaves the state as the advance was
+     * entered, on the same terms a single step does: the transition
+     * did not happen, so nothing it would have moved has moved. The
+     * wheel momenta a completed sub-interval already changed are the
+     * caller's working copy, which a caller discards on a failed
+     * advance for exactly this reason. */
+    if (s != K26ASTRO_ATT_OK) {
+        a->q          = q0;
+        a->omega_body = w0;
+        return s;
+    }
     if (!isfinite(a->q.w) || !isfinite(a->q.x) || !isfinite(a->q.y) ||
         !isfinite(a->q.z) || !act_finite3_(a->omega_body)) {
         a->q          = q0;
