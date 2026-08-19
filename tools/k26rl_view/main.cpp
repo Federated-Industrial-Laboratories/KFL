@@ -91,6 +91,7 @@ static int usage_(const char *prog)
         "  --velocity-seconds S    seconds of velocity the vector shows\n"
         "  --axis-length M         length of the body axis lines\n"
         "  --thruster-scale S      metres of line per newton of thrust\n"
+        "  --spin-scale S          metres of line per radian per second\n"
         "  --shading               draw the shaded depth cue as well\n"
         "  --light X,Y,Z           view-space light direction for it\n"
         "\n"
@@ -327,6 +328,10 @@ int main(int argc, char **argv)
             if (!v)
                 return usage_(argv[0]);
             opt.scene.thruster_scale = strtod(argv[++i], 0);
+        } else if (strcmp(a, "--spin-scale") == 0) {
+            if (!v)
+                return usage_(argv[0]);
+            opt.scene.spin_scale = strtod(argv[++i], 0);
         } else if (strcmp(a, "--shading") == 0) {
             opt.scene.shading = true;
         } else if (strcmp(a, "--tap") == 0) {

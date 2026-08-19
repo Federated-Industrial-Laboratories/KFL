@@ -64,7 +64,7 @@ const double UP_DEGENERATE = 1.0e-6;
 
 const char *const ELEMENT_NAMES[ELEM_KIND_COUNT] = {
     "wireframe", "collider", "axes", "trajectory", "velocity", "port",
-    "thruster", "detection"
+    "thruster", "detection", "force", "spin"
 };
 
 K26V3 v3_(const double a[3]) { return k26m3d_v3(a[0], a[1], a[2]); }
@@ -339,7 +339,7 @@ Camera::Camera()
 
 SceneOptions::SceneOptions()
     : frame(SCENE_ORIGIN), shading(false), velocity_seconds(1.0),
-      axis_length(1.0), thruster_scale(0.0025)
+      axis_length(1.0), thruster_scale(0.0025), spin_scale(10.0)
 {
     for (int i = 0; i < ELEM_KIND_COUNT; i++)
         enabled[i] = true;
@@ -400,6 +400,7 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
     std::vector<double> pos(bodies * 3, 0.0);
     std::vector<double> vel(bodies * 3, 0.0);
     std::vector<K26Quat> att(bodies, k26m3d_quat_identity());
+    std::vector<K26V3> omg(bodies, k26m3d_v3(0.0, 0.0, 0.0));
     bool have_attitudes = false;
     K26M4 view, proj, pv;
     K26V3 eye, look, up;
@@ -459,11 +460,30 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
                                      in.resim->attitudes[k + 3],
                                      in.resim->attitudes[k]);
             }
+            if (k + 6 < in.resim->attitudes.size()) {
+                omg[b] = k26m3d_v3(in.resim->attitudes[k + 4],
+                                   in.resim->attitudes[k + 5],
+                                   in.resim->attitudes[k + 6]);
+            }
         }
         have_attitudes = true;
     } else if (sc.pose_from_artifact) {
         sc.message += "; this artifact publishes no attitude, so every "
                       "body is drawn unrotated";
+    }
+    /* The actuator drives at this step, when the artifact publishes
+     * them: what the step into this state applied, which is what a
+     * force line over this state should draw. */
+    const double *drv = 0;
+    uint32_t drv_n = 0;
+    if (in.resim && in.resim->ran && in.resim->has_actuators &&
+        step < in.resim->steps_compared) {
+        size_t base = (size_t)step * in.resim->actuator_count * 10;
+        if (base + (size_t)in.resim->actuator_count * 10 <=
+            in.resim->actuators.size()) {
+            drv = &in.resim->actuators[base];
+            drv_n = in.resim->actuator_count;
+        }
     }
 
     /* The camera, resolved in the reference frame and in binary64. */
@@ -705,6 +725,51 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
                 bl.line(at, k26m3d_v3_add(at,
                     k26m3d_v3_scale(d, t.thrust * o.thruster_scale)));
             }
+            finish_(&e, bl, &mv, &mvp, true);
+            sc.elements.push_back(e);
+        }
+        /* The imparted thrust, from the artifact's actuator getter:
+         * the force the step into this state applied, at the same
+         * scale the mounts use so the two read against each other.
+         * Only thruster records draw; a wheel or a torquer is a
+         * command about the centre of mass, not a force at a point,
+         * and a line would assert a geometry it does not have. */
+        if (o.enabled[ELEM_FORCE] && drv_n) {
+            SceneElement e;
+            Builder bl;
+            e.kind = ELEM_FORCE;
+            e.body = b;
+            e.name = scene_body_name(sp, b) + "/force";
+            e.note = "imparted thrust over the step into this state, "
+                     "at the declared metres of line per newton";
+            for (uint32_t i = 0; i < drv_n; i++) {
+                const double *d = drv + (size_t)i * 10;
+                if ((uint32_t)d[0] != b || d[1] != 2.0 || d[8] == 0.0)
+                    continue;
+                K26V3 at = k26m3d_v3(d[2], d[3], d[4]);
+                K26V3 dir = k26m3d_v3_norm(k26m3d_v3(d[5], d[6], d[7]));
+                bl.line(at, k26m3d_v3_add(at,
+                    k26m3d_v3_scale(dir, d[8] * o.thruster_scale)));
+            }
+            if (!bl.empty()) {
+                finish_(&e, bl, &mv, &mvp, true);
+                sc.elements.push_back(e);
+            }
+        }
+        /* The angular velocity, drawn in the body frame the getter
+         * reports it in: the rotation axis, its length the rate at
+         * the declared scale. */
+        if (o.enabled[ELEM_SPIN] && have_attitudes &&
+            k26m3d_v3_len(omg[b]) > 0.0) {
+            SceneElement e;
+            Builder bl;
+            e.kind = ELEM_SPIN;
+            e.body = b;
+            e.name = scene_body_name(sp, b) + "/spin";
+            e.note = "body-frame angular velocity, at the declared "
+                     "metres of line per radian per second";
+            bl.line(k26m3d_v3(0.0, 0.0, 0.0),
+                    k26m3d_v3_scale(omg[b], o.spin_scale));
             finish_(&e, bl, &mv, &mvp, true);
             sc.elements.push_back(e);
         }

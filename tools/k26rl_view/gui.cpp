@@ -45,6 +45,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <map>
 
@@ -52,6 +53,7 @@
 #include "resim.h"
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "backends/imgui_impl_glfw.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "implot.h"
@@ -91,6 +93,7 @@ struct Ui {
     SceneOptions scene_opt;
     ResimResult scene_resim;
     bool scene_resim_done;
+    bool scene_auto_resim;
     uint32_t scene_resim_ref;
     uint32_t scene_resim_ep;
     Scene scene;
@@ -849,6 +852,12 @@ void panel_wireframe_(Ui &ui, const Episode &ep)
                     scene_body_name(sp, ui.assets[k].body).c_str(),
                     as.mesh_vertices, (unsigned)as.edges.size(),
                     as.mesh_triangles);
+        if (as.edges.empty()) {
+            ImGui::TextWrapped("this assembly declares no mesh; the "
+                               "scene draws its colliders and its axes");
+            ImGui::PopID();
+            continue;
+        }
         snprintf(title, sizeof title, "%s, body frame", as.name.c_str());
         if (ImPlot::BeginPlot(title, ImVec2(-1, 320), ImPlotFlags_Equal)) {
             ImPlot::SetupAxes("x (m)", "y (m)");
@@ -1084,7 +1093,9 @@ void scene_colour_(ElementKind k, size_t segment, float *rgba)
         { 0.55f, 0.95f, 0.55f, 1.0f },   /* velocity */
         { 0.95f, 0.85f, 0.35f, 1.0f },   /* port */
         { 0.95f, 0.45f, 0.85f, 1.0f },   /* thruster */
-        { 0.98f, 0.98f, 0.55f, 1.0f }    /* detection line of sight */
+        { 0.98f, 0.98f, 0.55f, 1.0f },   /* detection line of sight */
+        { 1.00f, 0.30f, 0.10f, 1.0f },   /* imparted thrust */
+        { 0.60f, 0.45f, 0.95f, 1.0f }    /* angular velocity */
     };
     static const float axes[3][4] = {
         { 0.95f, 0.35f, 0.35f, 1.0f },
@@ -1293,7 +1304,15 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
                            "channels, not body position or attitude");
     } else if (!ui.scene_resim_done || ui.scene_resim_ref != o.frame ||
                ui.scene_resim_ep != ui.episode_index) {
-        if (ImGui::Button("reconstruct body poses in this frame")) {
+        /* An artifact named on the command line is a request to see
+         * the flight, so the first rebuild runs unasked; the button
+         * stays for every rebuild after a frame or episode change. */
+        bool go = ImGui::Button("reconstruct body poses in this frame");
+        if (ui.scene_auto_resim) {
+            go = true;
+            ui.scene_auto_resim = false;
+        }
+        if (go) {
             ui.scene_resim = resimulate(*ui.model, ep, ui.artifact, o.frame);
             ui.scene_resim_done = true;
             ui.scene_resim_ref = o.frame;
@@ -1396,10 +1415,18 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
             o.shading = on;
         if (o.shading)
             ImGui::TextWrapped("%s", SHADING_LABEL);
+        float ts = (float)o.thruster_scale;
+        float ss = (float)o.spin_scale;
         if (ImGui::DragFloat("velocity vector (s)", &vs, 0.1f, 0.0f, 1.0e6f))
             o.velocity_seconds = vs;
         if (ImGui::DragFloat("axis length (m)", &al, 0.05f, 0.0f, 1.0e6f))
             o.axis_length = al;
+        if (ImGui::DragFloat("thrust line (m per N)", &ts, 0.0005f, 0.0f,
+                             1.0e6f, "%.4f"))
+            o.thruster_scale = ts;
+        if (ImGui::DragFloat("spin line (m per rad/s)", &ss, 0.5f, 0.0f,
+                             1.0e6f))
+            o.spin_scale = ss;
     }
 
     if (!ui.asset_tried && !ui.asset_reqs.empty()) {
@@ -1636,6 +1663,7 @@ int run_gui(Model &model, const DumpOptions &opt)
      * can be reproduced headlessly by repeating the arguments. */
     ui.scene_opt = opt.scene;
     ui.scene_resim_done = false;
+    ui.scene_auto_resim = !ui.artifact.empty();
     ui.scene_resim_ref = SCENE_ORIGIN;
     ui.scene_resim_ep = 0;
     ui.scene_ready = false;
@@ -1680,6 +1708,13 @@ int run_gui(Model &model, const DumpOptions &opt)
         fprintf(stderr, "k26rl_view: %s\n", gl.error.c_str());
     }
 
+    /* The default arrangement is built on a first run, when there is
+     * no imgui.ini beside the tool to restore one from, and again on
+     * request. Its shape: view controls left, channel panels tabbed
+     * right, the timeline and the reward across the bottom, and the
+     * centre left open, because the centre is where the scene is. */
+    bool build_layout = access("imgui.ini", F_OK) != 0;
+
     while (!glfwWindowShouldClose(win)) {
         std::string err;
         const Episode *ep;
@@ -1696,8 +1731,48 @@ int run_gui(Model &model, const DumpOptions &opt)
          * that painted its own background would paint over the
          * picture the panels exist to annotate. Panels dock around it
          * or float over it, as they are dragged. */
-        ImGui::DockSpaceOverViewport(ImGui::GetMainViewport(),
-                                     ImGuiDockNodeFlags_PassthruCentralNode);
+        if (ImGui::BeginMainMenuBar()) {
+            if (ImGui::BeginMenu("view")) {
+                if (ImGui::MenuItem("reset layout"))
+                    build_layout = true;
+                ImGui::EndMenu();
+            }
+            ImGui::EndMainMenuBar();
+        }
+        {
+            ImGuiID root = ImGui::DockSpaceOverViewport(
+                ImGui::GetMainViewport(),
+                ImGuiDockNodeFlags_PassthruCentralNode);
+            if (build_layout) {
+                build_layout = false;
+                ImGui::DockBuilderRemoveNodeDockedWindows(root, true);
+                ImGui::DockBuilderRemoveNodeChildNodes(root);
+                ImGuiID centre = root;
+                ImGuiID left = ImGui::DockBuilderSplitNode(
+                    centre, ImGuiDir_Left, 0.24f, NULL, &centre);
+                ImGuiID right = ImGui::DockBuilderSplitNode(
+                    centre, ImGuiDir_Right, 0.30f, NULL, &centre);
+                ImGuiID bottom = ImGui::DockBuilderSplitNode(
+                    centre, ImGuiDir_Down, 0.28f, NULL, &centre);
+                ImGuiID left_low = ImGui::DockBuilderSplitNode(
+                    left, ImGuiDir_Down, 0.40f, NULL, &left);
+                ImGuiID bot_right = ImGui::DockBuilderSplitNode(
+                    bottom, ImGuiDir_Right, 0.35f, NULL, &bottom);
+                ImGui::DockBuilderDockWindow("Scene", left);
+                ImGui::DockBuilderDockWindow("Run and episode", left_low);
+                ImGui::DockBuilderDockWindow("Re-simulation", left_low);
+                ImGui::DockBuilderDockWindow("Live", left_low);
+                ImGui::DockBuilderDockWindow("Observations", right);
+                ImGui::DockBuilderDockWindow("Actions", right);
+                ImGui::DockBuilderDockWindow("Attitude", right);
+                ImGui::DockBuilderDockWindow("Trajectory", right);
+                ImGui::DockBuilderDockWindow("World frame", right);
+                ImGui::DockBuilderDockWindow("Wireframe", right);
+                ImGui::DockBuilderDockWindow("Timeline", bottom);
+                ImGui::DockBuilderDockWindow("Reward", bot_right);
+                ImGui::DockBuilderFinish(root);
+            }
+        }
 
         {
             /* The viewport the model projects with is the framebuffer

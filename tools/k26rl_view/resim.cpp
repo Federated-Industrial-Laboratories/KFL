@@ -44,6 +44,9 @@ struct Surface {
     /* Added at ABI 1.4, probed on the same terms: an artifact
      * without it re-simulates and loses the attitude panel alone. */
     int32_t (*attitudes)(const K26RlEnv *, double *, uint32_t);
+    /* Added at ABI 1.6, probed on the same terms: an artifact
+     * without it re-simulates and loses the actuator drives alone. */
+    int32_t (*actuators)(const K26RlEnv *, double *, uint32_t);
 };
 
 bool resolve_(void *so, const char *name, void *slot, std::string *err)
@@ -122,6 +125,9 @@ ResimResult resimulate(const Model &model, const Episode &ep,
         p = dlsym(so, "k26rl_env_attitudes");
         if (p)
             memcpy(&s.attitudes, &p, sizeof p);
+        p = dlsym(so, "k26rl_env_actuators");
+        if (p)
+            memcpy(&s.actuators, &p, sizeof p);
     }
 
     r.abi_version = s.abi_version();
@@ -205,6 +211,17 @@ ResimResult resimulate(const Model &model, const Episode &ep,
                 r.has_attitudes = true;
         }
     }
+    /* The actuator getter sizes itself the same way. Its count is
+     * its own: actuators, not bodies. */
+    std::vector<double> drv_buf;
+    if (s.actuators) {
+        int32_t need = s.actuators(env, 0, 0);
+        if (need > 0 && n && (uint32_t)need % (n * 10u) == 0) {
+            drv_buf.resize((size_t)need);
+            r.actuator_count = (uint32_t)need / (n * 10u);
+            r.has_actuators = true;
+        }
+    }
 
     r.ran = true;
     r.equal = true;
@@ -261,6 +278,16 @@ ResimResult resimulate(const Model &model, const Episode &ep,
             size_t base = (size_t)ep.env * r.body_count * 7;
             r.attitudes.insert(r.attitudes.end(), att_buf.begin() + base,
                                att_buf.begin() + base + r.body_count * 7);
+        }
+        /* The actuator drives, at that same instant: what the step
+         * just taken applied, which is the figure a force line over
+         * this step should draw. */
+        if (r.has_actuators &&
+            s.actuators(env, &drv_buf[0], (uint32_t)drv_buf.size()) > 0) {
+            size_t base = (size_t)ep.env * r.actuator_count * 10;
+            r.actuators.insert(r.actuators.end(), drv_buf.begin() + base,
+                               drv_buf.begin() + base +
+                                   r.actuator_count * 10);
         }
         r.steps_compared++;
 

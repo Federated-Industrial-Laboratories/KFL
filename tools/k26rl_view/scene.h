@@ -53,6 +53,8 @@ enum ElementKind {
     ELEM_PORT,            /* port geometry and its capture envelope */
     ELEM_THRUSTER,        /* thruster positions and directions */
     ELEM_DETECTION,       /* a detection's line of sight, while it detects */
+    ELEM_FORCE,           /* imparted thrust, from the actuator getter */
+    ELEM_SPIN,            /* the body's angular velocity, at a scale */
     ELEM_KIND_COUNT
 };
 
@@ -123,6 +125,7 @@ struct SceneOptions {
     double velocity_seconds;        /* the velocity vector's declared scale */
     double axis_length;             /* the body axes' declared length, m */
     double thruster_scale;          /* metres of line per newton */
+    double spin_scale;              /* metres of line per radian per second */
 
     SceneOptions();
 };

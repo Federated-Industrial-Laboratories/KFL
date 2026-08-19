@@ -833,6 +833,8 @@ static void dump_scene_header_(FILE *f, Model &m, const DumpOptions &o)
     hx(f, s.axis_length);
     fprintf(f, " ");
     hx(f, s.thruster_scale);
+    fprintf(f, " ");
+    hx(f, s.spin_scale);
     fprintf(f, "\n");
 }
 
