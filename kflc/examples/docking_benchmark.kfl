@@ -17,12 +17,14 @@
 #
 # Free drift does not dock. Closing along the direction of travel
 # drives a radial acceleration of twice the mean motion times the
-# closing rate, which over the approach carries the chaser about 1.6 m
-# off the docking axis, sixteen times the envelope's lateral
-# misalignment limit. The lateral thrusters are what answer that, and
-# the wheels are what answer the initial angular rate: left alone, the
-# rate the reset draws turns the vehicle by far more than the four
-# degrees the envelope admits.
+# closing rate, and what that builds up depends on how long the
+# approach lasts: flown at the envelope's own 0.07 m/sec the approach
+# takes about 140 seconds and carries the chaser about 1.6 m off the
+# docking axis, sixteen times the envelope's lateral misalignment
+# limit. The lateral thrusters are what answer that, and the wheels
+# are what answer the initial angular rate: left alone, the rate the
+# reset draws turns the vehicle by far more than the four degrees the
+# envelope admits.
 #
 # The four outcomes are the ones the task has, and each is an ordinary
 # ending rather than a special case. Docked: the contact satisfied
@@ -31,6 +33,44 @@
 # that channel clear. Horizon: the declared horizon truncates. Fault:
 # the physics could not advance honestly, which nothing in this task
 # introduces.
+#
+# The reward is written against the same envelope the outcome is
+# judged by, because a reward and a success condition that disagree
+# are settled in the reward's favour: the reward is collected every
+# step and the condition once. Its largest term tracks a closing rate
+# rather than paying for one. The rate it asks for is the middle of
+# the envelope's closing-rate band, 0.075 m/sec, plus four hundredths
+# of the range still to run, so it is 0.475 m/sec at the hold point
+# and falls onto the middle of the band exactly as the interfaces
+# meet, which takes about 50 seconds rather than 140. The reference
+# is proportional to the range with no ceiling on purpose. A term
+# that simply paid for closing speed asks for the opposite, since
+# more speed is always worth more and it goes on asking at the mating
+# plane; and a reference held below a ceiling has a flat stretch that
+# a policy can sit on without ever having to brake.
+#
+# The remaining terms are the four alignment residuals and their four
+# rates, each weighted by the reciprocal of its own limit in that
+# envelope, so that each costs about one unit of reward per step at
+# that limit and the angular rates carry the largest coefficients.
+# That is what makes the reward and the capture test agree about
+# which residual is the binding one. A small range term keeps
+# standing off from ever being free.
+#
+# The closing-rate term is heavier than that same rule would make it,
+# and deliberately so. It is the only term carrying a schedule, and
+# following a schedule costs steps: a craft that ignores it and
+# arrives early pays every one of the other terms fewer times. The
+# rate term therefore has to be worth more than the steps that
+# patience adds, and at one unit per step it is not. Weighted at one
+# unit per step it buys an arrival at the rate the approach began
+# with; weighted as it is here it buys the braking.
+#
+# The capture is paid once and the shaping is paid every step, so the
+# capture has to be worth the steps a careful approach spends: it is
+# worth several times what a whole approach accumulates. Nothing flat
+# is paid at the end. A constant added to every ending is added to
+# the capture as well, and separates none of them.
 #
 # The vehicles are `examples/assets/crew_vehicle_10t.k26asm` and
 # `examples/assets/space_station.k26asm`, and every number in both
@@ -100,8 +140,8 @@ fn world docking_world
     observe contact of chaser as touch
 
     objective
-        reward 0.1 * dock_v_axial - 0.02 * dock_axial - 2.0 * dock_lateral - 5.0 * dock_pitchyaw - 5.0 * dock_roll - 0.5 * dock_v_lateral - 20.0 * dock_v_pitchyaw - 20.0 * dock_v_roll
-        terminal 100.0 * dock_captured - 20.0
+        reward -150.0 * abs(dock_v_axial - (0.075 + 0.04 * dock_axial)) - 0.05 * dock_axial - 10.0 * dock_lateral - 14.0 * dock_pitchyaw - 14.0 * dock_roll - 25.0 * dock_v_lateral - 280.0 * dock_v_pitchyaw - 280.0 * dock_v_roll
+        terminal 2000.0 * dock_captured
     end
 end
 end
