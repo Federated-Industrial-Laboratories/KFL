@@ -1,0 +1,224 @@
+# servicing_vehicle.k26asm - a ten-tonne class servicer that spends
+# what it thrusts.
+#
+# WHAT THIS IS. A modelled article. Nothing in this file is cited and
+# nothing here is a claim about any vehicle: the dry mass, the tank,
+# the hull dimensions, the thruster layout and the specific impulse
+# are all chosen, and each is disclosed as chosen on its own
+# provenance line. What the article is for is a control task in which
+# propellant runs out, which needs a craft whose mass falls as it
+# manoeuvres.
+#
+# WHY IT IS NOT THE CREW VEHICLE BESIDE IT. `crew_vehicle_10t.k26asm`
+# carries mass and inertia figures taken from a published standard,
+# and its hull geometry was solved so that this compiler's own closed
+# forms return exactly those figures. Splitting its ten tonnes into a
+# dry hull and a tank would move the derived tensor off the figures it
+# reproduces, because a tank has its own placement and its own
+# moments, and the standard publishes no propellant mass to split off
+# in any case. So the tanked article is a separate asset and the cited
+# one is left alone.
+#
+# WHAT IS KEPT FROM IT, AND WHY. The size class, the actuator count
+# and the actuator authority. The hull is a capsule 1.93 m in radius
+# with its segment endpoints 1.79 m either side of the centre, which
+# is within a quarter of a per cent of the other article's dimensions,
+# and the dry mass and the tank together make ten tonnes. What this
+# compiler then derives was measured back out of a compiled world, by
+# commanding a known wheel torque and reading the angular acceleration
+# it produced: 17020, 42031 and 42039 kg m^2 about the three body
+# axes, against 17000, 42000 and 42000 for the other article. Every
+# one is within 0.1 per cent, so the control problem is the one
+# already characterised: the same twelve body-fixed thrusters at the
+# same 400 N, the same three reaction wheels at the same 5 N m, the
+# same total mass, and therefore the same accelerations, the same
+# rates and the same integration margin. The dimensions themselves are
+# chosen rather than solved for anything, and the agreement is what
+# the choice was checked against rather than what it was derived from.
+#
+# WHAT THE TANK HOLDS, AND WHAT IT IS NOT. Thirty kilogrammes on a
+# ten tonne vehicle, which is three parts in a thousand. That is not a
+# spacecraft's mission load and is not offered as one. It is the
+# allocation for one close manoeuvre, and the article is written that
+# way on purpose: proximity operations are cheap in velocity change
+# and expensive in waste, so a load sized for a whole mission would
+# never bind on a single approach and would leave the model
+# unexercised. What binds here is one manoeuvre's share.
+#
+# The tank sits 1.2 m aft of the hull's centre, so the vehicle's
+# centre of mass travels as it empties: at a full tank it is
+# 1.2 * m / (dry + m) aft of the hull's centre, which is 3.6 mm, and
+# at an empty one it is at the hull's centre. Thruster torques are
+# taken about the centre of mass, so they travel with it, by about two
+# parts in a thousand against moment arms near two metres. The inertia
+# travels with it too, and by how much is checkable: the tank's own
+# share of the transverse moment about the body origin is
+# 30 * 1.2^2 + (1/3) * 30 * (0.16^2 + 0.16^2), which is 43.71 kg m^2,
+# and measured across a burn to depletion the transverse moment falls
+# by 0.104 per cent of 42031, which is 43.6. The effect is real and
+# correctly signed and it is small at this fill, because a propellant
+# load of three parts in a thousand cannot move a centre of mass far.
+# The offset is here because a centred tank would have hidden the
+# effect entirely rather than showing it small.
+#
+# The tank is a box of half extent 0.16 m, which is 0.0328 cubic
+# metres and puts thirty kilogrammes at about 915 kg per cubic metre,
+# the order of a storable propellant. Its placement and its shape are
+# an arrangement rather than a measurement: tank geometry is not
+# published for the vehicles this article stands in for, so this
+# component carries the modelled status and the compiler reports it.
+#
+# THE SPECIFIC IMPULSE. 300 s on every thruster, which is the right
+# order for a storable bipropellant thruster and is not read from a
+# source. Every thruster carries the same figure because this article
+# has one kind of thruster; a craft whose main engine and attitude
+# thrusters differ is what the calibration article next to this one is
+# for, and giving them a spread here would make the published delta-v
+# channel depend on which thruster the policy last had propellant for
+# rather than on the budget it has.
+#
+# At 300 s a thruster at full throttle spends 400 / (300 * 9.80665),
+# which is 0.13598 kg/s, and twelve of them at once spend 1.632 kg/s.
+# A full tank therefore lasts 18.4 s if a policy opens everything, and
+# the whole load is worth 300 * 9.80665 * ln(10000 / 9970), which is
+# 8.84 m/s of velocity change.
+
+assembly servicing_vehicle
+    frame x_to_port
+
+    provenance mass "chosen: a 9970 kg dry hull and a 30 kg manoeuvre allocation, making a ten tonne class servicer; no article is claimed and no figure is cited" modelled
+    provenance hull_geometry "chosen: a capsule of 1.93 m radius and 1.79 m half length, placing this article in the same size class as the crew vehicle asset beside it" modelled
+    provenance inertia "computed: this compiler's closed forms over the declared components at the declared fill" computed
+    provenance tank "a chosen tank placement, held aft of the hull's centre so the centre of mass travels as it empties; this is an arrangement and not a measurement" modelled
+    provenance isp "a chosen figure of the right order for a storable bipropellant thruster; no source is cited because no article is claimed" modelled
+    provenance thrust "chosen to match the actuator authority of the crew vehicle asset beside it, so that the control problem is the one already characterised" modelled
+    provenance thruster_layout "two rings at the cylinder ends in opposed pairs, chosen and not derived; no thruster position is published for any vehicle this article stands in for" modelled
+    provenance wheel_limits "computed: the torque that nulls 0.2 deg/s about the transverse axis in a minute at this article's transverse inertia, that torque held for 100 s, and 1000 rad/s when saturated" computed
+    provenance wheel_friction "a chosen friction model of the right order for a wheel of this size; no figure for the viscous, Coulomb or dead-rate terms is published or derived here" modelled
+
+    component hull
+        mass 9970.0
+        at 0.0 0.0 0.0
+        collider capsule -1.79 0.0 0.0 1.79 0.0 0.0 1.93
+    end
+
+    component tank
+        mass 30.0
+        at -1.2 0.0 0.0
+        collider box 0.16 0.16 0.16
+        propellant
+    end
+
+    # Two thrusters push the vehicle toward its forward end and two
+    # push it away. Each pair sits on opposite sides of the hull at
+    # one ring, so firing a pair together is a force through the
+    # centre of mass and firing one alone is a pitch or yaw command.
+    thruster close_yp
+        at -1.79 1.93 0.0
+        dir 1.0 0.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster close_ym
+        at -1.79 -1.93 0.0
+        dir 1.0 0.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster brake_yp
+        at 1.79 1.93 0.0
+        dir -1.0 0.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster brake_ym
+        at 1.79 -1.93 0.0
+        dir -1.0 0.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+
+    # Eight lateral thrusters, four to a plane. Each group of two is
+    # one forward and one aft of the centre of mass with the same
+    # direction, so the pair translates and either one alone turns.
+    thruster lat_yp_fwd
+        at 1.79 -1.93 0.0
+        dir 0.0 1.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster lat_yp_aft
+        at -1.79 -1.93 0.0
+        dir 0.0 1.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster lat_ym_fwd
+        at 1.79 1.93 0.0
+        dir 0.0 -1.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster lat_ym_aft
+        at -1.79 1.93 0.0
+        dir 0.0 -1.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster lat_zp_fwd
+        at 1.79 0.0 -1.93
+        dir 0.0 0.0 1.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster lat_zp_aft
+        at -1.79 0.0 -1.93
+        dir 0.0 0.0 1.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster lat_zm_fwd
+        at 1.79 0.0 1.93
+        dir 0.0 0.0 -1.0
+        thrust 400.0
+        isp_s 300.0
+    end
+    thruster lat_zm_aft
+        at -1.79 0.0 1.93
+        dir 0.0 0.0 -1.0
+        thrust 400.0
+        isp_s 300.0
+    end
+
+    # Three reaction wheels, which spend nothing. A policy that turns
+    # the vehicle on its wheels rather than on opposed thrusters keeps
+    # its propellant for the approach, and that is one of the things
+    # this article is here to let a controller discover.
+    wheel wheel_x
+        axis 1.0 0.0 0.0
+        spin_inertia 0.5
+        max_momentum 500.0
+        max_torque 5.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+    wheel wheel_y
+        axis 0.0 1.0 0.0
+        spin_inertia 0.5
+        max_momentum 500.0
+        max_torque 5.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+    wheel wheel_z
+        axis 0.0 0.0 1.0
+        spin_inertia 0.5
+        max_momentum 500.0
+        max_torque 5.0
+        viscous 1.0e-5
+        coulomb 2.0e-4
+        dead_rate 1.0e-3
+    end
+end
