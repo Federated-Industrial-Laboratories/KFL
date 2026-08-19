@@ -448,6 +448,28 @@ $(RL_POLICY_LATENCY_TEST): tests/test_rl_policy_latency.c \
 	    -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=free \
 	    ../libk26rl/libk26rl.a -lm
 
+# The wall-clock driver: a compiled world advanced against a monotonic
+# clock at a declared rate, where an action carries a deadline. The gate
+# holds the replay property that stands in for bit-identical
+# determinism here, what a missed deadline does, the decision-latency
+# distribution, and the stepping path's own determinism with the
+# wall-clock driver in the same binary. It builds the command-line
+# driver too, so the gate that reports a run and the program a person
+# runs are the same code rather than two copies of it.
+RL_REALTIME_TEST = tests/test_rl_realtime
+.PHONY: rtdrive
+rtdrive:
+	@$(MAKE) -s -C ../tools/k26rl_rtdrive
+
+$(RL_REALTIME_TEST): tests/test_rl_realtime.c $(RL_GATE_DEPS) \
+                     ../libk26rl/include/k26rl_env.h \
+                     ../libk26rl/include/k26rl_episode.h \
+                     ../libk26rl/include/k26rl_policy.h \
+                     ../libk26rl/include/k26rl_realtime.h \
+                     ../libk26rl/libk26rl.a rtdrive
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm
+
 RL_TAP_TEST = tests/test_rl_tap
 $(RL_TAP_TEST): tests/test_rl_tap.c $(RL_GATE_DEPS) \
                 ../libk26rl/include/k26rl_env.h \
@@ -610,7 +632,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -640,7 +662,8 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	          $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) \
 	          $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) \
-	          $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST); do \
+	          $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) \
+	          $(RL_REALTIME_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \
 	         echo "$$(basename $$t): SKIP (stack libraries not built)"; \
 	         continue; \
@@ -761,5 +784,6 @@ clean:
 	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
 	      $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) \
+	      $(RL_REALTIME_TEST) \
 	      tests/bench_parse
 	rm -rf bin
