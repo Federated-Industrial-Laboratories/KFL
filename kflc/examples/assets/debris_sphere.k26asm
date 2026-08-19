@@ -1,0 +1,55 @@
+# debris_sphere.k26asm - a derelict object, not a spacecraft.
+#
+# This asset exists to be in the way. An environment that asks a craft
+# to fly past things needs things to fly past, and this is one: a
+# passive body with mass and a collider, no actuators, no docking
+# interface, and no instruments. Nothing here is cited. Every number
+# is chosen and every provenance line says so.
+#
+# WHY A SPHERE. A body that carries no attitude control holds
+# whatever orientation it was given, and an environment that places
+# several of these gives them all the same one, because an orientation
+# is not among the state components a placement draw can reach. A box
+# or a capsule would therefore lay the whole field out on one set of
+# axes, and a craft could learn the grain of the field instead of
+# learning to look at it. A sphere has no orientation to share, so the
+# field it makes has no grain.
+#
+# WHAT THE NUMBERS STAND FOR. Three metres of radius and two tonnes.
+# The class in mind is a spent upper stage or a comparable derelict:
+# the Centaur stage is about 3.05 m across and about 2250 kg dry, so
+# an object of this bulk and this mass is of that order without being
+# a model of any particular one. The implied bulk density is 17.7
+# kg/m^3, which is what a mostly empty structure has, and the mass is
+# derived by the compiler from the collider under the assumption of a
+# uniform solid, so the derived inertia is that of a uniform sphere
+# and not that of a shell. It overstates nothing a task here reads.
+#
+# WHAT THE MASS DOES AND DOES NOT DO. It sets a gravitational
+# parameter of 1.3e-7 m^3/s^2, which at a hundred metres accelerates
+# another body by 1.3e-11 m/s^2 and moves nothing over any episode
+# length this format is used at. It also sets what a contact does to
+# the pair, and an environment that ends its episode on contact never
+# advances past that moment. So the figure is honest rather than
+# load bearing, and it is stated here so that an environment which
+# does read it knows what it is reading.
+#
+# The frame declaration names the only body frame the format defines.
+# Its x axis is the longitudinal axis toward a docking interface, and
+# this article has neither, so the declaration fixes an axis that
+# nothing here distinguishes. A sphere is invariant under every
+# rotation, so no derived quantity depends on the choice.
+
+assembly debris_sphere
+    frame x_to_port
+
+    provenance mass "two tonnes, chosen for the derelict class this stands for; the Centaur upper stage is about 2250 kg dry, which is the order this sits at and not a figure it reproduces" modelled
+    provenance hull_geometry "one sphere of 3.0 m radius, chosen so that a field of these objects is a hazard at the scale of the approach it obstructs; no source publishes a shape for a generic derelict" modelled
+    provenance inertia "computed from the modelled mass and sphere at uniform density" computed
+
+    component hull
+        mass 2000.0
+        at 0.0 0.0 0.0
+        collider sphere 0.0 0.0 0.0 3.0
+    end
+end
