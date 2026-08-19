@@ -86,6 +86,7 @@ typedef struct {
     double dir[3];           /* thruster */
     char   capture[KFLC_ASM_NAME_MAX];   /* port capture envelope name */
     double thrust;           /* thruster, N */
+    double isp_s;            /* thruster, specific impulse, seconds */
     double spin_inertia;     /* wheel, kg m^2 */
     double max_momentum;     /* wheel, N m s */
     double max_torque;       /* wheel, N m */
@@ -112,6 +113,10 @@ typedef struct {
     int    has_rot;
     char   mesh[KFLC_ASM_PATH_MAX];
     int    has_mesh;
+    /* 1 when the component holds propellant, which makes its declared
+     * mass a full tank rather than a fixed one. It is the only
+     * component whose mass varies, and at most one may say so. */
+    int    propellant;
     int    line;
     /* Derived, in the component's own frame. */
     double volume;           /* m^3 */
@@ -162,6 +167,33 @@ typedef struct {
     double  inertia[6];                 /* about the assembly centre of
                                            mass: xx, yy, zz, xy, xz, yz */
     uint8_t digest[KFLC_ASM_DIGEST];
+    /* ---- Mass properties as a function of the propellant left ----
+     *
+     * The totals above are the assembly with a full tank. A vehicle
+     * that burns needs them at any fill, and the derivation is linear
+     * in a component's mass once its geometry is fixed: the tank's
+     * centroid and its inertia per unit of mass do not move as it
+     * empties, so the whole family follows from the structure's
+     * aggregates and the tank's unit quantities.
+     *
+     * At propellant mass p the vehicle's mass is struct_mass + p, its
+     * centre of mass is (struct_moment + p * prop_centroid) over that,
+     * and its inertia about the body-frame origin is struct_inertia +
+     * p * prop_inertia; the parallel-axis term from the origin to the
+     * moving centre of mass takes the tensor to where the rotational
+     * equation wants it. Holding the origin form rather than the
+     * centre-of-mass form is what makes the sum linear at all, since
+     * the centre of mass itself is a function of the fill.
+     *
+     * `propellant` is -1 for an assembly that declares no tank, whose
+     * thrusters spend nothing and whose mass never changes. */
+    int     propellant;                 /* component index, or -1 */
+    double  prop_capacity;              /* kg, a full tank */
+    double  struct_mass;                /* kg, everything but the tank */
+    double  struct_moment[3];           /* kg m, about the body origin */
+    double  struct_inertia[6];          /* kg m^2, about the origin */
+    double  prop_centroid[3];           /* m, body frame */
+    double  prop_inertia[6];            /* m^2, about the origin, per kg */
     /* One sphere about the body-frame origin covering every collider,
      * which is what a broadphase tests before it tests primitives.
      * Derived here because this is where the collider geometry and

@@ -187,12 +187,22 @@ typedef struct {
 } K26AstroAttTorquer;
 
 /* A thruster. Position and direction are in the body frame; the
- * command is a throttle in the closed unit interval. */
+ * command is a throttle in the closed unit interval.
+ *
+ * The specific impulse is what prices the thrust: exhaust speed in
+ * the rocket frame is isp_s times standard gravity, 9.80665 m/s^2
+ * exactly, and mass flow is thrust over that speed. It is carried per
+ * thruster rather than per vehicle because a craft's attitude
+ * thrusters and its main engine differ, often by a factor of two, and
+ * one figure averaged over both would misprice every manoeuvre. This
+ * field is read by whatever propagates the vehicle's mass; nothing in
+ * this library's own wrench or advance depends on it. */
 typedef struct {
     K26V3  at;
     K26V3  dir;
     double max_thrust;     /* N */
     double command;        /* throttle, 0 to 1 */
+    double isp_s;          /* specific impulse, seconds */
 } K26AstroAttThruster;
 
 /* One vehicle's actuators, and the centre of mass their torques are

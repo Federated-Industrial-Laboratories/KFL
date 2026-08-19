@@ -70,6 +70,17 @@
 # Plume impingement is not modelled. The braking thrusters point their
 # exhaust along the docking axis, which a real vehicle avoids by
 # canting them; canting them here would be an invented angle.
+#
+# NO PROPELLANT COMPONENT, AND WHY. The mass and the inertia here are
+# the standard's cited figures for the article, and the hull geometry
+# was solved to reproduce them exactly. Splitting the ten tonnes into
+# a dry hull and a tank would move the derived tensor away from the
+# cited one, since a tank has its own placement and its own moments,
+# and the article publishes no propellant mass to split off in any
+# case. So this asset declares no tank: its thrusters spend nothing
+# and its mass does not fall as it manoeuvres, which the compiler
+# reports when the asset is read. What it is for is the docking
+# geometry, and a docking approach costs a few metres per second.
 
 assembly crew_vehicle_10t
     frame x_to_port

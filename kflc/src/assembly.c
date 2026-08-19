@@ -624,6 +624,7 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
     KflcAssembly *a = (KflcAssembly *)kflc_arena_alloc(arena, sizeof *a);
     if (!a) return NULL;
     memset(a, 0, sizeof *a);
+    a->propellant = -1;
     snprintf(a->path, sizeof a->path, "%s", resolved);
 
     /* The identity digest opens with the assembly's own bytes; each
@@ -820,6 +821,24 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
                 comp->has_mesh = 1;
                 continue;
             }
+            if (strcmp(kw, "propellant") == 0) {
+                /* A marker and not a quantity: the component's own
+                 * `mass` is the capacity, so the tank is declared
+                 * where every other mass is and there is still one
+                 * declaration site per number. */
+                ASM_NEED(1);
+                for (int k = 0; k < a->n_components; k++) {
+                    if (&a->components[k] != comp &&
+                        a->components[k].propellant) {
+                        ASM_ERR("%s: component `%s` holds propellant and "
+                                "so does `%s`; a vehicle here carries one "
+                                "propellant quantity", resolved, comp->name,
+                                a->components[k].name);
+                    }
+                }
+                comp->propellant = 1;
+                continue;
+            }
             if (strcmp(kw, "collider") == 0) {
                 if (a->n_colliders >= KFLC_ASM_MAX_COLL) {
                     ASM_ERR("%s: more than %d colliders", resolved,
@@ -892,6 +911,9 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
             if (strcmp(kw, "dir") == 0) { ASM_VEC3(1, feat->dir); continue; }
             if (strcmp(kw, "thrust") == 0) {
                 ASM_NEED(2); ASM_NUM(1, &feat->thrust); continue;
+            }
+            if (strcmp(kw, "isp_s") == 0) {
+                ASM_NEED(2); ASM_NUM(1, &feat->isp_s); continue;
             }
             ASM_ERR("%s: `%s` is not a thruster key", resolved, kw);
         }
@@ -1026,6 +1048,23 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
                     "%s: thruster `%s`: `thrust` is %.17g; a maximum is a "
                     "positive quantity, and a negative one inverts the "
                     "throttle clamp", resolved, f->name, f->thrust);
+                return NULL;
+            }
+            /* What a thruster spends is its thrust divided by its
+             * exhaust speed, and the exhaust speed is the specific
+             * impulse times standard gravity. A figure that cannot
+             * name a speed is refused outright; an absent one is
+             * reported below, where it is known whether the assembly
+             * has a tank for the thruster to draw on. No default is
+             * ever supplied, because a default specific impulse would
+             * price every manoeuvre in the program at a number nobody
+             * wrote. */
+            if (f->isp_s < 0.0) {
+                kflc_diag_errorf(diag, f->line,
+                    "%s: thruster `%s`: `isp_s` is %.17g; a specific "
+                    "impulse is a positive number of seconds, and it is "
+                    "what fixes the exhaust speed the propellant leaves "
+                    "at", resolved, f->name, f->isp_s);
                 return NULL;
             }
             continue;
@@ -1186,6 +1225,52 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
         for (int q = 0; q < 3; q++) d[q] = wcom[i][q] - a->com[q];
         asm_shift_(c->mass, d, a->inertia);
     }
+
+    /* ---- The same totals as a function of the propellant left ----- *
+     *
+     * The totals above are this assembly with a full tank. A vehicle
+     * that burns needs them at every fill in between, and the closed
+     * forms are linear in a component's mass once its geometry is
+     * fixed: a tank's centroid and its inertia per unit of mass do
+     * not move as it empties, so what varies is one scalar.
+     *
+     * The tensors summed here are about the body-frame origin rather
+     * than about the centre of mass, which is what makes the sum
+     * linear at all: the centre of mass is itself a function of the
+     * fill, so a tensor taken about it cannot be added up once and
+     * scaled afterwards. The consumer shifts from the origin to
+     * wherever the centre of mass has moved to.
+     *
+     * An assembly with no tank leaves `propellant` at -1 and every
+     * aggregate below at the whole assembly, so a consumer needs no
+     * second path for the vehicles that do not burn.
+     */
+    for (int i = 0; i < a->n_components; i++) {
+        if (a->components[i].propellant) a->propellant = i;
+    }
+    for (int i = 0; i < a->n_components; i++) {
+        KflcAsmComponent *c = &a->components[i];
+        double R[3][3], rot[6];
+        asm_quat_matrix_(c->rot, R);
+        if (i == a->propellant) {
+            double unit[6];
+            for (int q = 0; q < 6; q++) unit[q] = c->inertia[q] / c->mass;
+            asm_rot_tensor_(R, unit, rot);
+            a->prop_capacity = c->mass;
+            for (int q = 0; q < 3; q++) a->prop_centroid[q] = wcom[i][q];
+            for (int q = 0; q < 6; q++) a->prop_inertia[q] = rot[q];
+            asm_shift_(1.0, wcom[i], a->prop_inertia);
+            continue;
+        }
+        asm_rot_tensor_(R, c->inertia, rot);
+        a->struct_mass += c->mass;
+        for (int q = 0; q < 3; q++) {
+            a->struct_moment[q] += c->mass * wcom[i][q];
+        }
+        for (int q = 0; q < 6; q++) a->struct_inertia[q] += rot[q];
+        asm_shift_(c->mass, wcom[i], a->struct_inertia);
+    }
+
     /* ---- Colliders into the body frame, and the bound ------------ *
      *
      * The derivation above walked components one at a time and each
@@ -1320,6 +1405,45 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
     }
 
     k26rl_digest_final(&dig, a->digest);
+
+    /* An assembly may declare thrusters and no tank, and one that
+     * does is reported rather than refused. Its thrusters fire on
+     * nothing: no propellant is spent, the vehicle's mass and inertia
+     * do not change as it manoeuvres, and no throttle it is ever
+     * given will run it dry. That is a usable calibration article and
+     * it is not a craft, so the difference is stated where the asset
+     * is read rather than left for a reader to infer from the absence
+     * of a component.
+     *
+     * An assembly that does have a tank is held to the other rule: a
+     * thruster there draws on real propellant, and one that declares
+     * no specific impulse names no exhaust speed and so no rate to
+     * draw it at. That is refused rather than reported, because the
+     * tank beside it says the author meant the thrust to cost
+     * something. */
+    {
+        int n_thrusters = 0;
+        for (int i = 0; i < a->n_features; i++) {
+            const KflcAsmFeature *f = &a->features[i];
+            if (f->kind != KFLC_FEAT_THRUSTER) continue;
+            n_thrusters++;
+            if (f->isp_s > 0.0 || a->propellant < 0) continue;
+            kflc_diag_errorf(diag, f->line,
+                "%s: thruster `%s` declares no `isp_s`, and this "
+                "assembly holds propellant in component `%s`; a "
+                "thruster that draws on a tank has to say at what "
+                "specific impulse, in seconds, since that is what "
+                "fixes the exhaust speed and so the rate it spends",
+                resolved, f->name, a->components[a->propellant].name);
+            return NULL;
+        }
+        if (n_thrusters > 0 && a->propellant < 0) {
+            kflc_diag_warnf(diag, line,
+                "%s: %d thruster(s) and no component holding propellant, "
+                "so nothing is spent and this vehicle's mass never falls "
+                "as it manoeuvres", resolved, n_thrusters);
+        }
+    }
 
     /* The compiler reports what an asset says it has not checked. The
      * rule that a shipped asset carries none of these is the asset

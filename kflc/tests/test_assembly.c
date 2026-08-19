@@ -782,6 +782,207 @@ static void shipped_assets_(void)
     }
 }
 
+
+/* ---- Propellant, and the mass properties at a fill ------------------- *
+ *
+ * A component marked `propellant` is the only one whose mass varies,
+ * and its declared mass is a full tank. The reader keeps, beside the
+ * full-tank totals, the aggregates a consumer needs to derive the same
+ * three quantities at any lesser fill: the structure's mass, its first
+ * moment about the body-frame origin and its inertia there, and the
+ * tank's centroid and its inertia per unit of mass.
+ *
+ * The arms below evaluate those aggregates at the declared capacity
+ * and require them to reproduce the reader's own full-tank totals.
+ * That is the property everything downstream rests on, and it is not
+ * a tautology: the two are computed from different sums, one about the
+ * centre of mass and one about the origin, and a wrong sign or a
+ * missed component in either shows up here.
+ */
+static void props_at_(const KflcAssembly *a, double prop_kg,
+                      double *mass, double com[3], double inertia[6])
+{
+    double m = a->struct_mass + prop_kg;
+    double c[3], i6[6];
+    for (int q = 0; q < 3; q++) {
+        c[q] = (a->struct_moment[q] + prop_kg * a->prop_centroid[q]) / m;
+    }
+    for (int q = 0; q < 6; q++) {
+        i6[q] = a->struct_inertia[q] + prop_kg * a->prop_inertia[q];
+    }
+    double dd = c[0] * c[0] + c[1] * c[1] + c[2] * c[2];
+    i6[0] -= m * (dd - c[0] * c[0]);
+    i6[1] -= m * (dd - c[1] * c[1]);
+    i6[2] -= m * (dd - c[2] * c[2]);
+    i6[3] -= m * (-c[0] * c[1]);
+    i6[4] -= m * (-c[0] * c[2]);
+    i6[5] -= m * (-c[1] * c[2]);
+    *mass = m;
+    for (int q = 0; q < 3; q++) com[q] = c[q];
+    for (int q = 0; q < 6; q++) inertia[q] = i6[q];
+}
+
+static void propellant_gates_(void)
+{
+#define PROP_ASM(BODY) \
+        "assembly prop_check\n" \
+        "    frame x_to_port\n" \
+        "    provenance mass \"calibration shape\" computed\n" \
+        "    component hull\n" \
+        "        mass 1000.0\n" \
+        "        at 0 0 0\n" \
+        "        collider box 1.0 0.5 0.5\n" \
+        "    end\n" \
+        BODY \
+        "end\n"
+
+    /* A tank offset from the structure, so the derived centre of mass
+     * is somewhere a centred tank could not put it. */
+    write_file_(WORK "/prop_ok.k26asm", PROP_ASM(
+        "    component tank\n"
+        "        mass 400.0\n"
+        "        at 0.0 1.25 0.0\n"
+        "        rotate 0.92387953251128674 0.38268343236508978 0 0\n"
+        "        collider box 0.4 0.3 0.2\n"
+        "        propellant\n"
+        "    end\n"
+        "    thruster main\n"
+        "        at -2.0 0.0 0.0\n"
+        "        dir 1.0 0.0 0.0\n"
+        "        thrust 500.0\n"
+        "        isp_s 320.0\n"
+        "    end\n"));
+    {
+        KflcArena *arena = NULL;
+        KflcDiag   diag;
+        KflcAssembly *a = load_(WORK "/prop_ok.k26asm", &arena, &diag,
+                                stderr);
+        ASSERT(a != NULL && diag.errors == 0);
+        ASSERT(a->propellant == 1);
+        ASSERT(a->prop_capacity == 400.0);
+        ASSERT(a->struct_mass == 1000.0);
+        ASSERT(a->mass == 1400.0);
+        ASSERT(a->features[0].isp_s == 320.0);
+        /* The tank is not on the structure's centre, so the assembly's
+         * is not on the origin either: an arm that could not tell a
+         * moving centre of mass from a fixed one would pass on a
+         * centred tank and fail here. */
+        ASSERT(fabs(a->com[1] - 400.0 * 1.25 / 1400.0) < 1.0e-12);
+
+        double m, c[3], i6[6];
+        props_at_(a, a->prop_capacity, &m, c, i6);
+        ASSERT(fabs(m - a->mass) < 1.0e-9);
+        for (int q = 0; q < 3; q++) ASSERT(fabs(c[q] - a->com[q]) < 1.0e-12);
+        for (int q = 0; q < 6; q++) {
+            double scale = fabs(a->inertia[q]) > 1.0 ? fabs(a->inertia[q])
+                                                     : 1.0;
+            ASSERT(fabs(i6[q] - a->inertia[q]) / scale < 1.0e-12);
+        }
+        printf("  a tank's aggregates reproduce the full-tank totals: "
+               "mass %.10g, centre of mass y %.10g, Ixx %.10g\n",
+               m, c[1], i6[0]);
+        n_pass++;
+
+        /* And an empty tank is the structure alone, in all three. The
+         * rotation on the tank is there so that a tensor rotated the
+         * wrong way about could not cancel out of both readings. */
+        props_at_(a, 0.0, &m, c, i6);
+        ASSERT(m == 1000.0);
+        for (int q = 0; q < 3; q++) ASSERT(fabs(c[q]) < 1.0e-12);
+        /* The hull alone: a box of half extents 1, 0.5, 0.5 at unit
+         * density scaled to a thousand kilograms, about its own
+         * centre, which is the closed form and not this reader's. */
+        ASSERT(fabs(i6[0] - 1000.0 * (0.25 + 0.25) / 3.0) < 1.0e-9);
+        ASSERT(fabs(i6[1] - 1000.0 * (1.0 + 0.25) / 3.0) < 1.0e-9);
+        ASSERT(fabs(i6[2] - 1000.0 * (1.0 + 0.25) / 3.0) < 1.0e-9);
+        for (int q = 3; q < 6; q++) ASSERT(fabs(i6[q]) < 1.0e-9);
+        printf("  an empty tank leaves the structure alone: mass %.10g, "
+               "Ixx %.10g, Iyy %.10g\n", m, i6[0], i6[1]);
+        n_pass++;
+        kflc_arena_release(arena);
+    }
+
+    write_file_(WORK "/prop_two.k26asm", PROP_ASM(
+        "    component tank_a\n"
+        "        mass 400.0\n"
+        "        at 0.0 1.25 0.0\n"
+        "        collider box 0.4 0.3 0.2\n"
+        "        propellant\n"
+        "    end\n"
+        "    component tank_b\n"
+        "        mass 100.0\n"
+        "        at 0.0 -1.25 0.0\n"
+        "        collider box 0.4 0.3 0.2\n"
+        "        propellant\n"
+        "    end\n"));
+    expect_refused_("two_propellant_tanks", WORK "/prop_two.k26asm",
+                    "carries one propellant quantity");
+
+    write_file_(WORK "/prop_noisp.k26asm", PROP_ASM(
+        "    component tank\n"
+        "        mass 400.0\n"
+        "        at 0.0 1.25 0.0\n"
+        "        collider box 0.4 0.3 0.2\n"
+        "        propellant\n"
+        "    end\n"
+        "    thruster main\n"
+        "        at -2.0 0.0 0.0\n"
+        "        dir 1.0 0.0 0.0\n"
+        "        thrust 500.0\n"
+        "    end\n"));
+    expect_refused_("thruster_without_isp", WORK "/prop_noisp.k26asm",
+                    "declares no `isp_s`");
+
+    write_file_(WORK "/prop_negisp.k26asm", PROP_ASM(
+        "    thruster main\n"
+        "        at -2.0 0.0 0.0\n"
+        "        dir 1.0 0.0 0.0\n"
+        "        thrust 500.0\n"
+        "        isp_s -320.0\n"
+        "    end\n"));
+    expect_refused_("negative_isp", WORK "/prop_negisp.k26asm",
+                    "a specific impulse is a positive number of seconds");
+
+    /* A thruster with no specific impulse and no tank to draw on is
+     * reported and not refused: it is a calibration article whose
+     * thrust costs nothing, which is a thing an asset may be and not a
+     * thing it may be silently. The pairing with the refusal above is
+     * what makes this a rule rather than an omission. */
+    write_file_(WORK "/prop_free.k26asm", PROP_ASM(
+        "    thruster main\n"
+        "        at -2.0 0.0 0.0\n"
+        "        dir 1.0 0.0 0.0\n"
+        "        thrust 500.0\n"
+        "    end\n"));
+    {
+        FILE *errs = fopen(WORK "/free.log", "w+");
+        ASSERT(errs != NULL);
+        KflcArena *arena = NULL;
+        KflcDiag   diag;
+        KflcAssembly *a = load_(WORK "/prop_free.k26asm", &arena, &diag,
+                                errs);
+        fflush(errs);
+        long sz = ftell(errs);
+        rewind(errs);
+        char *buf = (char *)malloc((size_t)sz + 1);
+        ASSERT(buf != NULL);
+        size_t got = sz > 0 ? fread(buf, 1, (size_t)sz, errs) : 0;
+        buf[got] = '\0';
+        fclose(errs);
+        ASSERT(a != NULL && diag.errors == 0);
+        ASSERT(a->propellant == -1);
+        ASSERT(a->prop_capacity == 0.0);
+        ASSERT(a->struct_mass == a->mass);
+        ASSERT(strstr(buf, "no component holding propellant") != NULL);
+        free(buf);
+        kflc_arena_release(arena);
+        printf("  a thruster with no tank to draw on is reported and "
+               "accepted: OK\n");
+        n_pass++;
+    }
+#undef PROP_ASM
+}
+
 int main(void)
 {
     if (mkdir(WORK, 0755) != 0 && access(WORK, W_OK) != 0) {
@@ -1333,6 +1534,7 @@ int main(void)
             "        at 1.05 0.92 0.0\n"
             "        dir 0.0 -1.0 0.0\n"
             "        thrust 400.0\n"
+            "        isp_s 220.0\n"
             "    end\n");
         write_file_(WORK "/act_ok.k26asm", good);
         {
@@ -1624,6 +1826,7 @@ int main(void)
             "        at 1.05 0.92 0\n"
             "        dir 0 -1 0\n"
             "        thrust 400.0\n"
+            "        isp_s 220.0\n"
             "    end\n"
             "    wheel pitch\n"
             "        axis 0 1 0\n"
@@ -1671,6 +1874,7 @@ int main(void)
         ASSERT(a->mass == 1000.0);
         ASSERT(a->features[1].kind == KFLC_FEAT_THRUSTER);
         ASSERT(a->features[1].thrust == 400.0);
+        ASSERT(a->features[1].isp_s == 220.0);
         ASSERT(a->features[2].kind == KFLC_FEAT_WHEEL);
         ASSERT(a->features[2].max_momentum == 15.0);
         ASSERT(a->features[3].kind == KFLC_FEAT_TORQUER);
@@ -1738,6 +1942,9 @@ int main(void)
         n_pass++;
         kflc_arena_release(arena);
     }
+
+    printf("propellant:\n");
+    propellant_gates_();
 
     printf("assets shipped in this tree:\n");
     shipped_assets_();
