@@ -52,9 +52,10 @@ extern "C" {
 /* Major in the high 16 bits, minor in the low 16. Minor 1 adds
  * k26rl_env_tap, minor 2 adds k26rl_env_bodies, minor 3 adds the two
  * assembly tags, minor 4 adds k26rl_env_attitudes and the subdivision
- * tag, minor 5 adds the channel-source tag; a consumer checks major
- * equality and minor at-least. */
-#define K26RL_ABI_VERSION ((uint32_t)0x00010005u)
+ * tag, minor 5 adds the channel-source tag, minor 6 adds
+ * k26rl_env_actuators; a consumer checks major equality and minor
+ * at-least. */
+#define K26RL_ABI_VERSION ((uint32_t)0x00010006u)
 
 /* One handle owns n_envs worlds; layout is private to the artifact. */
 typedef struct K26RlEnv K26RlEnv;
@@ -415,6 +416,55 @@ int32_t      k26rl_env_bodies(const K26RlEnv *env, uint32_t reference,
  * nothing advances is refused at compile time rather than published
  * as a body that is spinning and static at once. */
 int32_t      k26rl_env_attitudes(const K26RlEnv *env, double *out,
+                                 uint32_t capacity);
+
+/* The actuator set as the latest step drove it, env-major, ten
+ * doubles per actuator: the index of the body the actuator's vehicle
+ * binds (the declaration order the body getter and the
+ * K26RL_TAG_BODY_NAME tags use), the kind (0 reaction wheel,
+ * 1 magnetorquer, 2 thruster), the mounting position's three
+ * body-frame components in metres, the axis or thrust direction's
+ * three body-frame components (a unit vector), the applied
+ * magnitude, and the full-scale magnitude. A wheel or a magnetorquer
+ * reports a zero mounting position: its torque acts about the centre
+ * of mass, not at a point.
+ *
+ * The applied magnitude is exact for a thruster and a bound for the
+ * others. A thruster reports newtons: the throttle clamped to the
+ * unit interval, scaled by the fraction of the latest sub-interval
+ * its tank had propellant for, times its maximum thrust, which is
+ * the force the dynamics imparted along the reported direction, and
+ * a dry tank reports zero because zero is what it imparted. A wheel
+ * reports its commanded torque clamped to its limit in newton
+ * metres; the torque the body felt can be smaller still, because
+ * saturation and friction act inside the wheel's own advance and the
+ * advance reports their sum for the set, not a per-wheel figure. A
+ * magnetorquer reports its dipole clamped to its limit in ampere
+ * square metres, whose torque depends on the field it sits in. The
+ * kind field is what tells a consumer which reading it holds.
+ *
+ * Actuators appear in a fixed order: every wheel, then every
+ * magnetorquer, then every thruster, each set in declaration order,
+ * the same order on every call on the same artifact. Sizing follows
+ * k26rl_env_spec's convention, as the other getters do: the required
+ * element count, n_envs * actuator_count * 10, is returned as a
+ * positive value, the buffer is written when `capacity` is at least
+ * that, nothing is written and the requirement is still returned
+ * when it is smaller, so a capacity of 0 sizes it, and an error is
+ * the negated K26RlStatus. A program declaring no actuators returns
+ * 0.
+ *
+ * A pure read with the standing properties of this surface's
+ * getters: callable wherever they are and as often, allocating
+ * nothing, performing no I/O, never retaining a caller buffer, and
+ * bitwise deterministic under the same contract.
+ *
+ * After a faulted step it reports what the attempted advance was
+ * driving, which the next boundary reset discards, for the body
+ * getter's reason: it reads live actuator state, not a cached
+ * output. After a reset and before the first step it reports zero
+ * commands, which is what a reset leaves. */
+int32_t      k26rl_env_actuators(const K26RlEnv *env, double *out,
                                  uint32_t capacity);
 
 #ifdef __cplusplus
