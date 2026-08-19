@@ -730,7 +730,21 @@ int main(void)
     {
         /* With no actuators commanded the two paths must agree
          * bitwise, so adding the actuator machinery changes nothing
-         * for a body that does not use it. */
+         * for a body that does not use it.
+         *
+         * This is also the arm that holds the two entries to one
+         * integrator. They advance the same equation of motion, the
+         * actuated one carrying the wheels' stored momentum in the
+         * gyroscopic term and nothing else, and they reach it through
+         * the same function in the body library. If one of them ever
+         * grew a copy of that equation again, the copy would only
+         * have to differ in its last bit for this arm to say so, and
+         * the far likelier way for it to differ, a copy left at an
+         * order the other one has moved past, would show up here as a
+         * gross disagreement. Both entries are driven over a rate the
+         * advance subdivides and a rate it does not, and under an
+         * external torque as well as none, because a copy could agree
+         * on one of those and not the others. */
         K26AstroBody b1, b2;
         K26AstroVehicle *v1 = make_vehicle_(120.0, 300.0, 380.0, &b1);
         K26AstroVehicle *v2 = make_vehicle_(120.0, 300.0, 380.0, &b2);
@@ -759,8 +773,60 @@ int main(void)
         ASSERT(b1.attitude.y == b2.attitude.y);
         ASSERT(b1.attitude.z == b2.attitude.z);
         ASSERT(b1.omega.x == b2.omega.x);
+        ASSERT(b1.omega.y == b2.omega.y);
+        ASSERT(b1.omega.z == b2.omega.z);
         printf("  an uncommanded actuator set leaves the advance "
                "bitwise unchanged: OK\n");
+        n_pass++;
+        k26astro_vehicle_destroy(v1);
+        k26astro_vehicle_destroy(v2);
+    }
+    {
+        /* The same claim over a rate the advance subdivides, under an
+         * external torque, so the subdivided path and the torqued
+         * path are both covered rather than the quiescent one alone.
+         * Just under six radians a second at a tenth of a second is
+         * twelve sub-intervals per advance. */
+        K26AstroBody b1, b2;
+        K26AstroVehicle *v1 = make_vehicle_(120.0, 300.0, 380.0, &b1);
+        K26AstroVehicle *v2 = make_vehicle_(120.0, 300.0, 380.0, &b2);
+        set_body_rate_(v1, 5.0, 3.0, -1.0);
+        set_body_rate_(v2, 5.0, 3.0, -1.0);
+        K26AstroAttWheel w;
+        memset(&w, 0, sizeof w);
+        w.axis = k26m3d_v3(0.0, 0.0, 1.0);
+        w.spin_inertia = 0.05;
+        w.max_momentum = 10.0;
+        w.max_torque = 1.0;
+        K26AstroAttActuators act;
+        memset(&act, 0, sizeof act);
+        act.wheels = &w;
+        act.n_wheels = 1;
+
+        K26V3 torque = k26m3d_v3(4.0, -9.0, 6.0);
+        int m = k26astro_att_substep_count(b1.omega, 0.1);
+        for (int i = 0; i < 200; i++) {
+            ASSERT(k26astro_att_step_actuated(v1, &act, torque, ZERO,
+                                              0.1) == K26ASTRO_ATT_OK);
+            ASSERT(k26astro_att_step(v2, torque, 0.1) == K26ASTRO_ATT_OK);
+        }
+        printf("  subdivided and torqued (%d sub-intervals at entry): "
+               "quat (%.17g) against (%.17g)\n", m,
+               b1.attitude.z, b2.attitude.z);
+        ASSERT(m > 1);
+        ASSERT(b1.attitude.w == b2.attitude.w);
+        ASSERT(b1.attitude.x == b2.attitude.x);
+        ASSERT(b1.attitude.y == b2.attitude.y);
+        ASSERT(b1.attitude.z == b2.attitude.z);
+        ASSERT(b1.omega.x == b2.omega.x);
+        ASSERT(b1.omega.y == b2.omega.y);
+        ASSERT(b1.omega.z == b2.omega.z);
+        /* The wheel must have stayed at rest, or the two would be
+         * advancing different physics and agreeing for the wrong
+         * reason. */
+        ASSERT(w.momentum == 0.0);
+        printf("  the two entries advance one equation through one "
+               "integrator, subdivided and under torque: OK\n");
         n_pass++;
         k26astro_vehicle_destroy(v1);
         k26astro_vehicle_destroy(v2);

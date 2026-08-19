@@ -33,9 +33,10 @@
  *      the quaternion and rate bits a driven tumble leaves behind,
  *      because a pure count consumed impurely would still be a defect.
  *   8. The defect itself, as a conserved quantity: a torque-free
- *      body turning three radians in a declared interval keeps the
- *      magnitude of its world-frame angular momentum, which without
- *      the subdivision it loses to the number line entirely.
+ *      body turning a radian in a declared interval keeps the
+ *      magnitude of its world-frame angular momentum to one part in
+ *      a million, which without the subdivision it holds to two
+ *      parts in a hundred.
  *   7. The rule is the rule it claims to be: below the declared angle
  *      the count is one and the advance is bit for bit the single
  *      step it was before it subdivided anything, and above it the
@@ -609,21 +610,28 @@ static void arm_unchanged_below_(void)
  * of its angular momentum in the world frame exactly, whatever it is
  * doing in its own frame, so anything that happens to it here is the
  * integrator's. At a rate whose declared interval turns the body a
- * whole radian at a time, the explicit rate update feeds itself: the
- * error in the rate raises the rate, which raises the error, and a
- * hundred and sixty intervals later the state is not a number. That
- * is what the red control that never subdivides does on this exact
- * fixture, and it is the failure the rule exists to remove.
+ * whole radian at a time, the step is asked to follow a curve it has
+ * only sampled a small part of, and the error it makes is the error
+ * it then integrates.
  *
- * What the subdivision delivers is stated as measured and not as
- * hoped. Holding the angle turned in one sub-interval inside the
- * declared bound removes the runaway: the horizon completes and the
- * momentum stays bounded. It does not make a first-order step
- * unconditionally stable, because no step size does; the residual
- * drift below falls in proportion to the sub-interval and not to
- * zero, and closing that is a higher-order step rather than a finer
- * one. The bound here is therefore stated with the rate, the interval
- * and the horizon it holds at, as every bound in this library is.
+ * What the bound below is worth stating carefully. When this arm was
+ * written the step underneath was first order, and at this rate it
+ * did not merely lose accuracy without the subdivision: it left the
+ * number line by the hundred and sixtieth interval, and the arm's
+ * bound of five was chosen to sit between that and the 2.8 the rule
+ * delivered. The step is higher order now, and on this fixture it
+ * survives the horizon whether it is subdivided or not, so a bound of
+ * five would pass on a rule that never subdivided anything and this
+ * arm would have stopped measuring what it names.
+ *
+ * The bound is therefore set where the two now separate, which is
+ * still four decades apart. Measured on this exact fixture, ten
+ * radians a second at a tenth of a second over three hundred
+ * intervals: 6.7283e-09 with the rule and 2.5049e-02 without it, a
+ * factor of three and a half million. The bound of one part in a
+ * million leaves the rule a hundred and fifty times its measured
+ * worst and rejects the control that never subdivides by four
+ * decades, which is what a red control is for.
  */
 static void arm_tumble_(void)
 {
@@ -664,17 +672,18 @@ static void arm_tumble_(void)
         double drift = fabs(v3len_(h) - h0_mag) / h0_mag;
         if (drift > worst) worst = drift;
     }
-    /* Measured at 2.8 with this rule in place, against a state that
-     * is not a number by interval 160 without it. */
-    if (!(worst < 5.0)) {
+    /* Measured at 6.7283e-09 with this rule in place, against
+     * 2.5049e-02 without it. */
+    if (!(worst < 1.0e-6)) {
         REJECT("tumble",
                "angular momentum drifted by %.4e over %d intervals at "
-               "%.2f rad/s, past the stated 5", worst, n, v3len_(w0));
+               "%.2f rad/s, past the stated one part in a million",
+               worst, n, v3len_(w0));
     }
     k26astro_vehicle_destroy(v);
     printf("  tumble: %.2f rad/s at dt %.2f is %d sub-intervals, and "
            "angular momentum holds to %.4e over %d intervals, where "
-           "one sub-interval leaves the number line: OK\n",
+           "one sub-interval holds it to 2.5e-02: OK\n",
            v3len_(w0), dt, m0, worst, n);
     n_pass_++;
 }

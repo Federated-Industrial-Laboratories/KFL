@@ -17,9 +17,16 @@
  *   3. A constant body-frame torque about a principal axis reproduces
  *      the analytic angular acceleration.
  *   4. Order. Every bound above is reported with the step count it
- *      holds at, and the error falls linearly in the step size, which
- *      is what a first-order method gives. An error that did not fall
- *      at that rate would be a defect wearing a tolerance's clothes.
+ *      holds at, and the error falls at the rate the advance's own
+ *      scheme gives. The rate advances by a fourth-order Runge-Kutta
+ *      step and the orientation by an exponential map of a rotation
+ *      vector built from that step's stages, which is third order,
+ *      so the world-frame momentum measured below, being a vector and
+ *      therefore carrying the orientation error as well as the rate
+ *      error, falls by eight when the step halves. An error that did
+ *      not fall at that rate would be a defect wearing a tolerance's
+ *      clothes, and a ratio of two would say the first-order step
+ *      this advance was built on had come back.
  *   5. Contract. A null vehicle, a negative interval, a singular
  *      inertia tensor, and a non-finite torque are each reported;
  *      a diverged step leaves the last finite state in place; and a
@@ -177,11 +184,18 @@ int main(void)
          * an interval. Measured here, repeatably across runs but not
          * necessarily across hosts or library versions, since these
          * are accumulated rounding and the orientation update calls
-         * the platform's sine and cosine: 2.758e-16 rad after four
-         * turns in 2000 steps and 7.169e-15 in 4000. The growth with
-         * step count is more operations accumulating rounding, not
-         * truncation, so no ratio is printed: there is no convergence
-         * rate here to report. */
+         * the platform's sine and cosine: 3.140e-16 rad after four
+         * turns in 2000 steps and 1.284e-16 in 4000. There is no
+         * ratio here and none is printed, because there is no
+         * truncation to converge: the numbers are rounding, and they
+         * do not order themselves by step count. That the exactness
+         * survives is the point of the arm. A rate held constant by
+         * the physics makes every stage of the Runge-Kutta step
+         * agree, so the rotation vector reduces to omega times the
+         * step and the exponential map composes the turns exactly,
+         * which is what it did before the order was raised and is a
+         * property a scheme carrying the orientation through
+         * quaternion components would have lost. */
         ASSERT(rate_err_a < 1e-15);
         ASSERT(rate_err_b < 1e-15);
         ASSERT(ang_a < 1e-12);
@@ -200,20 +214,32 @@ int main(void)
                "(ratio %.2f)\n", drift_a, drift_b, drift_a / drift_b);
         printf("  body-frame rate swing %.3f of its peak, so the "
                "cross-coupling is live\n", swing_a);
-        /* The bound is stated at the step count it holds at, and it
-         * is deliberately not tight: this is a hard tumble at half a
-         * radian per second sampled every ten milliseconds, chosen
-         * because it makes the first-order error large enough to
-         * measure a convergence rate in. What matters is the rate. */
-        ASSERT(drift_a < 9e-2);
+        /* The bound is stated at the step count it holds at. This is
+         * a hard tumble at nearly a radian and a half a second
+         * sampled every ten milliseconds, chosen because it makes the
+         * truncation error large enough to measure a convergence rate
+         * in. Measured: 1.005e-08 at 4000 steps, 1.254e-09 at 8000,
+         * 1.567e-10 at 16000, ratios 8.010 and 8.005.
+         *
+         * Both numbers gate, and each names a different defect. The
+         * bound catches an order that has been lost: the first-order
+         * step this advance was built on drifts 7.8e-02 on this
+         * fixture, seven decades past the bound below. The ratio
+         * catches a bound that has been loosened to accommodate one:
+         * a window around eight admits neither the two a first-order
+         * orientation gives nor the sixteen that would mean the
+         * orientation update had changed to something whose error
+         * this gate no longer describes. */
+        ASSERT(drift_a < 5e-8);
         double ratio = drift_a / drift_b;
-        ASSERT(ratio > 1.7 && ratio < 2.3);
+        ASSERT(ratio > 7.0 && ratio < 9.0);
         /* The body-frame rate must genuinely move, or the arm above
          * would be conserving the momentum of a body that is not
          * nutating and would prove nothing about the cross term. */
         ASSERT(swing_a > 0.2);
-        printf("  world-frame angular momentum is conserved to first "
-               "order while the body-frame rate nutates: OK\n");
+        printf("  world-frame angular momentum holds to eight decimal "
+               "places and its error falls by eight when the step "
+               "halves, while the body-frame rate nutates: OK\n");
         n_pass++;
     }
 
@@ -225,15 +251,19 @@ int main(void)
          * a control period divided by its declared subdivision.
          * Measured across regimes, drift over the run:
          *
-         *   tumble   0.9 rad/s, 40 s, dt 0.01   7.8e-2
-         *   tumble   0.9 rad/s, 40 s, dt 0.001  7.4e-3
-         *   detumble 0.1 rad/s, 100 s, dt 0.05  1.1e-2
-         *   docking  0.01 rad/s, 300 s, dt 0.05 4.1e-4
-         *   docking  0.01 rad/s, 300 s, dt 0.20 1.7e-3
+         *   tumble   0.9 rad/s, 40 s, dt 0.01    1.005e-08
+         *   tumble   0.9 rad/s, 40 s, dt 0.001   1.004e-11
+         *   detumble 0.1 rad/s, 100 s, dt 0.05   2.078e-09
+         *   docking  0.01 rad/s, 300 s, dt 0.05  1.716e-12
+         *   docking  0.01 rad/s, 300 s, dt 0.20  1.103e-10
          *
-         * So the first-order step is comfortable for proximity work
-         * and wants a subdivision for a fast tumble, which is what
-         * the declaration exists for. */
+         * The same five regimes on the first-order step this advance
+         * was built on read 7.8e-2, 7.4e-3, 1.1e-2, 4.1e-4 and
+         * 1.7e-3, so the coarsest step here is now better than the
+         * finest step there by seven decades. The subdivision is
+         * still what keeps a fast tumble representable; what it no
+         * longer has to do is buy accuracy the step could not
+         * provide. */
         K26AstroBody body;
         K26AstroVehicle *v = make_vehicle_(120.0, 300.0, 380.0, &body);
         set_omega_(v, 0.01, 0.01, 0.002);
@@ -248,9 +278,9 @@ int main(void)
         double drift = v3len_(d) / v3len_(h0);
         printf("  0.01 rad/s over 300 s at a 0.2 s step: momentum drift "
                "%.3e\n", drift);
-        ASSERT(drift < 3e-3);
-        printf("  the advance holds angular momentum to better than a "
-               "third of a per cent on an approach: OK\n");
+        ASSERT(drift < 1e-9);
+        printf("  the advance holds angular momentum to nine decimal "
+               "places on an approach: OK\n");
         n_pass++;
         k26astro_vehicle_destroy(v);
     }

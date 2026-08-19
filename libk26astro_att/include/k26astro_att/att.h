@@ -34,11 +34,20 @@
  * Ordering, per sub-advance of duration h: translation advances
  * first, then attitude advances by the same h, with the torque
  * evaluated at the interval's start. That splitting is first order in
- * h, as is the angular-velocity update the body library performs, so
- * the local error in attitude is of order h squared. It is measured
- * rather than asserted: tests/test_att_advance.c compares against
- * closed-form solutions and checks that the error falls at the rate a
- * first-order method gives when the subdivision doubles.
+ * h and remains so; what is no longer first order is the attitude
+ * integration inside it. The body library advances the rate by a
+ * fourth-order Runge-Kutta step and the orientation by an exponential
+ * map of a rotation vector built from that step's stages, which is
+ * third order and exact for a rate the physics holds constant. So a
+ * torque held across the interval, which is what an actuator command
+ * held over a control period is, is integrated to those orders; a
+ * torque that varies within the interval and is sampled at its start
+ * is limited by that sampling and not by the step.
+ *
+ * It is measured rather than asserted: tests/test_att_advance.c
+ * compares against closed-form solutions, states every bound at the
+ * step count it holds at, and checks that the error falls by eight
+ * when the step halves.
  *
  * Provenance. This library introduces no new equation of motion. The
  * forms it composes are implemented and cited by libk26astro_body,

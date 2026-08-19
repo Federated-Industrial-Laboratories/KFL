@@ -167,11 +167,12 @@ void k26astro_attitude_init_ext   (K26AstroAttitudeStateExt *a,
  * torque_ext. */
 void k26astro_attitude_destroy_ext(K26AstroAttitudeStateExt *a);
 
-/* Free-body integration step (no external torques): rotate the
- * orientation by ω · dt; ω evolves under the symmetric-inertia
- * cross-coupling I⁻¹(ω × Iω). For non-principal-axis ω on an
- * asymmetric inertia the body-frame ω traces a polhode on the
- * inertia ellipsoid (Euler nutation). */
+/* Free-body integration step (no external torques): ω evolves under
+ * the symmetric-inertia cross-coupling I⁻¹(ω × Iω) and the
+ * orientation follows it. For non-principal-axis ω on an asymmetric
+ * inertia the body-frame ω traces a polhode on the inertia ellipsoid
+ * (Euler nutation). This is k26astro_attitude_step_torque_ext with a
+ * zero torque and reaches the same step. */
 void k26astro_attitude_step_free_ext  (K26AstroAttitudeStateExt *a,
                                         double dt);
 
@@ -180,10 +181,31 @@ void k26astro_attitude_step_free_ext  (K26AstroAttitudeStateExt *a,
  *
  *   ω̇ = I⁻¹ (τ_body − ω × (I ω))
  *
- * then advances orientation via the small-angle quaternion
- * exponential map. Uses the precomputed inertia_inverse. */
+ * The rate advances by a classical fourth-order Runge-Kutta step and
+ * the orientation by one exponential map of a rotation vector built
+ * from that step's stages, composed onto q and renormalised. The
+ * torque is held constant across the interval. Uses the precomputed
+ * inertia_inverse. Source comments carry the scheme, the alternatives
+ * measured against it, and the drift and order those measurements
+ * report. */
 void k26astro_attitude_step_torque_ext(K26AstroAttitudeStateExt *a,
                                         K26V3 torque_body, double dt);
+
+/* The same step for a body carrying momentum-exchange devices:
+ *
+ *   ω̇ = I⁻¹ (τ_body − ω × (I ω + h))
+ *
+ * with h the momentum those devices store, in body frame, held
+ * constant across the interval along with the torque. The reaction
+ * torque of a device whose stored momentum is changing belongs in
+ * `torque_body`; the device's own state is the caller's, and
+ * libk26astro_att's actuated advance is the caller this exists for.
+ * k26astro_attitude_step_torque_ext is this call with h zero, and
+ * both reach the same code, so the two paths cannot drift apart. */
+void k26astro_attitude_step_exchange_ext(K26AstroAttitudeStateExt *a,
+                                         K26V3 torque_body,
+                                         K26V3 stored_momentum_body,
+                                         double dt);
 
 /* Replace the inertia tensor (mid-simulation event — stage drop,
  * propellant depletion, deployable extension) and recompute the

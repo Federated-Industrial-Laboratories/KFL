@@ -464,37 +464,80 @@ int main(void)
         s1.destroy(e1);
     }
 
-    /* ---- D7: convergence through the declared subdivision -------- */
+    /* ---- D7: what the declared subdivision buys ------------------ */
     {
-        /* The design asks that the bound improve as the declared
-         * substep count rises, at the rate a first-order method
-         * gives. That is not the same as measuring against a raw
-         * interval: the last sub-advance takes a remainder, so the
-         * effective step is not uniform, and only driving the
-         * declaration itself exercises what ships.
+        /* This arm used to measure the attitude step's convergence
+         * rate through the declaration, and it could, because the
+         * step was first order and its truncation error was the
+         * largest thing moving the body's angular momentum on this
+         * fixture. It measured 1.780e-02, 8.844e-03 and 4.407e-03 at
+         * one, two and four declared subdivisions, halving as the
+         * declaration doubled.
          *
-         * The measure is the angular momentum a torque-free body
-         * should conserve. The craft here is asymmetric and tumbling,
-         * and the gravity-gradient torque is orders below the
-         * splitting error at this rate, so what moves the momentum is
-         * the integrator.
+         * The step is not first order any more, and that measurement
+         * cannot be taken on this fixture at any declaration. The
+         * craft here orbits, so a gravity-gradient torque acts on it,
+         * and that torque genuinely changes the body-frame angular
+         * momentum: it is physics and not error. The step's own
+         * truncation is now four decades below it, and the advance
+         * caps the angle turned in one sub-interval at its own bound
+         * whatever the program declares, so there is no declaration
+         * at which the truncation could climb back above the physics.
+         * A gate asserting a ratio here would be asserting a ratio of
+         * one quantity that has converged to another.
          *
-         * The control period is deliberately short. A first-order
-         * method has a convergence rate only inside its asymptotic
-         * range, and at half a second with this body turning at more
-         * than a radian a second the rotation per step is most of a
-         * radian: the first version of this arm measured drifts of
-         * 7e-2, 2.5 and 0.76 at one, two and four subdivisions, which
-         * is not a rate but a method outside the range where it has
-         * one. At twenty milliseconds it is inside it. */
+         * So the two things that are still true are what is asserted,
+         * and they are asserted separately because they fail on
+         * different defects.
+         *
+         * First: the conserved quantity has stopped depending on the
+         * declaration, which is what convergence looks like from
+         * outside. Every declaration agrees to within a small factor
+         * and every one of them is far below what the first-order
+         * step left behind. A step that lost its order fails this on
+         * both counts at once, by four decades on the bound and by a
+         * factor of two on the agreement.
+         *
+         * Second: the declaration still buys something, and what it
+         * buys is first order, because what is first order is no
+         * longer the attitude step but the splitting around it.
+         * Translation advances, then attitude advances over the same
+         * sub-interval with the torque held at its start. Halving the
+         * declared sub-interval halves that splitting error, and the
+         * distance from a finely subdivided run measures it. This is
+         * the arm that fails if the sub-advance ordering is ever
+         * changed to something that does not converge, and it fails
+         * if the attitude step stops being the accurate half of the
+         * pair, since then the ratio moves off two.
+         *
+         * The declarations swept are two, four, eight and sixteen,
+         * against a run subdivided two hundred and fifty six ways.
+         * One is left out on purpose: at one the whole control period
+         * of twenty milliseconds is a single sub-advance and the
+         * splitting is outside the range where it has a rate at all,
+         * measured at a ratio of 4.14 from one to two against 2.43,
+         * 2.10 and 2.08 across the four kept. Asserting a first-order
+         * window on a step that is not yet in its asymptotic range is
+         * how the first version of this arm came to report 7e-2, 2.5
+         * and 0.76 and call it a rate.
+         *
+         * Measured, on this fixture: drift 7.340e-07, 7.387e-07,
+         * 7.411e-07 and 7.423e-07, agreeing to one part in ninety;
+         * distance from the reference 1.473e-08, 6.071e-09, 2.887e-09
+         * and 1.387e-09. */
         rl_write_file_(WORK_DIR "/conv.k26asm", CONV_ASM);
-        double drift[3];
-        const uint32_t subs[3] = { 1, 2, 4 };
-        for (int i = 0; i < 3; i++) {
+        const uint32_t subs[4] = { 2, 4, 8, 16 };
+        const uint32_t sub_ref = 256;
+        double drift[4];
+        double att[4][14];
+        double att_ref[14];
+
+        for (int i = 0; i < 5; i++) {
+            uint32_t nsub = (i < 4) ? subs[i] : sub_ref;
             char src[2048], kfl[256], bin[256];
-            snprintf(src, sizeof src, ATT_KFL_CONV_FMT, subs[i], subs[i]);
-            snprintf(kfl, sizeof kfl, WORK_DIR "/conv%u.kfl", subs[i]);
-            snprintf(bin, sizeof bin, WORK_DIR "/conv%u", subs[i]);
+            snprintf(src, sizeof src, ATT_KFL_CONV_FMT, nsub, nsub);
+            snprintf(kfl, sizeof kfl, WORK_DIR "/conv%u.kfl", nsub);
+            snprintf(bin, sizeof bin, WORK_DIR "/conv%u", nsub);
             rl_write_file_(kfl, src);
             rl_compile_(kfl, bin, WORK_DIR);
             char so[300];
@@ -507,9 +550,7 @@ int main(void)
             double a0[14];
             ASSERT(sc.attitudes(env, a0, 14) == 14);
             /* The momentum magnitude in the body frame is what the
-             * getter exposes; for a torque-free body the world-frame
-             * momentum is conserved, and its magnitude equals the
-             * body-frame one. The inertia here is the assembly's
+             * getter exposes. The inertia here is the assembly's
              * derived tensor for a uniform box. */
             const double Ixx = 1000.0 * (0.9 * 0.9 + 0.4 * 0.4) / 3.0;
             const double Iyy = 1000.0 * (1.6 * 1.6 + 0.4 * 0.4) / 3.0;
@@ -524,19 +565,63 @@ int main(void)
             ASSERT(sc.attitudes(env, a1, 14) == 14);
             double hx1 = Ixx * a1[11], hy1 = Iyy * a1[12], hz1 = Izz * a1[13];
             double h1 = sqrt(hx1 * hx1 + hy1 * hy1 + hz1 * hz1);
-            drift[i] = fabs(h1 - h0) / h0;
+            if (i < 4) {
+                drift[i] = fabs(h1 - h0) / h0;
+                memcpy(att[i], a1, sizeof a1);
+            } else {
+                memcpy(att_ref, a1, sizeof a1);
+            }
             sc.destroy(env);
         }
-        printf("  momentum drift by declared substeps: 1 -> %.3e, "
-               "2 -> %.3e, 4 -> %.3e\n", drift[0], drift[1], drift[2]);
-        double r1 = drift[0] / drift[1], r2 = drift[1] / drift[2];
-        printf("  ratios as the declaration doubles: %.2f and %.2f\n",
-               r1, r2);
-        ASSERT(drift[0] > drift[1] && drift[1] > drift[2]);
-        ASSERT(r1 > 1.6 && r1 < 2.6);
-        ASSERT(r2 > 1.6 && r2 < 2.6);
-        printf("  the error falls at the first-order rate as the "
-               "declared subdivision rises: OK\n");
+
+        printf("  momentum drift by declared substeps: 2 -> %.3e, "
+               "4 -> %.3e, 8 -> %.3e, 16 -> %.3e\n",
+               drift[0], drift[1], drift[2], drift[3]);
+        double worst_ratio = 1.0;
+        for (int i = 0; i < 4; i++) {
+            ASSERT(drift[i] > 0.0);
+            for (int j = 0; j < 4; j++) {
+                double r = drift[i] / drift[j];
+                if (r > worst_ratio) worst_ratio = r;
+            }
+        }
+        printf("  the widest disagreement between any two of them is a "
+               "factor of %.4f\n", worst_ratio);
+        /* The first-order step this replaced left 1.780e-02 here and
+         * halved it with each doubling of the declaration, so either
+         * assertion alone rejects a return to it. */
+        for (int i = 0; i < 4; i++) ASSERT(drift[i] < 1.0e-5);
+        ASSERT(worst_ratio < 1.05);
+        printf("  the conserved quantity no longer depends on the "
+               "declared subdivision, which is what a converged "
+               "integration looks like from outside: OK\n");
+        n_pass++;
+
+        /* The distance from a run subdivided 256 ways, over the
+         * craft's whole attitude state: four quaternion components
+         * and three body rates. */
+        double gap[4];
+        for (int i = 0; i < 4; i++) {
+            double acc = 0.0;
+            for (int c = 7; c < 14; c++) {
+                double d = att[i][c] - att_ref[c];
+                acc += d * d;
+            }
+            gap[i] = sqrt(acc);
+        }
+        printf("  distance from a 256-way subdivision: %.3e, %.3e, "
+               "%.3e, %.3e\n", gap[0], gap[1], gap[2], gap[3]);
+        double g1 = gap[0] / gap[1], g2 = gap[1] / gap[2],
+               g3 = gap[2] / gap[3];
+        printf("  ratios as the declaration doubles: %.2f, %.2f, %.2f\n",
+               g1, g2, g3);
+        ASSERT(gap[0] > gap[1] && gap[1] > gap[2] && gap[2] > gap[3]);
+        ASSERT(g1 > 1.6 && g1 < 2.6);
+        ASSERT(g2 > 1.6 && g2 < 2.6);
+        ASSERT(g3 > 1.6 && g3 < 2.6);
+        printf("  the declared subdivision still buys a first-order "
+               "improvement, and what is first order is the splitting "
+               "and not the attitude step: OK\n");
         n_pass++;
     }
 

@@ -1,12 +1,11 @@
 /* substep.c - how finely one attitude advance is subdivided.
  *
- * The advance integrates the body rate with an explicit first-order
- * step, so the rotation it resolves in one sub-interval is the whole
- * of its stability. A rate that turns the body a large angle in one
- * sub-interval leaves the gyroscopic term evaluated at an orientation
- * the body has already left, and the error feeds the rate that
+ * The rotation the advance resolves in one sub-interval is the whole
+ * of what its step can represent. A rate that turns the body a large
+ * angle in one sub-interval asks the integration to follow a curve it
+ * has only sampled the start of, and the error feeds the rate that
  * produced it: the rate grows, the angle per sub-interval grows with
- * it, and a few sub-intervals later the state is not a number. A
+ * it, and enough sub-intervals later the state is not a number. A
  * caller cannot avoid that by declaring a subdivision, because the
  * rate a policy will command is not knowable when the program is
  * written. So the advance subdivides itself, by the rate it is
@@ -29,17 +28,24 @@
  * between calls and it writes none.
  *
  * What this buys, stated as measured. Holding the angle turned in one
- * sub-interval inside the bound removes the runaway: a body at ten
- * radians a second, given intervals of a tenth of a second, keeps its
- * angular momentum inside a factor of three over thirty seconds where
- * the unsubdivided advance has left the number line by sixteen. It
- * does not make a first-order step unconditionally stable, because no
- * step size does: the residual drift falls in proportion to the
- * sub-interval rather than to zero, and closing that is a
- * higher-order step and not a finer one. The subdivision is the
- * remedy for a state the interval cannot represent, which is the
- * failure a world's author cannot see coming; the accuracy of a step
- * that can represent it is a separate question with its own answer.
+ * sub-interval inside the bound is what keeps the rotation
+ * representable at all. On the first-order step this rule was built
+ * against, that was the difference between an answer and a state that
+ * was not a number: a body at ten radians a second, given intervals
+ * of a tenth of a second, kept its angular momentum inside a factor
+ * of three over thirty seconds where the unsubdivided advance had
+ * left the number line by sixteen.
+ *
+ * The step underneath is no longer that step, and the division of
+ * labour is now clean. The step's own accuracy is the body library's
+ * and is stated there: over nine hundred intervals of a tenth of a
+ * second, torque free, on a crew vehicle's tensor, the drift in
+ * angular momentum runs from 2.6e-09 at one radian a second to
+ * 7.7e-08 at thirty, against 0.28 to 41 before. What this rule
+ * contributes is that the sub-interval stays inside the range where
+ * that accuracy is the accuracy: a step is only as good as the
+ * rotation it samples, and a caller who cannot know what rate a
+ * policy will command cannot keep it there by declaring a number.
  *
  * The arithmetic is multiplication, division, square root and a
  * ceiling. All four are correctly rounded under IEEE-754, so the same

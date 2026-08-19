@@ -175,9 +175,23 @@ K26AstroAttStatus k26astro_att_thrusters_wrench(
  * the body's momentum out of nothing, and the conservation the gates
  * check would fail.
  *
- * The orientation then advances by the same exponential map the
- * unactuated step uses, so the two paths differ in the angular
- * velocity update alone.
+ * The equation is the body library's and so is the step that advances
+ * it: this entry evaluates the wheels, the magnetorquers and the
+ * thrusters over the sub-interval, sums what they apply, and hands
+ * the torque and the stored momentum to the same function the
+ * unactuated advance calls with a stored momentum of zero. The two
+ * paths therefore have one integrator between them, at one order, and
+ * an accuracy claim proved of one is a claim about both.
+ *
+ * What the wheels do inside a sub-interval is unchanged and stays
+ * first order deliberately. Their momentum is clamped at saturation
+ * and their Coulomb friction has a dead rate, so the wheel state is
+ * not a smooth function of itself and a higher-order rule through
+ * either discontinuity would resolve a curve that is not there. What
+ * the body feels from them, the realised reaction torque and the
+ * stored momentum, is held across the sub-interval exactly as the
+ * commands are, which is what a zero-order hold over a control period
+ * already means.
  */
 K26AstroAttStatus k26astro_att_step_actuated(K26AstroVehicle *v,
                                              K26AstroAttActuators *act,
@@ -232,7 +246,6 @@ K26AstroAttStatus k26astro_att_step_actuated(K26AstroVehicle *v,
 
     for (int k = 0; k < m; k++) {
         double sub_dt = (k + 1 == m) ? (dt - advanced) : (dt / (double)m);
-        K26V3 wk = a->omega_body;
 
         K26V3 wheel_torque, stored, mag_torque, thr_torque;
         s = k26astro_att_wheels_step(act, sub_dt, &wheel_torque, &stored);
@@ -252,41 +265,17 @@ K26AstroAttStatus k26astro_att_step_actuated(K26AstroVehicle *v,
             extra.z + mag_torque.z + thr_torque.z + wheel_torque.z
         };
 
-        /* The gyroscopic term carries the stored momentum with the
-         * body's own, which is the other half of what a wheel does. */
-        K26V3 Iw;
-        Iw.x = a->inertia.m[0][0] * wk.x + a->inertia.m[0][1] * wk.y
-             + a->inertia.m[0][2] * wk.z;
-        Iw.y = a->inertia.m[1][0] * wk.x + a->inertia.m[1][1] * wk.y
-             + a->inertia.m[1][2] * wk.z;
-        Iw.z = a->inertia.m[2][0] * wk.x + a->inertia.m[2][1] * wk.y
-             + a->inertia.m[2][2] * wk.z;
-        K26V3 total = { Iw.x + stored.x, Iw.y + stored.y, Iw.z + stored.z };
-        K26V3 gyro  = k26m3d_v3_cross(wk, total);
-        K26V3 rhs   = { tau.x - gyro.x, tau.y - gyro.y, tau.z - gyro.z };
-
-        K26V3 wdot;
-        wdot.x = a->inertia_inverse.m[0][0] * rhs.x
-               + a->inertia_inverse.m[0][1] * rhs.y
-               + a->inertia_inverse.m[0][2] * rhs.z;
-        wdot.y = a->inertia_inverse.m[1][0] * rhs.x
-               + a->inertia_inverse.m[1][1] * rhs.y
-               + a->inertia_inverse.m[1][2] * rhs.z;
-        wdot.z = a->inertia_inverse.m[2][0] * rhs.x
-               + a->inertia_inverse.m[2][1] * rhs.y
-               + a->inertia_inverse.m[2][2] * rhs.z;
-
-        a->omega_body.x = wk.x + wdot.x * sub_dt;
-        a->omega_body.y = wk.y + wdot.y * sub_dt;
-        a->omega_body.z = wk.z + wdot.z * sub_dt;
-
-        K26V3 theta = {
-            a->omega_body.x * sub_dt,
-            a->omega_body.y * sub_dt,
-            a->omega_body.z * sub_dt
-        };
-        a->q = k26m3d_quat_norm(
-            k26m3d_quat_mul(a->q, k26astro_quat_exp_half(theta)));
+        /* The body library's step, with the wheels' stored momentum
+         * passed through so the gyroscopic term carries it alongside
+         * the body's own, which is the other half of what a wheel
+         * does. This entry used to write out that equation and
+         * advance it here. It does not any more: a second copy of one
+         * equation of motion is how two callers come to disagree
+         * about the same craft, and raising the order of one copy
+         * while leaving the other is exactly that failure. The
+         * unactuated advance reaches the same function with a zero
+         * stored momentum. */
+        k26astro_attitude_step_exchange_ext(a, tau, stored, sub_dt);
 
         advanced += sub_dt;
     }
