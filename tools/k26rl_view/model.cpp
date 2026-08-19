@@ -14,6 +14,8 @@
 
 #include <sys/stat.h>
 
+#include "live.h"
+
 namespace k26rl_view {
 
 const char *end_reason_name(uint16_t reason)
@@ -37,34 +39,8 @@ const char *observer_mode_name(uint16_t mode)
     }
 }
 
-/* Little-endian field reads, matching the format's own discipline:
- * every integer is assembled byte by byte, never read as a struct. */
-static uint16_t get_u16_(const uint8_t *p)
-{
-    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
-}
-
-static uint32_t get_u32_(const uint8_t *p)
-{
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-
-static uint64_t get_u64_(const uint8_t *p)
-{
-    return (uint64_t)get_u32_(p) | ((uint64_t)get_u32_(p + 4) << 32);
-}
-
-static double get_f64_(const uint8_t *p)
-{
-    uint64_t bits = get_u64_(p);
-    double v;
-    memcpy(&v, &bits, sizeof v);
-    return v;
-}
-
 Model::Model()
-    : reader_(0), current_k_(0), have_(false), index_lookups_(0),
+    : reader_(0), feed_(0), current_k_(0), have_(false), index_lookups_(0),
       episode_reads_(0)
 {
 }
@@ -79,6 +55,10 @@ void Model::close()
     if (reader_) {
         k26rl_episode_reader_close(reader_);
         reader_ = 0;
+    }
+    if (feed_) {
+        delete feed_;
+        feed_ = 0;
     }
     have_ = false;
     index_lookups_ = 0;
@@ -344,6 +324,72 @@ bool Model::open(const std::string &path, std::string *err)
     return true;
 }
 
+/* Attaching to a run in progress differs from opening a recording in
+ * one respect only: what is held grows. The spec comes from the ring
+ * preamble and is walked by the same parser that walks a file's, so
+ * the channel names, action bounds and agent slices the panels label
+ * themselves with are the same facts read from the same bytes. */
+bool Model::attach(const std::string &tap_name, bool from_start,
+                   std::string *err)
+{
+    const uint8_t *blob = 0;
+    uint32_t blob_len = 0;
+
+    close();
+    feed_ = new LiveFeed();
+    if (!feed_->attach(tap_name, from_start, err)) {
+        delete feed_;
+        feed_ = 0;
+        return false;
+    }
+    info_ = feed_->info();
+    blob = feed_->spec(&blob_len);
+    if (blob && blob_len)
+        parse_spec_(blob, blob_len);
+    find_trajectories_();
+    /* The decoder needs the widths before it reads a step frame, and
+     * they are the spec's, walked once above rather than a second
+     * time inside the feed. */
+    feed_->geometry(spec_.obs_total, spec_.act_total, spec_.agent_count);
+    return true;
+}
+
+uint32_t Model::poll()
+{
+    LivePoll p;
+
+    if (!feed_)
+        return 0;
+    p = feed_->poll();
+    info_ = feed_->info();
+    return p.frames;
+}
+
+bool Model::producer_closed() const
+{
+    return feed_ && feed_->closed();
+}
+
+uint64_t Model::frames_accepted() const
+{
+    return feed_ ? feed_->accepted() : 0;
+}
+
+uint64_t Model::frames_lost() const
+{
+    return feed_ ? feed_->lost() : 0;
+}
+
+uint32_t Model::ring_slot_size() const
+{
+    return feed_ ? feed_->slot_size() : 0;
+}
+
+uint32_t Model::ring_slot_count() const
+{
+    return feed_ ? feed_->slot_count() : 0;
+}
+
 /* The pairing predicate: a channel is overlaid when the file says it
  * carries a measurement and names the channel holding the truth that
  * measurement was applied to. Only the measured side answers, so a
@@ -378,6 +424,15 @@ std::vector<std::pair<uint32_t, uint32_t> > Model::overlay_pairs() const
 bool Model::identity(uint32_t k, uint32_t *ordinal, uint32_t *env,
                      uint32_t *episode) const
 {
+    if (feed_) {
+        const std::vector<Episode *> &eps = feed_->episodes();
+        if (k >= eps.size())
+            return false;
+        if (ordinal) *ordinal = eps[k]->ordinal;
+        if (env)     *env     = eps[k]->env;
+        if (episode) *episode = eps[k]->episode;
+        return true;
+    }
     if (!reader_ || k >= info_.episode_count)
         return false;
     return k26rl_episode_reader_at(reader_, k, ordinal, env, episode) ==
@@ -390,6 +445,20 @@ const Episode *Model::load(uint32_t k, std::string *err)
     K26RlEpisodeData d;
     K26RlStatus st;
 
+    /* A live source holds every episode it has decoded, so there is
+     * nothing to seek and nothing to cache: the episode is already
+     * where it will stay until detach, and the pointer stays good
+     * across the polls that lengthen it. */
+    if (feed_) {
+        const std::vector<Episode *> &eps = feed_->episodes();
+        if (k >= eps.size()) {
+            if (err)
+                *err = "episode index out of range";
+            return 0;
+        }
+        current_k_ = k;
+        return eps[k];
+    }
     if (!reader_ || k >= info_.episode_count) {
         if (err)
             *err = "episode index out of range";

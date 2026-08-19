@@ -25,6 +25,7 @@
 #include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 namespace k26rl_view {
 
@@ -77,7 +78,19 @@ static void dump_meta(FILE *f, Model &m)
     const FileInfo &i = m.info();
     const Spec &s = m.spec();
 
-    fprintf(f, "file %s\n", i.path.c_str());
+    /* Which source produced this, said once and first. A ring has no
+     * path and no length, so it says what it is instead of reporting
+     * a file's fields with nothing behind them. */
+    if (i.live) {
+        fprintf(f, "source tap %s\n", i.tap.c_str());
+        fprintf(f, "ring_slot_size %u\n", m.ring_slot_size());
+        fprintf(f, "ring_slot_count %u\n", m.ring_slot_count());
+        fprintf(f, "frames_accepted %" PRIu64 "\n", m.frames_accepted());
+        fprintf(f, "frames_lost %" PRIu64 "\n", m.frames_lost());
+        fprintf(f, "producer_closed %d\n", m.producer_closed() ? 1 : 0);
+    } else {
+        fprintf(f, "file %s\n", i.path.c_str());
+    }
     fprintf(f, "file_bytes %" PRIu64 "\n", i.file_bytes);
     fprintf(f, "clean_close %d\n", i.clean_close ? 1 : 0);
     fprintf(f, "readable_bytes %" PRIu64 "\n", i.readable_bytes);
@@ -144,11 +157,32 @@ static void dump_meta(FILE *f, Model &m)
     fprintf(f, "trajectory_label %s\n", TRAJECTORY_LABEL);
 }
 
+/* Every episode panel begins with this, so what an episode is missing
+ * travels with the episode rather than sitting in one panel a reader
+ * may not have asked for.
+ *
+ * A recording read from a file is missing nothing and these lines are
+ * absent from it, which is what makes a live dump comparable with the
+ * file the same run wrote: identical when the viewer kept up, and
+ * different by exactly these records when it did not. A viewer that
+ * drew through a hole without one of these would be drawing a path
+ * the craft never flew. */
 static void dump_episode_header(FILE *f, uint32_t k, const Episode &e)
 {
     fprintf(f, "episode %u %u %u %u %u %u %s %u %016" PRIx64 "\n", k,
             e.ordinal, e.env, e.episode, e.step_count, e.transitions(),
-            end_reason_name(e.end_reason), (unsigned)e.fault_code, e.seed);
+            e.complete ? end_reason_name(e.end_reason) : "open",
+            (unsigned)e.fault_code, e.seed);
+    if (!e.start_seen) {
+        /* The opening frame never arrived, so this episode has no
+         * initial observation and no randomisation record to report
+         * and does not present its earliest held values as them. */
+        fprintf(f, "episode_start_missing %u\n", k);
+    }
+    for (size_t g = 0; g < e.gaps.size(); g++) {
+        fprintf(f, "episode_gap %u %u %u\n", k, e.gaps[g].first,
+                e.gaps[g].count);
+    }
 }
 
 static void dump_timeline(FILE *f, Model &m, const DumpOptions &o)
@@ -168,9 +202,9 @@ static void dump_timeline(FILE *f, Model &m, const DumpOptions &o)
         dump_episode_header(f, k, *e);
         range_for(*e, o, &lo, &hi);
         for (uint32_t i = lo; i < hi; i++) {
-            fprintf(f, "flag %u %u %08x\n", k, i,
+            fprintf(f, "flag %u %u %08x\n", k, e->step_at(i),
                     i < e->flags.size() ? e->flags[i] : 0u);
-            fprintf(f, "dt %u %u ", k, i);
+            fprintf(f, "dt %u %u ", k, e->step_at(i));
             hx(f, i < e->applied_dt.size() ? e->applied_dt[i] : 0.0);
             fprintf(f, "\n");
         }
@@ -197,19 +231,23 @@ static void dump_reward(FILE *f, Model &m, const DumpOptions &o)
         for (uint32_t i = lo; i < hi; i++) {
             for (uint32_t a = 0; a < agents; a++) {
                 size_t idx = (size_t)i * agents + a;
-                fprintf(f, "reward %u %u %u ", k, i, a);
+                fprintf(f, "reward %u %u %u ", k, e->step_at(i), a);
                 hx(f, idx < e->rewards.size() ? e->rewards[idx] : 0.0);
                 fprintf(f, "\n");
-                fprintf(f, "return %u %u %u ", k, i, a);
+                fprintf(f, "return %u %u %u ", k, e->step_at(i), a);
                 hx(f, idx < ret.size() ? ret[idx] : 0.0);
                 fprintf(f, "\n");
             }
         }
-        for (uint32_t a = 0; a < agents; a++) {
-            fprintf(f, "terminal_adj %u %u ", k, a);
-            hx(f, a < e->terminal_adjustments.size()
-                   ? e->terminal_adjustments[a] : 0.0);
-            fprintf(f, "\n");
+        /* The terminal adjustment arrives with the closing record, so
+         * an episode still running has none and is not given one. */
+        if (e->complete) {
+            for (uint32_t a = 0; a < agents; a++) {
+                fprintf(f, "terminal_adj %u %u ", k, a);
+                hx(f, a < e->terminal_adjustments.size()
+                       ? e->terminal_adjustments[a] : 0.0);
+                fprintf(f, "\n");
+            }
         }
     }
 }
@@ -229,21 +267,28 @@ static void dump_obs(FILE *f, Model &m, const DumpOptions &o)
         if (!e)
             continue;
         dump_episode_header(f, k, *e);
-        for (uint32_t j = 0; j < obs_total; j++) {
-            fprintf(f, "initial_obs %u %u ", k, j);
-            hx(f, j < e->initial_obs.size() ? e->initial_obs[j] : 0.0);
-            fprintf(f, "\n");
-        }
-        for (uint32_t j = 0; j < e->dr_tags.size(); j++) {
-            fprintf(f, "dr %u %u %u ", k, j, e->dr_tags[j]);
-            hx(f, e->dr_values[j]);
-            fprintf(f, "\n");
+        /* An episode whose opening record never arrived has no
+         * initial observation and no randomisation draws to report.
+         * Printing zeros for them would be presenting a value the
+         * episode never had, which the header has already said is
+         * unknown. */
+        if (e->start_seen) {
+            for (uint32_t j = 0; j < obs_total; j++) {
+                fprintf(f, "initial_obs %u %u ", k, j);
+                hx(f, j < e->initial_obs.size() ? e->initial_obs[j] : 0.0);
+                fprintf(f, "\n");
+            }
+            for (uint32_t j = 0; j < e->dr_tags.size(); j++) {
+                fprintf(f, "dr %u %u %u ", k, j, e->dr_tags[j]);
+                hx(f, e->dr_values[j]);
+                fprintf(f, "\n");
+            }
         }
         range_for(*e, o, &lo, &hi);
         for (uint32_t i = lo; i < hi; i++) {
             for (uint32_t j = 0; j < obs_total; j++) {
                 size_t idx = (size_t)i * obs_total + j;
-                fprintf(f, "obs %u %u %u ", k, i, j);
+                fprintf(f, "obs %u %u %u ", k, e->step_at(i), j);
                 hx(f, idx < e->obs.size() ? e->obs[idx] : 0.0);
                 fprintf(f, "\n");
             }
@@ -280,7 +325,7 @@ static void dump_action(FILE *f, Model &m, const DumpOptions &o)
         for (uint32_t i = lo; i < hi; i++) {
             for (uint32_t j = 0; j < act_total; j++) {
                 size_t idx = (size_t)i * act_total + j;
-                fprintf(f, "act %u %u %u ", k, i, j);
+                fprintf(f, "act %u %u %u ", k, e->step_at(i), j);
                 hx(f, idx < e->act.size() ? e->act[idx] : 0.0);
                 fprintf(f, "\n");
             }
@@ -316,7 +361,8 @@ static void dump_traj(FILE *f, Model &m, const DumpOptions &o)
             for (uint32_t i = lo; i < hi; i++) {
                 double xyz[3];
                 Model::point(*e, m.spec(), tr, i, xyz);
-                fprintf(f, "traj %s %u %u ", tr.base.c_str(), k, i);
+                fprintf(f, "traj %s %u %u ", tr.base.c_str(), k,
+                        e->step_at(i));
                 hx(f, xyz[0]);
                 fprintf(f, " ");
                 hx(f, xyz[1]);
@@ -349,7 +395,8 @@ static void dump_scrub(FILE *f, Model &m, const DumpOptions &o)
             const Episode *again = m.load(k, &err);
             size_t idx = (size_t)marks[s] * m.spec().obs_total;
             fprintf(f, "scrub_sample %u %u %" PRIu64 " %" PRIu64 " ", k,
-                    marks[s], m.index_lookups(), m.episode_reads());
+                    e->step_at(marks[s]), m.index_lookups(),
+                    m.episode_reads());
             hx(f, (again && idx < again->obs.size()) ? again->obs[idx] : 0.0);
             fprintf(f, "\n");
         }
@@ -524,7 +571,8 @@ static void dump_overlay(FILE *f, Model &m, const DumpOptions &o)
                 size_t base = (size_t)i * sp.obs_total;
                 if (base + sp.obs_total > e->obs.size())
                     break;
-                fprintf(f, "overlay %u %u %u ", k, i, (unsigned)p);
+                fprintf(f, "overlay %u %u %u ", k, e->step_at(i),
+                        (unsigned)p);
                 hx(f, e->obs[base + pairs[p].first]);
                 fprintf(f, " ");
                 hx(f, e->obs[base + pairs[p].second]);
@@ -888,12 +936,99 @@ static void dump_resim(FILE *f, Model &m, const DumpOptions &o)
     }
 }
 
+/* The total number of step records held, over every episode. It is
+ * the one number that rises with every step frame accepted and never
+ * falls, which is what makes the advance a countable fact: an episode
+ * ending resets a per-episode count, and a viewer that had stopped
+ * receiving would look the same as one that had moved on. */
+static uint64_t steps_held_(Model &m)
+{
+    uint64_t total = 0;
+
+    for (uint32_t k = 0; k < m.info().episode_count; k++) {
+        std::string err;
+        const Episode *e = m.load(k, &err);
+        if (e)
+            total += e->step_count;
+    }
+    return total;
+}
+
+const char *live_watch(FILE *f, Model &m, const LiveOptions &o, bool report)
+{
+    uint64_t round = 0, idle = 0;
+    const char *reason = "closed";
+
+    if (report) {
+        fprintf(f, "live_tap %s\n", o.tap.c_str());
+        fprintf(f, "live_from_start %d\n", o.from_start ? 1 : 0);
+        fprintf(f, "live_slot_size %u\n", m.ring_slot_size());
+        fprintf(f, "live_slot_count %u\n", m.ring_slot_count());
+    }
+    for (;;) {
+        struct timespec ts;
+        uint64_t before_lost = m.frames_lost();
+        uint32_t frames = m.poll();
+        uint64_t lost = m.frames_lost() - before_lost;
+
+        round++;
+        if (frames || lost) {
+            idle = 0;
+            if (report) {
+                fprintf(f, "live_poll %" PRIu64 " %u %" PRIu64 " %" PRIu64
+                        " %" PRIu64 " %u %" PRIu64 "\n", round, frames, lost,
+                        m.frames_accepted(), m.frames_lost(),
+                        m.info().episode_count, steps_held_(m));
+            }
+        } else {
+            idle++;
+        }
+        /* The producer marks the ring closed before it unlinks it, so
+         * a drained ring that carries the mark is a finished run.
+         * One more round after the mark, because the mark and the
+         * last frames are separate stores and the frames may not
+         * have been taken yet. */
+        if (m.producer_closed() && !frames) {
+            reason = "closed";
+            break;
+        }
+        if (o.polls && round >= o.polls) {
+            reason = "polls";
+            break;
+        }
+        /* A producer that died without marking the ring leaves no
+         * signal at all: the cursor simply stops. Waiting forever on
+         * one is the same as hanging, so a watcher that has seen
+         * nothing for long enough says so and stops. */
+        if (o.idle_polls && idle >= o.idle_polls) {
+            reason = "idle";
+            break;
+        }
+        if (o.poll_ms) {
+            ts.tv_sec = (time_t)(o.poll_ms / 1000u);
+            ts.tv_nsec = (long)(o.poll_ms % 1000u) * 1000000L;
+            nanosleep(&ts, 0);
+        }
+    }
+    if (report) {
+        fprintf(f, "live_end %s %" PRIu64 " %" PRIu64 " %" PRIu64 " %u %"
+                PRIu64 "\n", reason, round, m.frames_accepted(),
+                m.frames_lost(), m.info().episode_count, steps_held_(m));
+    }
+    return reason;
+}
+
 int dump(FILE *f, Model &m, const DumpOptions &o)
 {
     const std::string &p = o.panel;
 
     fprintf(f, "k26rl_view dump 1\n");
     fprintf(f, "panel %s\n", p.c_str());
+    /* A run in progress is watched before it is reported: the panels
+     * below draw what a source holds, and a live source holds what
+     * has arrived by the time they are asked. */
+    if (m.live())
+        live_watch(f, m, o.live, p == "live" || p == "all");
     if (p == "meta" || p == "all")
         dump_meta(f, m);
     if (p == "timeline" || p == "all")
@@ -923,7 +1058,7 @@ int dump(FILE *f, Model &m, const DumpOptions &o)
     if (p != "meta" && p != "timeline" && p != "reward" && p != "obs" &&
         p != "action" && p != "traj" && p != "scrub" && p != "resim" &&
         p != "world" && p != "attitude" && p != "overlay" &&
-        p != "wireframe" && p != "scene" && p != "all") {
+        p != "wireframe" && p != "scene" && p != "live" && p != "all") {
         fprintf(stderr, "k26rl_view: unknown panel `%s`\n", p.c_str());
         return 2;
     }

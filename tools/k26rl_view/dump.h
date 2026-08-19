@@ -18,6 +18,20 @@
 
 namespace k26rl_view {
 
+/* Watching a run in progress, headlessly. The ring never blocks and
+ * never signals, so a consumer decides for itself how often to look
+ * and when to give up, and each of the three ways of stopping is
+ * separately bounded because they mean different things: the producer
+ * finished, the watcher had seen enough, or nothing is arriving any
+ * more from a producer that never said it was done. */
+struct LiveOptions {
+    std::string tap;               /* the ring's name; empty for a file */
+    bool from_start = false;       /* join at the oldest surviving frame */
+    uint64_t polls = 0;            /* rounds to run; 0 for no bound */
+    uint32_t poll_ms = 5;          /* pause between rounds */
+    uint64_t idle_polls = 400;     /* consecutive empty rounds tolerated */
+};
+
 struct DumpOptions {
     std::string panel;                 /* meta, timeline, reward, obs,
                                         * action, traj, world, attitude,
@@ -33,11 +47,20 @@ struct DumpOptions {
      * and a setting the headless dump cannot reach is a setting no
      * gate can vary. */
     SceneOptions scene;
+    LiveOptions live;
 };
 
 /* The trajectory panel's standing label, shared with the interface so
  * both say the same thing about what the reconstruction is. */
 extern const char *const TRAJECTORY_LABEL;
+
+/* Take frames from an attached ring until the run ends, the round
+ * bound is reached, or nothing has arrived for the idle bound.
+ * Returns the reason it stopped: closed, polls, or idle. When report
+ * is set it writes one record per round that brought anything, which
+ * is what makes the picture's advance a countable fact rather than a
+ * claim about a window nobody can see. */
+const char *live_watch(FILE *f, Model &m, const LiveOptions &o, bool report);
 
 int dump(FILE *f, Model &m, const DumpOptions &o);
 

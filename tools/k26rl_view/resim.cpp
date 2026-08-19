@@ -72,6 +72,26 @@ ResimResult resimulate(const Model &model, const Episode &ep,
     const uint32_t agents = model.spec().agent_count ? model.spec().agent_count : 1;
 
     memset(&s, 0, sizeof s);
+    /* A rebuild is the recorded action stream driven again, so a
+     * stream with a hole in it cannot be rebuilt: the actions after
+     * the hole belong to a state this side never reached. A live
+     * source the producer outran holds exactly such a stream, and
+     * refusing it here is what keeps the world frame, the attitudes
+     * and the scene from being drawn from a reconstruction that
+     * diverged at the first missing action. */
+    if (!ep.gaps.empty() || !ep.start_seen) {
+        char n[64];
+        uint32_t missing = 0;
+        for (size_t g = 0; g < ep.gaps.size(); g++)
+            missing += ep.gaps[g].count;
+        snprintf(n, sizeof n, "%u", (unsigned)missing);
+        r.message = std::string("the held step stream has holes in it: ") +
+                    n + " step records were overwritten before this "
+                    "viewer read them, so the action stream cannot be "
+                    "driven again";
+        return r;
+    }
+
     /* RTLD_LOCAL because an artifact carries its own statically linked
      * physics symbols, and two artifacts loaded together must not see
      * each other's. */

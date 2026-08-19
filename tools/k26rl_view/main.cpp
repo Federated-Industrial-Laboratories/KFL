@@ -27,7 +27,17 @@
  * Both presenters read one model, so the numbers checked headlessly
  * are the numbers the window draws.
  *
- * Live attach to a serving simulation is not in this version.
+ * With `--tap` in place of a file the source is a simulation that is
+ * still running, read from the telemetry ring it publishes into. The
+ * panels are the same panels: one record schema travels the file and
+ * the ring, so nothing above the model knows which one it is drawing.
+ * Watching costs the run nothing and can change nothing about it. The
+ * mapping is read only, the ring carries no field a consumer may
+ * write, and the producer never learns that anybody looked, so a run
+ * watched and the same run unwatched produce the same bytes. What
+ * watching can lose is frames, because the ring overwrites rather
+ * than wait: a viewer the producer outran says how many steps went
+ * past it and where, and never draws through the hole in silence.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,13 +51,13 @@
 static int usage_(const char *prog)
 {
     fprintf(stderr,
-        "usage: %s FILE\n"
+        "usage: %s FILE | --tap NAME\n"
         "       %s --dump PANEL [--episode K] [--steps A:B]\n"
         "               [--artifact PATH] [--asset PATH] [scene options]\n"
-        "               FILE\n"
+        "               [live options] FILE | --tap NAME\n"
         "\n"
         "panels: meta timeline reward obs action traj scrub world\n"
-        "        attitude overlay wireframe scene resim all\n"
+        "        attitude overlay wireframe scene resim live all\n"
         "\n"
         "  --episode K     restrict to the K-th indexed episode\n"
         "  --steps A:B     restrict to steps [A, B) of each episode\n"
@@ -79,7 +89,20 @@ static int usage_(const char *prog)
         "  --axis-length M         length of the body axis lines\n"
         "  --thruster-scale S      metres of line per newton of thrust\n"
         "  --shading               draw the shaded depth cue as well\n"
-        "  --light X,Y,Z           view-space light direction for it\n",
+        "  --light X,Y,Z           view-space light direction for it\n"
+        "\n"
+        "live options, for a simulation that is still running:\n"
+        "  --tap NAME              attach to the named telemetry ring\n"
+        "                          instead of opening a file\n"
+        "  --from-start            join at the ring's oldest surviving\n"
+        "                          frame rather than at the producer's\n"
+        "                          current position, so frames already\n"
+        "                          overwritten are counted and reported\n"
+        "  --polls N               stop after N rounds of reading\n"
+        "  --poll-ms MS            pause between rounds\n"
+        "  --idle-polls N          stop after N rounds that brought\n"
+        "                          nothing from a producer that has not\n"
+        "                          said it finished\n",
         prog, prog);
     return 2;
 }
@@ -291,6 +314,24 @@ int main(int argc, char **argv)
             opt.scene.thruster_scale = strtod(argv[++i], 0);
         } else if (strcmp(a, "--shading") == 0) {
             opt.scene.shading = true;
+        } else if (strcmp(a, "--tap") == 0) {
+            if (!v)
+                return usage_(argv[0]);
+            opt.live.tap = argv[++i];
+        } else if (strcmp(a, "--from-start") == 0) {
+            opt.live.from_start = true;
+        } else if (strcmp(a, "--polls") == 0) {
+            if (!v)
+                return usage_(argv[0]);
+            opt.live.polls = strtoull(argv[++i], 0, 10);
+        } else if (strcmp(a, "--poll-ms") == 0) {
+            if (!v)
+                return usage_(argv[0]);
+            opt.live.poll_ms = (uint32_t)strtoul(argv[++i], 0, 10);
+        } else if (strcmp(a, "--idle-polls") == 0) {
+            if (!v)
+                return usage_(argv[0]);
+            opt.live.idle_polls = strtoull(argv[++i], 0, 10);
         } else if (a[0] == '-' && a[1] != '\0') {
             fprintf(stderr, "%s: unknown option `%s`\n", argv[0], a);
             return usage_(argv[0]);
@@ -301,16 +342,27 @@ int main(int argc, char **argv)
             return usage_(argv[0]);
         }
     }
-    if (!path)
+    /* One source or the other, never both: a run in progress and a
+     * finished recording are two different things to be looking at,
+     * and a command naming both has not said which. */
+    if ((path == 0) == opt.live.tap.empty()) {
+        if (path)
+            fprintf(stderr, "%s: give a file or --tap, not both\n", argv[0]);
         return usage_(argv[0]);
+    }
 
     k26rl_view::Model model;
-    if (!model.open(path, &err)) {
+    if (!opt.live.tap.empty()) {
+        if (!model.attach(opt.live.tap, opt.live.from_start, &err)) {
+            fprintf(stderr, "%s: %s\n", argv[0], err.c_str());
+            return 1;
+        }
+    } else if (!model.open(path, &err)) {
         fprintf(stderr, "%s: %s\n", argv[0], err.c_str());
         return 1;
     }
 
-    /* Body names resolve against the file, so they resolve here and
+    /* Body names resolve against the source, so they resolve here and
      * not while the arguments are being read. A name the recording
      * does not carry is refused rather than silently taken as the
      * world origin, which would draw a different scene from the one

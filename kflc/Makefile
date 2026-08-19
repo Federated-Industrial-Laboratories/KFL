@@ -384,14 +384,17 @@ endif
 # built here before the gate runs rather than left to whatever a
 # previous build put there: a gate run against a stale viewer measures
 # the viewer that was, which is the shape of a green run that checked
-# nothing. The build is conditional on the interface development
-# packages exactly as the root target's is, and the gate skips on its
-# own when the binary is absent, so a tree without them still tests
-# green.
+# nothing. The build is conditional on the window and rendering
+# development packages exactly as the root target's is, and the gate
+# skips on its own when the binary is absent, so a tree without them
+# still tests green. The interface libraries themselves are no longer
+# among the conditions: they are vendored under the viewer, so what
+# remains to ask about is the window system and OpenGL, which are the
+# system's to provide.
 RL_VIEW_TEST = tests/test_rl_view
 .PHONY: viewer
 viewer:
-	@if pkg-config --exists imgui glfw3 2>/dev/null; then \
+	@if pkg-config --exists glfw3 gl 2>/dev/null; then \
 	    $(MAKE) -s -C ../tools/k26rl_view; \
 	fi
 
@@ -416,6 +419,40 @@ $(RL_SCENE_TEST): tests/test_rl_scene.c $(RL_GATE_DEPS) \
                   ../libk26rl/libk26rl.a viewer
 	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
 	    ../libk26rl/libk26rl.a -ldl -lm
+
+# Watching a simulation while it runs: the viewer attached to a
+# serving session's telemetry ring rather than to a finished file.
+# Isolation first, since the run's indifference to an observer is
+# fixed rather than desirable, then the advance of the picture as
+# frames arrive, the equality of what the two sources report, and the
+# exact accounting of frames a lapped ring cost the watcher. Links the
+# episode library because one arm owns a ring of its own. Skips (77)
+# when the sibling stack archives or the viewer binary are not built.
+RL_LIVE_TEST = tests/test_rl_live
+RL_LIVE_DEPS = tests/test_rl_live.c $(RL_GATE_DEPS) \
+               ../libk26rl/include/k26rl_env.h \
+               ../libk26rl/include/k26rl_episode.h \
+               ../libk26rl/include/k26rl_tap.h \
+               ../libk26rl/libk26rl.a viewer
+$(RL_LIVE_TEST): $(RL_LIVE_DEPS)
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm -lrt
+
+# One red build per arm, each carrying a defect that arm must reject.
+# A gate whose failure nobody has seen is a gate nobody has measured,
+# and every one of these four was written after an arm had already
+# been caught passing something it should not have.
+RL_LIVE_RED = tests/test_rl_live_red1 tests/test_rl_live_red2 \
+              tests/test_rl_live_red3 tests/test_rl_live_red4
+# Each red control paired with the arm that must reject it: a watched
+# run driven from a different seed, a watcher that looks once, a
+# comparison whose file half came from another run, and a watcher
+# joining a lapped ring at its head where it is owed nothing.
+RL_LIVE_PAIRS = 1:isolation 2:liveness 3:sources 4:loss
+
+tests/test_rl_live_red%: $(RL_LIVE_DEPS)
+	$(CC) $(CFLAGS) -I../libk26rl/include -DRL_LIVE_INJECT=$* -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm -lrt
 
 # The trained-policy file format: the reader, the evaluator, and the
 # check that holds a policy against the world it declares it was
@@ -632,7 +669,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -655,7 +692,8 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	@for t in $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) \
 	          $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) \
 	          $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) \
-	          $(RL_SCENE_TEST) $(RL_BODIES_TEST) $(RL_ATT_TEST) \
+	          $(RL_SCENE_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) \
+	          $(RL_ATT_TEST) \
 	          $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) \
 	          $(RL_COLL_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
@@ -691,6 +729,23 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	     elif [ $$rc -ne 0 ]; then \
 	         exit $$rc; \
 	     fi; \
+	 fi
+# The live gate's red controls, run where the gate itself has just
+# run: each must be rejected by the arm it is paired with, and a red
+# build that passed would mean that arm measures nothing.
+	@if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $(RL_LIVE_TEST) ]; then \
+	     echo 'test_rl_live red controls: SKIP (stack libraries not built)'; \
+	 else \
+	     for pair in $(RL_LIVE_PAIRS); do \
+	         n=$${pair%%:*}; arm=$${pair##*:}; \
+	         if ./tests/test_rl_live_red$$n --arm=$$arm >/dev/null 2>&1; \
+	         then \
+	             echo "  red control $$n passed the $$arm arm, which is the"; \
+	             echo "  one thing it cannot do: the arm measures nothing"; \
+	             exit 1; \
+	         fi; \
+	         echo "  red control $$n rejected by the $$arm arm, as it must"; \
+	     done; \
 	 fi
 	./$(RL_31_PIN_TEST)
 	@./$(RL_31_BASE_TEST); rc=$$?; \
@@ -778,7 +833,9 @@ clean:
 	      $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) \
 	      $(RL_31_PIN_TEST) $(RL_31_BASE_TEST) $(RL_DRAWS_TEST) \
 	      $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) \
-	      $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_BODIES_TEST) \
+	      $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_LIVE_TEST) \
+	      $(RL_LIVE_RED) \
+	      $(RL_BODIES_TEST) \
 	      $(RL_ATT_TEST) \
 	      $(ATT_SUBSTEP_TEST) $(ATT_SUBSTEP_RED) \
 	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \

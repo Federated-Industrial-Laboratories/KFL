@@ -12,11 +12,21 @@
  * index lookup and one bounded chunk read per seek, and nothing at
  * all for a step inside an episode already loaded) is a countable
  * fact rather than a timing measurement.
+ *
+ * There are two sources and one model. A finished recording is read
+ * from a file; a run still in progress is read from the telemetry
+ * ring it publishes into, decoded beside this in live.h. Both fill
+ * the same episodes, so no panel above knows or needs to know which
+ * one it is drawing, and the one difference a live source can carry
+ * is stated in the episode rather than hidden in it: a ring
+ * overwrites, so a viewer the producer outran holds a step stream
+ * with holes in it, and the holes are recorded.
  */
 #ifndef K26RL_VIEW_MODEL_H
 #define K26RL_VIEW_MODEL_H
 
 #include <stdint.h>
+#include <string.h>
 
 #include <string>
 #include <utility>
@@ -29,6 +39,34 @@ extern "C" {
 }
 
 namespace k26rl_view {
+
+/* Little-endian field reads, matching the format's own discipline:
+ * every integer is assembled byte by byte, never read as a struct.
+ * They live in the header because both sources decode the same
+ * fields and one of them would otherwise write these again. */
+inline uint16_t get_u16_(const uint8_t *p)
+{
+    return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+inline uint32_t get_u32_(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+inline uint64_t get_u64_(const uint8_t *p)
+{
+    return (uint64_t)get_u32_(p) | ((uint64_t)get_u32_(p + 4) << 32);
+}
+
+inline double get_f64_(const uint8_t *p)
+{
+    uint64_t bits = get_u64_(p);
+    double v;
+    memcpy(&v, &bits, sizeof v);
+    return v;
+}
 
 /* One declared observation channel, as the spec publishes it. */
 struct Channel {
@@ -113,6 +151,14 @@ struct Trajectory {
     uint32_t dir_x, dir_y, dir_z, range;
 };
 
+/* A run of step records the ring overwrote before this viewer read
+ * them: the first step number missing and how many. A file source
+ * never produces one, because a file records every step. */
+struct StepGap {
+    uint32_t first = 0;
+    uint32_t count = 0;
+};
+
 struct Episode {
     uint32_t ordinal = 0;
     uint32_t env = 0;
@@ -131,6 +177,31 @@ struct Episode {
     std::vector<double> applied_dt; /* step_count */
     std::vector<double> terminal_adjustments;  /* agent_count */
 
+    /* Live sources only, and each of them a statement about what did
+     * not arrive rather than about what did.
+     *
+     * step_no carries each stored record's own step number, because
+     * a stream with a hole in it no longer has position equal to
+     * number and a panel labelling a point with its position would
+     * be labelling it wrongly. It is empty for a file source, where
+     * the two are the same by construction.
+     *
+     * gaps are the holes themselves. start_seen is false when the
+     * episode's opening frame never arrived, in which case the
+     * initial observation and the randomisation record are absent
+     * rather than guessed. complete is false while the episode is
+     * still running, when its ending is not yet a fact. */
+    std::vector<uint32_t> step_no;
+    std::vector<StepGap> gaps;
+    bool start_seen = true;
+    bool complete = true;
+
+    /* The step number of the record stored at position i. */
+    uint32_t step_at(uint32_t i) const
+    {
+        return i < step_no.size() ? step_no[i] : i;
+    }
+
     /* True when the last step record is a fault record, which is the
      * format's one step record that is not a transition. */
     bool ends_by_fault() const { return end_reason == K26RL_END_FAULT; }
@@ -141,9 +212,16 @@ struct Episode {
     }
 };
 
-/* What the metadata panel reports about the file as a whole. */
+/* What the metadata panel reports about the recording as a whole.
+ * A live source fills the same fields from the ring preamble's
+ * file-header frame, which carries them field for field, and leaves
+ * the byte counts at zero because a ring has no length. */
 struct FileInfo {
     std::string path;
+    /* The ring's name when the source is a running simulation, and
+     * empty when it is a file. The two are never both set. */
+    std::string tap;
+    bool live = false;
     uint32_t format_version = 0;
     uint64_t governing_seed = 0;
     uint32_t rekey_ordinal = 0;
@@ -156,6 +234,8 @@ struct FileInfo {
     bool clean_close = false;
 };
 
+class LiveFeed;
+
 class Model {
 public:
     Model();
@@ -165,7 +245,37 @@ public:
      * readable prefix; info().clean_close is false and
      * info().readable_bytes marks where the valid prefix ended. */
     bool open(const std::string &path, std::string *err);
+
+    /* Attach to a running simulation's telemetry ring instead. The
+     * spec, the geometry and the seed come from the ring preamble,
+     * which is written once and never overwritten, so a viewer
+     * joining an hour into a run gets them whole. from_start joins
+     * at the ring's oldest surviving frame rather than at the
+     * producer's current position.
+     *
+     * Nothing about this attaches to the simulation: the mapping is
+     * read only, the ring holds no field a consumer may write, and
+     * the producer never learns that anybody looked. */
+    bool attach(const std::string &tap_name, bool from_start,
+                std::string *err);
+    bool live() const { return feed_ != 0; }
     void close();
+
+    /* Take whatever the producer has published since the last call,
+     * appending to the episodes and to the loss account. Returns the
+     * number of frames accepted, zero when nothing new has arrived,
+     * and zero always for a file source. Never blocks. */
+    uint32_t poll();
+    /* The producer has marked the ring closed: the run is over and
+     * what is held is all there will be. False for a file source and
+     * false for a producer that died without marking it, which is
+     * why a caller distinguishes stalled from finished by whether
+     * frames are still arriving. */
+    bool producer_closed() const;
+    uint64_t frames_accepted() const;
+    uint64_t frames_lost() const;
+    uint32_t ring_slot_size() const;
+    uint32_t ring_slot_count() const;
 
     const FileInfo &info() const { return info_; }
     const Spec &spec() const { return spec_; }
@@ -213,6 +323,7 @@ public:
 
 private:
     K26RlEpisodeReader *reader_;
+    LiveFeed *feed_;
     FileInfo info_;
     Spec spec_;
     std::vector<Trajectory> traj_;

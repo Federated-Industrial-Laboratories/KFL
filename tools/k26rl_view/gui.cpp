@@ -16,6 +16,15 @@
  * opened read-only by the reader beneath, and the re-simulation panel
  * offers no way to alter a recorded action.
  *
+ * With a live source the window watches a run as it happens. Once a
+ * frame it takes whatever the ring has published, which costs the
+ * producer nothing and cannot be noticed by it, and follows the
+ * newest step unless a person takes hold of the timeline, at which
+ * point following stops and the run goes on arriving behind them. The
+ * live panel states what has arrived and what has not: a producer
+ * that outran this window overwrote frames, and the count of them and
+ * the holes they left are shown rather than drawn over.
+ *
  * The trajectory view plots reconstructed points and stands beside
  * the scene view rather than being replaced by it.
  *
@@ -82,6 +91,11 @@ struct Ui {
     uint32_t scene_resim_ep;
     Scene scene;
     bool scene_ready;
+    /* Live sources only: whether the view rides the newest step as
+     * frames arrive. Taking hold of the timeline drops it, because a
+     * person who scrubbed back has said where they want to be. */
+    bool follow;
+    LiveOptions live;
 };
 
 void glfw_error_(int code, const char *desc)
@@ -122,8 +136,11 @@ void panel_timeline_(Ui &ui, const Episode &ep)
     char marks[128];
     ImGui::Begin("Timeline");
 
-    ImGui::Text("file %s", ui.model->info().path.c_str());
-    if (!ui.model->info().clean_close) {
+    if (ui.model->live())
+        ImGui::Text("ring %s", ui.model->info().tap.c_str());
+    else
+        ImGui::Text("file %s", ui.model->info().path.c_str());
+    if (!ui.model->live() && !ui.model->info().clean_close) {
         ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f),
                            "unclean close: readable prefix ends at byte %llu "
                            "of %llu",
@@ -142,11 +159,47 @@ void panel_timeline_(Ui &ui, const Episode &ep)
     if (ImGui::SliderInt("step", &st, 0,
                          ep.step_count ? (int)ep.step_count - 1 : 0)) {
         ui.step = (uint32_t)st;
+        /* Taking hold of the timeline is a person saying where they
+         * want to be, so the view stops riding the newest step. */
+        ui.follow = false;
     }
-
-    ImGui::TextColored(ending_colour_(ep.end_reason),
-                       "ends: %s", end_reason_name(ep.end_reason));
-    if (ep.end_reason == K26RL_END_FAULT) {
+    /* What this episode is missing, said where the timeline is read.
+     * A step's position in what arrived is not its step number once
+     * something did not arrive, so the number is stated too. */
+    if (!ep.gaps.empty()) {
+        uint32_t missing = 0;
+        for (size_t g = 0; g < ep.gaps.size(); g++)
+            missing += ep.gaps[g].count;
+        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f),
+                           "%u step records of this episode were "
+                           "overwritten before this window read them, in "
+                           "%u run%s; the track is drawn through what "
+                           "arrived and not through them",
+                           (unsigned)missing, (unsigned)ep.gaps.size(),
+                           ep.gaps.size() == 1 ? "" : "s");
+        for (size_t g = 0; g < ep.gaps.size() && g < 8; g++) {
+            ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f),
+                               "    missing steps %u to %u",
+                               ep.gaps[g].first,
+                               ep.gaps[g].first + ep.gaps[g].count - 1);
+        }
+    }
+    if (!ep.start_seen) {
+        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.35f, 1.0f),
+                           "this episode's opening record never arrived: "
+                           "its initial observation and its randomisation "
+                           "draws are not known and are not shown");
+    }
+    if (ui.model->live())
+        ImGui::Text("step %u of this episode", ep.step_at(ui.step));
+    if (!ep.complete) {
+        ImGui::TextColored(ImVec4(0.55f, 0.80f, 0.95f, 1.0f),
+                           "this episode is still running");
+    } else {
+        ImGui::TextColored(ending_colour_(ep.end_reason),
+                           "ends: %s", end_reason_name(ep.end_reason));
+    }
+    if (ep.complete && ep.end_reason == K26RL_END_FAULT) {
         ImGui::SameLine();
         ImGui::TextColored(ending_colour_(ep.end_reason),
                            "(reason code %u; the final record is the one "
@@ -1175,6 +1228,46 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
     ImGui::End();
 }
 
+/* The live panel: where the frames are coming from, how many arrived,
+ * how many did not, and what the run is doing now.
+ *
+ * The loss line is the point of it. The ring overwrites rather than
+ * wait for a watcher, so a window that fell behind a fast simulation
+ * lost whole steps, and a debugging instrument that showed a smooth
+ * track over them would be lying about the flight. The count is here
+ * and the holes are marked on the timeline beside it. */
+void panel_live_(Ui &ui)
+{
+    const Model &m = *ui.model;
+    const FileInfo &fi = m.info();
+    uint64_t lost = m.frames_lost();
+
+    ImGui::Begin("Live");
+    ImGui::Text("attached to ring %s", fi.tap.c_str());
+    ImGui::Text("ring %u slots of %u bytes", m.ring_slot_count(),
+                m.ring_slot_size());
+    ImGui::Text("frames accepted %llu", (unsigned long long)m.frames_accepted());
+    if (lost) {
+        ImGui::Text("frames lost to overwrite: %llu",
+                    (unsigned long long)lost);
+        ImGui::TextUnformatted(
+            "the simulation outran this window; the steps behind those "
+            "frames are not held and are not drawn");
+    } else {
+        ImGui::TextUnformatted("frames lost to overwrite: none");
+    }
+    ImGui::Text("episodes seen %u", fi.episode_count);
+    ImGui::TextUnformatted(m.producer_closed()
+        ? "the producer has finished and closed the ring"
+        : "the run is in progress");
+    ImGui::Checkbox("follow the newest step", &ui.follow);
+    ImGui::Separator();
+    ImGui::TextUnformatted(
+        "this window reads and nothing else: the mapping is read only "
+        "and the run cannot tell that anybody is watching");
+    ImGui::End();
+}
+
 void panel_meta_(Ui &ui, const Episode &ep)
 {
     const FileInfo &fi = ui.model->info();
@@ -1204,9 +1297,19 @@ void panel_meta_(Ui &ui, const Episode &ep)
                     sp.unknown_tags[k].second);
     }
     ImGui::Separator();
-    ImGui::Text("randomisation draws: %u", (unsigned)ep.dr_tags.size());
-    for (size_t k = 0; k < ep.dr_tags.size(); k++)
-        ImGui::Text("  parameter %u = %.17g", ep.dr_tags[k], ep.dr_values[k]);
+    if (!ep.start_seen) {
+        /* Not none: unknown. The record carrying them never arrived,
+         * and a count of zero here would read as a fact about the
+         * episode rather than about this window. */
+        ImGui::TextUnformatted("randomisation draws: not known, the "
+                               "episode's opening record never arrived");
+    } else {
+        ImGui::Text("randomisation draws: %u", (unsigned)ep.dr_tags.size());
+        for (size_t k = 0; k < ep.dr_tags.size(); k++) {
+            ImGui::Text("  parameter %u = %.17g", ep.dr_tags[k],
+                        ep.dr_values[k]);
+        }
+    }
     ImGui::End();
 }
 
@@ -1287,13 +1390,19 @@ int run_gui(Model &model, const DumpOptions &opt)
     SceneGl gl = SceneGl();
     GLFWwindow *win;
 
-    if (model.info().episode_count == 0) {
+    /* A recording with no complete episode has nothing to show and
+     * never will. A run in progress has nothing to show yet, which is
+     * a different thing: the window opens and fills as the frames
+     * arrive. */
+    if (!model.live() && model.info().episode_count == 0) {
         fprintf(stderr, "k26rl_view: the file carries no complete episode; "
                         "try --dump meta to see what it does carry\n");
         return 1;
     }
 
     ui.model = &model;
+    ui.follow = true;
+    ui.live = opt.live;
     ui.artifact = opt.artifact;
     ui.asset_path = opt.asset;
     ui.asset_tried = false;
@@ -1362,6 +1471,22 @@ int run_gui(Model &model, const DumpOptions &opt)
                 ui.scene_opt.viewport.width = (uint32_t)w;
                 ui.scene_opt.viewport.height = (uint32_t)h;
             }
+        }
+        /* One drain a frame. It is a read of a mapping and a copy of
+         * whatever is new, so a window that redraws at the display's
+         * rate over a simulation stepping far faster plots the newest
+         * of what arrived and counts the rest as lost, which is what
+         * the ring's discipline gives and what the live panel says. */
+        if (model.live()) {
+            uint32_t got = model.poll();
+            uint32_t last = model.info().episode_count;
+            if (got && ui.follow && last) {
+                const Episode *newest = model.load(last - 1, &err);
+                ui.episode_index = last - 1;
+                if (newest && newest->step_count)
+                    ui.step = newest->step_count - 1;
+            }
+            panel_live_(ui);
         }
         ep = model.load(ui.episode_index, &err);
         if (ep) {
