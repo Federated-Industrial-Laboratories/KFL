@@ -816,7 +816,17 @@ static KflcNode *parse_plan_(Lexer *L, Token *cur,
                 snprintf(nm, sizeof nm, "%s_k%ld%s", n->name, k,
                          CH_[c].suffix);
                 KflcNode *act = new_node(arena, KFLN_STMT_ACTION, line0);
+                KflcValue mark;
+
                 act->name = kflc_arena_strdup(arena, nm);
+                /* The mark says the channel is the block's rather than
+                 * a line an author wrote, so a round trip prints the
+                 * block and not the channels the block would declare
+                 * again on the way back in. */
+                memset(&mark, 0, sizeof mark);
+                mark.kind = KFLV_IDENT;
+                mark.u.s  = kflc_arena_strdup(arena, n->name);
+                stmt_append_attr(arena, act, "plan", mark, line0);
                 act->position.kind = KFLV_IDENT;
                 act->position.u.s  = kflc_arena_strdup(arena, "box");
                 act->expr  = kflc_parse_expr(alo->value.u.s, arena, diag,

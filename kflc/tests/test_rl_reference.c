@@ -78,6 +78,10 @@
  *      the step that ended the episode become a plan file and a plan
  *      frame that agree byte for byte, with the absent slot dropped
  *      and the rest in time order.
+ *  10. Both new spellings survive a parse, print and parse again,
+ *      which the plan block is what puts at risk: it declares action
+ *      channels of its own, and a printer emitting both the block and
+ *      the channels would declare each of them twice.
  *
  * The no-allocation half of the plan's stepping-path obligation is
  * measured where every other addition to that path is measured, in
@@ -1123,8 +1127,43 @@ int main(void)
     }
     rl_stage_done_();
 
+    /* ---- Arm 10: the spelling survives a round trip -------------- */
+    rl_stage_("round-tripping both new spellings", 120u);
+    {
+        /* Both constructs are new spellings, and a program that
+         * parses, prints and parses again must give the same tree. The
+         * plan block is the one at risk: it declares action channels
+         * of its own, and a printer that emitted both the block and
+         * the channels would declare each of them twice on the way
+         * back in. The round-trip corpus does not reach either
+         * construct, so the check is taken here over this gate's own
+         * fixtures. */
+        static const char *const srcs[] = {
+            WORK_DIR "/ref.kfl", WORK_DIR "/planner.kfl", NULL
+        };
+        int k;
+
+        for (k = 0; srcs[k]; k++) {
+            char cmd[1024];
+
+            snprintf(cmd, sizeof cmd,
+                     "./tests/round_trip %s > " WORK_DIR "/rt%d.log 2>&1",
+                     srcs[k], k);
+            if (system(cmd) != 0) {
+                fprintf(stderr, "FAIL: %s did not round-trip\n", srcs[k]);
+                snprintf(cmd, sizeof cmd, "cat " WORK_DIR "/rt%d.log", k);
+                (void)!system(cmd);
+                exit(1);
+            }
+        }
+        printf("arm 10: both spellings parse, print and parse again to"
+               " the same tree: OK\n");
+        g_arms++;
+    }
+    rl_stage_done_();
+
     dlclose(so);
-    ASSERT(g_arms == 9);
+    ASSERT(g_arms == 10);
     printf("test_rl_reference: %d arms passed\n", g_arms);
     return 0;
 }

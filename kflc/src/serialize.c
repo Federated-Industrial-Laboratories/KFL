@@ -533,44 +533,53 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
 
     case KFLN_STMT_PLAN: {
         /* The block's own spelling, restored from the attrs the parser
-         * left. The action channels it declared are ordinary action
-         * statements in the world body and print themselves. */
-        const KflcAttr *frame = find_attr_(n->attrs, "frame");
-        const KflcAttr *kind  = find_attr_(n->attrs, "kind");
-        static const char *const PAIRS_[] = {
-            "time", "position", "velocity", "tolerance", NULL
-        };
-
+         * left and in the order they were written, since a round trip
+         * has to reproduce the tree and not merely the meaning. The
+         * frame's two attrs and each bound pair came from one line
+         * each and go back onto one line each.
+         *
+         * The action channels the block declared are not printed here
+         * and are not printed by the action case either: they are the
+         * block's, they carry a mark saying so, and printing both the
+         * block and them would declare every channel twice on the way
+         * back in. */
+        indent(out, level);
         fprintf(out, "plan %s\n", n->name ? n->name : "?");
         for (const KflcAttr *a = n->attrs; a; a = a->next) {
-            if (!a->name || a->value.kind != KFLV_IDENT) continue;
-            if (strcmp(a->name, "file") == 0 ||
-                strcmp(a->name, "slots") == 0 ||
-                strcmp(a->name, "epoch") == 0 ||
-                strcmp(a->name, "provenance") == 0) {
-                fprintf(out, "    %s %s\n", a->name, a->value.u.s);
-            }
-        }
-        if (frame && kind) {
-            fprintf(out, "    frame %s %s\n", frame->value.u.s,
-                    kind->value.u.s);
-        }
-        for (int k = 0; PAIRS_[k]; k++) {
-            char lo[32], hi[32];
-            const KflcAttr *al, *ah;
+            size_t l;
 
-            snprintf(lo, sizeof lo, "%s_lo", PAIRS_[k]);
-            snprintf(hi, sizeof hi, "%s_hi", PAIRS_[k]);
-            al = find_attr_(n->attrs, lo);
-            ah = find_attr_(n->attrs, hi);
-            if (al && ah) {
-                fprintf(out, "    %s %s %s\n", PAIRS_[k], al->value.u.s,
-                        ah->value.u.s);
+            if (!a->name || a->value.kind != KFLV_IDENT) continue;
+            if (strcmp(a->name, "kind") == 0) continue;   /* with frame */
+            l = strlen(a->name);
+            if (l > 3 && strcmp(a->name + l - 3, "_hi") == 0) {
+                continue;                                 /* with _lo */
+            }
+            indent(out, level + 1);
+            if (strcmp(a->name, "frame") == 0) {
+                const KflcAttr *k = find_attr_(n->attrs, "kind");
+
+                fprintf(out, "frame %s %s\n", a->value.u.s,
+                        (k && k->value.kind == KFLV_IDENT && k->value.u.s)
+                            ? k->value.u.s : "?");
+            } else if (l > 3 && strcmp(a->name + l - 3, "_lo") == 0) {
+                char base[32], hi[36];
+                const KflcAttr *h;
+
+                snprintf(base, sizeof base, "%.*s", (int)(l - 3), a->name);
+                snprintf(hi, sizeof hi, "%s_hi", base);
+                h = find_attr_(n->attrs, hi);
+                fprintf(out, "%s %s %s\n", base, a->value.u.s,
+                        (h && h->value.kind == KFLV_IDENT && h->value.u.s)
+                            ? h->value.u.s : "?");
+            } else {
+                fprintf(out, "%s %s\n", a->name, a->value.u.s);
             }
         }
+        indent(out, level);
         fputs("end\n", out);
-        return;
+        break;
     }
+
     case KFLN_STMT_ASTRO_PAYLOAD: {
         indent(out, level);
         fprintf(out, "astro_payload %s", n->name ? n->name : "?");
@@ -806,6 +815,9 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
     }
 
     case KFLN_STMT_ACTION: {
+        /* A channel a plan block declared prints as part of that
+         * block, not on its own line. */
+        if (find_attr_(n->attrs, "plan")) break;
         indent(out, level);
         fprintf(out, "action %s %s ",
                 n->name ? n->name : "?",

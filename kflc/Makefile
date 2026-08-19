@@ -318,6 +318,7 @@ $(RL_PROPULSION_TEST): tests/test_rl_propulsion.c $(RL_GATE_DEPS) \
 # recovery from a recording.
 RL_REFERENCE_TEST = tests/test_rl_reference
 $(RL_REFERENCE_TEST): tests/test_rl_reference.c $(RL_GATE_DEPS) \
+                      $(TEST_BIN) \
                       ../libk26rl/include/k26rl_env.h \
                       ../libk26rl/include/k26rl_ref.h \
                       ../libk26rl/include/k26rl_episode.h \
