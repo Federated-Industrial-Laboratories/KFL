@@ -1,0 +1,66 @@
+# propellant_box.k26asm - a calibration article that spends what it
+# thrusts.
+#
+# WHAT THIS IS. A shape, not a craft. Nothing here is a claim about
+# any vehicle: the masses, the dimensions and the thruster layout are
+# chosen so that every quantity in the propulsion model has a closed
+# form a reader can check by hand, and so that each of them moves.
+#
+# The hull is a cube of half extent one metre carrying a tonne. The
+# tank is a smaller cube of four hundred kilograms held a metre and a
+# quarter off the hull's centre along the y axis, which is what makes
+# the article worth having: the vehicle's centre of mass sits at
+# 1.25 * m / (1000 + m) along y with m the propellant left, so it
+# travels from 0.357 m at a full tank to the hull's own centre at an
+# empty one, and every thruster torque, which is taken about the
+# centre of mass, travels with it.
+#
+# The two thrusters differ in specific impulse by a factor of four,
+# which is about the spread between a storable bipropellant main
+# engine and a cold gas attitude thruster. `main` thrusts along the
+# body x axis from behind, and `vernier` thrusts along z from a point
+# on the x axis, so the second turns the article about two axes while
+# the first pushes it along one. A craft whose thrusters all shared a
+# specific impulse could not tell a per-thruster model from a
+# per-vehicle one, which is the reason for the spread.
+#
+# The specific impulses are of the right order for the two engine
+# classes named above and are not read from any source: 300 s for a
+# storable bipropellant engine and 75 s for cold gas. Nothing is cited
+# here because nothing here is a real article.
+
+assembly propellant_box
+    frame x_to_port
+
+    provenance mass "calibration shape, not a craft: a tonne of hull chosen for round arithmetic" computed
+    provenance tank "a chosen tank placement, held off the hull's centre so the centre of mass travels as it empties; this is an arrangement and not a measurement" modelled
+    provenance isp "chosen figures of the right order for a storable bipropellant engine and for cold gas; no source is cited because no article is claimed" modelled
+    provenance thrust "chosen so that a full tank is worth about 850 m/s and empties in about an hour at the main engine's full throttle" modelled
+
+    component hull
+        mass 1000.0
+        at 0.0 0.0 0.0
+        collider box 1.0 1.0 1.0
+    end
+
+    component tank
+        mass 400.0
+        at 0.0 1.25 0.0
+        collider box 0.4 0.4 0.4
+        propellant
+    end
+
+    thruster main
+        at -1.0 0.0 0.0
+        dir 1.0 0.0 0.0
+        thrust 400.0
+        isp_s 300.0
+    end
+
+    thruster vernier
+        at 1.0 0.0 0.0
+        dir 0.0 0.0 1.0
+        thrust 50.0
+        isp_s 75.0
+    end
+end

@@ -1,0 +1,46 @@
+# rl_propulsion.kfl - a craft that pays for its thrust.
+#
+# The smallest programme that exercises the propulsion model end to
+# end: a craft in low orbit whose assembly holds propellant, a main
+# engine and a vernier at different specific impulses, and the four
+# published components of a propulsion observe read back in the
+# reward and in the termination predicate.
+#
+# The reward is a stand-in and not a task. It pays for velocity change
+# still affordable and charges for propellant spent, which is what a
+# programme conditioning on this form would read; the episode ends
+# when the tank runs dry, which is a state the model can reach and a
+# controller has to be able to see coming.
+
+form RL_PROPULSION
+
+fn world w
+    astro_body earth gm=3.986004418e14 mass=5.972e24
+
+    astro_body craft assembly="../examples/assets/propellant_box.k26asm" parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0 omega_x=0.0 omega_y=0.0 omega_z=0.0
+
+    episode
+        control_dt 1.0
+        horizon 64
+        substeps 8
+        terminated when fuel_propellant_fraction < 0.001
+    end
+
+    action burn box 0.0 1.0 default 0.0
+    action steer box -1.0 1.0 default 0.0
+
+    on_step
+        craft.main.throttle = burn
+        craft.vernier.throttle = steer * steer
+    end
+
+    observe propulsion of craft as fuel
+    observe attitude of craft as att
+    observe craft from earth mode=geometric as trk
+
+    objective
+        reward fuel_delta_v_remaining * 0.001 - burn * 0.01
+    end
+end
+
+end

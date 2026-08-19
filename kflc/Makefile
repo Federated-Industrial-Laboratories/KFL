@@ -514,6 +514,7 @@ test: $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_BINDING_TEST) $(W8_AR
 	./$(TEST_BIN) integration_tests/rl_pointing.kfl
 	./$(TEST_BIN) integration_tests/rl_multi_agent.kfl
 	./$(TEST_BIN) integration_tests/rl_defense.kfl
+	./$(TEST_BIN) integration_tests/rl_propulsion.kfl
 	./$(MANIFEST_TEST)
 	./$(BODY_BINDING_TEST)
 	./$(W8_ARENA_TEST)
