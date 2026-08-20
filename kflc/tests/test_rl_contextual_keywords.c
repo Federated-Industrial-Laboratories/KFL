@@ -2,9 +2,10 @@
  *
  * `agent`, `sensor`, `on_step`, `astro_payload`, `capture_envelope`
  * and `engage` introduce constructs at statement position inside a
- * `fn world` body, and `at`, `effect`, `against` and `full` are read
- * as connectives or marks inside three of those statements. None of
- * the ten is a reserved word: a Grammar 3.1 program that binds one of
+ * `fn world` body; `at`, `effect`, `against` and `full` are read as
+ * connectives or marks inside three of those statements; and
+ * `datalink`, `network` and `source` are a payload kind and two
+ * payload keys. None of the thirteen is a reserved word: a Grammar 3.1 program that binds one of
  * them as an ordinary identifier compiles and behaves as it always
  * did, because each opens its construct only when what follows is
  * what that construct's form requires.
@@ -26,6 +27,11 @@
  *   2b. The two connectives. A body called `at` is engaged by name,
  *      and a body called `effect` keeps its line-of-sight observe,
  *      which is the shape the effector form is told apart from.
+ *   2c. The datalink's three words. One program declares a datalink
+ *      and a gated information state while a body is called
+ *      `datalink`, two payloads are called `source` and `network`,
+ *      the community is called `source` as well, and all three words
+ *      are bound as ordinary numbers in the same world prefix.
  *
  * Both halves are needed and neither is sufficient. A fixture holding
  * only the block form cannot tell a disambiguating parser from a
@@ -57,12 +63,21 @@
 /* The words this gate is about. The first four open blocks in the
  * world prefix; `engage` opens a statement inside `on_step`; `at` and
  * `effect` are connectives inside two statements and are here because
- * a word read anywhere is a word that can be lost everywhere. */
+ * a word read anywhere is a word that can be lost everywhere.
+ *
+ * The last three arrived with the datalink: `datalink` is a value of
+ * `kind=` and `network` and `source` are keys of the payload
+ * statement. None of the three sits at a statement's first position,
+ * and the payload statement reads the rest of its line as text, so
+ * none of them needed a guard and there is no guard to delete. What
+ * they need is what every word here needs: to be shown still working
+ * as a name, and to be shown still opening what they open. */
 static const char *const WORDS[] = {
     "agent", "sensor", "on_step", "astro_payload", "capture_envelope",
-    "engage", "at", "effect", "against", "full", NULL
+    "engage", "at", "effect", "against", "full",
+    "datalink", "network", "source", NULL
 };
-#define WORD_COUNT 10
+#define WORD_COUNT 13
 
 static int g_arms;
 
@@ -493,6 +508,69 @@ static void arm_effect_as_body_(void)
                   "observe", SRC);
 }
 
+/* The datalink's own three words, in one program that also binds all
+ * three as ordinary names. A body is called `datalink`, a payload is
+ * called `source` and is what another payload's `source=` names, a
+ * payload is called `network`, and the community is called `source`
+ * too, since a community name is an identifier of its own and shares
+ * nothing with the payload namespace. Three bindings of the same
+ * words sit in the world prefix beside them. */
+static void arm_datalink_forms_(void)
+{
+    static const char *const SRC =
+        "form CTXLINK\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body craft assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    astro_body mate assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 pos_y=3.0e4 vel_y=7546.0"
+        " quat_w=1.0\n"
+        "    astro_body datalink assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.02e6 vel_y=7535.0 quat_w=1.0\n"
+        "    let datalink: double = 3.0\n"
+        "    datalink = datalink + 1.0\n"
+        "    let network: double = 5.0\n"
+        "    network = network + 1.0\n"
+        "    let source: double = 7.0\n"
+        "    source = source + 1.0\n"
+        "    astro_payload source body=craft kind=detect_radar"
+        " p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10"
+        " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0"
+        " noise_figure=2.0 snr_threshold=10.0\n"
+        "    astro_payload network body=craft kind=infostate"
+        " source=source\n"
+        "    astro_payload mate_eye body=mate kind=detect_radar"
+        " p_tx_w=2000.0 g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10"
+        " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0"
+        " noise_figure=2.0 snr_threshold=10.0\n"
+        "    astro_payload mate_pic body=mate kind=infostate"
+        " source=mate_eye\n"
+        "    astro_payload wire body=craft kind=datalink network=source"
+        " rate_hz=1.0 p_tx_w=2.0 g_tx_db=3.0 g_rx_db=3.0 freq_hz=2.2e9"
+        " loss_sys_db=2.0 bandwidth_hz=1.0e6 t_sys_k=500.0"
+        " noise_figure=2.0 snr_threshold=6.0\n"
+        "    astro_payload mate_wire body=mate kind=datalink"
+        " network=source rate_hz=1.0 p_tx_w=2.0 g_tx_db=3.0"
+        " g_rx_db=3.0 freq_hz=2.2e9 loss_sys_db=2.0 bandwidth_hz=1.0e6"
+        " t_sys_k=500.0 noise_figure=2.0 snr_threshold=6.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 4\n"
+        "    end\n"
+        "    action thrust box -1.0 1.0 default 0.0\n"
+        "    observe track network of datalink as trk\n"
+        "    observe track mate_pic of datalink as mtrk\n"
+        "    objective\n"
+        "        reward trk_valid + datalink + network + source\n"
+        "    end\n"
+        "end\n"
+        "end\n";
+    must_compile_("the datalink kind, the `network` and `source` keys, "
+                  "a body and two payloads of those names, and three "
+                  "bindings of the same words in one program", SRC);
+}
+
 /* The `capture_envelope` block opens where its form is written, and
  * the port observe's two words are read as the clause and the mark
  * they are. */
@@ -726,6 +804,7 @@ int main(void)
     arm_both_readings_();
     arm_effector_forms_();
     arm_effect_as_body_();
+    arm_datalink_forms_();
     arm_capture_forms_();
     arm_port_clause_names_();
     arm_port_clause_not_greedy_();

@@ -133,7 +133,6 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
     const KflcNode *s = m->observes[i];
     int p   = m->obs_payload[i];
     int tgt = m->obs_target[i];
-    const RlPayload *py = &m->payloads[p];
 
     if (rl_observe_form(s) == RL_OBS_EFF) {
         /* The block is read without a null test. This form exists only
@@ -212,6 +211,35 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
             off + 7, off + 8);
         return;
     }
+
+    rl_emit_detect_eval(out, m, p, tgt);
+
+    fprintf(out,
+        "        out_v[%d] = _kfl_det;\n"
+        "        out_v[%d] = _kfl_snr;\n"
+        "        out_v[%d] = _kfl_rng;\n"
+        "        out_v[%d] = _kfl_ux;\n"
+        "        out_v[%d] = _kfl_uy;\n"
+        "        out_v[%d] = _kfl_uz;\n"
+        "        out_v[%d] = _kfl_asp;\n"
+        "    }\n",
+        off, off + 1, off + 2, off + 3, off + 4, off + 5, off + 6);
+}
+
+/* The detection statistic and its verdict, for one payload against one
+ * target, as far as the two closing braces of its own guards. What
+ * follows it is the caller's: the observation path publishes the seven
+ * channels, and the information state's gate reads the verdict alone.
+ *
+ * It is emitted from here rather than written twice because the gate
+ * is defined as the comparison the `_detected` channel publishes. Two
+ * copies of that comparison would be two things that could drift apart
+ * while both compiled, and a program's track picture would then open
+ * and close on a rule its own detection channel did not agree with. */
+
+void rl_emit_detect_eval(FILE *out, const RlModel *m, int p, int tgt)
+{
+    const RlPayload *py = &m->payloads[p];
 
     fprintf(out,
         "    {\n"
@@ -334,18 +362,9 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
 
     rl_emit_detect_degrade_(out, m, p, tgt, py->kind);
 
-    fprintf(out,
+    fputs(
         "            }\n"
-        "        }\n"
-        "        out_v[%d] = _kfl_det;\n"
-        "        out_v[%d] = _kfl_snr;\n"
-        "        out_v[%d] = _kfl_rng;\n"
-        "        out_v[%d] = _kfl_ux;\n"
-        "        out_v[%d] = _kfl_uy;\n"
-        "        out_v[%d] = _kfl_uz;\n"
-        "        out_v[%d] = _kfl_asp;\n"
-        "    }\n",
-        off, off + 1, off + 2, off + 3, off + 4, off + 5, off + 6);
+        "        }\n", out);
 }
 
 int rl_emit_observe(FILE *out, const RlModel *m,

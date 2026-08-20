@@ -45,7 +45,7 @@ EMIT_RL_OBJS = src/emit_rl.o src/emit_rl_collect.o \
                src/emit_rl_collect_defense.o src/emit_rl_helpers.o \
                src/emit_rl_tables.o src/emit_rl_world.o \
                src/emit_rl_observe.o src/emit_rl_step.o \
-               src/emit_rl_core.o
+               src/emit_rl_link.o src/emit_rl_core.o
 DRV_OBJS = src/emit.o $(EMIT_RL_OBJS) src/main.o
 
 $(EMIT_RL_OBJS): src/emit_rl_internal.h
@@ -718,6 +718,20 @@ $(RL_AGENT_ID_TEST): tests/test_rl_agent_identity.c $(RL_GATE_DEPS) \
 # keeps compiling. One arm per word per shape, both readings, because
 # a fixture holding only the block form cannot tell a disambiguating
 # parser from a greedy one.
+# The gated information state and the datalink: the gate a `source=`
+# puts on the push, the one-way link budget against hand figures with
+# one perturbation per declared key, the channel value a receiver
+# cannot reach without the link, what may not cross between two
+# communities, and the determinism and declaration order of the
+# transfer.
+RL_LINK_TEST = tests/test_rl_datalink
+$(RL_LINK_TEST): tests/test_rl_datalink.c $(RL_GATE_DEPS) \
+                 ../libk26rl/include/k26rl_env.h \
+                 ../libk26rl/include/k26rl_episode.h \
+                 ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -I../libk26astro_core/include \
+	    -o $@ $< ../libk26rl/libk26rl.a -ldl -lm
+
 RL_CTXKW_TEST = tests/test_rl_contextual_keywords
 $(RL_CTXKW_TEST): tests/test_rl_contextual_keywords.c $(RL_GATE_DEPS) \
                   ../libk26rl/include/k26rl_env.h
@@ -745,7 +759,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_MAVIEW_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_CAPTURE_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_MAVIEW_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_CAPTURE_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_LINK_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -780,6 +794,7 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	          $(RL_CAPTURE_TEST) \
 	          $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) \
 	          $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) \
+	          $(RL_LINK_TEST) \
 	          $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) \
 	          $(RL_REALTIME_TEST); do \
 	     if [ ! -f $(RL_STACK_ARCHIVE) ] || [ ! -x $$t ]; then \

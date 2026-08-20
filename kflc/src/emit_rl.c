@@ -87,6 +87,15 @@ static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
         kflc_arena_release(arena);
         return 1;
     }
+    /* The datalink's tables and the information state's gates come
+     * after the world prefix, because a gate is the detection block
+     * and that block reads the body-index table the prefix declares,
+     * and before the observation function, because the environment
+     * core beneath both walks the tables. */
+    if (rl_emit_link_tables(out, &m, diag)) {
+        kflc_arena_release(arena);
+        return 1;
+    }
     if (rl_emit_observe(out, &m, diag)) {
         kflc_arena_release(arena);
         return 1;

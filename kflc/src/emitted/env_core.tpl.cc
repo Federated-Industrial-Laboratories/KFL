@@ -1,5 +1,24 @@
 /* ---- Environment handle ------------------------------------------ */
 
+#if KFLRL_N_LINKEDGE > 0
+/* One offer in flight: what a datalink broadcast about one target,
+ * and the instant it reaches the receiver.
+ *
+ * The state carries the epoch it was true at, not the epoch it
+ * arrives at. A history sample is a statement about where a body was
+ * when the light left it, and stamping it with its arrival would make
+ * a peer's report of an old sighting read as a fresh one. What the
+ * arrival decides is when the receiver may have it, which is what
+ * `due` is for: the offer sits here until the binding's own clock
+ * reaches it, and is pushed into the receiver's ring then. */
+typedef struct {
+    K26AstroEpoch t;
+    K26V3         pos;
+    K26V3         vel;
+    double        due;
+} KflrlLinkPend;
+#endif
+
 /* The context a thrust perturbation is registered with: the handle
  * and which environment it speaks for. Both are fixed at create. */
 typedef struct KflrlThrustCtx {
@@ -133,6 +152,33 @@ struct K26RlEnv {
     double  *payp;
     double  *info_t;
     int64_t *info_day;
+#endif
+#if KFLRL_N_LINK > 0
+    /* How many broadcast instants each datalink has passed this
+     * episode. The cadence is on the binding's own clock, so the
+     * count restarts with the seconds field at every reset and a
+     * cadence instant takes effect at the first sub-advance boundary
+     * at or after it. */
+    int64_t *link_n;
+#endif
+#if KFLRL_N_LINKEDGE > 0
+    /* The offers in flight, one queue per transfer edge, and the
+     * head and depth of each. An edge is one entry of one transmitter
+     * offered to one receiver, and it is a compile-time fact: the
+     * receivers of an entry are the members of the transmitter's own
+     * community that declare a track over that target, which is what
+     * drops an entry for a target the receiver holds no ring slot for
+     * before the stepping path ever sees it.
+     *
+     * `link_over` is raised where a queue is full at a broadcast: the
+     * cadence has outrun the light time to that peer by more offers
+     * than the depth holds. The environment faults on it rather than
+     * dropping the offer, because a transmission that vanishes is a
+     * link reporting a reach it does not have. */
+    KflrlLinkPend *link_q;
+    uint8_t       *link_qh;
+    uint8_t       *link_qn;
+    uint8_t       *link_over;
 #endif
 #if KFLRL_N_EFFECTOR > 0
     /* One engagement block per environment, holding the channels
@@ -829,8 +875,22 @@ static int kflrl_join_form_(K26RlEnv *h, uint32_t e,
  * per sub-advance thereafter, so the history is finer than the
  * light-time lag rather than coarser than it. The rings exist from
  * the first call onward, so no call after the first allocates. */
-static void kflrl_info_push_(K26RlEnv *h, uint32_t e)
+/* `seed` marks the push taken at an episode epoch rather than at a
+ * sub-advance. Two things ride on the distinction.
+ *
+ * The first is allocation. A target's ring is allocated by the first
+ * push that names it, and an allocation on the stepping path is
+ * forbidden, so the epoch push is what has to reach every pair: the
+ * world prefix's call is what builds every ring, and no call after it
+ * allocates anything.
+ *
+ * The second is the design's own rule that seeding at an episode
+ * epoch is unconditional. A gate is a statement about what a craft
+ * saw while it was flying, and an episode's first instant is where
+ * its knowledge is set rather than sensed. */
+static void kflrl_info_push_(K26RlEnv *h, uint32_t e, int seed)
 {
+    (void)seed;
 #if KFLRL_N_TRACKPAIR > 0
     K26AstroEpoch t = kflrl_info_epoch_(h->info_day[e], h->info_t[e]);
     K26AstroPos origin = k26astro_pos_zero();
@@ -842,6 +902,19 @@ static void kflrl_info_push_(K26RlEnv *h, uint32_t e)
         K26AstroVehicle *tv =
             h->vehicles[(size_t)e * KFLRL_N_VEHICLES + tv_slot];
         if (!is || !tv) continue;
+#if KFLRL_N_GATE > 0
+        /* The gate an information state's `source=` puts on this
+         * pair: the push happens only where the named detection's
+         * verdict for this target meets its declared threshold, which
+         * is the comparison the `_detected` channel publishes and the
+         * same emitted statements. Between detections the ring keeps
+         * its last entries and the track observe ages them. */
+        if (!seed &&
+            !kflrl_track_gate_(h->worlds[e], KFLRL_PAYP(h, e),
+                               KFLRL_ENG(h, e), i)) {
+            continue;
+        }
+#endif
         const K26AstroBody *tb = k26astro_world_body_at(
             h->worlds[e],
             kflrl_body_idx_[kflrl_vehicle_body_[tv_slot]]);
@@ -852,6 +925,209 @@ static void kflrl_info_push_(K26RlEnv *h, uint32_t e)
 #else
     (void)h; (void)e;
 #endif
+}
+#endif
+
+#if KFLRL_N_LINK > 0
+/* The one-way link budget, and it is not the radar's.
+ *
+ * Received power over a single path of range R, with both antennas'
+ * gains and the declared system loss as decibel figures:
+ *
+ *     P_r = P_t * G_t * G_r * lambda^2 / ((4 pi R)^2 * L)
+ *
+ * against the receiver's own thermal noise floor
+ *
+ *     N = k_B * T_sys * B * F
+ *
+ * and the returned ratio is thresholded by the caller at the declared
+ * `snr_threshold`. The detection library's radar evaluator is the
+ * monostatic equation: it carries a fourth power of range, a cube of
+ * four pi and a target cross-section, because its signal goes out to
+ * a target and scatters back. A datalink's signal makes the trip
+ * once, to a receiver that is listening for it, so that evaluator is
+ * the wrong physics here and this kernel is this capability's own.
+ *
+ * Same treatment, same conventions: Skolnik, M.I. 2008. Radar
+ * Handbook, 3rd ed., section 1.4, which is what the detection
+ * library's radio evaluator cites and where its decibel and noise
+ * conventions come from.
+ *
+ * Deterministic throughout. The closure decision is a threshold on a
+ * continuous quantity of the two craft's states and the declared
+ * parameters, with no draw anywhere. */
+static double kflrl_link_snr_(const double *pp, double range_m)
+{
+    double freq = pp[KFLRL_LINK_FREQ];
+    double bw   = pp[KFLRL_LINK_BW];
+    double tsys = pp[KFLRL_LINK_T_SYS];
+    double nf   = pp[KFLRL_LINK_NF];
+
+    if (!(pp[KFLRL_LINK_P_TX] > 0.0) || !(freq > 0.0) ||
+        !(range_m > 0.0) || !(bw > 0.0) || !(tsys > 0.0)) {
+        return 0.0;
+    }
+    /* The noise figure is a ratio of noise powers and cannot be less
+     * than one, which is the same floor the radio evaluator applies
+     * to the same quantity. */
+    if (nf < 1.0) nf = 1.0;
+
+    double lambda = K26A_C / freq;
+    double g_tx = pow(10.0, pp[KFLRL_LINK_G_TX] / 10.0);
+    double g_rx = pow(10.0, pp[KFLRL_LINK_G_RX] / 10.0);
+    double loss = pow(10.0, pp[KFLRL_LINK_LOSS] / 10.0);
+    double spread = 4.0 * K26A_PI * range_m;
+    double p_rx = (pp[KFLRL_LINK_P_TX] * g_tx * g_rx * lambda * lambda)
+                / (spread * spread * loss);
+    double noise = K26A_K_BOLTZMANN * tsys * bw * nf;
+
+    return (noise > 0.0) ? (p_rx / noise) : 0.0;
+}
+
+/* The transfer pass, run at every sub-advance boundary beside the
+ * information state's own push.
+ *
+ * Arrivals first, then broadcasts. Taking the arrivals first is what
+ * lets a member relay: an offer that lands on this boundary is in the
+ * receiver's ring before the receiver's own broadcast reads it, and
+ * the relayed copy still pays its own light time on the next hop.
+ *
+ * Both halves walk their tables in index order, and index order is
+ * declaration order: transmitters as the program declares them,
+ * entries in each transmitter's own track order, receivers as the
+ * program declares them. What the ring's drop-older rule keeps where
+ * two offers of one target meet is decided by that and not by which
+ * loop was written first. */
+static void kflrl_link_pass_(K26RlEnv *h, uint32_t e)
+{
+    const double *payp = KFLRL_PAYP(h, e);
+    double now = h->info_t[e];
+#if KFLRL_N_LINKEDGE > 0
+    for (int k = 0; k < KFLRL_N_LINKEDGE; k++) {
+        size_t qi = (size_t)e * KFLRL_N_LINKEDGE + (size_t)k;
+        while (h->link_qn[qi] > 0) {
+            KflrlLinkPend *pd =
+                &h->link_q[qi * KFLRL_LINK_QCAP + h->link_qh[qi]];
+            if (pd->due > now) break;
+            int j  = kflrl_ledge_ent_[k];
+            int rx = kflrl_ledge_rx_[k];
+            K26AstroInfostate *is = (K26AstroInfostate *)
+                h->payloads[(size_t)e * KFLRL_N_PAYLOAD
+                            + kflrl_link_info_[rx]];
+            K26AstroVehicle *tv =
+                h->vehicles[(size_t)e * KFLRL_N_VEHICLES
+                            + kflrl_lent_veh_[j]];
+            /* The push is the library's own, so an entry older than
+             * what the receiver already holds for that target is
+             * dropped by the standing rule rather than by a second
+             * rule written here. Staler knowledge is not knowledge. */
+            if (is && tv) {
+                k26astro_infostate_target_push(is, tv, pd->t, pd->pos,
+                                               pd->vel);
+            }
+            h->link_qh[qi] = (uint8_t)((h->link_qh[qi] + 1)
+                                       % KFLRL_LINK_QCAP);
+            h->link_qn[qi] = (uint8_t)(h->link_qn[qi] - 1);
+        }
+    }
+#endif
+    K26AstroPos origin = k26astro_pos_zero();
+    for (int i = 0; i < KFLRL_N_LINK; i++) {
+        const double *pp = payp
+            + (size_t)kflrl_link_pay_[i] * KFLRL_PAY_NPARAM;
+        double rate = pp[KFLRL_LINK_RATE];
+        size_t ni = (size_t)e * KFLRL_N_LINK + (size_t)i;
+
+        if (!(rate > 0.0)) continue;
+        if (now < (double)h->link_n[ni] / rate) continue;
+        /* Every cadence instant at or before now has taken effect on
+         * this boundary, which is what the design fixes so the grid
+         * is nobody's guess. The count moves straight to the next
+         * one rather than by repeated addition, so a high cadence
+         * costs the same as a low one. */
+        {
+            int64_t passed = (int64_t)floor(now * rate) + 1;
+            if (passed > h->link_n[ni]) h->link_n[ni] = passed;
+        }
+
+        int txv = kflrl_link_veh_[i];
+        const K26AstroBody *tb = k26astro_world_body_at(
+            h->worlds[e], kflrl_body_idx_[kflrl_vehicle_body_[txv]]);
+        if (!tb) continue;
+        K26AstroInfostate *tis = (K26AstroInfostate *)
+            h->payloads[(size_t)e * KFLRL_N_PAYLOAD
+                        + kflrl_link_info_[i]];
+
+        /* Closure to every member of this transmitter's community,
+         * taken once per receiver rather than once per entry: the
+         * budget is a property of the pair and the offer's content
+         * has nothing to do with it. The range is the separation at
+         * this instant, which is the emitter's own retarded time with
+         * respect to the arrival it decides. */
+        double lrange[KFLRL_N_LINK];
+        int    lclosed[KFLRL_N_LINK];
+        for (int r = 0; r < KFLRL_N_LINK; r++) {
+            lrange[r]  = 0.0;
+            lclosed[r] = 0;
+            if (r == i) continue;
+            const K26AstroBody *rb = k26astro_world_body_at(
+                h->worlds[e],
+                kflrl_body_idx_[kflrl_vehicle_body_[kflrl_link_veh_[r]]]);
+            if (!rb) continue;
+            K26V3 d = k26astro_pos_sub(&rb->pos, &tb->pos);
+            lrange[r] = k26m3d_v3_len(d);
+            lclosed[r] = kflrl_link_snr_(pp, lrange[r])
+                         >= pp[KFLRL_LINK_THRESHOLD];
+        }
+
+        K26AstroEpoch t_now = kflrl_info_epoch_(h->info_day[e], now);
+        int j0 = kflrl_link_ent0_[i];
+        for (int j = j0; j < j0 + kflrl_link_nent_[i]; j++) {
+            K26AstroEpoch et;
+            K26V3 epos, evel;
+
+            if (kflrl_lent_self_[j]) {
+                /* The carrier's own state, which it knows exactly and
+                 * at this instant. A member that told its peers
+                 * nothing about itself would be the one craft no
+                 * track in the swarm could ever cover. */
+                et   = t_now;
+                epos = k26astro_pos_sub(&tb->pos, &origin);
+                evel = tb->vel;
+            } else {
+                K26AstroVehicle *tv =
+                    h->vehicles[(size_t)e * KFLRL_N_VEHICLES
+                                + kflrl_lent_veh_[j]];
+                K26AstroInfostateObservation o =
+                    k26astro_infostate_latest(tis, tv);
+                if (!o.valid) continue;
+                et   = o.t_retarded;
+                epos = o.position;
+                evel = o.velocity;
+            }
+#if KFLRL_N_LINKEDGE > 0
+            int k0 = kflrl_lent_edge0_[j];
+            for (int k = k0; k < k0 + kflrl_lent_nedge_[j]; k++) {
+                int rx = kflrl_ledge_rx_[k];
+                if (!lclosed[rx]) continue;
+                size_t qi = (size_t)e * KFLRL_N_LINKEDGE + (size_t)k;
+                if (h->link_qn[qi] >= KFLRL_LINK_QCAP) {
+                    h->link_over[e] = 1;
+                    continue;
+                }
+                int slot = (h->link_qh[qi] + h->link_qn[qi])
+                           % KFLRL_LINK_QCAP;
+                KflrlLinkPend *pd =
+                    &h->link_q[qi * KFLRL_LINK_QCAP + (size_t)slot];
+                pd->t   = et;
+                pd->pos = epos;
+                pd->vel = evel;
+                pd->due = now + lrange[rx] / K26A_C;
+                h->link_qn[qi] = (uint8_t)(h->link_qn[qi] + 1);
+            }
+#endif
+        }
+    }
 }
 #endif
 
@@ -940,7 +1216,24 @@ static void kflrl_reset_env_(K26RlEnv *h, uint32_t e, uint32_t ep)
      * appended rather than replacing it. */
     h->info_day[e] += 1 + (int64_t)floor(h->info_t[e] / 86400.0);
     h->info_t[e]    = 0.0;
-    kflrl_info_push_(h, e);
+    kflrl_info_push_(h, e, 1);
+#endif
+#if KFLRL_N_LINK > 0
+    /* The cadence and everything in flight belong to the episode that
+     * produced them. A datalink's count restarts with the seconds
+     * field it is measured on, and an offer broadcast in one episode
+     * arriving in the next would make episode k+1 a function of
+     * episode k. */
+    for (int i = 0; i < KFLRL_N_LINK; i++) {
+        h->link_n[(size_t)e * KFLRL_N_LINK + i] = 0;
+    }
+#endif
+#if KFLRL_N_LINKEDGE > 0
+    memset(&h->link_qh[(size_t)e * KFLRL_N_LINKEDGE], 0,
+           sizeof(uint8_t) * KFLRL_N_LINKEDGE);
+    memset(&h->link_qn[(size_t)e * KFLRL_N_LINKEDGE], 0,
+           sizeof(uint8_t) * KFLRL_N_LINKEDGE);
+    h->link_over[e] = 0;
 #endif
     h->episode[e] = ep;
     h->steps[e]   = 0;
@@ -1156,6 +1449,15 @@ static void kflrl_free_handle_(K26RlEnv *h)
     free(h->payp);
     free(h->info_t);
     free(h->info_day);
+#endif
+#if KFLRL_N_LINK > 0
+    free(h->link_n);
+#endif
+#if KFLRL_N_LINKEDGE > 0
+    free(h->link_q);
+    free(h->link_qh);
+    free(h->link_qn);
+    free(h->link_over);
 #endif
 #if KFLRL_N_EFFECTOR > 0
     free(h->eng);
@@ -1415,6 +1717,30 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
         return K26RL_E_INTERNAL;
     }
 #endif
+#if KFLRL_N_LINK > 0
+    /* The datalink's whole per-environment store, sized here so the
+     * transfer pass writes into memory that already exists. */
+    h->link_n = (int64_t *)calloc(
+        (size_t)n_envs * KFLRL_N_LINK, sizeof(int64_t));
+    if (!h->link_n) {
+        kflrl_free_handle_(h);
+        return K26RL_E_INTERNAL;
+    }
+#endif
+#if KFLRL_N_LINKEDGE > 0
+    h->link_q = (KflrlLinkPend *)calloc(
+        (size_t)n_envs * KFLRL_N_LINKEDGE * KFLRL_LINK_QCAP,
+        sizeof(KflrlLinkPend));
+    h->link_qh = (uint8_t *)calloc(
+        (size_t)n_envs * KFLRL_N_LINKEDGE, sizeof(uint8_t));
+    h->link_qn = (uint8_t *)calloc(
+        (size_t)n_envs * KFLRL_N_LINKEDGE, sizeof(uint8_t));
+    h->link_over = (uint8_t *)calloc(n_envs, sizeof(uint8_t));
+    if (!h->link_q || !h->link_qh || !h->link_qn || !h->link_over) {
+        kflrl_free_handle_(h);
+        return K26RL_E_INTERNAL;
+    }
+#endif
 #if KFLRL_N_EFFECTOR > 0
     h->eng = (KflrlEng *)calloc(n_envs, sizeof(KflrlEng));
     if (!h->eng) {
@@ -1530,7 +1856,7 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
          * sample. One act serves both. */
         h->info_day[e] = 0;
         h->info_t[e]   = 0.0;
-        kflrl_info_push_(h, e);
+        kflrl_info_push_(h, e, 1);
 #endif
         kflrl_observe_(h->worlds[e],
                        h->obs + (size_t)e * KFLRL_OBS_TOTAL,
@@ -1882,6 +2208,11 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
          * nothing every effector channel reads zero, and the
          * one-engagement-per-payload record starts empty. */
         memset(&h->eng[e], 0, sizeof h->eng[e]);
+#endif
+#if KFLRL_N_LINKEDGE > 0
+        /* A transmission this step could not hold is a fact about
+         * this step, so the mark is cleared with the rest of them. */
+        h->link_over[e] = 0;
 #endif
         kflrl_on_step_(h->worlds[e], aslice, &h->act[e],
                        KFLRL_PAYH(h, e), KFLRL_PAYU(h, e),
@@ -2637,9 +2968,30 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
              * so what the history holds is the state the transition
              * actually produced. */
             h->info_t[e] += step_dt;
-            kflrl_info_push_(h, e);
+            kflrl_info_push_(h, e, 0);
+#endif
+#if KFLRL_N_LINK > 0
+            /* The datalink runs on the same boundary and after the
+             * push, so what a transmitter offers is the picture the
+             * sub-advance just produced. */
+            kflrl_link_pass_(h, e);
 #endif
         }
+#if KFLRL_N_LINKEDGE > 0
+        /* A datalink whose cadence outran the light time to a peer by
+         * more offers than one edge holds. It cannot be refused where
+         * the program is written, because the depth a cadence needs
+         * is a function of a separation the run decides; so it is
+         * reported here rather than resolved by dropping a
+         * transmission and letting the link claim a reach it has
+         * not got. */
+        if (h->link_over[e]) {
+            K26RlStatus fst = kflrl_fault_(
+                h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);
+            if (fst != K26RL_OK) return fst;
+            continue;
+        }
+#endif
         if (att_reason != 0) {
             K26RlStatus fst = kflrl_fault_(h, e, aslice, att_reason);
             if (fst != K26RL_OK) return fst;

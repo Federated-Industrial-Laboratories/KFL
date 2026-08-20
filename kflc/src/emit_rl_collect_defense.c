@@ -9,54 +9,83 @@ static const RlPayWord RL_PAY_REGIME_[] = {
 };
 
 static const RlPayKey RL_PAY_IR_[] = {
-    { "aperture_m",        1, "0.0", NULL, 0 },
-    { "integration_s",     1, "0.0", NULL, 0 },
-    { "passband_lo_um",    1, "0.0", NULL, 0 },
-    { "passband_hi_um",    1, "0.0", NULL, 0 },
-    { "throughput",        1, "0.0", NULL, 0 },
-    { "snr_threshold",     1, "0.0", NULL, 0 },
-    { "target_temp_k",     1, "0.0", NULL, 0 },
-    { "target_emissivity", 1, "0.0", NULL, 0 },
+    { "aperture_m",        1, "0.0", NULL, 0, 0 },
+    { "integration_s",     1, "0.0", NULL, 0, 0 },
+    { "passband_lo_um",    1, "0.0", NULL, 0, 0 },
+    { "passband_hi_um",    1, "0.0", NULL, 0, 0 },
+    { "throughput",        1, "0.0", NULL, 0, 0 },
+    { "snr_threshold",     1, "0.0", NULL, 0, 0 },
+    { "target_temp_k",     1, "0.0", NULL, 0, 0 },
+    { "target_emissivity", 1, "0.0", NULL, 0, 0 },
     /* Optional, and zero by default, which is what the library
      * documents as recovering its cosmic-background-only behaviour.
      * They are offered because that behaviour is background free for
      * a warm instrument looking in its own emission band, and the
      * library says so; a program that wants the honest noise floor
      * declares its optics rather than rebuilding the model. */
-    { "t_optics_k",        0, "0.0", NULL, 0 },
-    { "optics_emissivity", 0, "0.0", NULL, 0 },
+    { "t_optics_k",        0, "0.0", NULL, 0, 0 },
+    { "optics_emissivity", 0, "0.0", NULL, 0, 0 },
     RL_PAY_REGIME_KEY
 };
 
 static const RlPayKey RL_PAY_RADAR_[] = {
-    { "p_tx_w",        1, "0.0", NULL, 0 },
-    { "g_tx_db",       1, "0.0", NULL, 0 },
-    { "g_rx_db",       1, "0.0", NULL, 0 },
-    { "freq_hz",       1, "0.0", NULL, 0 },
-    { "loss_sys_db",   1, "0.0", NULL, 0 },
-    { "bandwidth_hz",  1, "0.0", NULL, 0 },
-    { "t_sys_k",       1, "0.0", NULL, 0 },
-    { "noise_figure",  1, "0.0", NULL, 0 },
-    { "snr_threshold", 1, "0.0", NULL, 0 },
+    { "p_tx_w",        1, "0.0", NULL, 0, 0 },
+    { "g_tx_db",       1, "0.0", NULL, 0, 0 },
+    { "g_rx_db",       1, "0.0", NULL, 0, 0 },
+    { "freq_hz",       1, "0.0", NULL, 0, 0 },
+    { "loss_sys_db",   1, "0.0", NULL, 0, 0 },
+    { "bandwidth_hz",  1, "0.0", NULL, 0, 0 },
+    { "t_sys_k",       1, "0.0", NULL, 0, 0 },
+    { "noise_figure",  1, "0.0", NULL, 0, 0 },
+    { "snr_threshold", 1, "0.0", NULL, 0, 0 },
     RL_PAY_REGIME_KEY,
-    { "target_chaff_n_strips",        0, "0.0", NULL, 0 },
+    { "target_chaff_n_strips",        0, "0.0", NULL, 0, 0 },
     { "target_chaff_sigma_dipole_m2", 0,
-      "K26ASTRO_SOFTKILL_DIPOLE_RCS_DEFAULT_M2", NULL, 0 }
+      "K26ASTRO_SOFTKILL_DIPOLE_RCS_DEFAULT_M2", NULL, 0, 0 }
 };
 
 static const RlPayKey RL_PAY_LIDAR_[] = {
-    { "pulse_energy_j",      1, "0.0", NULL, 0 },
-    { "wavelength_nm",       1, "0.0", NULL, 0 },
-    { "aperture_rx_m",       1, "0.0", NULL, 0 },
-    { "atmospheric_tx",      1, "0.0", NULL, 0 },
-    { "detector_efficiency", 1, "0.0", NULL, 0 },
-    { "snr_threshold",       1, "0.0", NULL, 0 },
-    { "target_albedo",       1, "0.0", NULL, 0 },
+    { "pulse_energy_j",      1, "0.0", NULL, 0, 0 },
+    { "wavelength_nm",       1, "0.0", NULL, 0, 0 },
+    { "aperture_rx_m",       1, "0.0", NULL, 0, 0 },
+    { "atmospheric_tx",      1, "0.0", NULL, 0, 0 },
+    { "detector_efficiency", 1, "0.0", NULL, 0, 0 },
+    { "snr_threshold",       1, "0.0", NULL, 0, 0 },
+    { "target_albedo",       1, "0.0", NULL, 0, 0 },
     RL_PAY_REGIME_KEY
 };
 
+/* The information state's own keys. `source` is optional and names a
+ * detection payload of the same body: with it, a target's push happens
+ * on a sub-advance only where that detection's verdict for that target
+ * meets its declared threshold, which is what gives a track picture
+ * something to be shared. Without it the push is truth-fed and the
+ * behaviour is what it was before the key existed. */
+
 static const RlPayKey RL_PAY_INFO_[] = {
-    { "history", 0, "1024", NULL, 0 }
+    { "history", 0, "1024", NULL, 0, 0 },
+    { "source",  0, "0.0",  NULL, 0, 1 }
+};
+
+/* The datalink. `network` names the community, on the `pattern`
+ * precedent of an identifier rather than a number; `rate_hz` is the
+ * broadcast cadence on the binding's own clock. The nine radio keys
+ * are the radar row's, less the cross-section, and they are read by
+ * this layer's own one-way link budget rather than by any evaluator of
+ * the tier. */
+
+static const RlPayKey RL_PAY_LINK_[] = {
+    { "network",       1, "0.0", NULL, 0, 1 },
+    { "rate_hz",       1, "0.0", NULL, 0, 0 },
+    { "p_tx_w",        1, "0.0", NULL, 0, 0 },
+    { "g_tx_db",       1, "0.0", NULL, 0, 0 },
+    { "g_rx_db",       1, "0.0", NULL, 0, 0 },
+    { "freq_hz",       1, "0.0", NULL, 0, 0 },
+    { "loss_sys_db",   1, "0.0", NULL, 0, 0 },
+    { "bandwidth_hz",  1, "0.0", NULL, 0, 0 },
+    { "t_sys_k",       1, "0.0", NULL, 0, 0 },
+    { "noise_figure",  1, "0.0", NULL, 0, 0 },
+    { "snr_threshold", 1, "0.0", NULL, 0, 0 }
 };
 
 static const RlPayWord RL_PAY_PATTERN_[] = {
@@ -67,25 +96,25 @@ static const RlPayWord RL_PAY_PATTERN_[] = {
 static const RlPayKey RL_PAY_IMPACTOR_[] = {
     { "pattern",                      1, "0.0",
       RL_PAY_PATTERN_,
-      (int)(sizeof RL_PAY_PATTERN_ / sizeof RL_PAY_PATTERN_[0]) },
-    { "projectile_mass_kg",           1, "0.0", NULL, 0 },
-    { "projectile_density_kg_per_m3", 1, "0.0", NULL, 0 },
-    { "projectile_diameter_m",        1, "0.0", NULL, 0 },
+      (int)(sizeof RL_PAY_PATTERN_ / sizeof RL_PAY_PATTERN_[0]), 0 },
+    { "projectile_mass_kg",           1, "0.0", NULL, 0, 0 },
+    { "projectile_density_kg_per_m3", 1, "0.0", NULL, 0, 0 },
+    { "projectile_diameter_m",        1, "0.0", NULL, 0, 0 },
     /* Required when `pattern=swarm` and refused when `pattern=single`,
      * which the resolution below applies: the requirement is a
      * function of another key's value and not of the kind. */
-    { "swarm_count",                  0, "0.0", NULL, 0 },
-    { "swarm_half_angle_rad",         0, "0.0", NULL, 0 },
-    { "target_wall_thickness_m",         0, "0.0", NULL, 0 },
-    { "target_bumper_thickness_m",       0, "0.0", NULL, 0 },
-    { "target_bumper_density_kg_per_m3", 0, "0.0", NULL, 0 },
-    { "target_bumper_spacing_m",         0, "0.0", NULL, 0 },
-    { "target_wall_yield_stress_ksi",    0, "0.0", NULL, 0 },
-    { "target_brinell_hardness",         0, "0.0", NULL, 0 },
-    { "target_density_kg_per_m3",        0, "0.0", NULL, 0 },
-    { "target_speed_of_sound_m_per_s",   0, "0.0", NULL, 0 },
-    { "target_inner_thickness_m",        0, "0.0", NULL, 0 },
-    { "target_monolithic_thickness_m",   0, "0.0", NULL, 0 }
+    { "swarm_count",                  0, "0.0", NULL, 0, 0 },
+    { "swarm_half_angle_rad",         0, "0.0", NULL, 0, 0 },
+    { "target_wall_thickness_m",         0, "0.0", NULL, 0, 0 },
+    { "target_bumper_thickness_m",       0, "0.0", NULL, 0, 0 },
+    { "target_bumper_density_kg_per_m3", 0, "0.0", NULL, 0, 0 },
+    { "target_bumper_spacing_m",         0, "0.0", NULL, 0, 0 },
+    { "target_wall_yield_stress_ksi",    0, "0.0", NULL, 0, 0 },
+    { "target_brinell_hardness",         0, "0.0", NULL, 0, 0 },
+    { "target_density_kg_per_m3",        0, "0.0", NULL, 0, 0 },
+    { "target_speed_of_sound_m_per_s",   0, "0.0", NULL, 0, 0 },
+    { "target_inner_thickness_m",        0, "0.0", NULL, 0, 0 },
+    { "target_monolithic_thickness_m",   0, "0.0", NULL, 0, 0 }
 };
 
 static const RlPayWord RL_PAY_MATERIAL_[] = {
@@ -98,17 +127,17 @@ static const RlPayWord RL_PAY_MATERIAL_[] = {
 };
 
 static const RlPayKey RL_PAY_LASER_[] = {
-    { "primary_diam_m",      1, "0.0", NULL, 0 },
-    { "wavelength_nm",       1, "0.0", NULL, 0 },
-    { "p_output_w",          1, "0.0", NULL, 0 },
-    { "m_squared",           1, "0.0", NULL, 0 },
-    { "pointing_jitter_rad", 1, "0.0", NULL, 0 },
-    { "rms_wavefront_m",     1, "0.0", NULL, 0 },
-    { "plasma_attn_k",       1, "0.0", NULL, 0 },
+    { "primary_diam_m",      1, "0.0", NULL, 0, 0 },
+    { "wavelength_nm",       1, "0.0", NULL, 0, 0 },
+    { "p_output_w",          1, "0.0", NULL, 0, 0 },
+    { "m_squared",           1, "0.0", NULL, 0, 0 },
+    { "pointing_jitter_rad", 1, "0.0", NULL, 0, 0 },
+    { "rms_wavefront_m",     1, "0.0", NULL, 0, 0 },
+    { "plasma_attn_k",       1, "0.0", NULL, 0, 0 },
     { "target_material",     1, "0.0",
       RL_PAY_MATERIAL_,
-      (int)(sizeof RL_PAY_MATERIAL_ / sizeof RL_PAY_MATERIAL_[0]) },
-    { "target_reflectivity", 1, "0.0", NULL, 0 }
+      (int)(sizeof RL_PAY_MATERIAL_ / sizeof RL_PAY_MATERIAL_[0]), 0 },
+    { "target_reflectivity", 1, "0.0", NULL, 0, 0 }
 };
 
 static const RlPayWord RL_PAY_DECOY_MODE_[] = {
@@ -119,12 +148,12 @@ static const RlPayWord RL_PAY_DECOY_MODE_[] = {
 static const RlPayKey RL_PAY_DECOY_[] = {
     { "mode", 1, "0.0",
       RL_PAY_DECOY_MODE_,
-      (int)(sizeof RL_PAY_DECOY_MODE_ / sizeof RL_PAY_DECOY_MODE_[0]) },
-    { "dry_mass_kg",         1, "0.0", NULL, 0 },
-    { "deploy_dv_mps",       1, "0.0", NULL, 0 },
-    { "ir_match_quality",    1, "0.0", NULL, 0 },
-    { "rcs_match_quality",   1, "0.0", NULL, 0 },
-    { "accel_match_quality", 1, "0.0", NULL, 0 }
+      (int)(sizeof RL_PAY_DECOY_MODE_ / sizeof RL_PAY_DECOY_MODE_[0]), 0 },
+    { "dry_mass_kg",         1, "0.0", NULL, 0, 0 },
+    { "deploy_dv_mps",       1, "0.0", NULL, 0, 0 },
+    { "ir_match_quality",    1, "0.0", NULL, 0, 0 },
+    { "rcs_match_quality",   1, "0.0", NULL, 0, 0 },
+    { "accel_match_quality", 1, "0.0", NULL, 0, 0 }
 };
 
 static const RlPayWord RL_PAY_JAMMER_MODE_[] = {
@@ -136,41 +165,45 @@ static const RlPayWord RL_PAY_JAMMER_MODE_[] = {
 static const RlPayKey RL_PAY_JAMMER_[] = {
     { "mode", 1, "0.0",
       RL_PAY_JAMMER_MODE_,
-      (int)(sizeof RL_PAY_JAMMER_MODE_ / sizeof RL_PAY_JAMMER_MODE_[0]) },
-    { "p_j_w",           1, "0.0", NULL, 0 },
-    { "g_j_db",          1, "0.0", NULL, 0 },
-    { "freq_hz",         1, "0.0", NULL, 0 },
-    { "bandwidth_hz",    1, "0.0", NULL, 0 },
-    { "snr_threshold",   1, "0.0", NULL, 0 },
-    { "radiator_temp_k", 1, "0.0", NULL, 0 }
+      (int)(sizeof RL_PAY_JAMMER_MODE_ / sizeof RL_PAY_JAMMER_MODE_[0]), 0 },
+    { "p_j_w",           1, "0.0", NULL, 0, 0 },
+    { "g_j_db",          1, "0.0", NULL, 0, 0 },
+    { "freq_hz",         1, "0.0", NULL, 0, 0 },
+    { "bandwidth_hz",    1, "0.0", NULL, 0, 0 },
+    { "snr_threshold",   1, "0.0", NULL, 0, 0 },
+    { "radiator_temp_k", 1, "0.0", NULL, 0, 0 }
 };
 
 const RlPayKindDesc RL_PAY_KIND_[RL_PAY_KINDS] = {
     { "detect_ir",    "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
       RL_PAY_IR_,    (int)(sizeof RL_PAY_IR_    / sizeof RL_PAY_IR_[0]),
-      1, 0, 0 },
+      1, 0, 0, 0 },
     { "detect_radar", "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
       RL_PAY_RADAR_, (int)(sizeof RL_PAY_RADAR_ / sizeof RL_PAY_RADAR_[0]),
-      1, 0, 0 },
+      1, 0, 0, 0 },
     { "detect_lidar", "K26ASTRO_DEFENSE_KIND_DETECT_SENSOR",
       RL_PAY_LIDAR_, (int)(sizeof RL_PAY_LIDAR_ / sizeof RL_PAY_LIDAR_[0]),
-      1, 0, 0 },
+      1, 0, 0, 0 },
     { "infostate",    "K26ASTRO_DEFENSE_KIND_INFOSTATE",
       RL_PAY_INFO_,  (int)(sizeof RL_PAY_INFO_  / sizeof RL_PAY_INFO_[0]),
-      0, 0, 0 },
+      0, 0, 0, 0 },
     { "impactor",     "K26ASTRO_DEFENSE_KIND_IMPACTOR",
       RL_PAY_IMPACTOR_,
       (int)(sizeof RL_PAY_IMPACTOR_ / sizeof RL_PAY_IMPACTOR_[0]),
-      0, 1, 0 },
+      0, 1, 0, 0 },
     { "laser",        "K26ASTRO_DEFENSE_KIND_LASER",
       RL_PAY_LASER_,
-      (int)(sizeof RL_PAY_LASER_ / sizeof RL_PAY_LASER_[0]), 0, 1, 0 },
+      (int)(sizeof RL_PAY_LASER_ / sizeof RL_PAY_LASER_[0]), 0, 1, 0, 0 },
     { "decoy",        "K26ASTRO_DEFENSE_KIND_DECOY",
       RL_PAY_DECOY_,
-      (int)(sizeof RL_PAY_DECOY_ / sizeof RL_PAY_DECOY_[0]), 0, 1, 1 },
+      (int)(sizeof RL_PAY_DECOY_ / sizeof RL_PAY_DECOY_[0]), 0, 1, 1, 0 },
     { "jammer",       "K26ASTRO_DEFENSE_KIND_JAMMER",
       RL_PAY_JAMMER_,
-      (int)(sizeof RL_PAY_JAMMER_ / sizeof RL_PAY_JAMMER_[0]), 0, 1, 1 }
+      (int)(sizeof RL_PAY_JAMMER_ / sizeof RL_PAY_JAMMER_[0]), 0, 1, 1, 0 },
+    /* No registry tag, because no slot of the tier is taken. */
+    { "datalink",     NULL,
+      RL_PAY_LINK_,
+      (int)(sizeof RL_PAY_LINK_ / sizeof RL_PAY_LINK_[0]), 0, 0, 0, 1 }
 };
 
 static const RlPayUnimplemented RL_PAY_UNIMPLEMENTED_[] = {
@@ -240,9 +273,12 @@ int rl_finish_payloads(RlModel *m, const KflcNode *form,
     int err = 0;
     for (int p = 0; p < m->n_payloads; p++) {
         RlPayload *py = &m->payloads[p];
-        py->kind = -1;
-        py->body = -1;
-        py->veh  = -1;
+        py->kind     = -1;
+        py->body     = -1;
+        py->veh      = -1;
+        py->src_pay  = -1;
+        py->net      = -1;
+        py->info_pay = -1;
         for (int k = 0; k < RL_PAY_MAXP; k++) {
             py->attr[k] = NULL;
             py->dist[k] = NULL;
@@ -395,6 +431,11 @@ int rl_finish_payloads(RlModel *m, const KflcNode *form,
                 }
                 continue;
             }
+            /* An open identifier is resolved by this pass and carried
+             * to the artifact as a table, not as a number: there is
+             * nothing between two names to draw from, so no
+             * distribution form is read for it and none is stored. */
+            if (kd->keys[slot].ident) continue;
             int derr = 0;
             KflcExpr *d = rl_attr_dist(a, form, arena, diag, &derr);
             if (derr) err = 1;
@@ -522,6 +563,50 @@ int rl_finish_payloads(RlModel *m, const KflcNode *form,
             }
         }
 
+        /* At most one datalink per body, on this surface's own ground
+         * rather than on a slot's. One body has one information state,
+         * so a second transmitter would broadcast the same state on a
+         * second cadence with nothing to select between them. A body
+         * on two networks is out of this issue's scope and is refused
+         * by the same rule. */
+        if (py->kind == RL_PAY_DATALINK && py->body >= 0) {
+            for (int q = 0; q < p; q++) {
+                if (m->payloads[q].kind != RL_PAY_DATALINK) continue;
+                if (m->payloads[q].body != py->body) continue;
+                kflc_diag_errorf(diag, py->line,
+                    "astro_payload `%s`: `%s` already carries the "
+                    "datalink `%s` declared at line %d, and a body "
+                    "carries at most one: both would broadcast the "
+                    "same information state on cadences of their own "
+                    "with nothing to select between them",
+                    py->name, m->bodies[py->body].body->name,
+                    m->payloads[q].name, m->payloads[q].line);
+                err = 1;
+                break;
+            }
+        }
+
+        /* The cadence, on the ground the history minimum stands on: a
+         * rate of nought or less names no instants at all, so the
+         * payload would broadcast nothing for the whole run with
+         * nothing reporting why. A distribution is admissible here and
+         * only a literal can be judged now, so what can be judged is. */
+        if (py->kind == RL_PAY_DATALINK && py->attr[RL_PAY_LINK_RATE]) {
+            const char *txt =
+                rl_pay_attr_text(py->attr[RL_PAY_LINK_RATE]);
+            char *end = NULL;
+            double v = txt ? strtod(txt, &end) : 0.0;
+            if (txt && end && *end == '\0' && !(v > 0.0)) {
+                kflc_diag_errorf(diag, py->attr[RL_PAY_LINK_RATE]->line,
+                    "astro_payload `%s`: `rate_hz=%s` names no "
+                    "broadcast instant at all, so this datalink would "
+                    "transmit nothing for the whole run; the cadence "
+                    "is a positive number of broadcasts per second",
+                    py->name, txt);
+                err = 1;
+            }
+        }
+
         /* D7's other half: the history capacity the library documents
          * a minimum for. The library clamps a smaller value silently;
          * a reader who has been told the minimum takes it for a
@@ -541,6 +626,95 @@ int rl_finish_payloads(RlModel *m, const KflcNode *form,
                     "interpolate between two samples",
                     py->name, txt,
                     K26ASTRO_INFOSTATE_MIN_HISTORY_CAPACITY);
+                err = 1;
+            }
+        }
+    }
+
+    /* The cross-references, in a pass of their own because a payload
+     * may name one declared after it and a program is not written in
+     * the order this compiler happens to read it. */
+    for (int p = 0; p < m->n_payloads; p++) {
+        RlPayload *py = &m->payloads[p];
+
+        if (py->kind == RL_PAY_INFOSTATE && py->attr[RL_PAY_INFO_SOURCE]) {
+            const char *sn =
+                rl_pay_attr_text(py->attr[RL_PAY_INFO_SOURCE]);
+            int line = py->attr[RL_PAY_INFO_SOURCE]->line;
+            int s = -1;
+            for (int q = 0; q < m->n_payloads; q++) {
+                if (m->payloads[q].name && sn &&
+                    strcmp(m->payloads[q].name, sn) == 0) s = q;
+            }
+            if (s < 0) {
+                kflc_diag_errorf(diag, line,
+                    "astro_payload `%s`: `source=%s` names no "
+                    "astro_payload declared in this world; the key "
+                    "names the detection payload whose verdict gates "
+                    "this information state's push",
+                    py->name, sn ? sn : "?");
+                err = 1;
+            } else if (m->payloads[s].kind < 0) {
+                err = 1;
+            } else if (!RL_PAY_KIND_[m->payloads[s].kind].is_detect) {
+                kflc_diag_errorf(diag, line,
+                    "astro_payload `%s`: `source=%s` names the payload "
+                    "declared at line %d, which is of kind `%s` and "
+                    "publishes no detection verdict; the key takes a "
+                    "detection payload",
+                    py->name, sn, m->payloads[s].line,
+                    RL_PAY_KIND_[m->payloads[s].kind].name);
+                err = 1;
+            } else if (m->payloads[s].body != py->body) {
+                kflc_diag_errorf(diag, line,
+                    "astro_payload `%s`: `source=%s` names the payload "
+                    "declared at line %d, which is carried by `%s` "
+                    "while this information state is carried by `%s`; "
+                    "a gate is one craft's own view of a target, not "
+                    "another craft's",
+                    py->name, sn, m->payloads[s].line,
+                    m->payloads[s].body >= 0
+                        ? m->bodies[m->payloads[s].body].body->name : "?",
+                    py->body >= 0 ? m->bodies[py->body].body->name : "?");
+                err = 1;
+            } else {
+                py->src_pay = s;
+            }
+        }
+
+        if (py->kind != RL_PAY_DATALINK) continue;
+
+        if (py->attr[RL_PAY_LINK_NETWORK]) {
+            const char *nn =
+                rl_pay_attr_text(py->attr[RL_PAY_LINK_NETWORK]);
+            if (nn) {
+                for (int q = 0; q < m->n_nets && py->net < 0; q++) {
+                    if (strcmp(m->nets[q], nn) == 0) py->net = q;
+                }
+                if (py->net < 0 && m->n_nets < RL_MAX_PAYLOADS) {
+                    m->nets[m->n_nets] = nn;
+                    py->net = m->n_nets++;
+                }
+            }
+        }
+
+        /* A datalink shares its carrier's information state, so a
+         * carrier that holds none has nothing to share. Refused
+         * naming what is missing rather than compiled into a
+         * transmitter that broadcasts an empty offer for ever. */
+        if (py->body >= 0) {
+            for (int q = 0; q < m->n_payloads; q++) {
+                if (m->payloads[q].kind != RL_PAY_INFOSTATE) continue;
+                if (m->payloads[q].body != py->body) continue;
+                py->info_pay = q;
+            }
+            if (py->info_pay < 0) {
+                kflc_diag_errorf(diag, py->line,
+                    "astro_payload `%s`: `%s` carries no payload of "
+                    "kind `infostate`, and a datalink shares its "
+                    "carrier's information state, so this one would "
+                    "have nothing to broadcast",
+                    py->name, m->bodies[py->body].body->name);
                 err = 1;
             }
         }
@@ -927,6 +1101,19 @@ int rl_finish_defense(RlModel *m, KflcDiag *diag)
         for (int i = 0; i < m->n_observes; i++) {
             if (rl_observe_form(m->observes[i]) != RL_OBS_DET) continue;
             if (m->obs_target[i] == b) wanted = 1;
+        }
+        /* A gated information state runs its named detection against
+         * every target it holds a track over, whether or not the
+         * program also publishes that detection's own channels, so
+         * those targets need the silhouette the detection takes an
+         * area of exactly as a declared detection target does. */
+        for (int i = 0; i < m->n_observes; i++) {
+            if (rl_observe_form(m->observes[i]) != RL_OBS_TRK) continue;
+            if (m->obs_target[i] != b) continue;
+            int p = m->obs_payload[i];
+            if (p < 0 || m->payloads[p].src_pay < 0) continue;
+            if (!wanted) why = "the gated information state's track over";
+            wanted = 1;
         }
         for (int e = 0; e < m->n_engages; e++) {
             const RlEngage *en = &m->engages[e];

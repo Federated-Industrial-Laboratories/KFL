@@ -886,12 +886,28 @@ static int rl_emit_payload_build_(FILE *out, const RlModel *m,
                 }
                 fprintf(out, "        _kfl_pp[%d] = (double)(%s);\n",
                         k, code ? code : kd->keys[k].dflt);
+            } else if (kd->keys[k].ident) {
+                /* An open identifier names another declaration or a
+                 * community of them, and the compiler has already
+                 * resolved it into a table beside this store. The slot
+                 * is kept and zeroed so a kind's store has one shape
+                 * whatever its keys are. */
+                fprintf(out, "        _kfl_pp[%d] = 0.0;\n", k);
             } else {
                 const char *v = py->attr[k] ? rl_pay_attr_text(py->attr[k])
                                             : kd->keys[k].dflt;
                 fprintf(out, "        _kfl_pp[%d] = (double)(%s);\n",
                         k, v ? v : kd->keys[k].dflt);
             }
+        }
+        if (kd->is_link) {
+            /* Nothing to construct. The datalink takes no slot of the
+             * tier, so the handle array's entry stays null and the
+             * transfer pass reads this store and the link tables
+             * instead. */
+            fprintf(out, "        _kfl_pay[%d] = NULL;\n"
+                         "    }\n", p);
+            continue;
         }
         fprintf(out,
             "        K26AstroVehicle *_kfl_ov = _kfl_veh ? _kfl_veh[%d] "

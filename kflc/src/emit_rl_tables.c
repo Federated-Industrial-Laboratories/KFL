@@ -807,6 +807,13 @@ int rl_emit_payload_tables(FILE *out, const RlModel *m)
     fputs("static void kflrl_payload_destroy_(int slot, void *p)\n{\n"
           "    switch (slot) {\n", out);
     for (int p = 0; p < m->n_payloads; p++) {
+        if (RL_PAY_KIND_[m->payloads[p].kind].is_link) {
+            /* A datalink constructs no handle: it takes no slot of
+             * the tier, so its entry here holds a null and there is
+             * nothing to free. */
+            fprintf(out, "    case %d: (void)p; break;\n", p);
+            continue;
+        }
         fprintf(out, "    case %d: %s((%s *)p); break;\n", p,
                 rl_pay_dtor(m->payloads[p].kind),
                 rl_pay_ctype(m->payloads[p].kind));
@@ -819,7 +826,13 @@ int rl_emit_payload_tables(FILE *out, const RlModel *m)
      * is a mechanical check rather than a comment. */
     fputs("static const uint32_t kflrl_pay_tag_[] = {\n", out);
     for (int p = 0; p < m->n_payloads; p++) {
-        fprintf(out, "    (uint32_t)%s,\n", RL_PAY_KIND_[m->payloads[p].kind].tag);
+        const RlPayKindDesc *kd = &RL_PAY_KIND_[m->payloads[p].kind];
+        /* A kind that binds to no slot of the tier has no tag in that
+         * registry and none is invented for it here: the entry reads
+         * zero and nothing cross-checks it, because there is no
+         * constructed handle to check. */
+        if (kd->is_link) { fputs("    0u,\n", out); continue; }
+        fprintf(out, "    (uint32_t)%s,\n", kd->tag);
     }
     fputs("};\n\n", out);
     fputs("static const int kflrl_pay_veh_[] = {\n", out);

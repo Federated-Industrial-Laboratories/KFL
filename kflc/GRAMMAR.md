@@ -399,7 +399,7 @@ Ten constructs carry the surface, all of them statements inside a
 | `objective` ... `end`         | The reward, and an optional terminal adjustment.            |
 | `agent <name>` ... `end`      | A scope owning actions, observation channels, and an objective. |
 | `sensor <name>` ... `end`     | An imperfection model bound to observation channels with `through`. |
-| `astro_payload <name> ...`    | A defense payload carried by one craft: a detection sensor, an information state, or an effector. |
+| `astro_payload <name> ...`    | A payload carried by one craft: a detection sensor, an information state, an effector, or a datalink. |
 | `engage <payload> at <target>`| Fire an effector at a body. Inside `on_step` only. |
 | `plan <name>` ... `end`       | Knot slots a planner emits, and where the plan they make is written. |
 
@@ -433,7 +433,11 @@ No statement form in the language has the shape
 overlap on one shape, a bare `on_step` alone on a line, which the block
 form takes. `at` and `effect` are read as connectives inside `engage`
 and `observe effect` alone, and are ordinary identifiers everywhere
-else, including as body names.
+else, including as body names. `datalink` is a value of `kind=` and
+`network` and `source` are keys of `astro_payload`, so none of the
+three is a word at statement position at all and all three stay
+ordinary identifiers everywhere, including as body, payload and
+community names.
 
 A program that uses any of these constructs, or a distribution-valued
 `astro_body` attribute (below), is a reinforcement learning program. Such
@@ -1342,11 +1346,12 @@ constructed and a per-episode draw could not reach it.
 | `detect_ir` | `aperture_m`, `integration_s`, `passband_lo_um`, `passband_hi_um`, `throughput`, `snr_threshold`, `target_temp_k`, `target_emissivity`; optional `t_optics_k` and `optics_emissivity`, both 0 by default; optional `discriminator_regime` |
 | `detect_radar` | `p_tx_w`, `g_tx_db`, `g_rx_db`, `freq_hz`, `loss_sys_db`, `bandwidth_hz`, `t_sys_k`, `noise_figure`, `snr_threshold`; optional `discriminator_regime`, `target_chaff_n_strips` and `target_chaff_sigma_dipole_m2` |
 | `detect_lidar` | `pulse_energy_j`, `wavelength_nm`, `aperture_rx_m`, `atmospheric_tx`, `detector_efficiency`, `snr_threshold`, `target_albedo`; optional `discriminator_regime` |
-| `infostate` | `history`, optional, 1024 by default; fixed when the payload is constructed, so it takes no distribution, and refused below 2, which is the fewest samples an interpolation needs |
+| `infostate` | `history`, optional, 1024 by default; fixed when the payload is constructed, so it takes no distribution, and refused below 2, which is the fewest samples an interpolation needs. Optional `source`, naming a detection payload of the same body that gates the push: see *Information state* below |
 | `impactor` | See *Effectors* below |
 | `laser` | See *Effectors* below |
 | `decoy` | See *Countermeasures* below |
 | `jammer` | See *Countermeasures* below |
+| `datalink` | `network`, `rate_hz`, `p_tx_w`, `g_tx_db`, `g_rx_db`, `freq_hz`, `loss_sys_db`, `bandwidth_hz`, `t_sys_k`, `noise_figure`, `snr_threshold`; see *The datalink* below |
 
 **One kind this grammar does not offer.** The defense kind registry
 allocates a tag for a dazzler and the effector-class range includes it,
@@ -1428,12 +1433,15 @@ which takes a generator, is never called: the mean is deterministic and
 imperfection comes through the sensor layer, as it does for every other
 channel here.
 
-**A body carries any number of detection payloads and at most one
-information state.** A detection sensor binds into the vehicle's
-payload list; an information state binds into its singleton slot, so a
-second would evict the first and leave the evicted one's channels
-reporting nothing for the rest of the run. A second is refused naming
-both statements.
+**A body carries any number of detection payloads, at most one
+information state, and at most one datalink.** A detection sensor binds
+into the vehicle's payload list; an information state binds into its
+singleton slot, so a second would evict the first and leave the evicted
+one's channels reporting nothing for the rest of the run. A second of
+either is refused naming both statements. The datalink's rule has a
+different reason and the same shape: a craft holds one information
+state, so a second transmitter would broadcast the same picture on a
+cadence of its own with nothing to choose between them.
 
 #### Detection
 
@@ -1534,9 +1542,10 @@ count is not published: it is a convergence diagnostic rather than a
 state of the world.
 
 The target's true state is pushed into the payload's history once per
-sub-advance, so the history is finer than the light-time lag rather than
-coarser. At the start of each episode, before any stepping, one sample
-is pushed at the episode epoch. **The first observation of an episode is
+sub-advance, unless a `source=` gates it as described below, so the
+history is finer than the light-time lag rather than coarser. At the
+start of each episode, before any stepping, one sample is pushed at the
+episode epoch. **The first observation of an episode is
 therefore unavailable**: the only sample is the epoch itself and the
 retarded time is strictly earlier, so the observer would be receiving
 light emitted before the episode began, and no such state is invented to
@@ -1546,9 +1555,122 @@ than one step.
 
 At most 64 targets may be tracked against one information state, which
 is the library's own per-observer limit; a program that names more is
-refused naming the payload, the count, and the limit. And at most one
-information state is carried by one body, for the reason given with the
-statement above.
+refused naming the payload, the count, and the limit. Shared and own
+knowledge count alike against it, and a shared entry only ever lands
+for a target the receiver already declares a track over, so what the
+limit binds on is the declared count. And at most one information state
+is carried by one body, for the reason given with the statement above.
+
+**`source=` gates the push.** The key is optional and names a detection
+payload of the same body. With it, a target's push happens on a
+sub-advance only when that detection's verdict for that target at that
+instant meets its declared threshold, which is the same comparison the
+detection's own `_detected` channel publishes. Between detections the
+history keeps its last entries and the observation ages them; once the
+newest entry is older than the light time to the target, the observer
+would be reading light that had not left the target yet and `_valid`
+reads 0.0 rather than an extrapolation being invented.
+
+Without `source=` the push is truth-fed and the behaviour is what it
+was before the key existed, so no existing program changes. The
+seeding push at an episode epoch is not gated either way: it is what
+allocates each target's history ring, and an episode's first instant is
+where a craft's knowledge is set rather than sensed.
+
+A `source=` naming no payload of this world, one of a kind that
+publishes no detection verdict, or one carried by another body, is
+refused naming both statements. The key takes an identifier and no
+distribution form.
+
+The gate is what makes a shared picture worth carrying. An information
+state fed with truth already holds every declared target at light
+delay, so a peer's report of the same target arrives with an older
+timestamp and is dropped by the history's own drop-older rule without
+changing any channel.
+
+#### The datalink
+
+```
+astro_payload <name> body=<body> kind=datalink network=<id> rate_hz=<r> ...
+```
+
+A datalink shares its carrier's information state with the other
+members of a named community, over a physical broadcast with a physical
+cost and a physical delay. It publishes no channel of its own: what it
+changes is what a carrier's information state knows, never whose
+channels an agent reads.
+
+`network=` takes an identifier and names the community. Every datalink
+carrying that name participates, with no addressing and no
+acknowledgement. `rate_hz=` is the broadcast cadence, measured on the
+information state's own clock; each cadence instant takes effect at the
+first sub-advance boundary at or after it, and a cadence of nought or
+less is refused because it would name no instant at all. The nine radio
+keys are the ones `detect_radar` names, less the cross-section a
+one-way link has no use for, and they take distribution forms as every
+other payload key does.
+
+The carrier must also carry an `infostate` payload; one that does not
+is refused naming what is missing, since a datalink with no information
+state has nothing to broadcast.
+
+**Reception is a one-way link budget.** Received power is the transmit
+power times both antenna gains times the wavelength squared, over the
+square of four pi times the range, less the declared system loss:
+
+```
+P_r = P_t * G_t * G_r * lambda^2 / ((4 * pi * R)^2 * L_sys)
+```
+
+against the receiver's thermal noise floor `N = k_B * T_sys * B * F`,
+and the link closes when `P_r / N` meets `snr_threshold`. Gains and the
+system loss are decibel figures and the noise figure is linear, exactly
+as `detect_radar` takes them; the conventions and the noise model are
+those of Skolnik, *Radar Handbook*, 3rd ed., section 1.4, which is
+where the radio detection evaluator takes its own. The range is the
+separation of the two carriers at the broadcast instant, and the
+signal reaches the receiver a light time later.
+
+This is not the radar equation. That one is monostatic: it carries a
+fourth power of range, a cube of four pi and a target cross-section,
+because its signal travels out to a target and scatters back. A
+datalink's signal makes the trip once, to a receiver listening for it.
+The closure decision is a threshold on a continuous quantity of the two
+craft's states and the declared parameters, with no draw anywhere; a
+program wanting a lossy or noisy link binds a sensor model to the
+receiving channels, which is the route every other imperfection here
+takes.
+
+**What a broadcast offers**, at each broadcast instant, is the
+carrier's own state at that instant and the carrier's information-state
+entry for each target it holds a track over. For every member of the
+same community whose link closes, those entries are pushed into the
+receiver's history at the arrival time, in a fixed order: transmitters
+in declaration order, entries in each transmitter's own track order.
+
+Two rules bound what lands. An entry for a target the receiver declares
+no `observe track` over is dropped, the declared-target universe
+bounding shared knowledge exactly as it bounds sensed knowledge; and an
+entry older than what the receiver already holds for that target is
+dropped by the history's standing rule, because staler knowledge is not
+knowledge. Together they are why a truth-fed information state learns
+nothing from a peer and a gated one learns what its own sensors cannot
+reach.
+
+A datalink takes no slot of the defense tier and carries no tag in its
+kind registry: no evaluator of that tier consumes it, so there is
+nothing to attach. It is declared through the same statement for
+uniformity of surface, and it drives this capability's own transfer
+pass beside the information state's push.
+
+**One limit is reported rather than refused.** A cadence high enough
+that more than eight broadcasts to one peer are in flight at once
+cannot be refused where the program is written, because the depth a
+cadence needs is its rate times a light time the run decides. The
+environment faults on it instead, rather than dropping a transmission
+and letting the link claim a reach it has not got. In practice the
+depth a cadence needs is far below one: it is the rate times the light
+time to the peer.
 
 #### Effectors
 

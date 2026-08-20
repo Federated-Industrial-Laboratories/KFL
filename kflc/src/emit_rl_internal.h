@@ -258,10 +258,18 @@ typedef enum {
     RL_PAY_IMPACTOR     = 4,
     RL_PAY_LASER        = 5,
     RL_PAY_DECOY        = 6,
-    RL_PAY_JAMMER       = 7
+    RL_PAY_JAMMER       = 7,
+    /* The datalink, added with the shared information state. It is
+     * declared through the same statement for surface uniformity and
+     * it is the one kind that binds to no slot of the tier: the
+     * payload machinery keys every slot by a registry tag, the
+     * registry is not this layer's to change, and no tier evaluator
+     * consumes a datalink. What it drives is this layer's own
+     * transfer pass, beside the push discipline it extends. */
+    RL_PAY_DATALINK     = 8
 } RlPayloadKind;
 
-#define RL_PAY_KINDS 8
+#define RL_PAY_KINDS 9
 
 /* An effector observe publishes what the last engagement of its
  * payload did. Two channels are common to every effector kind:
@@ -461,6 +469,13 @@ typedef struct {
      * key takes one of them and no distribution form. */
     const RlPayWord *words;
     int              n_words;
+    /* An open identifier this grammar resolves itself: the name of
+     * another declaration, or the name of a community of them. It
+     * takes no distribution form, because there is nothing between
+     * two names to draw from, and it reaches the artifact as a
+     * compile-time table rather than as a number in the parameter
+     * store. */
+    int              ident;
 } RlPayKey;
 
 /* The set of discriminators the observing craft runs against a decoy.
@@ -478,7 +493,7 @@ typedef struct {
 #define RL_PAY_REGIME_KEY \
     { "discriminator_regime", 0, "K26ASTRO_DISC_IR_ONLY", \
       RL_PAY_REGIME_, \
-      (int)(sizeof RL_PAY_REGIME_ / sizeof RL_PAY_REGIME_[0]) }
+      (int)(sizeof RL_PAY_REGIME_ / sizeof RL_PAY_REGIME_[0]), 0 }
 
 /* The two chaff keys are the cloud statistics routine's own parameters
  * of the same name, prefixed like every other key that describes what
@@ -590,9 +605,33 @@ typedef struct {
 
 #define RL_PAY_JAMMER_RADIATOR 6
 
+/* The datalink's own slots. `network` is an identifier and `rate_hz`
+ * is the broadcast cadence; the nine below them are the one-way link
+ * budget's, read by this layer's own kernel and by nothing in the
+ * tier. They are spelled as the radar row spells them, less the
+ * cross-section a one-way link has no use for, so a reader who knows
+ * one radio row knows the other. */
+#define RL_PAY_LINK_NETWORK   0
+#define RL_PAY_LINK_RATE      1
+#define RL_PAY_LINK_P_TX      2
+#define RL_PAY_LINK_G_TX      3
+#define RL_PAY_LINK_G_RX      4
+#define RL_PAY_LINK_FREQ      5
+#define RL_PAY_LINK_LOSS      6
+#define RL_PAY_LINK_BW        7
+#define RL_PAY_LINK_T_SYS     8
+#define RL_PAY_LINK_NF        9
+#define RL_PAY_LINK_THRESHOLD 10
+
+/* The information state's `source` slot, which names the detection
+ * payload whose verdict gates the push. */
+#define RL_PAY_INFO_SOURCE 1
+
 typedef struct {
     const char     *name;         /* the `kind=` value */
-    const char     *tag;          /* the registry's own tag name */
+    /* The registry's own tag name, or NULL for a kind that binds to
+     * no slot of the tier and therefore carries no tag. */
+    const char     *tag;
     const RlPayKey *keys;
     int             n_keys;
     int             is_detect;
@@ -601,6 +640,12 @@ typedef struct {
      * rather than on a body. The two are not exclusive: a decoy also
      * takes mass off its host. */
     int             is_softkill;
+    /* A kind this layer implements itself, with no handle constructed
+     * and no slot of the tier taken. The construction loop, the
+     * teardown switch and the registry-tag cross-check all stand
+     * down for it, since there is nothing to construct, free or
+     * check. */
+    int             is_link;
 } RlPayKindDesc;
 
 /* A kind the tier's registry names and no library in the tree
@@ -622,7 +667,7 @@ typedef struct {
 
 #define RL_PAY_KIND_LIST \
     "detect_ir, detect_radar, detect_lidar, infostate, impactor, laser, " \
-    "decoy and jammer"
+    "decoy, jammer and datalink"
 
 typedef struct {
     const KflcNode *node;
@@ -633,6 +678,14 @@ typedef struct {
     const KflcAttr *attr[RL_PAY_MAXP];    /* declared key, or NULL */
     KflcExpr       *dist[RL_PAY_MAXP];    /* distribution form, or NULL */
     int             dr[RL_PAY_MAXP];      /* draw slot, or -1 */
+    /* The detection payload an information state's `source=` names,
+     * or -1 where the key is absent and the push is truth-fed. */
+    int             src_pay;
+    /* A datalink's community, as an index into the model's network
+     * table, and the information state its carrier holds. Both -1 on
+     * every other kind. */
+    int             net;
+    int             info_pay;
     int             line;
 } RlPayload;
 
@@ -907,6 +960,13 @@ typedef struct {
     int         n_colliders;
     RlPayload   payloads[RL_MAX_PAYLOADS];
     int         n_payloads;
+    /* The datalink communities this program names, in the order they
+     * are first declared. A community is a name and nothing else:
+     * every datalink carrying it participates, with no addressing and
+     * no acknowledgement, so the table exists to tell one community
+     * from another and for no other purpose. */
+    const char *nets[RL_MAX_PAYLOADS];
+    int         n_nets;
     /* Per observe of a defense form: the payload it names and the body
      * it observes, resolved once so the emitter needs no lookups. Both
      * are -1 for every other form. */
@@ -1131,6 +1191,11 @@ void rl_scope_bindings(const RlModel *m, int ag,
 int rl_softkill_reaches(const RlModel *m, int p, int t,
                                 int want_jammer);
 int rl_track_pairs(const RlModel *m, int *pay, int *veh, int cap);
+int rl_n_link(const RlModel *m);
+int rl_link_index(const RlModel *m, int payload);
+int rl_track_gate_pay(const RlModel *m, int payload);
+int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag);
+void rl_emit_detect_eval(FILE *out, const RlModel *m, int p, int tgt);
 int rl_emit_observe(FILE *out, const RlModel *m,
                             KflcDiag *diag);
 int rl_emit_objective(FILE *out, const RlModel *m,

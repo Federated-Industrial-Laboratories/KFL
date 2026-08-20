@@ -354,7 +354,31 @@ static const char *const HP_PAY_KFL =
     " pulse_energy_j=0.1 wavelength_nm=1064.0 aperture_rx_m=0.5"
     " atmospheric_tx=1.0 detector_efficiency=0.3 snr_threshold=5.0"
     " target_albedo=0.2\n"
-    "    astro_payload picture body=watcher kind=infostate history=64\n"
+    /* The information state is gated by the radar above, so the
+     * push the step makes is the gated one and the evaluator the
+     * gate runs is on the counted path with it. */
+    "    astro_payload picture body=watcher kind=infostate history=64"
+    " source=rf\n"
+    /* The other end of a datalink, so the transfer pass is on the
+     * counted path too: a peer to broadcast to, an information state
+     * for it to keep, and a detection to gate that one. The transfer
+     * pushes into a ring the seeding has already allocated and holds
+     * its offers in a store sized with the handle, so it is here to
+     * be counted rather than to be argued about. */
+    "    astro_payload meye body=mover kind=detect_radar p_tx_w=2000.0"
+    " g_tx_db=40.0 g_rx_db=40.0 freq_hz=1.0e10 loss_sys_db=3.0"
+    " bandwidth_hz=1.0e6 t_sys_k=290.0 noise_figure=2.0"
+    " snr_threshold=10.0\n"
+    "    astro_payload mpic body=mover kind=infostate history=64"
+    " source=meye\n"
+    "    astro_payload wire body=watcher kind=datalink network=hp"
+    " rate_hz=4.0 p_tx_w=2.0 g_tx_db=3.0 g_rx_db=3.0 freq_hz=2.2e9"
+    " loss_sys_db=2.0 bandwidth_hz=1.0e6 t_sys_k=500.0"
+    " noise_figure=2.0 snr_threshold=6.0\n"
+    "    astro_payload mwire body=mover kind=datalink network=hp"
+    " rate_hz=4.0 p_tx_w=2.0 g_tx_db=3.0 g_rx_db=3.0 freq_hz=2.2e9"
+    " loss_sys_db=2.0 bandwidth_hz=1.0e6 t_sys_k=500.0"
+    " noise_figure=2.0 snr_threshold=6.0\n"
     /* The two effector kinds, and an engagement of each inside the
      * step body. Their evaluators return a value struct and are the
      * only tier call the step makes for them, so what this measures is
@@ -404,6 +428,7 @@ static const char *const HP_PAY_KFL =
     "    agent quarry\n"
     "        action dodge box -1.0 1.0 default 0.0\n"
     "        observe mover from watcher mode=geometric as los\n"
+    "        observe track mpic of drifter as mtrk\n"
     "    end\n"
     "    on_step\n"
     "        watcher.vel_x = watcher.vel_x + nudge\n"
