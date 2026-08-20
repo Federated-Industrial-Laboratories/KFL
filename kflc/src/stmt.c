@@ -1,239 +1,12 @@
-/* kflc , function-body parser + emitter.
- *
- * Inline KFL functions hold a body of statements: let / const / assign /
- * return / expression / if / while. This module parses them off the
- * main line-oriented token stream, and (separately) walks the parsed
- * AST and emits the corresponding C++ statements.
- *
- * Statement grammar (newline-terminated, blocks closed with `end`):
- *
- *   let_stmt    = "let"   IDENT ":" TYPE "=" EXPR
- *   const_stmt  = "const" IDENT ":" TYPE "=" EXPR
- *   assign_stmt = IDENT "=" EXPR
- *   return_stmt = "return" [EXPR]
- *   expr_stmt   = EXPR
- *   if_stmt     = "if" EXPR NEWLINE
- *                   stmt*
- *                 [ "else" NEWLINE stmt* ]
- *                 "end"
- *   while_stmt  = "while" EXPR NEWLINE
- *                   stmt*
- *                 "end"
- *
- * EXPR / TYPE re-use the shared expression sub-language (expr.c) and
- * the KflcType enum from kflc.h.
- *
- * The parser is given the same Token-stream `Lexer` used by parser.c.
- * It reads a single physical line of source as an attribute-style value
- * stream, then takes the *rest* of that logical line (everything after
- * the keyword that introduced the statement) and hands it to the
- * expression parser. This sidesteps having to grow the main lexer with
- * operator tokens.
- */
+/* stmt.c - the statement parser: line plumbing, node
+ * construction, the type helpers, and the dispatcher. */
+#include "stmt_internal.h"
 
-#include "kflc.h"
-#include "internal.h"
-#include "assembly.h"
-
-/* ---- Block-scope tracker for heap-typed lets --------------------- */
-
-#include <string.h>   /* memcpy for scope-array growth */
-
-/* Forward declaration: `emit_indent` is defined further down this
- * file with the rest of the per-stmt emit helpers; the scope-tracker
- * block sits above so it can be cross-referenced from kfl_emit_stmt
- * cases. */
-static void emit_indent(FILE *out, int n);
-
-/* Per-scope record: heap-typed `let` names declared in this scope,
- * with their types so we know whether to emit `k26c_vec_free` or
- * `k26c_mat_free`. Storage is arena-backed (lifetime = the per-compile
- * temp arena set by kfl_emit_stmt_reset_scopes). */
-typedef struct {
-    const char **names;
-    KflcType    *types;
-    int          n;
-    int          cap;
-} BlockScope;
-
-enum { B1_MAX_SCOPE_DEPTH = 16 };
-
-static BlockScope g_b1_scopes[B1_MAX_SCOPE_DEPTH];
-static int        g_b1_depth = 0;        /* 0 == fn-body root */
-static KflcArena *g_b1_arena = NULL;
-static KflcType   g_b1_fn_return_type = KFLT_VOID;
-/* Opaque-subtype companion to g_b1_fn_return_type. Set at the same
- * point and queried by the return-statement emitter when the fn
- * returns an opaque handle. */
-static const char *g_b1_fn_return_subtype = NULL;
-
-void kfl_emit_stmt_reset_scopes(KflcArena *arena, KflcType fn_return_type)
-{
-    kfl_emit_stmt_reset_scopes_ex(arena, fn_return_type, NULL);
-}
-
-void kfl_emit_stmt_reset_scopes_ex(KflcArena *arena, KflcType fn_return_type,
-                                   const char *fn_return_subtype)
-{
-    g_b1_depth = 0;
-    g_b1_arena = arena;
-    g_b1_fn_return_type = fn_return_type;
-    g_b1_fn_return_subtype = fn_return_subtype;
-    for (int i = 0; i < B1_MAX_SCOPE_DEPTH; i++) {
-        g_b1_scopes[i].n = 0;
-        /* names/types/cap intentionally NOT cleared — the arena owns
-         * the backing storage across fn boundaries; resetting n is
-         * enough to "empty" the scope, and we can reuse the cap. */
-    }
-}
-
-static void b1_scope_push_(void)
-{
-    if (g_b1_depth + 1 >= B1_MAX_SCOPE_DEPTH) {
-        /* Hard cap. Realistic KFL forms don't nest 16 deep; if they
-         * do, just stop tracking; the deeper scopes will leak their
-         * heap-typed lets until the process exits. */
-        return;
-    }
-    g_b1_depth++;
-    g_b1_scopes[g_b1_depth].n = 0;
-}
-
-static void b1_scope_pop_(void)
-{
-    if (g_b1_depth == 0) return;
-    g_b1_depth--;
-}
-
-/* Register a let in the CURRENT scope, if it's heap-typed. Depth 0
- * is the fn-body root and is tracked here too; emit.c does not keep
- * a parallel `frees[]` registry. */
-static void b1_scope_add_let_(const char *name, KflcType type)
-{
-    if (type != KFLT_VECTOR && type != KFLT_MATRIX) return;
-    BlockScope *s = &g_b1_scopes[g_b1_depth];
-    if (s->n == s->cap) {
-        int nc = s->cap ? s->cap * 2 : 4;
-        const char **nn = (const char **)kflc_arena_alloc(
-            g_b1_arena, sizeof(char *) * (size_t)nc);
-        KflcType *nt = (KflcType *)kflc_arena_alloc(
-            g_b1_arena, sizeof(KflcType) * (size_t)nc);
-        if (s->n > 0) {
-            memcpy(nn, s->names, sizeof(char *)   * (size_t)s->n);
-            memcpy(nt, s->types, sizeof(KflcType) * (size_t)s->n);
-        }
-        s->names = nn;
-        s->types = nt;
-        s->cap   = nc;
-    }
-    s->names[s->n] = name;
-    s->types[s->n] = type;
-    s->n++;
-}
-
-/* Emit a free for a single binding. Centralises the
- * `if (KFLT_MATRIX) k26c_mat_free else k26c_vec_free` repetition. */
-static void b1_emit_free_one_(FILE *out, const char *name,
-                              KflcType type, int indent)
-{
-    emit_indent(out, indent);
-    if (type == KFLT_MATRIX) {
-        fprintf(out, "k26c_mat_free(&%s);\n", name);
-    } else {
-        fprintf(out, "k26c_vec_free(&%s);\n", name);
-    }
-}
-
-/* Emit frees for the CURRENT scope only (in reverse declaration
- * order). Used at the end of each block body, i.e. before the
- * closing `}` of a while-loop or if-branch. Per-iteration semantic.
- * For depth 0 (fn-body root), callers should use
- * kfl_emit_stmt_drain_root from emit.c at fall-through end. */
-static void b1_emit_frees_current_(FILE *out, int indent)
-{
-    const BlockScope *s = &g_b1_scopes[g_b1_depth];
-    for (int i = s->n - 1; i >= 0; i--) {
-        b1_emit_free_one_(out, s->names[i], s->types[i], indent);
-    }
-}
-
-/* Public helper: emit frees for depth 0 (the fn-body root). Called
- * from emit.c at fn-body fall-through end to release any heap-typed
- * lets that didn't escape via a return. */
-void kfl_emit_stmt_drain_root(FILE *out, int indent)
-{
-    /* Walk depth 0 specifically; deeper scopes have already drained
-     * via their own end-of-block hooks (b1_emit_frees_current_). */
-    const BlockScope *s = &g_b1_scopes[0];
-    for (int i = s->n - 1; i >= 0; i--) {
-        b1_emit_free_one_(out, s->names[i], s->types[i], indent);
-    }
-}
-
-/* Total live heap-typed let count across all currently-open scopes.
- * Used by the RETURN handler to decide whether to bother with the
- * `_kfl_rv` temp-save dance (no heap lets → no risk of returning a
- * dangling reference → emit the plain `return expr;` form). */
-static int b1_total_live_(void)
-{
-    int total = 0;
-    for (int d = 0; d <= g_b1_depth; d++) total += g_b1_scopes[d].n;
-    return total;
-}
-
-/* Walk an lvalue expression to its base IDENT; return the name if
- * the base resolves to an observed-cell form-arg in ctx->bindings,
- * NULL otherwise. The walker uses this after each assignment
- * statement to decide whether to fan out to subscribers via
- * `kfl_cell_notify(&_kfl_cell_<name>)`. */
-static const char *observed_cell_base_(const KflcExpr *e,
-                                        const KflcExprCtx *ctx)
-{
-    if (!e || !ctx || !ctx->bindings) return NULL;
-    /* Walk index chains down to the root identifier. */
-    while (e && e->kind == KFLE_INDEX) {
-        e = e->u.index.base;
-    }
-    if (!e || e->kind != KFLE_IDENT || !e->u.ident) return NULL;
-    for (int i = ctx->n_bindings - 1; i >= 0; i--) {
-        if (strcmp(ctx->bindings[i].name, e->u.ident) == 0) {
-            if (ctx->bindings[i].is_form_arg &&
-                ctx->bindings[i].is_observed_cell) {
-                return e->u.ident;
-            }
-            return NULL;
-        }
-    }
-    return NULL;
-}
-
-static void emit_observed_cell_notify_(FILE *out, const KflcExpr *lhs,
-                                        const KflcExprCtx *ctx, int indent)
-{
-    const char *name = observed_cell_base_(lhs, ctx);
-    if (!name) return;
-    emit_indent(out, indent);
-    fprintf(out, "kfl_cell_notify(&_kfl_cell_%s);\n", name);
-}
-
-/* Emit frees for ALL scopes (depths 0..current), in reverse depth
- * order, reverse declaration order within each level. Includes
- * depth 0 (the fn-body root) so nested returns inside if/while
- * drain every heap-typed let, not just the inner ones. */
-static void b1_emit_frees_all_(FILE *out, int indent)
-{
-    for (int d = g_b1_depth; d >= 0; d--) {
-        const BlockScope *s = &g_b1_scopes[d];
-        for (int i = s->n - 1; i >= 0; i--) {
-            b1_emit_free_one_(out, s->names[i], s->types[i], indent);
-        }
-    }
-}
-
-#include <ctype.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+static long find_assign(const char *s);
+static long find_colon(const char *s);
+int kflc_type_from_str(const char *name, const char **out_opaque_name);
+const char *kflc_type_kfl_str(KflcType t, const char *opaque_name);
+void kfl_stmt_set_world_ctx(int in_world);
 
 /* Helpers exported to parser.c. Declared in internal.h. */
 
@@ -244,7 +17,8 @@ static void b1_emit_frees_all_(FILE *out, int indent)
  * return/assign + the condition of if/while.
  *
  * Does NOT consume the closing newline. */
-static char *take_line_remainder(Lexer *L, KflcArena *arena)
+
+char *kfl_stmt_take_line_remainder(Lexer *L, KflcArena *arena)
 {
     /* Skip horizontal whitespace. */
     while (L->pos < L->len) {
@@ -271,6 +45,7 @@ static char *take_line_remainder(Lexer *L, KflcArena *arena)
  * its index, or -1 if not found. Counts both `(...)` and `[...]` so
  * an `=` inside an index expression (`xs[i] = ...` — outer) is
  * preferred over any `==` that might appear in the index. */
+
 static long find_assign(const char *s)
 {
     int paren = 0;
@@ -290,6 +65,7 @@ static long find_assign(const char *s)
 }
 
 /* Find the first unparenthesised `:` in a string. */
+
 static long find_colon(const char *s)
 {
     int depth = 0;
@@ -303,7 +79,8 @@ static long find_colon(const char *s)
 
 /* Trim a NUL-terminated string in place (returns pointer to first
  * non-space char; nul-terminates after last non-space). */
-static char *trim(char *s)
+
+char *kfl_stmt_trim(char *s)
 {
     while (*s == ' ' || *s == '\t') s++;
     size_t n = strlen(s);
@@ -374,35 +151,25 @@ const char *kflc_type_kfl_str(KflcType t, const char *opaque_name)
     return NULL;
 }
 
-/* ---- Statement parser -------------------------------------------- */
-
-/* Forward decls. The fn-body parser is mutually recursive: an if/while
- * statement contains a body of further statements. */
-KflcNode *kfl_parse_stmt_block(Lexer *L, Token *cur,
-                                KflcArena *arena, KflcDiag *diag,
-                                int *had_error,
-                                const char *terminator,
-                                const char **also_break);
-
-static int is_ident_named(const Token *t, const char *name)
+int kfl_stmt_is_ident_named(const Token *t, const char *name)
 {
     return t->kind == T_IDENT && t->str && strcmp(t->str, name) == 0;
 }
 
-static int at_nl  (const Token *t) { return t->kind == T_NEWLINE; }
-static int at_eof2(const Token *t) { return t->kind == T_EOF; }
+int kfl_stmt_at_nl  (const Token *t) { return t->kind == T_NEWLINE; }
+int kfl_stmt_at_eof2(const Token *t) { return t->kind == T_EOF; }
 
-static void advance(Lexer *L, Token *cur, int *had_error)
+void kfl_stmt_advance(Lexer *L, Token *cur, int *had_error)
 {
     if (!lex_next(L, cur)) *had_error = 1;
 }
 
-static void skip_newlines(Lexer *L, Token *cur, int *had_error)
+void kfl_stmt_skip_newlines(Lexer *L, Token *cur, int *had_error)
 {
-    while (at_nl(cur)) advance(L, cur, had_error);
+    while (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
 }
 
-static KflcNode *new_node(KflcArena *arena, KflcNodeKind k, int line)
+KflcNode *kfl_stmt_new_node(KflcArena *arena, KflcNodeKind k, int line)
 {
     KflcNode *n = (KflcNode *)kflc_arena_alloc(arena, sizeof(*n));
     /* Zero-init defensively so all KflcNode fields have a predictable
@@ -420,7 +187,8 @@ static KflcNode *new_node(KflcArena *arena, KflcNodeKind k, int line)
 /* Append a single attribute to a statement node's linked attr list.
  * Returns the appended attr so callers can stash extras (e.g. a
  * pre-parsed KflcExpr * on the attr's `expr` field for `label`). */
-static KflcAttr *stmt_append_attr(KflcArena *arena, KflcNode *n,
+
+KflcAttr *kfl_stmt_stmt_append_attr(KflcArena *arena, KflcNode *n,
                                    const char *key, KflcValue val, int line)
 {
     KflcAttr *a = (KflcAttr *)kflc_arena_alloc(arena, sizeof *a);
@@ -436,27 +204,13 @@ static KflcAttr *stmt_append_attr(KflcArena *arena, KflcNode *n,
     return a;
 }
 
-static void append_child(KflcNode *parent, KflcNode *child)
+void kfl_stmt_append_child(KflcNode *parent, KflcNode *child)
 {
     if (!parent->children) { parent->children = child; return; }
     KflcNode *p = parent->children;
     while (p->next) p = p->next;
     p->next = child;
 }
-
-/* ---- Grammar 3.2 reinforcement learning statements ---------------- */
-
-/* Statement-parse context. `g_rl_world_ctx` is raised by parser.c
- * around `fn world` body parses (kfl_stmt_set_world_ctx); the RL
- * statement keywords bind as constructs only while it is set, so those
- * words keep their ordinary-identifier reading (and the reserved-future
- * warning) in every other fn body. Inside a `fn world` body three of
- * them are decided by what follows as well, which
- * rl_word_is_construct_ below states. `g_rl_on_step_depth` tracks
- * nesting inside `on_step` bodies so the statements the per-step body
- * rejects can be diagnosed at parse time. */
-static int g_rl_world_ctx     = 0;
-static int g_rl_on_step_depth = 0;
 
 void kfl_stmt_set_world_ctx(int in_world)
 {
@@ -477,7 +231,8 @@ void kfl_stmt_set_world_ctx(int in_world)
  * the token, and the expression sub-parser reads several characters
  * this lexer refuses, so treating a refusal as an end of line would
  * make `on_step = 2.0` open a block. */
-static int peek_kind_(Lexer *L, TokenKind *out)
+
+int kfl_stmt_peek_kind(Lexer *L, TokenKind *out)
 {
     Lexer save = *L;
     Token next;
@@ -489,1171 +244,12 @@ static int peek_kind_(Lexer *L, TokenKind *out)
     return ok;
 }
 
-/* Whether a word at statement position inside a `fn world` body is a
- * Grammar 3.2 construct keyword here, or an ordinary identifier.
- *
- * Three of the words are decided by what follows them rather than by
- * the word alone, so that a Grammar 3.1 program which binds one of
- * them as a name keeps compiling: `agent alpha` and `sensor rf` open
- * their blocks, while `agent = 2.0`, `agent(3.0)`, `agent[0]` and a
- * bare `agent` stay what they were. The discrimination is exact
- * rather than a heuristic. A name-led block is followed by an
- * identifier, and no statement form in this language has the shape
- * `<identifier> <identifier>`: an assignment, an index assignment and
- * a call all put punctuation there, and juxtaposition is not
- * application in any expression. A body-led block is followed by the
- * end of its line, which is the one shape the ordinary reading also
- * has, and that shape is refused by the grammar these words joined,
- * so nothing that compiled before is lost to it.
- *
- * `episode`, `action` and `objective` are not treated this way. They
- * were placed on the reserved-name table before the constructs
- * landed, so a program binding one of them has been warned that the
- * word was going to be taken.
- *
- * `engage` joins the name-led group: `engage beam at mover` is the
- * statement and `engage = 1.0`, `engage(2.0)`, `engage[0]` and a bare
- * `engage` stay the identifier they were. It is the only word here
- * that is a construct in one block and not in another, which the
- * dispatch below decides rather than this function: what is a
- * construct is a property of the word and what follows it, and where
- * it is admissible is a property of the block. */
-static int rl_word_is_construct_(Lexer *L, const char *s)
-{
-    if (strcmp(s, "episode") == 0 || strcmp(s, "action") == 0 ||
-        strcmp(s, "objective") == 0) {
-        return 1;
-    }
-    TokenKind k = T_EOF;
-    if (strcmp(s, "on_step") == 0) {
-        return peek_kind_(L, &k) && (k == T_NEWLINE || k == T_EOF);
-    }
-    if (strcmp(s, "sensor") == 0 || strcmp(s, "agent") == 0 ||
-        strcmp(s, "astro_payload") == 0 || strcmp(s, "engage") == 0 ||
-        strcmp(s, "plan") == 0) {
-        return peek_kind_(L, &k) && k == T_IDENT;
-    }
-    return 0;
-}
-
-/* World construction, stepping and observation, which the `on_step`
- * body rejects because the episode machinery owns them in these
- * programs. The nested constructs it also rejects are decided by
- * rl_word_is_construct_ beside this, so a word that is an ordinary
- * identifier there is not reported as a construct. */
-static int is_on_step_world_stmt_(const char *s)
-{
-    return strcmp(s, "astro_body") == 0 || strcmp(s, "step") == 0 ||
-           strcmp(s, "propagate")  == 0 || strcmp(s, "observe") == 0;
-}
-
-static const KflcAttr *stmt_find_attr_(const KflcNode *n, const char *key)
+const KflcAttr *kfl_stmt_stmt_find_attr(const KflcNode *n, const char *key)
 {
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, key) == 0) return a;
     }
     return NULL;
-}
-
-/* Scalar state keys accepted on an episode reset line. The same keys
- * are accepted as astro_body attributes (parsed generically there;
- * the emission pass maps them). Six are translation; the other seven
- * are the body-to-world quaternion's components and the body-frame
- * angular velocity. */
-static int is_reset_state_key_(const char *s)
-{
-    return kflc_body_state_key_index(s) >= 0;
-}
-
-/* Returns 1 when `e` is a well-formed distribution call:
- * `uniform(<low>, <high>)` or `normal(<mean>, <stddev>)`. */
-static int is_dist_call_(const KflcExpr *e)
-{
-    return e && e->kind == KFLE_CALL && e->u.call.name &&
-           (strcmp(e->u.call.name, "uniform") == 0 ||
-            strcmp(e->u.call.name, "normal")  == 0) &&
-           e->u.call.n_args == 2;
-}
-
-/* Error recovery: discard the rest of the current source line as raw
- * bytes, then step past the newline. Raw discard (rather than
- * token-by-token draining) because the rest of the line may hold
- * expression characters the main lexer does not tokenise. Call only
- * when `cur` has not yet reached the line's newline. */
-static void rl_drain_line_(Lexer *L, Token *cur,
-                           KflcArena *arena, int *had_error)
-{
-    (void)take_line_remainder(L, arena);
-    advance(L, cur, had_error);
-    if (at_nl(cur)) advance(L, cur, had_error);
-}
-
-/* `sensor <name> ... end`. One model term per line, in the order the
- * chain applies them:
- *
- *   noise normal <mean> <sigma>       additive, one draw per step
- *   scale <relative sigma>            multiplicative, one draw per step
- *   bias_walk <sigma0> <tau> <sigma>  turn-on bias plus an in-run walk
- *   latency <whole control periods>   a fixed-depth delay, no draws
- *   quantise <lsb> [<lo> <hi>]        a step, with a declared clamp
- *   dropout <probability>             hold the last delivered value
- *
- * Order is load-bearing and is kept: a quantiser declared after a
- * noise term quantises the noisy value and one declared before it does
- * not, so the terms are carried as ordered children rather than as
- * attributes, which have no order a reader can rely on.
- *
- * Operands are plain numbers rather than expressions. A sensor's
- * parameters become compile-time tables and a coefficient the artifact
- * computes once at create, so there is nothing for an expression to
- * close over; the assembly reader's rule of a fully consumed number is
- * used, so a unit suffix is a loud refusal rather than a silent
- * truncation.
- *
- * `cur` is the `sensor` keyword on entry. */
-/* `plan <name> ... end`, the knot slots a planner emits.
- *
- * The block is a declaration of an action space and of where the plan
- * those actions make is written. Its lines are:
- *
- *     file "<prefix>"          required, the path a plan is written to
- *     frame <body> <kind>      required, `lvlh` or `inertial`
- *     slots <n>                required
- *     time <lo> <hi>           required, seconds from the epoch
- *     position <lo> <hi>       required, metres
- *     velocity <lo> <hi>       required, metres per second
- *     tolerance <lo> <hi>      required, metres
- *     epoch <value>            optional, default 0
- *     provenance "<text>"      optional
- *
- * The block declares eight action channels per slot and appends them
- * as ordinary `action` statements, chained after this node so the
- * block builder takes the whole run. Everything downstream therefore
- * sees a fixed-width action space with declared bounds, and nothing
- * about a knot slot is a special case in the spec, the agent slicing
- * or the batch driver.
- *
- * The bounds are the block's rather than a convention because a
- * planner's action space is the mission's scale: a transfer's knots
- * are megametres apart and a docking approach's are metres apart, and
- * a single hard-coded pair would be wrong for both. */
-static KflcNode *parse_plan_(Lexer *L, Token *cur,
-                             KflcArena *arena, KflcDiag *diag,
-                             int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (cur->kind != T_IDENT) {
-        kflc_diag_errorf(diag, line0, "plan: expected a name");
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-        return NULL;
-    }
-    KflcNode *n = new_node(arena, KFLN_STMT_PLAN, line0);
-    n->name = cur->str;
-    advance(L, cur, had_error);
-    if (!at_nl(cur) && !at_eof2(cur)) {
-        kflc_diag_errorf(diag, line0,
-            "plan `%s`: expected end of line after the name", n->name);
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-    } else if (at_nl(cur)) {
-        advance(L, cur, had_error);
-    }
-
-    for (;;) {
-        skip_newlines(L, cur, had_error);
-        if (at_eof2(cur)) {
-            kflc_diag_errorf(diag, line0,
-                "plan `%s`: unexpected EOF (missing `end`)", n->name);
-            *had_error = 1;
-            return n;
-        }
-        if (is_ident_named(cur, "end")) {
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            break;
-        }
-        if (cur->kind != T_IDENT) {
-            kflc_diag_errorf(diag, cur->line,
-                "plan `%s`: expected a plan line or `end`", n->name);
-            *had_error = 1;
-            rl_drain_line_(L, cur, arena, had_error);
-            continue;
-        }
-        char *kw = cur->str;
-        int lineK = cur->line;
-        char *rest = take_line_remainder(L, arena);
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-
-        char *p = trim(rest);
-        if (strcmp(kw, "file") == 0 || strcmp(kw, "provenance") == 0 ||
-            strcmp(kw, "slots") == 0 || strcmp(kw, "epoch") == 0) {
-            KflcValue v;
-            memset(&v, 0, sizeof v);
-            v.kind = KFLV_IDENT;
-            v.u.s  = kflc_arena_strdup(arena, p);
-            if (p[0] == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "plan `%s`: `%s` takes a value", n->name, kw);
-                *had_error = 1;
-                continue;
-            }
-            stmt_append_attr(arena, n, kflc_arena_strdup(arena, kw), v,
-                             lineK);
-            continue;
-        }
-        if (strcmp(kw, "frame") == 0) {
-            char *body = p;
-            while (*p && *p != ' ' && *p != '\t') p++;
-            if (*p) { *p = '\0'; p++; }
-            char *kind = trim(p);
-            if (body[0] == '\0' || kind[0] == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "plan `%s`: `frame` takes a body name and either "
-                    "`lvlh` or `inertial`", n->name);
-                *had_error = 1;
-                continue;
-            }
-            KflcValue bv, kv;
-            memset(&bv, 0, sizeof bv);
-            memset(&kv, 0, sizeof kv);
-            bv.kind = KFLV_IDENT; bv.u.s = kflc_arena_strdup(arena, body);
-            kv.kind = KFLV_IDENT; kv.u.s = kflc_arena_strdup(arena, kind);
-            stmt_append_attr(arena, n, "frame", bv, lineK);
-            stmt_append_attr(arena, n, "kind", kv, lineK);
-            continue;
-        }
-        if (strcmp(kw, "time") == 0 || strcmp(kw, "position") == 0 ||
-            strcmp(kw, "velocity") == 0 || strcmp(kw, "tolerance") == 0) {
-            char *lo = p;
-            while (*p && *p != ' ' && *p != '\t') p++;
-            if (*p) { *p = '\0'; p++; }
-            char *hi = trim(p);
-            if (lo[0] == '\0' || hi[0] == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "plan `%s`: `%s` takes a lower and an upper bound",
-                    n->name, kw);
-                *had_error = 1;
-                continue;
-            }
-            char key[32];
-            KflcValue lv, hv;
-            memset(&lv, 0, sizeof lv);
-            memset(&hv, 0, sizeof hv);
-            lv.kind = KFLV_IDENT; lv.u.s = kflc_arena_strdup(arena, lo);
-            hv.kind = KFLV_IDENT; hv.u.s = kflc_arena_strdup(arena, hi);
-            snprintf(key, sizeof key, "%s_lo", kw);
-            stmt_append_attr(arena, n, kflc_arena_strdup(arena, key), lv,
-                             lineK);
-            snprintf(key, sizeof key, "%s_hi", kw);
-            stmt_append_attr(arena, n, kflc_arena_strdup(arena, key), hv,
-                             lineK);
-            continue;
-        }
-        kflc_diag_errorf(diag, lineK,
-            "plan `%s`: unknown line `%s`; the block takes `file`, "
-            "`frame`, `slots`, `time`, `position`, `velocity`, "
-            "`tolerance`, `epoch` and `provenance`", n->name, kw);
-        *had_error = 1;
-    }
-
-    /* The action channels this block declares. They are appended to
-     * the chain this statement returns, which the block builder walks
-     * to its end, so the world body carries them as ordinary actions
-     * in the position the plan was written. */
-    {
-        const char *slots_s = NULL;
-        long slots = 0;
-        static const struct { const char *suffix, *bound; } CH_[] = {
-            { "_t",   "time" },      { "_r_x", "position" },
-            { "_r_y", "position" },  { "_r_z", "position" },
-            { "_v_x", "velocity" },  { "_v_y", "velocity" },
-            { "_v_z", "velocity" },  { "_tol", "tolerance" }
-        };
-        for (const KflcAttr *a = n->attrs; a; a = a->next) {
-            if (a->name && strcmp(a->name, "slots") == 0 &&
-                a->value.kind == KFLV_IDENT) {
-                slots_s = a->value.u.s;
-            }
-        }
-        if (slots_s) {
-            char *end = NULL;
-            slots = strtol(slots_s, &end, 10);
-            if (!end || *end != '\0') slots = 0;
-        }
-        if (slots < 1 || slots > 4096) {
-            kflc_diag_errorf(diag, line0,
-                "plan `%s`: `slots` takes a whole number of knot slots "
-                "from 1 to 4096", n->name);
-            *had_error = 1;
-            return n;
-        }
-        KflcNode *tail = n;
-        for (long k = 0; k < slots; k++) {
-            for (int c = 0; c < 8; c++) {
-                char nm[128], lo[8], hi[8];
-                const KflcAttr *alo = NULL, *ahi = NULL;
-
-                snprintf(lo, sizeof lo, "_lo");
-                snprintf(hi, sizeof hi, "_hi");
-                for (const KflcAttr *a = n->attrs; a; a = a->next) {
-                    if (!a->name || a->value.kind != KFLV_IDENT) continue;
-                    size_t bl = strlen(CH_[c].bound);
-                    if (strncmp(a->name, CH_[c].bound, bl) != 0) continue;
-                    if (strcmp(a->name + bl, "_lo") == 0) alo = a;
-                    if (strcmp(a->name + bl, "_hi") == 0) ahi = a;
-                }
-                if (!alo || !ahi) {
-                    kflc_diag_errorf(diag, line0,
-                        "plan `%s`: `%s` bounds are required, since a knot "
-                        "slot is an action channel and an action channel "
-                        "declares its own range", n->name, CH_[c].bound);
-                    *had_error = 1;
-                    return n;
-                }
-                snprintf(nm, sizeof nm, "%s_k%ld%s", n->name, k,
-                         CH_[c].suffix);
-                KflcNode *act = new_node(arena, KFLN_STMT_ACTION, line0);
-                KflcValue mark;
-
-                act->name = kflc_arena_strdup(arena, nm);
-                /* The mark says the channel is the block's rather than
-                 * a line an author wrote, so a round trip prints the
-                 * block and not the channels the block would declare
-                 * again on the way back in. */
-                memset(&mark, 0, sizeof mark);
-                mark.kind = KFLV_IDENT;
-                mark.u.s  = kflc_arena_strdup(arena, n->name);
-                stmt_append_attr(arena, act, "plan", mark, line0);
-                act->position.kind = KFLV_IDENT;
-                act->position.u.s  = kflc_arena_strdup(arena, "box");
-                act->expr  = kflc_parse_expr(alo->value.u.s, arena, diag,
-                                             line0);
-                act->expr2 = kflc_parse_expr(ahi->value.u.s, arena, diag,
-                                             line0);
-                if (!act->expr || !act->expr2) {
-                    *had_error = 1;
-                    return n;
-                }
-                tail->next = act;
-                tail = act;
-            }
-        }
-    }
-    return n;
-}
-
-static KflcNode *parse_sensor_(Lexer *L, Token *cur,
-                               KflcArena *arena, KflcDiag *diag,
-                               int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (cur->kind != T_IDENT) {
-        kflc_diag_errorf(diag, line0, "sensor: expected a name");
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-        return NULL;
-    }
-    KflcNode *n = new_node(arena, KFLN_STMT_SENSOR, line0);
-    n->name = cur->str;
-    advance(L, cur, had_error);
-    if (!at_nl(cur) && !at_eof2(cur)) {
-        kflc_diag_errorf(diag, line0,
-            "sensor `%s`: expected end of line after the name", n->name);
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-    } else if (at_nl(cur)) {
-        advance(L, cur, had_error);
-    }
-
-    for (;;) {
-        skip_newlines(L, cur, had_error);
-        if (at_eof2(cur)) {
-            kflc_diag_errorf(diag, line0,
-                "sensor `%s`: unexpected EOF (missing `end`)", n->name);
-            *had_error = 1;
-            return n;
-        }
-        if (is_ident_named(cur, "end")) {
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            break;
-        }
-        if (cur->kind != T_IDENT) {
-            kflc_diag_errorf(diag, cur->line,
-                "sensor `%s`: expected a model term or `end`", n->name);
-            *had_error = 1;
-            rl_drain_line_(L, cur, arena, had_error);
-            continue;
-        }
-
-        /* The remainder is taken while the cursor still sits on the
-         * keyword, which is the convention the episode block uses:
-         * advancing first would consume the first operand into the
-         * cursor and leave it out of the remainder. */
-        char *kw = cur->str;
-        int lineK = cur->line;
-        char *rest = take_line_remainder(L, arena);
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-
-        KflcNode *t = new_node(arena, KFLN_STMT_SENSOR_TERM, lineK);
-        t->name = kw;
-
-        char *p = trim(rest);
-        int    n_num = 0, bad = 0;
-        double num[4];
-        char  *dist = NULL;
-
-        if (strcmp(kw, "noise") == 0) {
-            char *w = p;
-            while (*p && *p != ' ' && *p != '\t') p++;
-            if (*p) { *p = '\0'; p++; }
-            if (*w == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "sensor `%s`: `noise` takes a distribution name",
-                    n->name);
-                *had_error = 1;
-                bad = 1;
-            } else {
-                dist = kflc_arena_strdup(arena, w);
-            }
-        }
-        while (!bad && *p) {
-            while (*p == ' ' || *p == '\t') p++;
-            if (!*p) break;
-            if (n_num == 4) {
-                kflc_diag_errorf(diag, lineK,
-                    "sensor `%s`: `%s` takes at most four values",
-                    n->name, kw);
-                *had_error = 1;
-                bad = 1;
-                break;
-            }
-            char *w = p;
-            while (*p && *p != ' ' && *p != '\t') p++;
-            char saved = *p;
-            *p = '\0';
-            char *endp = NULL;
-            double v = strtod(w, &endp);
-            if (!endp || *endp != '\0' || endp == w) {
-                kflc_diag_errorf(diag, lineK,
-                    "sensor `%s`: `%s` is not a number", n->name, w);
-                *had_error = 1;
-                bad = 1;
-            } else {
-                num[n_num++] = v;
-            }
-            if (saved) { *p = saved; p++; } else break;
-        }
-        if (bad) { append_child(n, t); continue; }
-
-        if (dist) {
-            KflcValue dv;
-            memset(&dv, 0, sizeof dv);
-            dv.kind = KFLV_IDENT; dv.u.s = dist;
-            stmt_append_attr(arena, t, "dist", dv, lineK);
-        }
-        for (int i = 0; i < n_num; i++) {
-            KflcValue nv;
-            memset(&nv, 0, sizeof nv);
-            nv.kind = KFLV_FLOAT; nv.u.f = num[i];
-            char akey[8];
-            snprintf(akey, sizeof akey, "n%d", i);
-            stmt_append_attr(arena, t, akey, nv, lineK);
-        }
-        append_child(n, t);
-    }
-    return n;
-}
-
-/* `episode ... end`. Body lines, each at most once except `reset`:
- *   control_dt <expr>           (required)
- *   horizon <expr>
- *   terminated when <expr>
- *   reset <body>.<key> <distribution>
- * `cur` is the `episode` keyword on entry. */
-static KflcNode *parse_episode_(Lexer *L, Token *cur,
-                                KflcArena *arena, KflcDiag *diag,
-                                int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (!at_nl(cur) && !at_eof2(cur)) {
-        kflc_diag_errorf(diag, line0,
-            "episode: expected end of line after `episode`");
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-    } else if (at_nl(cur)) {
-        advance(L, cur, had_error);
-    }
-
-    KflcNode *n = new_node(arena, KFLN_STMT_EPISODE, line0);
-    for (;;) {
-        skip_newlines(L, cur, had_error);
-        if (at_eof2(cur)) {
-            kflc_diag_errorf(diag, cur->line,
-                "episode: unexpected EOF (missing `end`)");
-            *had_error = 1;
-            break;
-        }
-        if (is_ident_named(cur, "end")) {
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            break;
-        }
-        if (cur->kind != T_IDENT || !cur->str) {
-            kflc_diag_errorf(diag, cur->line,
-                "episode: expected a keyword line (control_dt, horizon, "
-                "substeps, contact, `terminated when`, reset, or end)");
-            *had_error = 1;
-            rl_drain_line_(L, cur, arena, had_error);
-            continue;
-        }
-
-        if (is_ident_named(cur, "control_dt") ||
-            is_ident_named(cur, "horizon") ||
-            is_ident_named(cur, "substeps"))
-        {
-            const char *key = cur->str;
-            int lineK = cur->line;
-            char *src = take_line_remainder(L, arena);
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            if (stmt_find_attr_(n, key)) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: duplicate `%s` (allowed at most once)", key);
-                *had_error = 1;
-                continue;
-            }
-            char *t = trim(src);
-            if (t[0] == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: `%s` requires an expression", key);
-                *had_error = 1;
-                continue;
-            }
-            KflcValue none;
-            memset(&none, 0, sizeof none);
-            KflcAttr *a = stmt_append_attr(arena, n, key, none, lineK);
-            a->expr = kflc_parse_expr(t, arena, diag, lineK);
-            if (!a->expr) *had_error = 1;
-            continue;
-        }
-
-        /* `contact arrest`
-         * `contact bounce restitution <expr> friction <expr>`
-         *
-         * One optional line, because the resolution is a property of
-         * how the episode ends rather than of any one body. Absent
-         * means arrest, which is the default the design already
-         * fixed, so no program written before this line existed
-         * changes meaning.
-         *
-         * `bounce` requires both coefficients and neither is
-         * defaulted: a restitution nobody declared is a number this
-         * compiler would have invented, and inventing physical
-         * constants is the habit these rules exist to prevent. */
-        if (is_ident_named(cur, "contact")) {
-            int lineK = cur->line;
-            char *src = take_line_remainder(L, arena);
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            if (stmt_find_attr_(n, "contact")) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: duplicate `contact` (allowed at most once)");
-                *had_error = 1;
-                continue;
-            }
-            char *t = trim(src);
-            char *rest = t;
-            while (*rest && *rest != ' ' && *rest != '\t') rest++;
-            int is_arrest = (rest - t) == 6 && strncmp(t, "arrest", 6) == 0;
-            int is_bounce = (rest - t) == 6 && strncmp(t, "bounce", 6) == 0;
-            if (!is_arrest && !is_bounce) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: `contact` takes `arrest` or `bounce`, not "
-                    "`%s`", t[0] ? t : "nothing");
-                *had_error = 1;
-                continue;
-            }
-            KflcValue kind;
-            memset(&kind, 0, sizeof kind);
-            kind.kind = KFLV_IDENT;
-            kind.u.s  = kflc_arena_strdup(arena, is_arrest ? "arrest"
-                                                           : "bounce");
-            stmt_append_attr(arena, n, "contact", kind, lineK);
-            if (is_arrest) {
-                if (*trim(rest) != '\0') {
-                    kflc_diag_errorf(diag, lineK,
-                        "episode: `contact arrest` takes no further "
-                        "words, and `%s` follows it", trim(rest));
-                    *had_error = 1;
-                }
-                continue;
-            }
-            /* `bounce` takes the two coefficients in a fixed order,
-             * each introduced by its own keyword so that a program
-             * cannot silently swap them. */
-            char *p2 = trim(rest);
-            if (strncmp(p2, "restitution", 11) != 0) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: `contact bounce` requires `restitution "
-                    "<expr> friction <expr>`; neither coefficient is "
-                    "defaulted, because a coefficient nobody declared "
-                    "is one this compiler invented");
-                *had_error = 1;
-                continue;
-            }
-            p2 = trim(p2 + 11);
-            char *fr = strstr(p2, "friction");
-            if (!fr || fr == p2) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: `contact bounce` requires `friction "
-                    "<expr>` after the restitution");
-                *had_error = 1;
-                continue;
-            }
-            char *rest_src = kflc_arena_strdup(arena, p2);
-            rest_src[fr - p2] = '\0';
-            char *rr = trim(rest_src);
-            char *ff = trim(fr + 8);
-            if (rr[0] == '\0' || ff[0] == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: `contact bounce` requires an expression "
-                    "for each of `restitution` and `friction`");
-                *had_error = 1;
-                continue;
-            }
-            KflcValue none;
-            memset(&none, 0, sizeof none);
-            KflcAttr *ra = stmt_append_attr(arena, n, "restitution", none,
-                                            lineK);
-            ra->expr = kflc_parse_expr(rr, arena, diag, lineK);
-            if (!ra->expr) *had_error = 1;
-            KflcAttr *fa = stmt_append_attr(arena, n, "friction", none,
-                                            lineK);
-            fa->expr = kflc_parse_expr(ff, arena, diag, lineK);
-            if (!fa->expr) *had_error = 1;
-            continue;
-        }
-
-        if (is_ident_named(cur, "terminated")) {
-            int lineK = cur->line;
-            advance(L, cur, had_error);
-            if (!is_ident_named(cur, "when")) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: expected `when` after `terminated`");
-                *had_error = 1;
-                if (!at_nl(cur) && !at_eof2(cur)) {
-                    rl_drain_line_(L, cur, arena, had_error);
-                } else if (at_nl(cur)) {
-                    advance(L, cur, had_error);
-                }
-                continue;
-            }
-            char *src = take_line_remainder(L, arena);
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            if (stmt_find_attr_(n, "terminated_when")) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: duplicate `terminated when` "
-                    "(allowed at most once)");
-                *had_error = 1;
-                continue;
-            }
-            char *t = trim(src);
-            if (t[0] == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "episode: `terminated when` requires an expression");
-                *had_error = 1;
-                continue;
-            }
-            KflcValue none;
-            memset(&none, 0, sizeof none);
-            KflcAttr *a = stmt_append_attr(arena, n, "terminated_when",
-                                           none, lineK);
-            a->expr = kflc_parse_expr(t, arena, diag, lineK);
-            if (!a->expr) *had_error = 1;
-            continue;
-        }
-
-        if (is_ident_named(cur, "reset")) {
-            int lineK = cur->line;
-            char *raw = take_line_remainder(L, arena);
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            char *p = trim(raw);
-            char *q = p;
-            while (*q && *q != '.' && *q != ' ' && *q != '\t') q++;
-            if (*q != '.' || q == p) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode reset: expected `<body>.<key> <distribution>`");
-                *had_error = 1;
-                continue;
-            }
-            *q = '\0';
-            char *body_name = kflc_arena_strdup(arena, p);
-            char *k = q + 1;
-            q = k;
-            while (*q && *q != ' ' && *q != '\t') q++;
-            int have_more = (*q != '\0');
-            *q = '\0';
-            char *key = kflc_arena_strdup(arena, k);
-            char *expr_src = have_more ? q + 1 : q;
-            if (!is_reset_state_key_(key)) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode reset: unknown state key `%s` (expected pos_x, "
-                    "pos_y, pos_z, vel_x, vel_y, vel_z, quat_w, quat_x, "
-                    "quat_y, quat_z, omega_x, omega_y, or omega_z)", key);
-                *had_error = 1;
-                continue;
-            }
-            expr_src = trim(expr_src);
-            if (expr_src[0] == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "episode reset: expected a distribution expression "
-                    "after `%s.%s`", body_name, key);
-                *had_error = 1;
-                continue;
-            }
-            KflcExpr *dist = kflc_parse_expr(expr_src, arena, diag, lineK);
-            if (!dist) {
-                *had_error = 1;
-                continue;
-            }
-            if (!is_dist_call_(dist)) {
-                kflc_diag_errorf(diag, lineK,
-                    "episode reset: expected a distribution expression "
-                    "`uniform(<low>, <high>)` or `normal(<mean>, <stddev>)`");
-                *had_error = 1;
-                continue;
-            }
-            KflcNode *r = new_node(arena, KFLN_STMT_EPISODE_RESET, lineK);
-            r->name          = body_name;
-            r->position.kind = KFLV_IDENT;
-            r->position.u.s  = key;
-            r->expr          = dist;
-            append_child(n, r);
-            continue;
-        }
-
-        kflc_diag_errorf(diag, cur->line,
-            "episode: unknown keyword `%s` (expected control_dt, horizon, "
-            "substeps, contact, `terminated when`, reset, or end)",
-            cur->str);
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-    }
-
-    if (!stmt_find_attr_(n, "control_dt")) {
-        kflc_diag_errorf(diag, line0,
-            "episode: missing required `control_dt <expr>`");
-        *had_error = 1;
-    }
-    return n;
-}
-
-/* `action <name> box <low> <high> [default <expr>]`
- * `action <name> discrete <count> [default <expr>]`
- * The bounds / count / default are whitespace-separated expressions
- * (balanced `()` / `[]` keep a spaced expression together, matching
- * the astro_body value convention). `cur` is the `action` keyword. */
-static KflcNode *parse_action_(Lexer *L, Token *cur,
-                               KflcArena *arena, KflcDiag *diag,
-                               int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (cur->kind != T_IDENT) {
-        kflc_diag_errorf(diag, line0, "action: expected action name");
-        *had_error = 1;
-        if (!at_nl(cur) && !at_eof2(cur)) {
-            rl_drain_line_(L, cur, arena, had_error);
-        } else if (at_nl(cur)) {
-            advance(L, cur, had_error);
-        }
-        return NULL;
-    }
-    char *name = cur->str;
-    advance(L, cur, had_error);
-    int is_box = is_ident_named(cur, "box");
-    if (!is_box && !is_ident_named(cur, "discrete")) {
-        kflc_diag_errorf(diag, line0,
-            "action %s: expected `box <low> <high>` or `discrete <count>`",
-            name);
-        *had_error = 1;
-        if (!at_nl(cur) && !at_eof2(cur)) {
-            rl_drain_line_(L, cur, arena, had_error);
-        } else if (at_nl(cur)) {
-            advance(L, cur, had_error);
-        }
-        return NULL;
-    }
-    char *raw = take_line_remainder(L, arena);
-    advance(L, cur, had_error);
-    if (at_nl(cur)) advance(L, cur, had_error);
-
-    /* Split into whitespace-separated, paren/bracket-balanced chunks:
-     * the expressions plus the optional `default` marker word. */
-    enum { ACTION_MAX_CHUNKS = 5 };
-    char *chunks[ACTION_MAX_CHUNKS];
-    int   n_chunks = 0;
-    int   overflow = 0;
-    char *p = trim(raw);
-    while (*p) {
-        while (*p == ' ' || *p == '\t') p++;
-        if (!*p) break;
-        char *beg = p;
-        int paren = 0, brack = 0;
-        while (*p) {
-            if      (*p == '(') paren++;
-            else if (*p == ')') paren--;
-            else if (*p == '[') brack++;
-            else if (*p == ']') brack--;
-            else if ((*p == ' ' || *p == '\t') && paren == 0 && brack == 0)
-                break;
-            p++;
-        }
-        int more = (*p != '\0');
-        *p = '\0';
-        if (n_chunks < ACTION_MAX_CHUNKS) chunks[n_chunks++] = beg;
-        else overflow = 1;
-        if (more) p++;
-    }
-
-    int expect = is_box ? 2 : 1;
-    if (n_chunks < expect) {
-        kflc_diag_errorf(diag, line0,
-            is_box ? "action %s: box requires `<low> <high>`"
-                   : "action %s: discrete requires `<count>`",
-            name);
-        *had_error = 1;
-        return NULL;
-    }
-    int have_default = 0;
-    if (overflow || n_chunks > expect) {
-        if (overflow || n_chunks != expect + 2 ||
-            strcmp(chunks[expect], "default") != 0)
-        {
-            kflc_diag_errorf(diag, line0,
-                "action %s: expected optional `default <expr>` after the %s",
-                name, is_box ? "bounds" : "count");
-            *had_error = 1;
-            return NULL;
-        }
-        have_default = 1;
-    }
-
-    KflcNode *n = new_node(arena, KFLN_STMT_ACTION, line0);
-    n->name          = name;
-    n->position.kind = KFLV_IDENT;
-    n->position.u.s  = kflc_arena_strdup(arena, is_box ? "box" : "discrete");
-    n->expr = kflc_parse_expr(chunks[0], arena, diag, line0);
-    if (!n->expr) *had_error = 1;
-    if (is_box) {
-        n->expr2 = kflc_parse_expr(chunks[1], arena, diag, line0);
-        if (!n->expr2) *had_error = 1;
-    }
-    if (have_default) {
-        KflcValue none;
-        memset(&none, 0, sizeof none);
-        KflcAttr *a = stmt_append_attr(arena, n, "default", none, line0);
-        a->expr = kflc_parse_expr(chunks[expect + 1], arena, diag, line0);
-        if (!a->expr) *had_error = 1;
-    }
-    return n;
-}
-
-/* `on_step ... end`. The body is a plain statement block; the
- * forbidden-statement check at the top of parse_stmt fires while
- * `g_rl_on_step_depth` is raised. `cur` is the `on_step` keyword. */
-static KflcNode *parse_on_step_(Lexer *L, Token *cur,
-                                KflcArena *arena, KflcDiag *diag,
-                                int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (!at_nl(cur) && !at_eof2(cur)) {
-        kflc_diag_errorf(diag, line0,
-            "on_step: expected end of line after `on_step`");
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-    } else if (at_nl(cur)) {
-        advance(L, cur, had_error);
-    }
-
-    KflcNode *n = new_node(arena, KFLN_STMT_ON_STEP, line0);
-    const char *brk[] = { "end", NULL };
-    g_rl_on_step_depth++;
-    KflcNode *blk = kfl_parse_stmt_block(L, cur, arena, diag, had_error,
-                                         "end", brk);
-    g_rl_on_step_depth--;
-    n->children = blk ? blk->children : NULL;
-    if (is_ident_named(cur, "end")) {
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-    }
-    return n;
-}
-
-/* `objective ... end` with `reward <expr>` (required) and
- * `terminal <expr>` (optional), each at most once. `cur` is the
- * `objective` keyword. */
-static KflcNode *parse_objective_(Lexer *L, Token *cur,
-                                  KflcArena *arena, KflcDiag *diag,
-                                  int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (!at_nl(cur) && !at_eof2(cur)) {
-        kflc_diag_errorf(diag, line0,
-            "objective: expected end of line after `objective`");
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-    } else if (at_nl(cur)) {
-        advance(L, cur, had_error);
-    }
-
-    KflcNode *n = new_node(arena, KFLN_STMT_OBJECTIVE, line0);
-    for (;;) {
-        skip_newlines(L, cur, had_error);
-        if (at_eof2(cur)) {
-            kflc_diag_errorf(diag, cur->line,
-                "objective: unexpected EOF (missing `end`)");
-            *had_error = 1;
-            break;
-        }
-        if (is_ident_named(cur, "end")) {
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            break;
-        }
-        if (cur->kind == T_IDENT && cur->str &&
-            (strcmp(cur->str, "reward") == 0 ||
-             strcmp(cur->str, "terminal") == 0))
-        {
-            const char *key = cur->str;
-            int lineK = cur->line;
-            char *src = take_line_remainder(L, arena);
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            if (stmt_find_attr_(n, key)) {
-                kflc_diag_errorf(diag, lineK,
-                    "objective: duplicate `%s` (allowed at most once)", key);
-                *had_error = 1;
-                continue;
-            }
-            char *t = trim(src);
-            if (t[0] == '\0') {
-                kflc_diag_errorf(diag, lineK,
-                    "objective: `%s` requires an expression", key);
-                *had_error = 1;
-                continue;
-            }
-            KflcValue none;
-            memset(&none, 0, sizeof none);
-            KflcAttr *a = stmt_append_attr(arena, n, key, none, lineK);
-            a->expr = kflc_parse_expr(t, arena, diag, lineK);
-            if (!a->expr) *had_error = 1;
-            continue;
-        }
-        kflc_diag_errorf(diag, cur->line,
-            "objective: unknown keyword `%s` (expected reward, terminal, "
-            "or end)",
-            (cur->kind == T_IDENT && cur->str) ? cur->str : "(non-ident)");
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-    }
-
-    if (!stmt_find_attr_(n, "reward")) {
-        kflc_diag_errorf(diag, line0,
-            "objective: missing required `reward <expr>`");
-        *had_error = 1;
-    }
-    return n;
-}
-
-/* `agent <name> ... end`. The block is a scope over constructs that
- * already exist, so its body is parsed by the ordinary block parser
- * and the `action`, `observe ... as` and `objective` statements inside
- * it come out as the same nodes they are at world level. Which
- * statements an agent block may hold is decided where the rest of the
- * environment model is built, so the admissible set lives in one place
- * rather than in the parser and again in the emitter. `cur` is the
- * `agent` keyword. */
-static KflcNode *parse_agent_(Lexer *L, Token *cur,
-                              KflcArena *arena, KflcDiag *diag,
-                              int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (cur->kind != T_IDENT) {
-        kflc_diag_errorf(diag, line0, "agent: expected a name");
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-        return NULL;
-    }
-    KflcNode *n = new_node(arena, KFLN_STMT_AGENT, line0);
-    n->name = cur->str;
-    advance(L, cur, had_error);
-    if (!at_nl(cur) && !at_eof2(cur)) {
-        kflc_diag_errorf(diag, line0,
-            "agent `%s`: expected end of line after the name", n->name);
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-    } else if (at_nl(cur)) {
-        advance(L, cur, had_error);
-    }
-
-    const char *brk[] = { "end", NULL };
-    KflcNode *blk = kfl_parse_stmt_block(L, cur, arena, diag, had_error,
-                                         "end", brk);
-    n->children = blk ? blk->children : NULL;
-    if (is_ident_named(cur, "end")) {
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-    } else {
-        kflc_diag_errorf(diag, line0,
-            "agent `%s`: unexpected EOF (missing `end`)", n->name);
-        *had_error = 1;
-    }
-    return n;
-}
-
-/* `astro_payload <name> body=<body> kind=<kind> [key=value ...]`.
- *
- * The shape is astro_body's, deliberately: a name and whitespace
- * separated `key=value` pairs whose values are kept as verbatim
- * expression text and validated at emit time, where the kind is known
- * and where the distribution forms are already recognised. One
- * statement covers every defense payload kind because the libraries
- * share one payload slot and one kind-tag registry, so the parse has
- * one case and the key schema is a function of `kind=` rather than of
- * the statement word. */
-static KflcNode *parse_astro_payload_(Lexer *L, Token *cur,
-                                      KflcArena *arena, KflcDiag *diag,
-                                      int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (cur->kind != T_IDENT) {
-        kflc_diag_errorf(diag, line0,
-            "astro_payload: expected payload name");
-        *had_error = 1;
-        while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-        return NULL;
-    }
-    char *pay_name = cur->str;
-    char *raw = take_line_remainder(L, arena);
-    advance(L, cur, had_error);
-    if (at_nl(cur)) advance(L, cur, had_error);
-
-    KflcNode *n = new_node(arena, KFLN_STMT_ASTRO_PAYLOAD, line0);
-    n->name = pay_name;
-
-    char *p = trim(raw);
-    while (*p) {
-        while (*p == ' ' || *p == '\t') p++;
-        if (!*p) break;
-        char *kbeg = p;
-        while (*p && *p != '=' && *p != ' ' && *p != '\t') p++;
-        if (*p != '=') {
-            kflc_diag_errorf(diag, line0,
-                "astro_payload %s: expected `key=value` (got `%s`)",
-                pay_name, kbeg);
-            *had_error = 1;
-            return n;
-        }
-        char *kend = p;
-        *kend = '\0';
-        char *key = kflc_arena_strdup(arena, kbeg);
-        p++;  /* past '=' */
-        char *vbeg = p;
-        int paren = 0, brack = 0;
-        while (*p) {
-            if      (*p == '(') paren++;
-            else if (*p == ')') paren--;
-            else if (*p == '[') brack++;
-            else if (*p == ']') brack--;
-            else if ((*p == ' ' || *p == '\t') && paren == 0 && brack == 0) break;
-            p++;
-        }
-        char saved_v = *p; *p = '\0';
-        char *val = kflc_arena_strdup(arena, vbeg);
-        if (saved_v) { *p = saved_v; }
-        KflcValue v;
-        memset(&v, 0, sizeof v);
-        v.kind = KFLV_IDENT;
-        v.u.s  = val;
-        stmt_append_attr(arena, n, key, v, line0);
-    }
-    return n;
-}
-
-/* `engage <payload> at <target>`.
- *
- * Three identifiers and one connective, with nothing else admitted on
- * the line: an engagement names what fires and what it fires at, and
- * every other quantity it needs is already declared on the payload or
- * derived from the two bodies' state. `at` is read as a connective
- * here alone, so a body or a binding called `at` keeps its name
- * everywhere else. */
-static KflcNode *parse_engage_(Lexer *L, Token *cur,
-                               KflcArena *arena, KflcDiag *diag,
-                               int *had_error)
-{
-    int line0 = cur->line;
-    advance(L, cur, had_error);
-    if (cur->kind != T_IDENT) {
-        kflc_diag_errorf(diag, line0,
-            "engage: expected the name of a payload to engage");
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-        return NULL;
-    }
-    char *pay = cur->str;
-    advance(L, cur, had_error);
-    if (!is_ident_named(cur, "at")) {
-        kflc_diag_errorf(diag, line0,
-            "engage %s: expected `at` and the name of the body engaged",
-            pay);
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-        return NULL;
-    }
-    advance(L, cur, had_error);
-    if (cur->kind != T_IDENT) {
-        kflc_diag_errorf(diag, line0,
-            "engage %s at: expected the name of a body", pay);
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-        return NULL;
-    }
-    char *tgt = cur->str;
-    advance(L, cur, had_error);
-    if (!at_nl(cur) && !at_eof2(cur)) {
-        kflc_diag_errorf(diag, line0,
-            "engage %s at %s: the statement takes a payload and a body "
-            "and nothing else", pay, tgt);
-        *had_error = 1;
-        rl_drain_line_(L, cur, arena, had_error);
-        return NULL;
-    }
-    if (at_nl(cur)) advance(L, cur, had_error);
-
-    KflcNode *n = new_node(arena, KFLN_STMT_ENGAGE, line0);
-    n->name = pay;
-    KflcValue v;
-    memset(&v, 0, sizeof v);
-    v.kind = KFLV_IDENT;
-    v.u.s  = tgt;
-    stmt_append_attr(arena, n, "at", v, line0);
-    return n;
 }
 
 /* Parse a single statement on the current line. Consumes the trailing
@@ -1665,7 +261,8 @@ static KflcNode *parse_engage_(Lexer *L, Token *cur,
  * to the expression sub-parser (which has its own lexer). After the
  * capture L->pos sits at the newline; we then advance the main lexer
  * once to refresh `cur` to T_NEWLINE, and again to skip it. */
-static KflcNode *parse_stmt(Lexer *L, Token *cur,
+
+KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
                              KflcArena *arena, KflcDiag *diag,
                              int *had_error)
 {
@@ -1679,19 +276,19 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
      * constructs are rejected here so the diagnostic names the
      * offending keyword. */
     if (g_rl_world_ctx && cur->kind == T_IDENT && cur->str) {
-        int construct = rl_word_is_construct_(L, cur->str);
+        int construct = kfl_stmt_rl_word_is_construct(L, cur->str);
         /* `engage` runs the other way from every word beside it: it is
          * an act of a step, so the per-step body is the one block that
          * admits it and the world prefix is where it is refused. */
         int engaging = construct && strcmp(cur->str, "engage") == 0;
         if (g_rl_on_step_depth > 0 && !engaging &&
-            (construct || is_on_step_world_stmt_(cur->str))) {
+            (construct || kfl_stmt_is_on_step_world_stmt(cur->str))) {
             kflc_diag_errorf(diag, line,
                 "on_step: `%s` is not allowed inside an on_step block; "
                 "the per-step body admits only ordinary statements",
                 cur->str);
             *had_error = 1;
-            rl_drain_line_(L, cur, arena, had_error);
+            kfl_stmt_rl_drain_line(L, cur, arena, had_error);
             return NULL;
         }
         if (engaging && g_rl_on_step_depth == 0) {
@@ -1699,42 +296,42 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                 "engage: an engagement is an act of a step and is "
                 "admissible inside an `on_step` block only");
             *had_error = 1;
-            rl_drain_line_(L, cur, arena, had_error);
+            kfl_stmt_rl_drain_line(L, cur, arena, had_error);
             return NULL;
         }
         if (construct) {
             if (engaging)
-                return parse_engage_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_engage(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "episode") == 0)
-                return parse_episode_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_episode(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "action") == 0)
-                return parse_action_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_action(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "on_step") == 0)
-                return parse_on_step_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_on_step(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "objective") == 0)
-                return parse_objective_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_objective(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "sensor") == 0)
-                return parse_sensor_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_sensor(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "agent") == 0)
-                return parse_agent_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_agent(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "astro_payload") == 0)
-                return parse_astro_payload_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_astro_payload(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "plan") == 0)
-                return parse_plan_(L, cur, arena, diag, had_error);
+                return kfl_stmt_parse_plan(L, cur, arena, diag, had_error);
         }
     }
 
     /* `return [<expr>]` */
-    if (is_ident_named(cur, "return")) {
-        char *body = take_line_remainder(L, arena);
-        advance(L, cur, had_error);   /* cur becomes T_NEWLINE */
-        KflcNode *n = new_node(arena, KFLN_STMT_RETURN, line);
-        char *trimmed = trim(body);
+    if (kfl_stmt_is_ident_named(cur, "return")) {
+        char *body = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);   /* cur becomes T_NEWLINE */
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_RETURN, line);
+        char *trimmed = kfl_stmt_trim(body);
         if (trimmed[0] != '\0') {
             n->expr = kflc_parse_expr(trimmed, arena, diag, line);
             if (!n->expr) *had_error = 1;
         }
-        if (at_nl(cur)) advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
         return n;
     }
 
@@ -1743,11 +340,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
      * literal (printed verbatim), otherwise the arg is a numeric
      * expression (printed as a double). Commas inside a quoted string
      * do not split. */
-    if (is_ident_named(cur, "print")) {
-        char *body = take_line_remainder(L, arena);
-        advance(L, cur, had_error);   /* cur becomes T_NEWLINE */
-        KflcNode *n = new_node(arena, KFLN_STMT_PRINT, line);
-        char *b = trim(body);
+    if (kfl_stmt_is_ident_named(cur, "print")) {
+        char *body = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);   /* cur becomes T_NEWLINE */
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_PRINT, line);
+        char *b = kfl_stmt_trim(body);
         while (*b) {
             while (*b == ' ' || *b == '\t') b++;
             if (!*b) break;
@@ -1763,7 +360,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             if (*b == ',') b++;            /* consume separator */
             while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
             if (end == start) continue;    /* empty arg */
-            KflcNode *arg = new_node(arena, KFLN_STMT_EXPR, line);
+            KflcNode *arg = kfl_stmt_new_node(arena, KFLN_STMT_EXPR, line);
             if (start[0] == '"') {
                 /* string literal: content between the quotes */
                 char *s = start + 1;
@@ -1783,9 +380,9 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                 arg->expr = kflc_parse_expr(src, arena, diag, line);
                 if (!arg->expr) *had_error = 1;
             }
-            append_child(n, arg);
+            kfl_stmt_append_child(n, arg);
         }
-        if (at_nl(cur)) advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
         return n;
     }
 
@@ -1794,16 +391,16 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
      * name we capture the rest of the line as raw bytes and split
      * manually. Cur is left on the trailing newline so the block
      * parser can skip it. */
-    if (is_ident_named(cur, "let") || is_ident_named(cur, "const")) {
-        int is_const = is_ident_named(cur, "const");
-        advance(L, cur, had_error);
+    if (kfl_stmt_is_ident_named(cur, "let") || kfl_stmt_is_ident_named(cur, "const")) {
+        int is_const = kfl_stmt_is_ident_named(cur, "const");
+        kfl_stmt_advance(L, cur, had_error);
         if (cur->kind != T_IDENT) {
             kflc_diag_errorf(diag, line,
                              "%s: expected name identifier",
                              is_const ? "const" : "let");
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         char *name = cur->str;
@@ -1818,9 +415,9 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         /* Capture from immediately after `name` to EOL — should look
          * like `: <type> = <expr>` or `= <expr>`. Then refill cur to
          * read the newline that terminates the statement. */
-        char *rest = take_line_remainder(L, arena);
-        advance(L, cur, had_error);   /* now cur is the newline */
-        rest = trim(rest);
+        char *rest = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);   /* now cur is the newline */
+        rest = kfl_stmt_trim(rest);
 
         KflcType              ty         = KFLT_DOUBLE;
         const char           *ty_opaque  = NULL;
@@ -1873,11 +470,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                              "%s: expected `=` followed by expression",
                              is_const ? "const" : "let");
             *had_error = 1;
-            if (at_nl(cur)) advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         char *expr_src = rest + eq_at + 1;
-        KflcNode *n = new_node(arena,
+        KflcNode *n = kfl_stmt_new_node(arena,
             is_const ? KFLN_STMT_CONST : KFLN_STMT_LET, line);
         n->name = name;
         n->type = ty;
@@ -1885,17 +482,17 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         n->lifetime_qualifier = lq;
         n->expr = kflc_parse_expr(expr_src, arena, diag, line);
         if (!n->expr) *had_error = 1;
-        if (at_nl(cur)) advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
         return n;
     }
 
     /* `if <expr> ... [else] end` */
-    if (is_ident_named(cur, "if")) {
-        char *body_src = take_line_remainder(L, arena);
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-        char *trimmed = trim(body_src);
-        KflcNode *n = new_node(arena, KFLN_STMT_IF, line);
+    if (kfl_stmt_is_ident_named(cur, "if")) {
+        char *body_src = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+        char *trimmed = kfl_stmt_trim(body_src);
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_IF, line);
         n->expr = kflc_parse_expr(trimmed, arena, diag, line);
         if (!n->expr) *had_error = 1;
 
@@ -1903,17 +500,17 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         KflcNode *blk = kfl_parse_stmt_block(L, cur, arena, diag, had_error,
                                               "end", brk);
         n->children = blk ? blk->children : NULL;
-        if (is_ident_named(cur, "else")) {
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+        if (kfl_stmt_is_ident_named(cur, "else")) {
+            kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             const char *brk2[] = { "end", NULL };
             KflcNode *eb = kfl_parse_stmt_block(L, cur, arena, diag, had_error,
                                                  "end", brk2);
             n->else_children = eb ? eb->children : NULL;
         }
-        if (is_ident_named(cur, "end")) {
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+        if (kfl_stmt_is_ident_named(cur, "end")) {
+            kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
         }
         return n;
     }
@@ -1936,17 +533,17 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         else if (strcmp(suffix, "heatmap")  == 0) series_kind = 5;
         if (series_kind >= 0) {
             int line0 = cur->line;
-            advance(L, cur, had_error);   /* consume keyword; now cur = label string */
+            kfl_stmt_advance(L, cur, had_error);   /* consume keyword; now cur = label string */
             if (cur->kind != T_STRING) {
                 kflc_diag_errorf(diag, line0,
                     "series_%s: expected label string", suffix);
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
             char *label = cur->str;
-            advance(L, cur, had_error);
+            kfl_stmt_advance(L, cur, had_error);
             /* Heatmap takes a single `matrix` identifier (row-major
              * data + rows/cols), not an xs/ys vector pair. The grid is
              * placed in index space [0,cols]×[0,rows]; color auto-fits. */
@@ -1955,14 +552,14 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                     kflc_diag_errorf(diag, line0,
                         "series_heatmap: expected matrix identifier");
                     *had_error = 1;
-                    while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                    if (at_nl(cur)) advance(L, cur, had_error);
+                    while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                    if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                     return NULL;
                 }
                 char *mat_name = cur->str;
-                advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
-                KflcNode *hn = new_node(arena, KFLN_STMT_SERIES, line0);
+                kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+                KflcNode *hn = kfl_stmt_new_node(arena, KFLN_STMT_SERIES, line0);
                 hn->name          = label;
                 hn->position.kind = KFLV_INT;
                 hn->position.u.i  = series_kind;
@@ -1979,24 +576,24 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                 kflc_diag_errorf(diag, line0,
                     "series_%s: expected xs vector identifier", suffix);
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
             char *xs_name = cur->str;
-            advance(L, cur, had_error);
+            kfl_stmt_advance(L, cur, had_error);
             if (cur->kind != T_IDENT) {
                 kflc_diag_errorf(diag, line0,
                     "series_%s: expected ys vector identifier", suffix);
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
             char *ys_name = cur->str;
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
-            KflcNode *n = new_node(arena, KFLN_STMT_SERIES, line0);
+            kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+            KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_SERIES, line0);
             n->name             = label;
             n->position.kind    = KFLV_INT;
             n->position.u.i     = series_kind;
@@ -2035,28 +632,28 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
      * against the active fn-world ctx. Keys are stable for serialize
      * round-trip; emit time validates the schema. The lexer doesn't
      * tokenise `=`, so we read the line remainder raw and split. */
-    if (is_ident_named(cur, "astro_body")) {
+    if (kfl_stmt_is_ident_named(cur, "astro_body")) {
         int line0 = cur->line;
-        advance(L, cur, had_error);
+        kfl_stmt_advance(L, cur, had_error);
         if (cur->kind != T_IDENT) {
             kflc_diag_errorf(diag, line0, "astro_body: expected body name");
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         char *body_name = cur->str;
-        char *raw = take_line_remainder(L, arena);
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
+        char *raw = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
 
-        KflcNode *n = new_node(arena, KFLN_STMT_ASTRO_BODY, line0);
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_ASTRO_BODY, line0);
         n->name = body_name;
 
         /* Whitespace-separated `key=value` pairs. Values are
          * paren-balanced expressions; whitespace inside `()`/`[]` is
          * preserved. */
-        char *p = trim(raw);
+        char *p = kfl_stmt_trim(raw);
         while (*p) {
             while (*p == ' ' || *p == '\t') p++;
             if (!*p) break;
@@ -2090,19 +687,19 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             memset(&v, 0, sizeof v);
             v.kind = KFLV_IDENT;
             v.u.s  = val;
-            stmt_append_attr(arena, n, key, v, line0);
+            kfl_stmt_stmt_append_attr(arena, n, key, v, line0);
         }
         return n;
     }
 
     /* `step <dt_expr>` — drive one scheduler tick. */
-    if (is_ident_named(cur, "step")) {
+    if (kfl_stmt_is_ident_named(cur, "step")) {
         int line0 = cur->line;
-        char *body = take_line_remainder(L, arena);
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-        KflcNode *n = new_node(arena, KFLN_STMT_STEP, line0);
-        char *trimmed = trim(body);
+        char *body = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_STEP, line0);
+        char *trimmed = kfl_stmt_trim(body);
         if (trimmed[0] == '\0') {
             kflc_diag_errorf(diag, line0, "step: expected dt expression");
             *had_error = 1;
@@ -2115,33 +712,33 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
 
     /* `propagate <body_ident> for <dt_expr>`: single-body Kepler /
      * integrator step (conics on-rails or grav.step under the hood). */
-    if (is_ident_named(cur, "propagate")) {
+    if (kfl_stmt_is_ident_named(cur, "propagate")) {
         int line0 = cur->line;
-        advance(L, cur, had_error);
+        kfl_stmt_advance(L, cur, had_error);
         if (cur->kind != T_IDENT) {
             kflc_diag_errorf(diag, line0,
                 "propagate: expected body identifier");
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         char *body_ident = cur->str;
-        advance(L, cur, had_error);
-        if (!is_ident_named(cur, "for")) {
+        kfl_stmt_advance(L, cur, had_error);
+        if (!kfl_stmt_is_ident_named(cur, "for")) {
             kflc_diag_errorf(diag, line0,
                 "propagate %s: expected `for` keyword", body_ident);
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
-        char *dt_src = take_line_remainder(L, arena);
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-        KflcNode *n = new_node(arena, KFLN_STMT_PROPAGATE, line0);
+        char *dt_src = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_PROPAGATE, line0);
         n->name = body_ident;
-        char *trimmed = trim(dt_src);
+        char *trimmed = kfl_stmt_trim(dt_src);
         n->expr = kflc_parse_expr(trimmed, arena, diag, line0);
         if (!n->expr) *had_error = 1;
         return n;
@@ -2152,54 +749,54 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
      * reuses kfl_parse_stmt_block with `end` terminator (matches
      * the existing while/if precedent — the lexer doesn't tokenise
      * `{`/`}`, so we use `end` as the block closer). */
-    if (is_ident_named(cur, "for_each")) {
+    if (kfl_stmt_is_ident_named(cur, "for_each")) {
         int line0 = cur->line;
-        advance(L, cur, had_error);
+        kfl_stmt_advance(L, cur, had_error);
         if (cur->kind != T_IDENT) {
             kflc_diag_errorf(diag, line0, "for_each: expected iterator name");
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         char *iter_name = cur->str;
-        advance(L, cur, had_error);
-        if (!is_ident_named(cur, "in")) {
+        kfl_stmt_advance(L, cur, had_error);
+        if (!kfl_stmt_is_ident_named(cur, "in")) {
             kflc_diag_errorf(diag, line0,
                 "for_each %s: expected `in` keyword", iter_name);
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
-        advance(L, cur, had_error);
+        kfl_stmt_advance(L, cur, had_error);
         if (cur->kind != T_IDENT) {
             kflc_diag_errorf(diag, line0,
                 "for_each %s in: expected world identifier", iter_name);
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         char *world_ident = cur->str;
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
 
-        KflcNode *n = new_node(arena, KFLN_STMT_FOR_EACH, line0);
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_FOR_EACH, line0);
         n->name = iter_name;
         KflcValue wv;
         memset(&wv, 0, sizeof wv);
         wv.kind = KFLV_IDENT;
         wv.u.s  = world_ident;
-        stmt_append_attr(arena, n, "world", wv, line0);
+        kfl_stmt_stmt_append_attr(arena, n, "world", wv, line0);
 
         const char *brk[] = { "end", NULL };
         KflcNode *blk = kfl_parse_stmt_block(L, cur, arena, diag,
                                               had_error, "end", brk);
         n->children = blk ? blk->children : NULL;
-        if (is_ident_named(cur, "end")) {
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+        if (kfl_stmt_is_ident_named(cur, "end")) {
+            kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
         }
         return n;
     }
@@ -2207,18 +804,18 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
     /* `observe <target> from <observer> [<name>=<value>]*` — invoke
      * the world's observer-correction pipeline. Trailing `name=value`
      * pairs (mode=astrometric etc.) are captured by raw-line scan. */
-    if (is_ident_named(cur, "observe")) {
+    if (kfl_stmt_is_ident_named(cur, "observe")) {
         int line0 = cur->line;
-        advance(L, cur, had_error);
+        kfl_stmt_advance(L, cur, had_error);
         if (cur->kind != T_IDENT) {
             kflc_diag_errorf(diag, line0, "observe: expected target ident");
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         char *target_ident = cur->str;
-        advance(L, cur, had_error);
+        kfl_stmt_advance(L, cur, had_error);
         /* `observe attitude of <body> as <name>` publishes a body's
          * own orientation and rate, rather than a line of sight from
          * one body to another. It is spelled as a distinct form
@@ -2253,11 +850,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * `observe relative from earth` has `from` after the name. */
         int relative_form = 0;
         if (strcmp(target_ident, "relative") == 0 &&
-            cur->kind == T_IDENT && !is_ident_named(cur, "from"))
+            cur->kind == T_IDENT && !kfl_stmt_is_ident_named(cur, "from"))
         {
             relative_form = 1;
             target_ident  = cur->str;
-            advance(L, cur, had_error);
+            kfl_stmt_advance(L, cur, had_error);
         }
         /* `observe port <port> of <body> as <name>` publishes how far
          * a named docking port on a body is from mated with the port
@@ -2270,11 +867,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         int         port_form = 0;
         const char *port_ident = NULL;
         if (!relative_form && strcmp(target_ident, "port") == 0 &&
-            cur->kind == T_IDENT && !is_ident_named(cur, "from"))
+            cur->kind == T_IDENT && !kfl_stmt_is_ident_named(cur, "from"))
         {
             port_ident = cur->str;
-            advance(L, cur, had_error);
-            if (!is_ident_named(cur, "of")) {
+            kfl_stmt_advance(L, cur, had_error);
+            if (!kfl_stmt_is_ident_named(cur, "of")) {
                 /* A body genuinely called `port` reaches here when
                  * the line-of-sight form is written with a trailing
                  * key rather than `from` first, so the diagnostic
@@ -2286,17 +883,17 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                     "<observer>` with `from` before any key",
                     port_ident);
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
-            advance(L, cur, had_error);
+            kfl_stmt_advance(L, cur, had_error);
             if (cur->kind != T_IDENT) {
                 kflc_diag_errorf(diag, line0,
                     "observe port %s of: expected a body name", port_ident);
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
             /* As the self-reporting forms below: the cursor stays on
@@ -2324,8 +921,8 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * payload name. */
         if (!relative_form && !port_form &&
             strcmp(target_ident, "effect") == 0 &&
-            cur->kind == T_IDENT && !is_ident_named(cur, "from") &&
-            !is_ident_named(cur, "as"))
+            cur->kind == T_IDENT && !kfl_stmt_is_ident_named(cur, "from") &&
+            !kfl_stmt_is_ident_named(cur, "as"))
         {
             defense_form  = 3;
             payload_ident = cur->str;
@@ -2338,12 +935,12 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         if (!relative_form && !port_form && !defense_form &&
             (strcmp(target_ident, "detect") == 0 ||
              strcmp(target_ident, "track") == 0) &&
-            cur->kind == T_IDENT && !is_ident_named(cur, "from"))
+            cur->kind == T_IDENT && !kfl_stmt_is_ident_named(cur, "from"))
         {
             defense_form  = strcmp(target_ident, "detect") == 0 ? 1 : 2;
             payload_ident = cur->str;
-            advance(L, cur, had_error);
-            if (!is_ident_named(cur, "of")) {
+            kfl_stmt_advance(L, cur, had_error);
+            if (!kfl_stmt_is_ident_named(cur, "of")) {
                 kflc_diag_errorf(diag, line0,
                     "observe %s %s: expected `of` and the name of the "
                     "body observed; if `%s` is a body here, its "
@@ -2353,18 +950,18 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                     defense_form == 1 ? "detect" : "track",
                     defense_form == 1 ? "detect" : "track");
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
-            advance(L, cur, had_error);
+            kfl_stmt_advance(L, cur, had_error);
             if (cur->kind != T_IDENT) {
                 kflc_diag_errorf(diag, line0,
                     "observe %s %s of: expected a body name",
                     defense_form == 1 ? "detect" : "track", payload_ident);
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
             /* As the port form: the cursor stays on the body name,
@@ -2379,7 +976,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * second time and leave the diagnostic naming the wrong
          * body. */
         if (!relative_form && !port_form && !defense_form &&
-            is_ident_named(cur, "of"))
+            kfl_stmt_is_ident_named(cur, "of"))
         {
             for (int k = 0; SELF_FORMS_[k]; k++) {
                 if (strcmp(target_ident, SELF_FORMS_[k]) == 0) {
@@ -2388,13 +985,13 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             }
         }
         if (self_marker) {
-            advance(L, cur, had_error);
+            kfl_stmt_advance(L, cur, had_error);
             if (cur->kind != T_IDENT) {
                 kflc_diag_errorf(diag, line0,
                     "observe %s of: expected a body name", self_marker);
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
             /* The cursor stays on the body name, where the ordinary
@@ -2403,7 +1000,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             target_ident   = cur->str;
             attitude_form  = 1;
         }
-        if (!attitude_form && !is_ident_named(cur, "from")) {
+        if (!attitude_form && !kfl_stmt_is_ident_named(cur, "from")) {
             if (relative_form) {
                 kflc_diag_errorf(diag, line0,
                     "observe relative %s: expected `from` after the "
@@ -2413,35 +1010,35 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                     "observe %s: expected `from` keyword", target_ident);
             }
             *had_error = 1;
-            while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         char *observer_ident = target_ident;
         if (!attitude_form) {
-            advance(L, cur, had_error);
+            kfl_stmt_advance(L, cur, had_error);
             if (cur->kind != T_IDENT) {
                 kflc_diag_errorf(diag, line0,
                     "observe %s from: expected observer ident",
                     target_ident);
                 *had_error = 1;
-                while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-                if (at_nl(cur)) advance(L, cur, had_error);
+                while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+                if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
                 return NULL;
             }
             observer_ident = cur->str;
         }
         /* Capture rest of line for trailing named-args. */
-        char *raw = take_line_remainder(L, arena);
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
+        char *raw = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
 
-        KflcNode *n = new_node(arena, KFLN_STMT_OBSERVE, line0);
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_OBSERVE, line0);
         n->name = target_ident;
         KflcValue ov;
         memset(&ov, 0, sizeof ov);
         ov.kind = KFLV_IDENT; ov.u.s = observer_ident;
-        stmt_append_attr(arena, n, "observer", ov, line0);
+        kfl_stmt_stmt_append_attr(arena, n, "observer", ov, line0);
         if (attitude_form || relative_form) {
             KflcValue kv;
             memset(&kv, 0, sizeof kv);
@@ -2459,7 +1056,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                                : defense_form == 2 ? "track"
                                : defense_form == 3 ? "effect"
                                : self_marker     ? self_marker : "attitude";
-            stmt_append_attr(arena, n, marker, kv, line0);
+            kfl_stmt_stmt_append_attr(arena, n, marker, kv, line0);
         }
 
         /* Parse trailing `key=value` pairs (whitespace-separated).
@@ -2467,7 +1064,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
          * `as <name>` clause (Grammar 3.2) names the observation
          * channel; it must be the last clause on the line and lands
          * as the `as` attr. */
-        char *p = trim(raw);
+        char *p = kfl_stmt_trim(raw);
         while (*p) {
             while (*p == ' ' || *p == '\t') p++;
             if (!*p) break;
@@ -2499,7 +1096,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                     memset(&tv, 0, sizeof tv);
                     tv.kind = KFLV_IDENT;
                     tv.u.s  = kflc_arena_strdup(arena, nbeg);
-                    stmt_append_attr(arena, n, "through", tv, line0);
+                    kfl_stmt_stmt_append_attr(arena, n, "through", tv, line0);
                     if (saved_t) { *p = saved_t; p++; }
                     continue;
                 }
@@ -2521,7 +1118,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                     memset(&wv, 0, sizeof wv);
                     wv.kind = KFLV_IDENT;
                     wv.u.s  = kflc_arena_strdup(arena, "1");
-                    stmt_append_attr(arena, n, "truth", wv, line0);
+                    kfl_stmt_stmt_append_attr(arena, n, "truth", wv, line0);
                     if (saved_w) { *p = saved_w; p++; }
                     continue;
                 }
@@ -2553,7 +1150,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
                     memset(&av, 0, sizeof av);
                     av.kind = KFLV_IDENT;
                     av.u.s  = kflc_arena_strdup(arena, nbeg);
-                    stmt_append_attr(arena, n, "as", av, line0);
+                    kfl_stmt_stmt_append_attr(arena, n, "as", av, line0);
                     return n;
                 }
                 kflc_diag_errorf(diag, line0,
@@ -2574,7 +1171,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             KflcValue v;
             memset(&v, 0, sizeof v);
             v.kind = KFLV_IDENT; v.u.s = val;
-            stmt_append_attr(arena, n, key, v, line0);
+            kfl_stmt_stmt_append_attr(arena, n, key, v, line0);
         }
         /* Reached only when no `as` clause was found; the clause
          * returns above. The line-of-sight form without one is a print
@@ -2601,19 +1198,19 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
      * (statement context) rather than fn-header so the full fn body
      * parser owns the dispatch; emit enforces the "must appear
      * before non-binding statements" rule. */
-    if (is_ident_named(cur, "allocator")) {
+    if (kfl_stmt_is_ident_named(cur, "allocator")) {
         int line_a = cur->line;
         /* `=` is not in the lexer's token alphabet; same as
          * let/const, we capture the rest of the line as raw text
          * and string-parse `= <ident>`. */
-        char *raw = take_line_remainder(L, arena);
-        advance(L, cur, had_error);   /* now cur = newline */
-        char *p = trim(raw);
+        char *raw = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);   /* now cur = newline */
+        char *p = kfl_stmt_trim(raw);
         if (*p != '=') {
             kflc_diag_errorf(diag, line_a,
                 "allocator: expected `= <arena_name>`");
             *had_error = 1;
-            if (at_nl(cur)) advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         p++;
@@ -2625,22 +1222,22 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             kflc_diag_errorf(diag, line_a,
                 "allocator: expected arena name identifier after `=`");
             *had_error = 1;
-            if (at_nl(cur)) advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
-        if (at_nl(cur)) advance(L, cur, had_error);
-        KflcNode *n = new_node(arena, KFLN_ALLOCATOR_BIND, line_a);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_ALLOCATOR_BIND, line_a);
         n->name = kflc_arena_strdup(arena, name_start);
         return n;
     }
 
     /* `while <expr> ... end` */
-    if (is_ident_named(cur, "while")) {
-        char *body_src = take_line_remainder(L, arena);
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
-        char *trimmed = trim(body_src);
-        KflcNode *n = new_node(arena, KFLN_STMT_WHILE, line);
+    if (kfl_stmt_is_ident_named(cur, "while")) {
+        char *body_src = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+        char *trimmed = kfl_stmt_trim(body_src);
+        KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_WHILE, line);
         n->expr = kflc_parse_expr(trimmed, arena, diag, line);
         if (!n->expr) *had_error = 1;
 
@@ -2648,9 +1245,9 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         KflcNode *blk = kfl_parse_stmt_block(L, cur, arena, diag, had_error,
                                               "end", brk);
         n->children = blk ? blk->children : NULL;
-        if (is_ident_named(cur, "end")) {
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+        if (kfl_stmt_is_ident_named(cur, "end")) {
+            kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
         }
         return n;
     }
@@ -2665,11 +1262,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         /* Bare strings as a statement are nonsense; emit a diagnostic. */
         kflc_diag_errorf(diag, line, "stmt: unexpected string literal at start of statement");
         *had_error = 1;
-        while (!at_nl(cur) && !at_eof2(cur)) advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
+        while (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
         return NULL;
     }
-    char *rest = take_line_remainder(L, arena);
+    char *rest = kfl_stmt_take_line_remainder(L, arena);
     /* The leading token is re-joined to the rest of the line with a
      * separating space, which would split a dotted name the
      * expression lexer folds into one identifier (`craft.vel_x`).
@@ -2698,21 +1295,21 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         char *lhs_buf = (char *)kflc_arena_alloc(arena, (size_t)eq + 1);
         memcpy(lhs_buf, line_src, (size_t)eq);
         lhs_buf[eq] = '\0';
-        char *lhs_trim = trim(lhs_buf);
+        char *lhs_trim = kfl_stmt_trim(lhs_buf);
         KflcExpr *lhs_expr = kflc_parse_expr(lhs_trim, arena, diag, line);
         if (!lhs_expr) {
             *had_error = 1;
-            advance(L, cur, had_error);
-            if (at_nl(cur)) advance(L, cur, had_error);
+            kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
             return NULL;
         }
         KflcExpr *rhs_expr = kflc_parse_expr(line_src + eq + 1, arena, diag, line);
         if (!rhs_expr) *had_error = 1;
-        advance(L, cur, had_error);
-        if (at_nl(cur)) advance(L, cur, had_error);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
 
         if (lhs_expr->kind == KFLE_IDENT) {
-            KflcNode *n = new_node(arena, KFLN_STMT_ASSIGN, line);
+            KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_ASSIGN, line);
             n->name = lhs_expr->u.ident;
             n->expr = rhs_expr;
             return n;
@@ -2723,7 +1320,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
         {
             /* Single-level vector index. Kept on STMT_INDEX_ASSIGN so
              * the B5 KFLC_VEC_W bounds-check macro applies. */
-            KflcNode *n = new_node(arena, KFLN_STMT_INDEX_ASSIGN, line);
+            KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_INDEX_ASSIGN, line);
             n->name  = lhs_expr->u.index.base->u.ident;
             n->expr  = rhs_expr;
             n->expr2 = lhs_expr->u.index.idx;
@@ -2733,7 +1330,7 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
             /* B2: deeper index chain (e.g. matrix `m[i][j]`). The
              * shape check is deferred to kflc_emit_lvalue at emit
              * time so error messages cite the actual ident + type. */
-            KflcNode *n = new_node(arena, KFLN_STMT_LVALUE_ASSIGN, line);
+            KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_LVALUE_ASSIGN, line);
             n->expr  = lhs_expr;    /* full LHS expr */
             n->expr2 = rhs_expr;    /* RHS expr */
             return n;
@@ -2746,11 +1343,11 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
     }
 
     /* Bare expression statement. Generates `(void)expr;` in C++. */
-    KflcNode *n = new_node(arena, KFLN_STMT_EXPR, line);
+    KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_EXPR, line);
     n->expr = kflc_parse_expr(line_src, arena, diag, line);
     if (!n->expr) *had_error = 1;
-    advance(L, cur, had_error);
-    if (at_nl(cur)) advance(L, cur, had_error);
+    kfl_stmt_advance(L, cur, had_error);
+    if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
     return n;
 }
 
@@ -2759,1069 +1356,30 @@ static KflcNode *parse_stmt(Lexer *L, Token *cur,
  * the caller decides whether to consume it. Returns a parent node
  * whose `children` is the linked list of statements, or NULL on error.
  */
+
 KflcNode *kfl_parse_stmt_block(Lexer *L, Token *cur,
                                 KflcArena *arena, KflcDiag *diag,
                                 int *had_error,
                                 const char *terminator,
                                 const char **also_break)
 {
-    KflcNode *parent = new_node(arena, KFLN_FN, 0);   /* placeholder kind */
+    KflcNode *parent = kfl_stmt_new_node(arena, KFLN_FN, 0);   /* placeholder kind */
     for (;;) {
-        skip_newlines(L, cur, had_error);
-        if (at_eof2(cur)) {
+        kfl_stmt_skip_newlines(L, cur, had_error);
+        if (kfl_stmt_at_eof2(cur)) {
             kflc_diag_errorf(diag, cur->line,
                              "unexpected EOF inside fn body (missing `%s`)",
                              terminator);
             *had_error = 1;
             return parent;
         }
-        if (is_ident_named(cur, terminator)) return parent;
+        if (kfl_stmt_is_ident_named(cur, terminator)) return parent;
         if (also_break) {
             for (int i = 0; also_break[i]; i++) {
-                if (is_ident_named(cur, also_break[i])) return parent;
+                if (kfl_stmt_is_ident_named(cur, also_break[i])) return parent;
             }
         }
-        KflcNode *s = parse_stmt(L, cur, arena, diag, had_error);
-        if (s) append_child(parent, s);
-    }
-}
-
-/* ---- Statement emitter ------------------------------------------ */
-
-/* Emit a statement subtree to `out`. Indent is in spaces. Returns 0
- * on success, nonzero on emit error. */
-int kfl_emit_stmt(FILE *out, const KflcNode *s,
-                   const KflcExprCtx *ctx, KflcDiag *diag,
-                   int indent);
-
-static void emit_indent(FILE *out, int n)
-{
-    for (int i = 0; i < n; i++) fputc(' ', out);
-}
-
-static int emit_expr_stmt_value(FILE *out, const KflcExpr *e,
-                                 KflcType target_type,
-                                 const KflcExprCtx *ctx, KflcDiag *diag)
-{
-    if (target_type == KFLT_INT) {
-        fputs("(int)(", out);
-        if (kflc_emit_expr(out, e, ctx, diag)) return 1;
-        fputs(")", out);
-    } else if (target_type == KFLT_BOOL) {
-        fputs("(bool)(", out);
-        if (kflc_emit_expr(out, e, ctx, diag)) return 1;
-        fputs(")", out);
-    } else if (target_type == KFLT_STRING) {
-        /* Strings aren't part of the expr grammar; emit literal "". */
-        fputs("\"\"", out);
-        (void)ctx; (void)diag; (void)e;
-    } else {
-        if (kflc_emit_expr(out, e, ctx, diag)) return 1;
-    }
-    return 0;
-}
-
-/* Emit `s` as a C++ double-quoted string literal (escapes decoded in
- * the KflcValue are re-escaped for the emitted source). Used by the
- * print statement; kept local because emit.c's emit_string_literal is
- * file-static there. */
-static void emit_c_str_lit_(FILE *out, const char *s)
-{
-    fputc('"', out);
-    for (; s && *s; s++) {
-        switch (*s) {
-        case '"':  fputs("\\\"", out); break;
-        case '\\': fputs("\\\\", out); break;
-        case '\n': fputs("\\n",  out); break;
-        case '\t': fputs("\\t",  out); break;
-        case '\r': fputs("\\r",  out); break;
-        default:   fputc(*s, out);     break;
-        }
-    }
-    fputc('"', out);
-}
-
-int kfl_emit_stmt(FILE *out, const KflcNode *s,
-                   const KflcExprCtx *ctx, KflcDiag *diag,
-                   int indent)
-{
-    if (!s) return 0;
-    switch (s->kind) {
-    case KFLN_STMT_ENGAGE: {
-        /* The environment emitter resolved this statement to one
-         * engagement helper and left its index on the node, so the
-         * payload, the target and every table index they need are
-         * compile-time constants and nothing is looked up here. The
-         * statement is admissible in an `on_step` body alone, which is
-         * the one place these names are in scope. */
-        emit_indent(out, indent);
-        fprintf(out, "kflrl_engage_%ld_(world, _kfl_pay, _kfl_payu, "
-                     "_kfl_payp, _kfl_dt, _kfl_eng);\n",
-                s->position.kind == KFLV_INT ? s->position.u.i : 0L);
-        return 0;
-    }
-
-    case KFLN_STMT_LET:
-    case KFLN_STMT_CONST: {
-        /* Register heap-typed lets with the unified scope tracker
-         * (depth 0 = fn-body root, depths >= 1 = if/while bodies).
-         * Registration happens before the type-specific emit so a
-         * `return` mid-body that follows still sees the binding. */
-        b1_scope_add_let_(s->name, s->type);
-        /* Vector / matrix locals: zero-init the struct, then call
-         * k26c_vec_from / k26c_mat_from with a stack-array temporary.
-         * The expression must be a vector literal: nested for
-         * matrices, flat for vectors. */
-        if (s->type == KFLT_VECTOR) {
-            emit_indent(out, indent);
-            fprintf(out, "K26CVector %s = {0};\n", s->name);
-            if (!s->expr) {
-                kflc_diag_errorf(diag, s->line,
-                    "let %s: vector requires a `[...]` or builder initializer",
-                    s->name);
-                return 1;
-            }
-            if (s->expr->kind == KFLE_VEC_LIT) {
-                int n = s->expr->u.vec.n_elems;
-                emit_indent(out, indent);
-                fputs("{ double _ka[] = {", out);
-                for (int i = 0; i < n; i++) {
-                    if (i > 0) fputs(", ", out);
-                    if (kflc_emit_expr(out, s->expr->u.vec.elems[i], ctx, diag)) return 1;
-                }
-                fprintf(out, "}; k26c_vec_from(&%s, _ka, %d); }\n", s->name, n);
-                return 0;
-            }
-            /* Vector builder calls: linspace / zeros / ones /
-             * arange. Each emits a `k26c_vec_alloc` + a fill loop. */
-            if (s->expr->kind == KFLE_CALL &&
-                s->expr->u.call.name)
-            {
-                const char *bn = s->expr->u.call.name;
-                int n_args = s->expr->u.call.n_args;
-                if (strcmp(bn, "zeros") == 0 && n_args == 1) {
-                    emit_indent(out, indent);
-                    fprintf(out, "{ size_t _n = (size_t)((int)(");
-                    if (kflc_emit_expr(out, s->expr->u.call.args[0], ctx, diag)) return 1;
-                    fprintf(out, ")); k26c_vec_alloc(&%s, _n); for (size_t _i = 0; _i < _n; _i++) %s.data[_i] = 0.0; }\n",
-                            s->name, s->name);
-                    return 0;
-                }
-                if (strcmp(bn, "ones") == 0 && n_args == 1) {
-                    emit_indent(out, indent);
-                    fprintf(out, "{ size_t _n = (size_t)((int)(");
-                    if (kflc_emit_expr(out, s->expr->u.call.args[0], ctx, diag)) return 1;
-                    fprintf(out, ")); k26c_vec_alloc(&%s, _n); for (size_t _i = 0; _i < _n; _i++) %s.data[_i] = 1.0; }\n",
-                            s->name, s->name);
-                    return 0;
-                }
-                if (strcmp(bn, "linspace") == 0 && n_args == 3) {
-                    emit_indent(out, indent);
-                    fputs("{ double _a = ", out);
-                    if (kflc_emit_expr(out, s->expr->u.call.args[0], ctx, diag)) return 1;
-                    fputs("; double _b = ", out);
-                    if (kflc_emit_expr(out, s->expr->u.call.args[1], ctx, diag)) return 1;
-                    fputs("; size_t _n = (size_t)((int)(", out);
-                    if (kflc_emit_expr(out, s->expr->u.call.args[2], ctx, diag)) return 1;
-                    fprintf(out, ")); k26c_vec_alloc(&%s, _n); if (_n == 1) { %s.data[0] = _a; } else { for (size_t _i = 0; _i < _n; _i++) %s.data[_i] = _a + (_b - _a) * (double)_i / (double)(_n - 1); } }\n",
-                            s->name, s->name, s->name);
-                    return 0;
-                }
-                if (strcmp(bn, "arange") == 0 && n_args == 3) {
-                    emit_indent(out, indent);
-                    fputs("{ double _a = ", out);
-                    if (kflc_emit_expr(out, s->expr->u.call.args[0], ctx, diag)) return 1;
-                    fputs("; double _b = ", out);
-                    if (kflc_emit_expr(out, s->expr->u.call.args[1], ctx, diag)) return 1;
-                    fputs("; double _st = ", out);
-                    if (kflc_emit_expr(out, s->expr->u.call.args[2], ctx, diag)) return 1;
-                    fprintf(out, "; size_t _n = (size_t)((_b - _a) / _st + 0.5); k26c_vec_alloc(&%s, _n); for (size_t _i = 0; _i < _n; _i++) %s.data[_i] = _a + (double)_i * _st; }\n",
-                            s->name, s->name);
-                    return 0;
-                }
-            }
-            kflc_diag_errorf(diag, s->line,
-                "let %s: vector init must be `[...]`, `zeros(N)`, "
-                "`ones(N)`, `linspace(a, b, N)`, or `arange(a, b, step)`",
-                s->name);
-            return 1;
-        }
-        if (s->type == KFLT_MATRIX) {
-            emit_indent(out, indent);
-            fprintf(out, "K26CMatrix %s = {0};\n", s->name);
-            /* Runtime `zeros(rows, cols)` constructor — the 2-arg form
-             * allocates a rows×cols matrix (the 1-arg form is a vector).
-             * Cells are then filled by `m[i][j] = ...` assignment. */
-            if (s->expr && s->expr->kind == KFLE_CALL && s->expr->u.call.name &&
-                strcmp(s->expr->u.call.name, "zeros") == 0 &&
-                s->expr->u.call.n_args == 2)
-            {
-                emit_indent(out, indent);
-                fputs("{ size_t _mr = (size_t)((int)(", out);
-                if (kflc_emit_expr(out, s->expr->u.call.args[0], ctx, diag)) return 1;
-                fputs(")); size_t _mc = (size_t)((int)(", out);
-                if (kflc_emit_expr(out, s->expr->u.call.args[1], ctx, diag)) return 1;
-                fprintf(out, ")); k26c_mat_alloc(&%s, _mr, _mc); "
-                             "for (size_t _i = 0; _i < _mr * _mc; _i++) "
-                             "%s.data[_i] = 0.0; }\n", s->name, s->name);
-                return 0;
-            }
-            if (!s->expr || s->expr->kind != KFLE_VEC_LIT) {
-                kflc_diag_errorf(diag, s->line,
-                    "let %s: matrix requires a `[[...], [...]]` initializer "
-                    "or `zeros(rows, cols)`",
-                    s->name);
-                return 1;
-            }
-            int rows = s->expr->u.vec.n_elems;
-            int cols = 0;
-            if (rows > 0) {
-                const KflcExpr *first_row = s->expr->u.vec.elems[0];
-                if (!first_row || first_row->kind != KFLE_VEC_LIT) {
-                    kflc_diag_errorf(diag, s->line,
-                        "let %s: matrix rows must themselves be `[...]` literals",
-                        s->name);
-                    return 1;
-                }
-                cols = first_row->u.vec.n_elems;
-            }
-            /* Validate every row has the same column count. */
-            for (int r = 0; r < rows; r++) {
-                const KflcExpr *row = s->expr->u.vec.elems[r];
-                if (!row || row->kind != KFLE_VEC_LIT || row->u.vec.n_elems != cols) {
-                    kflc_diag_errorf(diag, s->line,
-                        "let %s: matrix row %d has wrong shape (expected %d cols)",
-                        s->name, r, cols);
-                    return 1;
-                }
-            }
-            emit_indent(out, indent);
-            fputs("{ double _ka[] = {", out);
-            int first = 1;
-            for (int r = 0; r < rows; r++) {
-                const KflcExpr *row = s->expr->u.vec.elems[r];
-                for (int c = 0; c < cols; c++) {
-                    if (!first) fputs(", ", out);
-                    first = 0;
-                    if (kflc_emit_expr(out, row->u.vec.elems[c], ctx, diag)) return 1;
-                }
-            }
-            fprintf(out, "}; k26c_mat_from(&%s, _ka, %d, %d); }\n",
-                    s->name, rows, cols);
-            return 0;
-        }
-        const char *cxx_ty = kflc_type_cxx(s->type, s->type_subtype);
-        if (!cxx_ty) cxx_ty = "double";
-        /* Borrow source resolution + emit type adjustment.
-         *
-         * For `let v: borrow T = src`, look up src's binding index in
-         * the current ctx and store it on the new binding's
-         * borrow_source_idx so the read-side use-after-move check
-         * (expr.c KFLE_IDENT) can trace from a borrow read back to
-         * its source binding and detect "source was moved" cases.
-         *
-         * Also enforce the "borrow needs an owning source" rule:
-         * borrow RHS must be a bare identifier resolving to an
-         * own / borrow / ptr / none-opaque binding (not a call
-         * result, not a value-typed scalar). */
-        int borrow_source_idx = -1;
-        if (s->type == KFLT_OPAQUE
-            && s->lifetime_qualifier == KFL_LQ_BORROW
-            && s->expr
-            && ctx && ctx->bindings) {
-            if (s->expr->kind != KFLE_IDENT || !s->expr->u.ident) {
-                kflc_diag_errorf(diag, s->line,
-                    "let %s: borrow RHS must be a bare identifier "
-                    "(borrow needs a named source for scope tracking)",
-                    s->name);
-                return 1;
-            }
-            int found = -1;
-            for (int i = 0; i < ctx->n_bindings; i++) {
-                if (!ctx->bindings[i].name) continue;
-                if (strcmp(ctx->bindings[i].name, s->expr->u.ident) != 0) continue;
-                found = i;
-                break;
-            }
-            if (found < 0) {
-                kflc_diag_errorf(diag, s->line,
-                    "let %s: borrow source identifier `%s` is unknown",
-                    s->name, s->expr->u.ident);
-                return 1;
-            }
-            if (ctx->bindings[found].moved_from) {
-                kflc_diag_errorf(diag, s->line,
-                    "let %s: borrow source `%s` has already been moved",
-                    s->name, s->expr->u.ident);
-                return 1;
-            }
-            borrow_source_idx = found;
-            /* Record on the newly-declared binding (find by name). */
-            for (int i = 0; i < ctx->n_bindings; i++) {
-                if (!ctx->bindings[i].name) continue;
-                if (strcmp(ctx->bindings[i].name, s->name) != 0) continue;
-                ((KflcExprBinding *)ctx->bindings)[i].borrow_source_idx =
-                    borrow_source_idx;
-                break;
-            }
-        }
-        (void)borrow_source_idx;
-        /* "Explicit move required" enforcement. When the LHS binding
-         * is `own`-qualified and the RHS is a bare identifier
-         * resolving to an own-qualified source, require the user to
-         * wrap with `move(src)` so the ownership transfer is
-         * syntactically visible. Aliasing two `own` bindings to the
-         * same heap value would silently break the single-ownership
-         * invariant; explicit move() makes the intent (and the
-         * implicit invalidation of the source) clear.
-         *
-         * Pass-through cases (no error):
-         *  - LHS is none/borrow/ptr qualified, no ownership invariant
-         *  - RHS is not a bare identifier (call result, expression, NULL)
-         *  - RHS identifier resolves to a non-own binding (form-arg,
-         *    borrow, ptr, scalar copy) */
-        if (s->type == KFLT_OPAQUE
-            && s->lifetime_qualifier == KFL_LQ_OWN
-            && s->expr
-            && s->expr->kind == KFLE_IDENT
-            && s->expr->u.ident
-            && ctx && ctx->bindings) {
-            for (int i = 0; i < ctx->n_bindings; i++) {
-                if (!ctx->bindings[i].name) continue;
-                if (strcmp(ctx->bindings[i].name, s->expr->u.ident) != 0) continue;
-                if (ctx->bindings[i].lifetime_qualifier == KFL_LQ_OWN) {
-                    kflc_diag_errorf(diag, s->line,
-                        "let %s: own RHS is a bare `own` binding `%s`. "
-                        "Wrap with `move(%s)` to make the ownership "
-                        "transfer explicit.",
-                        s->name, s->expr->u.ident, s->expr->u.ident);
-                    return 1;
-                }
-                break;
-            }
-        }
-        emit_indent(out, indent);
-        if (s->kind == KFLN_STMT_CONST) fputs("const ", out);
-        /* Borrow-qualified opaques emit as `const T *` so downstream
-         * code can't mutate through the borrow handle (compile-error
-         * from the C compiler if attempted). own / ptr / none
-         * qualifiers fall through to the existing `T *` shape. */
-        if (s->type == KFLT_OPAQUE
-            && s->lifetime_qualifier == KFL_LQ_BORROW) {
-            fprintf(out, "const %s %s = ", cxx_ty, s->name);
-        } else {
-            fprintf(out, "%s %s = ", cxx_ty, s->name);
-        }
-        if (s->expr) {
-            if (emit_expr_stmt_value(out, s->expr, s->type, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(";\n", out);
-        return 0;
-    }
-    /* Unified lvalue write. All three assignment
-     * shapes (scalar bare IDENT, single-level vector index, full
-     * lvalue chain) route through kflc_emit_lvalue, which decides
-     * whether to emit a `kfl_arg_<name>` prefix, KFLC_VEC_W /
-     * KFLC_MAT_W, or a deeper chain. The legacy three-arm dispatch
-     * is preserved at the AST level (parser still classifies into
-     * STMT_ASSIGN / STMT_INDEX_ASSIGN / STMT_LVALUE_ASSIGN to keep
-     * round-trip serialisation honest), but each arm now synthesises
-     * a KflcExpr LHS on the stack and hands it to the walker so the
-     * write path has one source of truth. After the write we also
-     * fire `kfl_cell_notify(&_kfl_cell_<base>)` if the base resolves
-     * to an observed form-arg (E7) — covers handler-fn writes via
-     * `kfl_arg_X = ...` and future vector/matrix cell writes via
-     * `xs[i] = ...` per the §4.3 sketch in 12-binding-model.md. */
-    case KFLN_STMT_ASSIGN: {
-        emit_indent(out, indent);
-        KflcExpr lhs;
-        memset(&lhs, 0, sizeof lhs);
-        lhs.kind     = KFLE_IDENT;
-        lhs.line     = s->line;
-        lhs.u.ident  = s->name;
-        if (kflc_emit_lvalue(out, &lhs, ctx, diag, KFLC_LV_WRITE)) return 1;
-        fputs(" = ", out);
-        if (s->expr) {
-            if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(";\n", out);
-        emit_observed_cell_notify_(out, &lhs, ctx, indent);
-        return 0;
-    }
-    case KFLN_STMT_INDEX_ASSIGN: {
-        emit_indent(out, indent);
-        KflcExpr base, lhs;
-        memset(&base, 0, sizeof base);
-        memset(&lhs,  0, sizeof lhs);
-        base.kind        = KFLE_IDENT;
-        base.line        = s->line;
-        base.u.ident     = s->name;
-        lhs.kind         = KFLE_INDEX;
-        lhs.line         = s->line;
-        lhs.u.index.base = &base;
-        lhs.u.index.idx  = s->expr2;
-        if (kflc_emit_lvalue(out, &lhs, ctx, diag, KFLC_LV_WRITE)) return 1;
-        fputs(" = ", out);
-        if (s->expr) {
-            if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(";\n", out);
-        emit_observed_cell_notify_(out, &lhs, ctx, indent);
-        return 0;
-    }
-    case KFLN_STMT_LVALUE_ASSIGN:
-        emit_indent(out, indent);
-        if (!s->expr) {
-            kflc_diag_errorf(diag, s->line,
-                "lvalue-assign: missing LHS expression");
-            return 1;
-        }
-        if (kflc_emit_lvalue(out, s->expr, ctx, diag, KFLC_LV_WRITE)) return 1;
-        fputs(" = ", out);
-        if (s->expr2) {
-            if (kflc_emit_expr(out, s->expr2, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(";\n", out);
-        emit_observed_cell_notify_(out, s->expr, ctx, indent);
-        return 0;
-    case KFLN_STMT_SERIES: {
-        /* Multi-series: each statement slots its K26PSeries into
-         * the enclosing fn-data's _kfl_all[] array at index
-         * _kfl_count, then bumps the counter. The xs/ys caches at the
-         * same index hold deep copies of the fn-local vectors so the
-         * series stays valid across calls (callee may free its
-         * locals). Bounded by _KFL_MAX_SERIES (16). */
-        /* Heatmap: matrix-backed 2-D field. Deep-copies the matrix's
-         * row-major data into the persistent _kfl_hh cache (the fn-data
-         * local matrix is freed before k26plot_render runs), then wires
-         * heat_data / heat_rows / heat_cols + index-space extents
-         * [0,cols]×[0,rows]; NaN vmin/vmax auto-fits the color scale. */
-        if (s->position.u.i == 5) {
-            const KflcAttr *amat = NULL;
-            for (const KflcAttr *a = s->attrs; a; a = a->next)
-                if (strcmp(a->name, "mat") == 0) amat = a;
-            if (!amat || amat->value.kind != KFLV_IDENT) {
-                kflc_diag_errorf(diag, s->line,
-                    "series_heatmap: missing matrix identifier");
-                return 1;
-            }
-            const char *mat_name = amat->value.u.s;
-            emit_indent(out, indent);
-            fputs("if (_kfl_count < _KFL_MAX_SERIES) {\n", out);
-            emit_indent(out, indent + 4);
-            fprintf(out, "size_t _hn = %s.rows * %s.cols;\n", mat_name, mat_name);
-            emit_indent(out, indent + 4);
-            fputs("k26c_vec_free(&_kfl_hh[_kfl_count]);\n", out);
-            emit_indent(out, indent + 4);
-            fputs("k26c_vec_alloc(&_kfl_hh[_kfl_count], _hn);\n", out);
-            emit_indent(out, indent + 4);
-            fprintf(out, "for (size_t _i = 0; _i < _hn; _i++) "
-                         "_kfl_hh[_kfl_count].data[_i] = %s.data[_i];\n", mat_name);
-            emit_indent(out, indent + 4);
-            fputs("_kfl_all[_kfl_count].kind      = K26P_HEATMAP;\n", out);
-            emit_indent(out, indent + 4);
-            fputs("_kfl_all[_kfl_count].label     = ", out);
-            fputc('"', out);
-            for (const unsigned char *p = (const unsigned char *)(s->name ? s->name : "");
-                 p && *p; p++) {
-                if (*p == '"' || *p == '\\') fputc('\\', out);
-                fputc((char)*p, out);
-            }
-            fputs("\";\n", out);
-            emit_indent(out, indent + 4);
-            fputs("_kfl_all[_kfl_count].heat_data = _kfl_hh[_kfl_count].data;\n", out);
-            emit_indent(out, indent + 4);
-            fprintf(out, "_kfl_all[_kfl_count].heat_rows = %s.rows;\n", mat_name);
-            emit_indent(out, indent + 4);
-            fprintf(out, "_kfl_all[_kfl_count].heat_cols = %s.cols;\n", mat_name);
-            emit_indent(out, indent + 4);
-            fputs("_kfl_all[_kfl_count].heat_x0   = 0.0;\n", out);
-            emit_indent(out, indent + 4);
-            fprintf(out, "_kfl_all[_kfl_count].heat_x1   = (double)%s.cols;\n", mat_name);
-            emit_indent(out, indent + 4);
-            fputs("_kfl_all[_kfl_count].heat_y0   = 0.0;\n", out);
-            emit_indent(out, indent + 4);
-            fprintf(out, "_kfl_all[_kfl_count].heat_y1   = (double)%s.rows;\n", mat_name);
-            emit_indent(out, indent + 4);
-            fputs("_kfl_all[_kfl_count].heat_vmin = (double)NAN;\n", out);
-            emit_indent(out, indent + 4);
-            fputs("_kfl_all[_kfl_count].heat_vmax = (double)NAN;\n", out);
-            emit_indent(out, indent + 4);
-            fputs("_kfl_count++;\n", out);
-            emit_indent(out, indent);
-            fputs("}\n", out);
-            return 0;
-        }
-        const KflcAttr *axs = NULL, *ays = NULL;
-        for (const KflcAttr *a = s->attrs; a; a = a->next) {
-            if (strcmp(a->name, "xs") == 0) axs = a;
-            if (strcmp(a->name, "ys") == 0) ays = a;
-        }
-        if (!axs || !ays ||
-            axs->value.kind != KFLV_IDENT || ays->value.kind != KFLV_IDENT)
-        {
-            kflc_diag_errorf(diag, s->line, "series: missing xs/ys identifiers");
-            return 1;
-        }
-        const char *xs_name = axs->value.u.s;
-        const char *ys_name = ays->value.u.s;
-        const char *kind_name =
-            (s->position.u.i == 0) ? "K26P_LINE" :
-            (s->position.u.i == 1) ? "K26P_SCATTER" :
-            (s->position.u.i == 2) ? "K26P_ERRORBAR" :
-            (s->position.u.i == 3) ? "K26P_HISTOGRAM" :
-            (s->position.u.i == 4) ? "K26P_BOX" :
-                                     "K26P_HEATMAP";
-        emit_indent(out, indent);
-        fputs("if (_kfl_count < _KFL_MAX_SERIES) {\n", out);
-        emit_indent(out, indent + 4);
-        fputs("k26c_vec_free(&_kfl_xh[_kfl_count]);\n", out);
-        emit_indent(out, indent + 4);
-        fputs("k26c_vec_free(&_kfl_yh[_kfl_count]);\n", out);
-        emit_indent(out, indent + 4);
-        fprintf(out, "k26c_vec_copy(&_kfl_xh[_kfl_count], &%s);\n", xs_name);
-        emit_indent(out, indent + 4);
-        fprintf(out, "k26c_vec_copy(&_kfl_yh[_kfl_count], &%s);\n", ys_name);
-        emit_indent(out, indent + 4);
-        fprintf(out, "_kfl_all[_kfl_count].kind  = %s;\n", kind_name);
-        emit_indent(out, indent + 4);
-        fputs("_kfl_all[_kfl_count].label = ", out);
-        /* Emit label literal. */
-        fputc('"', out);
-        for (const unsigned char *p = (const unsigned char *)(s->name ? s->name : "");
-             p && *p; p++)
-        {
-            if (*p == '"' || *p == '\\') fputc('\\', out);
-            fputc((char)*p, out);
-        }
-        fputs("\";\n", out);
-        emit_indent(out, indent + 4);
-        fputs("_kfl_all[_kfl_count].xs        = _kfl_xh[_kfl_count].data;\n", out);
-        emit_indent(out, indent + 4);
-        fputs("_kfl_all[_kfl_count].ys        = _kfl_yh[_kfl_count].data;\n", out);
-        emit_indent(out, indent + 4);
-        fputs("_kfl_all[_kfl_count].n         = _kfl_xh[_kfl_count].n;\n", out);
-        emit_indent(out, indent + 4);
-        fputs("_kfl_all[_kfl_count].linewidth = 2.0;\n", out);
-        emit_indent(out, indent + 4);
-        fputs("_kfl_count++;\n", out);
-        emit_indent(out, indent);
-        fputs("}\n", out);
-        return 0;
-    }
-
-    case KFLN_STMT_RETURN: {
-        /* "No-cross-fn-borrow-escape" check.
-         *
-         * Returning a borrow whose source is a fn-local binding
-         * (not form-arg, not fn-arg) is a dangling-reference bug:
-         * the source goes out of scope at fn return, leaving the
-         * caller holding a borrow that points at freed memory.
-         *
-         * Form-args (is_form_arg=1) outlive the fn body, so borrows
-         * to them are safe to return. Bindings without a tracked
-         * borrow_source_idx are assumed safe (they aren't borrows). */
-        if (s->expr && s->expr->kind == KFLE_IDENT && s->expr->u.ident
-            && ctx && ctx->bindings) {
-            for (int i = 0; i < ctx->n_bindings; i++) {
-                if (!ctx->bindings[i].name) continue;
-                if (strcmp(ctx->bindings[i].name, s->expr->u.ident) != 0) continue;
-                if (ctx->bindings[i].lifetime_qualifier != KFL_LQ_BORROW) break;
-                int src_idx = ctx->bindings[i].borrow_source_idx;
-                if (src_idx < 0 || src_idx >= ctx->n_bindings) break;
-                if (!ctx->bindings[src_idx].is_form_arg) {
-                    kflc_diag_errorf(diag, s->line,
-                        "return: cannot return borrow `%s`; its source "
-                        "`%s` is a fn-local binding and would dangle "
-                        "(no-cross-fn-borrow-escape rule).",
-                        s->expr->u.ident,
-                        ctx->bindings[src_idx].name);
-                    return 1;
-                }
-                break;
-            }
-        }
-        /* Drain every live heap-typed let across all open scopes
-         * (including depth 0, the fn-body root). The drain happens
-         * BEFORE
-         * the actual `return`, but if the return value is itself a
-         * function of one of the about-to-be-freed lets (e.g.
-         * `return xs[0]` after `let xs: vector = ...`), evaluating
-         * the expression after the free would be use-after-free.
-         * Save the value into a temporary first, then free, then
-         * return the temp. The fn return type comes from
-         * kfl_emit_stmt_reset_scopes (g_b1_fn_return_type). */
-        int live = b1_total_live_();
-        if (s->expr && live > 0 && g_b1_fn_return_type != KFLT_VOID) {
-            const char *rt = kflc_type_cxx(g_b1_fn_return_type,
-                                            g_b1_fn_return_subtype);
-            emit_indent(out, indent);
-            fprintf(out, "%s _kfl_rv = ", rt ? rt : "double");
-            if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-            fputs(";\n", out);
-            b1_emit_frees_all_(out, indent);
-            emit_indent(out, indent);
-            fputs("return _kfl_rv;\n", out);
-        } else {
-            b1_emit_frees_all_(out, indent);
-            emit_indent(out, indent);
-            if (s->expr) {
-                fputs("return ", out);
-                if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-                fputs(";\n", out);
-            } else {
-                fputs("return;\n", out);
-            }
-        }
-        return 0;
-    }
-    case KFLN_STMT_EXPR:
-        emit_indent(out, indent);
-        fputs("(void)(", out);
-        if (s->expr) {
-            if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(");\n", out);
-        return 0;
-    case KFLN_STMT_PRINT: {
-        /* Each arg emits its own matched-argument fprintf/fputs (no
-         * unmatched-specifier musl UB), then a trailing newline. String
-         * args print verbatim; numeric args print as a double (%.6g). */
-        for (const KflcNode *arg = s->children; arg; arg = arg->next) {
-            emit_indent(out, indent);
-            if (arg->position.kind == KFLV_STR) {
-                fputs("fputs(", out);
-                emit_c_str_lit_(out, arg->position.u.s);
-                fputs(", stdout);\n", out);
-            } else if (arg->expr) {
-                fputs("fprintf(stdout, \"%.6g\", (double)(", out);
-                if (kflc_emit_expr(out, arg->expr, ctx, diag)) return 1;
-                fputs("));\n", out);
-            }
-        }
-        emit_indent(out, indent);
-        fputs("fputc('\\n', stdout);\n", out);
-        return 0;
-    }
-    case KFLN_STMT_IF: {
-        emit_indent(out, indent);
-        fputs("if (", out);
-        if (s->expr) {
-            if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(") {\n", out);
-        /* B1: push a scope for the then-branch so heap-typed lets
-         * declared inside are tracked + freed at branch exit. Same
-         * shape for the else-branch below. The drain happens just
-         * before the closing `}` so a fall-through cleans up; if the
-         * branch's last statement is a `return`, the RETURN case
-         * already drained, so skip — emitting both would leave
-         * unreachable `k26c_vec_free` calls in the generated C++. */
-        b1_scope_push_();
-        int last_was_return = 0;
-        for (const KflcNode *c = s->children; c; c = c->next) {
-            if (kfl_emit_stmt(out, c, ctx, diag, indent + 4)) return 1;
-            last_was_return = (c->kind == KFLN_STMT_RETURN);
-        }
-        if (!last_was_return) b1_emit_frees_current_(out, indent + 4);
-        b1_scope_pop_();
-        emit_indent(out, indent);
-        fputs("}", out);
-        if (s->else_children) {
-            fputs(" else {\n", out);
-            b1_scope_push_();
-            last_was_return = 0;
-            for (const KflcNode *c = s->else_children; c; c = c->next) {
-                if (kfl_emit_stmt(out, c, ctx, diag, indent + 4)) return 1;
-                last_was_return = (c->kind == KFLN_STMT_RETURN);
-            }
-            if (!last_was_return) b1_emit_frees_current_(out, indent + 4);
-            b1_scope_pop_();
-            emit_indent(out, indent);
-            fputs("}\n", out);
-        } else {
-            fputs("\n", out);
-        }
-        return 0;
-    }
-    case KFLN_STMT_WHILE: {
-        emit_indent(out, indent);
-        fputs("while (", out);
-        if (s->expr) {
-            if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(") {\n", out);
-        /* B1: push a scope; the drain fires before the closing `}`
-         * which is the loop's natural back-edge. Net effect: each
-         * iteration sees a freshly-zeroed K26CVector / K26CMatrix
-         * for any heap-typed `let` declared in the body, and the
-         * prior iteration's heap buffer is freed before the next
-         * one allocates. Skip the back-edge drain when the loop
-         * body's last statement is `return` — the RETURN case
-         * already drained, and the back-edge is unreachable. */
-        b1_scope_push_();
-        int last_was_return = 0;
-        for (const KflcNode *c = s->children; c; c = c->next) {
-            if (kfl_emit_stmt(out, c, ctx, diag, indent + 4)) return 1;
-            last_was_return = (c->kind == KFLN_STMT_RETURN);
-        }
-        if (!last_was_return) b1_emit_frees_current_(out, indent + 4);
-        b1_scope_pop_();
-        emit_indent(out, indent);
-        fputs("}\n", out);
-        return 0;
-    }
-    /* ---- Astro statements ---------------------------------------- *
-     * Emitted inside `fn world <name>` bodies. The handle `world`
-     * (typed K26AstroWorld * by the fn-world prologue) is in scope.
-     * Attribute values were captured at parse time as verbatim
-     * expression text (KFLV_IDENT); we splice them straight into
-     * the C++ output. Callers must `#include <k26astro_rt/world.h>`
-     * + `<k26astro_rt/observer.h>` + `<k26astro_body/body.h>` in
-     * the linking translation unit. */
-    case KFLN_STMT_ASTRO_BODY: {
-        /* assembly= binds a vehicle assembly to the body: the
-         * compiler reads the asset, derives the mass properties from
-         * the geometry, and writes them here as constants, so nothing
-         * opens an asset file while a simulation runs. The binding's
-         * rules live in one place (assembly.c), because the
-         * environment emitter has its own body emission and the two
-         * must not be able to disagree. */
-        KflcAssembly *asmb = NULL;
-        KflcArena    *asm_arena = kflc_arena_create();
-        if (!asm_arena) return 1;
-        if (kflc_assembly_for_body(s, diag->path, asm_arena, diag, &asmb)) {
-            kflc_arena_release(asm_arena);
-            return 1;
-        }
-
-        emit_indent(out, indent);
-        fputs("{\n", out);
-        emit_indent(out, indent + 4);
-        fputs("K26AstroBody _kfl_b; k26astro_body_init(&_kfl_b);\n", out);
-        emit_indent(out, indent + 4);
-        fprintf(out,
-            "snprintf(_kfl_b.name, sizeof _kfl_b.name, \"%%s\", \"%s\");\n",
-            s->name ? s->name : "_anon");
-        if (asmb) {
-            char hex[2 * KFLC_ASM_DIGEST + 1];
-            kflc_assembly_digest_hex(asmb->digest, hex);
-            emit_indent(out, indent + 4);
-            fprintf(out, "/* assembly `%s` from %s\n", asmb->name,
-                    asmb->path);
-            emit_indent(out, indent + 4);
-            fprintf(out, " * digest %s */\n", hex);
-            emit_indent(out, indent + 4);
-            fprintf(out, "k26astro_body_set_mass(&_kfl_b, %.17g);\n",
-                    asmb->mass);
-            /* The centre of mass and the inertia tensor are derived
-             * here and emitted as constants beside the body. The
-             * attitude path is what consumes them; they are written
-             * now so the numbers in an artifact are the asset's. */
-            emit_indent(out, indent + 4);
-            fprintf(out, "static const double _kfl_asm_com[3] = "
-                    "{ %.17g, %.17g, %.17g };\n",
-                    asmb->com[0], asmb->com[1], asmb->com[2]);
-            emit_indent(out, indent + 4);
-            fprintf(out, "static const double _kfl_asm_inertia[6] = "
-                    "{ %.17g, %.17g, %.17g, %.17g, %.17g, %.17g };\n",
-                    asmb->inertia[0], asmb->inertia[1], asmb->inertia[2],
-                    asmb->inertia[3], asmb->inertia[4], asmb->inertia[5]);
-            emit_indent(out, indent + 4);
-            fputs("(void)_kfl_asm_com; (void)_kfl_asm_inertia;\n", out);
-        }
-        for (const KflcAttr *a = s->attrs; a; a = a->next) {
-            if (!a->name) continue;
-            if (strcmp(a->name, "assembly") == 0) continue;
-            /* A plan is read when the program is compiled, like an
-             * assembly, and what it contributes lands as constants
-             * rather than as a field on the body. */
-            if (strcmp(a->name, "reference") == 0) continue;
-            const char *val = (a->value.kind == KFLV_IDENT && a->value.u.s)
-                              ? a->value.u.s : "0";
-            /* parent= is a name string → resolve at runtime via find_body
-             * or, if the parent is a parse-time-known body, via the
-             * cached idx. */
-            if (strcmp(a->name, "parent") == 0) {
-                emit_indent(out, indent + 4);
-                if (kflc_body_idx_known(ctx, val)) {
-                    fprintf(out, "_kfl_b.parent_body_idx = "
-                            "_kfl_body_%s_idx;\n", val);
-                } else {
-                    fprintf(out, "_kfl_b.parent_body_idx = "
-                            "k26astro_world_find_body(world, \"%s\");\n",
-                            val);
-                }
-            } else if (kflc_body_state_key_index(a->name) >= 0) {
-                /* The scalar state keys map onto compound fields, so
-                 * they take the shared write rather than the generic
-                 * passthrough below; every emitter that touches body
-                 * state uses that one emission. */
-                kflc_emit_body_state_write(out, indent + 4, "_kfl_b.",
-                                           a->name, val);
-            } else {
-                emit_indent(out, indent + 4);
-                fprintf(out, "_kfl_b.%s = (%s);\n", a->name, val);
-            }
-        }
-        emit_indent(out, indent + 4);
-        /* Parse-time-known body name → capture idx in the
-         * fn-prologue-declared `_kfl_body_<NAME>_idx` variable so
-         * subsequent `propagate`/`observe` calls can deref via
-         * `k26astro_world_body_at`. */
-        if (s->name && kflc_body_idx_known(ctx, s->name)) {
-            fprintf(out, "_kfl_body_%s_idx = "
-                    "k26astro_world_add_body(world, _kfl_b);\n",
-                    s->name);
-        } else {
-            fputs("(void)k26astro_world_add_body(world, _kfl_b);\n", out);
-        }
-        emit_indent(out, indent);
-        fputs("}\n", out);
-        kflc_arena_release(asm_arena);
-        return 0;
-    }
-
-    case KFLN_STMT_STEP: {
-        emit_indent(out, indent);
-        fputs("(void)k26astro_world_step(world, ", out);
-        if (s->expr) {
-            if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(");\n", out);
-        return 0;
-    }
-
-    case KFLN_STMT_PROPAGATE: {
-        /* Per-body Kepler advance via the dedicated runtime API
-         * k26astro_world_body_step (libk26astro_rt). The body's SOI
-         * parent (body->parent_body_idx) sets the central body for
-         * the Kepler step. Other bodies in the world are NOT touched
-         * and the world clock is NOT advanced; that is `step`
-         * semantics, not `propagate`.
-         *
-         * Use the parse-time-known body idx when the name is
-         * registered; fall back to runtime find_body otherwise. */
-        emit_indent(out, indent);
-        fputs("{\n", out);
-        emit_indent(out, indent + 4);
-        if (s->name && kflc_body_idx_known(ctx, s->name)) {
-            fprintf(out, "int _kfl_idx = _kfl_body_%s_idx;\n", s->name);
-        } else {
-            fprintf(out, "int _kfl_idx = "
-                    "k26astro_world_find_body(world, \"%s\");\n",
-                    s->name ? s->name : "_anon");
-        }
-        emit_indent(out, indent + 4);
-        fputs("(void)k26astro_world_body_step(world, _kfl_idx, ", out);
-        if (s->expr) {
-            if (kflc_emit_expr(out, s->expr, ctx, diag)) return 1;
-        } else {
-            fputs("0", out);
-        }
-        fputs(");\n", out);
-        emit_indent(out, indent);
-        fputs("}\n", out);
-        return 0;
-    }
-
-    case KFLN_STMT_FOR_EACH: {
-        /* The iterator binds as a `body` opaque (K26AstroBody *) for
-         * the duration of one iteration. add_body() inside the loop
-         * body is not realloc-safe; the loop pointer would become
-         * stale. The surface treats the iterator as read-only. */
-        const char *iter = s->name ? s->name : "_kfl_b";
-        emit_indent(out, indent);
-        fputs("{\n", out);
-        emit_indent(out, indent + 4);
-        fputs("int _kfl_n = k26astro_world_body_count(world);\n", out);
-        emit_indent(out, indent + 4);
-        fputs("for (int _kfl_i = 0; _kfl_i < _kfl_n; _kfl_i++) {\n", out);
-        emit_indent(out, indent + 8);
-        fprintf(out, "K26AstroBody *%s = "
-                     "k26astro_world_body_at(world, _kfl_i);\n", iter);
-        emit_indent(out, indent + 8);
-        fprintf(out, "(void)%s;\n", iter);
-        for (const KflcNode *c = s->children; c; c = c->next) {
-            if (kfl_emit_stmt(out, c, ctx, diag, indent + 8)) return 1;
-        }
-        emit_indent(out, indent + 4);
-        fputs("}\n", out);
-        emit_indent(out, indent);
-        fputs("}\n", out);
-        return 0;
-    }
-
-    case KFLN_STMT_OBSERVE: {
-        /* Resolve target + observer by name, optionally set the
-         * world's observer mode from the named-arg, then call
-         * k26astro_world_observe. The position + apparent direction
-         * are currently discarded; consumers can capture them once a
-         * KFL-side observation type is added. */
-        const char *observer = "_observer";
-        const char *mode_kw  = NULL;
-        for (const KflcAttr *a = s->attrs; a; a = a->next) {
-            if (!a->name) continue;
-            if (strcmp(a->name, "observer") == 0 && a->value.kind == KFLV_IDENT)
-                observer = a->value.u.s ? a->value.u.s : observer;
-            else if (strcmp(a->name, "mode") == 0 && a->value.kind == KFLV_IDENT)
-                mode_kw = a->value.u.s;
-        }
-        emit_indent(out, indent);
-        fputs("{\n", out);
-        if (mode_kw) {
-            const char *enum_name = "K26ASTRO_OBS_ASTROMETRIC";
-            if      (strcmp(mode_kw, "geometric")   == 0) enum_name = "K26ASTRO_OBS_GEOMETRIC";
-            else if (strcmp(mode_kw, "astrometric") == 0) enum_name = "K26ASTRO_OBS_ASTROMETRIC";
-            else if (strcmp(mode_kw, "apparent")    == 0) enum_name = "K26ASTRO_OBS_APPARENT";
-            else if (strcmp(mode_kw, "topocentric") == 0) enum_name = "K26ASTRO_OBS_TOPOCENTRIC";
-            emit_indent(out, indent + 4);
-            fprintf(out, "(void)k26astro_world_set_observer_mode(world, %s);\n",
-                    enum_name);
-        }
-        /* Route through parse-time-known idx tables when available. */
-        emit_indent(out, indent + 4);
-        if (s->name && kflc_body_idx_known(ctx, s->name)) {
-            fprintf(out, "int _kfl_t = _kfl_body_%s_idx;\n", s->name);
-        } else {
-            fprintf(out, "int _kfl_t = "
-                    "k26astro_world_find_body(world, \"%s\");\n",
-                    s->name ? s->name : "_target");
-        }
-        emit_indent(out, indent + 4);
-        if (kflc_body_idx_known(ctx, observer)) {
-            fprintf(out, "int _kfl_o = _kfl_body_%s_idx;\n", observer);
-        } else {
-            fprintf(out, "int _kfl_o = "
-                    "k26astro_world_find_body(world, \"%s\");\n",
-                    observer);
-        }
-        emit_indent(out, indent + 4);
-        fputs("K26AstroPos _kfl_p;\n", out);
-        emit_indent(out, indent + 4);
-        fputs("K26V3 _kfl_d;\n", out);
-        emit_indent(out, indent + 4);
-        fputs("if (_kfl_t >= 0 && _kfl_o >= 0) "
-              "(void)k26astro_world_observe(world, _kfl_t, _kfl_o, "
-              "&_kfl_p, &_kfl_d);\n", out);
-        if (ctx && ctx->headless) {
-            /* Headless artifact output: print the observation (range +
-             * direction) to stdout instead of feeding a render. The
-             * emit-time format carries matched %s args (target,
-             * observer); the %% escapes become the runtime %.6e
-             * specifiers, so this emit-time fprintf is not the
-             * unmatched-specifier musl UB case. */
-            emit_indent(out, indent + 4);
-            fprintf(out,
-                "if (_kfl_t >= 0 && _kfl_o >= 0) fprintf(stdout, "
-                "\"observe %s from %s: range=%%.6e m  "
-                "dir=(%%.6e, %%.6e, %%.6e)\\n\", "
-                "std::sqrt(_kfl_d.x*_kfl_d.x + _kfl_d.y*_kfl_d.y "
-                "+ _kfl_d.z*_kfl_d.z), "
-                "_kfl_d.x, _kfl_d.y, _kfl_d.z);\n",
-                s->name ? s->name : "_target", observer);
-            emit_indent(out, indent + 4);
-            fputs("(void)_kfl_p;\n", out);
-        } else {
-            emit_indent(out, indent + 4);
-            fputs("(void)_kfl_p; (void)_kfl_d;\n", out);
-        }
-        emit_indent(out, indent);
-        fputs("}\n", out);
-        return 0;
-    }
-
-    case KFLN_ALLOCATOR_BIND: {
-        /* Bind the fn body to the form-level arena named `<s->name>`.
-         * The arena's static handle (`_kfl_arena_<name>`) was declared
-         * at form scope by the form_has_arena emit sweep; here we
-         * install it as the fn-local active arena alias.
-         *
-         * reset_mode handling: look up the matching arena decl in the
-         * form (via ctx->form) and check its `reset_mode` attr:
-         *   - fn / fn_exit / unspecified (default): emit with
-         *     __attribute__((cleanup(_kfl_arena_reset_cleanup_))) so
-         *     the arena auto-resets on every fn return path.
-         *   - manual: skip the cleanup attribute; user calls
-         *     k26kfl_arena_reset(_kfl_active_arena) explicitly when
-         *     they want it.
-         *   - form / frame / tick: not yet implemented; treated as
-         *     manual with a diagnostic note. */
-        const char *reset_mode = "fn_exit";   /* default */
-        if (ctx && ctx->form && s->name) {
-            for (const KflcNode *c = ctx->form->children; c; c = c->next) {
-                if (c->kind != KFLN_ARENA || !c->name) continue;
-                if (strcmp(c->name, s->name) != 0) continue;
-                for (const KflcAttr *a = c->attrs; a; a = a->next) {
-                    if (strcmp(a->name, "reset_mode") != 0) continue;
-                    if (a->value.kind == KFLV_IDENT && a->value.u.s) {
-                        reset_mode = a->value.u.s;
-                    }
-                    break;
-                }
-                break;
-            }
-        }
-        const int use_cleanup =
-            (strcmp(reset_mode, "fn") == 0
-             || strcmp(reset_mode, "fn_exit") == 0);
-        emit_indent(out, indent);
-        if (use_cleanup) {
-            fprintf(out,
-                "K26KflArena *_kfl_active_arena "
-                "__attribute__((cleanup(_kfl_arena_reset_cleanup_))) "
-                "= _kfl_arena_%s;\n",
-                s->name ? s->name : "anon");
-        } else {
-            fprintf(out,
-                "K26KflArena *_kfl_active_arena = _kfl_arena_%s;\n",
-                s->name ? s->name : "anon");
-            if (strcmp(reset_mode, "manual") != 0) {
-                emit_indent(out, indent);
-                fprintf(out,
-                    "/* unhandled reset_mode `%s`; defaulting to manual */\n",
-                    reset_mode);
-            }
-        }
-        emit_indent(out, indent);
-        fputs("(void)_kfl_active_arena;\n", out);
-        return 0;
-    }
-
-    case KFLN_STMT_EPISODE:
-    case KFLN_STMT_EPISODE_RESET:
-    case KFLN_STMT_ACTION:
-    case KFLN_STMT_ON_STEP:
-    case KFLN_STMT_OBJECTIVE:
-    case KFLN_STMT_AGENT:
-        /* The reinforcement learning constructs are emitted by the
-         * environment emitter (emit_rl.c), which a form using them is
-         * routed to before this dispatch can see them. Reaching this
-         * arm means the routing failed. */
-        kflc_diag_errorf(diag, s->line,
-            "internal error: reinforcement learning construct outside "
-            "the environment emitter");
-        return 1;
-
-    default:
-        kflc_diag_errorf(diag, s->line,
-                         "emit_stmt: unexpected node kind %d", s->kind);
-        return 1;
+        KflcNode *s = kfl_stmt_parse_stmt(L, cur, arena, diag, had_error);
+        if (s) kfl_stmt_append_child(parent, s);
     }
 }

@@ -36,7 +36,7 @@ LIB      = libkflc.a
 # assembly reader normalises the directions an asset declares, so the
 # archive carries a square root whoever links it.
 LIB_OBJS = src/util.o src/lexer.o src/parser.o src/dump.o src/serialize.o \
-           src/expr.o src/stmt.o src/check.o src/opaque.o \
+           src/expr.o src/stmt.o src/stmt_rl.o src/stmt_emit.o src/check.o src/opaque.o \
            src/assembly.o src/capture.o src/body_state.o \
            src/builtin_register_astro.o \
            src/builtin_loader.o src/runtime.o
@@ -49,6 +49,7 @@ EMIT_RL_OBJS = src/emit_rl.o src/emit_rl_collect.o \
 DRV_OBJS = src/emit.o $(EMIT_RL_OBJS) src/main.o
 
 $(EMIT_RL_OBJS): src/emit_rl_internal.h
+src/stmt.o src/stmt_rl.o src/stmt_emit.o: src/stmt_internal.h
 
 # The emitted core's template, carried into a header by the tree's
 # own tool so the emitter ships no second copy of the text.
