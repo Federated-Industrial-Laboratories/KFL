@@ -364,6 +364,7 @@ int rl_emit_observe(FILE *out, const RlModel *m,
           "double *out_v,\n"
           "                           const KflrlContact *ct,\n"
           "                           const KflrlJoin *jn,\n"
+          "                           const KflrlPortLatch *pl,\n"
           "                           void *const *pay,\n"
           "                           const double *payp,\n"
           "                           K26AstroVehicle *const *veh,\n"
@@ -379,7 +380,7 @@ int rl_emit_observe(FILE *out, const RlModel *m,
            * many have been taken. */
           "                           double t_ep)\n"
           "{\n"
-          "    (void)world; (void)out_v; (void)ct; (void)jn;\n"
+          "    (void)world; (void)out_v; (void)ct; (void)jn; (void)pl;\n"
           "    (void)pay; (void)payp; (void)veh; (void)t_day; "
           "(void)t_info;\n"
           "    (void)eng; (void)prop; (void)coms; (void)t_ep;\n", out);
@@ -395,19 +396,26 @@ int rl_emit_observe(FILE *out, const RlModel *m,
         if (rl_observe_form(s) == RL_OBS_PORT) {
             /* The form names a port on a body, and the state it
              * publishes is that port's with respect to the one it
-             * faces. Which port it faces is not written in the
-             * statement, so it is resolved here: the one port
-             * declared on any other body. A world with none has
-             * nothing to measure against, and a world with several
-             * leaves the pairing to an accident of declaration
-             * order, so both are refused where they are written
-             * rather than publishing nine channels about an
-             * arbitrary choice. */
+             * faces.
+             *
+             * Which port it faces is written in the statement when the
+             * statement says so, with `against <port> of <body>`, and
+             * resolved here when it does not: the one port declared on
+             * any other body. A world with none has nothing to measure
+             * against; a world with several leaves the pairing to an
+             * accident of declaration order, so it is refused naming
+             * the candidates rather than publishing channels about an
+             * arbitrary choice. The rule is per statement and not per
+             * world, so several enveloped bodies with a clause each
+             * are ordinary. */
             const char *pname = NULL;
+            const char *agst = NULL, *agst_body = NULL;
             for (const KflcAttr *a = s->attrs; a; a = a->next) {
-                if (a->name && strcmp(a->name, "port") == 0 &&
-                    a->value.kind == KFLV_IDENT) {
-                    pname = a->value.u.s;
+                if (!a->name || a->value.kind != KFLV_IDENT) continue;
+                if (strcmp(a->name, "port") == 0)  pname = a->value.u.s;
+                if (strcmp(a->name, "against") == 0) agst = a->value.u.s;
+                if (strcmp(a->name, "against_body") == 0) {
+                    agst_body = a->value.u.s;
                 }
             }
             int tgt = rl_body_index_of(m, s->name);
@@ -452,21 +460,92 @@ int rl_emit_observe(FILE *out, const RlModel *m,
                     seen ? have : "none");
                 return 1;
             }
-            int passive = -1, others = 0;
-            for (int q = 0; q < m->n_ports; q++) {
-                if (m->ports[q].body == tgt) continue;
-                passive = q;
-                others++;
+            int passive = -1;
+            if (agst) {
+                int abody = rl_body_index_of(m, agst_body);
+                if (abody < 0) {
+                    kflc_diag_errorf(diag, s->line,
+                        "observe port %s of %s against %s of `%s`: no "
+                        "astro_body of that name is declared in this "
+                        "world", pname, s->name, agst, agst_body);
+                    return 1;
+                }
+                if (abody == tgt) {
+                    kflc_diag_errorf(diag, s->line,
+                        "observe port %s of %s against %s of %s: a "
+                        "pairing is between two bodies, and both of "
+                        "these ports are on `%s`",
+                        pname, s->name, agst, agst_body, s->name);
+                    return 1;
+                }
+                for (int q = 0; q < m->n_ports; q++) {
+                    if (m->ports[q].body == abody &&
+                        strcmp(m->ports[q].name, agst) == 0) {
+                        passive = q;
+                    }
+                }
+                if (passive < 0) {
+                    char have[256];
+                    size_t used = 0;
+                    int    seen = 0;
+                    have[0] = '\0';
+                    for (int q = 0; q < m->n_ports; q++) {
+                        if (m->ports[q].body != abody) continue;
+                        int wrote = snprintf(have + used, sizeof have - used,
+                                             "%s`%s`", seen++ ? ", " : "",
+                                             m->ports[q].name);
+                        if (wrote < 0 ||
+                            (size_t)wrote >= sizeof have - used) break;
+                        used += (size_t)wrote;
+                    }
+                    kflc_diag_errorf(diag, s->line,
+                        "observe port %s of %s against %s of %s: `%s` "
+                        "declares no port of that name carrying a capture "
+                        "envelope; it carries %s",
+                        pname, s->name, agst, agst_body, agst_body,
+                        seen ? have : "none");
+                    return 1;
+                }
+            } else {
+                char cand[512];
+                size_t used = 0;
+                int    others = 0;
+                cand[0] = '\0';
+                for (int q = 0; q < m->n_ports; q++) {
+                    if (m->ports[q].body == tgt) continue;
+                    passive = q;
+                    int wrote = snprintf(cand + used, sizeof cand - used,
+                                         "%s`%s of %s`", others++ ? ", " : "",
+                                         m->ports[q].name,
+                                         m->bodies[m->ports[q].body].body->name);
+                    if (wrote < 0 || (size_t)wrote >= sizeof cand - used) break;
+                    used += (size_t)wrote;
+                }
+                if (others != 1) {
+                    kflc_diag_errorf(diag, s->line,
+                        "observe port %s of %s: the state this form "
+                        "publishes is against the port it faces, and %d "
+                        "ports carrying a capture envelope are declared on "
+                        "other bodies (%s); name one with `against <port> "
+                        "of <body>`", pname, s->name, others,
+                        others ? cand : "none");
+                    return 1;
+                }
             }
-            if (others != 1) {
+            if (strcmp(m->ports[active].env_name,
+                       m->ports[passive].env_name) != 0) {
                 kflc_diag_errorf(diag, s->line,
-                    "observe port %s of %s: the state this form publishes "
-                    "is against the port it faces, and %d ports carrying a "
-                    "capture envelope are declared on other bodies; exactly "
-                    "one is needed", pname, s->name, others);
+                    "observe port %s of %s: `%s of %s` names capture "
+                    "envelope `%s` and `%s of %s` names `%s`; the two "
+                    "ports of a pairing are one interface and are judged "
+                    "against one envelope",
+                    pname, s->name, pname, s->name,
+                    m->ports[active].env_name,
+                    m->ports[passive].name,
+                    m->bodies[m->ports[passive].body].body->name,
+                    m->ports[passive].env_name);
                 return 1;
             }
-            int aslot = m->ports[active].veh;
             int pbody = m->ports[passive].body;
             fprintf(out,
                 "    {\n"
@@ -477,20 +556,23 @@ int rl_emit_observe(FILE *out, const RlModel *m,
                 "        K26AstroCollPortState _kfl_ps;\n"
                 "        double _kfl_cap = 0.0;\n"
                 "        memset(&_kfl_ps, 0, sizeof _kfl_ps);\n"
-                /* A transition that ended at this interface publishes
+                /* A transition that ended at THIS pairing publishes
                  * the state the capture test was given; any other
-                 * step publishes the state as it stands, which is
-                 * what an approach is flown on. */
-                "        if (ct && ct[%d].port_hit != 0.0) {\n"
-                "            _kfl_cap           = ct[%d].captured;\n"
-                "            _kfl_ps.axial      = ct[%d].axial;\n"
-                "            _kfl_ps.lateral    = ct[%d].lateral;\n"
-                "            _kfl_ps.pitchyaw   = ct[%d].pitchyaw;\n"
-                "            _kfl_ps.roll       = ct[%d].roll;\n"
-                "            _kfl_ps.v_axial    = ct[%d].v_axial;\n"
-                "            _kfl_ps.v_lateral  = ct[%d].v_lateral;\n"
-                "            _kfl_ps.v_pitchyaw = ct[%d].v_pitchyaw;\n"
-                "            _kfl_ps.v_roll     = ct[%d].v_roll;\n"
+                 * step, and any contact this port made with some
+                 * other port, publishes the state as it stands, which
+                 * is what an approach is flown on. */
+                "        if (pl && pl[%d].hit != 0.0 && "
+                "pl[%d].partner == %d) {\n"
+                "            _kfl_cap             = pl[%d].captured;\n"
+                "            _kfl_ps.axial        = pl[%d].axial;\n"
+                "            _kfl_ps.lateral      = pl[%d].lateral;\n"
+                "            _kfl_ps.pitchyaw     = pl[%d].pitchyaw;\n"
+                "            _kfl_ps.roll         = pl[%d].roll;\n"
+                "            _kfl_ps.v_axial      = pl[%d].v_axial;\n"
+                "            _kfl_ps.v_lateral    = pl[%d].v_lateral;\n"
+                "            _kfl_ps.v_pitchyaw   = pl[%d].v_pitchyaw;\n"
+                "            _kfl_ps.v_roll       = pl[%d].v_roll;\n"
+                "            _kfl_ps.v_lateral_cg = pl[%d].v_cg;\n"
                 "        } else if (_kfl_pa && _kfl_pp) {\n"
                 "            K26AstroCollBody _kfl_ba, _kfl_bp;\n"
                 /* The centres of mass are read from the state
@@ -517,11 +599,11 @@ int rl_emit_observe(FILE *out, const RlModel *m,
                 "        out_v[%d] = _kfl_ps.v_axial;\n"
                 "        out_v[%d] = _kfl_ps.v_lateral;\n"
                 "        out_v[%d] = _kfl_ps.v_pitchyaw;\n"
-                "        out_v[%d] = _kfl_ps.v_roll;\n"
-                "    }\n",
+                "        out_v[%d] = _kfl_ps.v_roll;\n",
                 tgt, pbody,
-                aslot, aslot, aslot, aslot, aslot, aslot, aslot, aslot,
-                aslot, aslot,
+                active, active, passive,
+                active, active, active, active, active, active, active,
+                active, active, active,
                 3 * m->ports[active].veh, 3 * m->ports[active].veh + 1,
                 3 * m->ports[active].veh + 2,
                 3 * m->ports[passive].veh, 3 * m->ports[passive].veh + 1,
@@ -529,6 +611,19 @@ int rl_emit_observe(FILE *out, const RlModel *m,
                 active, passive,
                 off, off + 1, off + 2, off + 3, off + 4, off + 5,
                 off + 6, off + 7, off + 8);
+            /* The two the `full` mark adds. The combined rate is the
+             * one condition an unmarked form leaves invisible: it
+             * decides captures and a craft inside every published
+             * limit can be refused by it with no channel that says
+             * so. The join state is the standing fact the capture
+             * pulse deliberately is not. */
+            if (rl_observe_is_full(s)) {
+                fprintf(out,
+                    "        out_v[%d] = _kfl_ps.v_lateral_cg;\n"
+                    "        out_v[%d] = kflrl_ports_joined_(jn, %d, %d);\n",
+                    off + 9, off + 10, active, passive);
+            }
+            fputs("    }\n", out);
             continue;
         }
         if (rl_observe_form(s) == RL_OBS_CON) {

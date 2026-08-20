@@ -33,7 +33,11 @@ struct K26RlEnv {
      * function reads it either way and one signature is cheaper than
      * a conditional one. */
     KflrlContact *contact;
-    KflrlJoin *join;             /* one per environment */
+    /* The join table, KFLRL_N_JOINS entries per environment, and one
+     * port latch per docking port per environment. Both are episode
+     * state and both are cleared by the reset. */
+    KflrlJoin *join;
+    KflrlPortLatch *plat;
     struct KflrlThrustCtx *thrust_ctx;
     /* Propellant remaining and the centre of mass it puts the craft
      * at, one of each per vehicle per environment. Both are episode
@@ -227,16 +231,22 @@ static void kflrl_sense_apply_(K26RlEnv *h, uint32_t e, uint32_t ep,
 }
 
 #if KFLRL_N_PORTS > 1
-/* Form the joint body from a captured pair, at the impact
- * configuration the sweep computed.
+/* Form the composite body from a joined chain, at the configuration
+ * the sweep computed.
  *
- * Mass is summed. Linear momentum is conserved, so the pair leaves
- * at the velocity of their common centre of mass. Angular momentum
- * about that centre is conserved too, which is what decides the
- * joint rate: each body brings its own spin and the moment of its
- * own motion about the joint centre, and the joint inertia turns the
- * total into a rate. The inertia is the sum of the two tensors, each
- * carried to the joint centre by the parallel-axis theorem.
+ * Mass is summed over the chain's members. Linear momentum is
+ * conserved, so the chain leaves at the velocity of their common
+ * centre of mass. Angular momentum about that centre is conserved
+ * too, which is what decides the composite rate: each member brings
+ * its own spin and the moment of its own motion about that centre,
+ * and the composite inertia turns the total into a rate. That inertia
+ * is the sum of the members' tensors, each carried to the composite
+ * centre by the parallel-axis theorem.
+ *
+ * The rule is the same at every chain length, which is why a laden
+ * re-dock needs nothing of its own: a craft carrying cargo is one
+ * composite by this arithmetic, and joining it to a third body sums
+ * over three members instead of two.
  *
  * Nothing here allocates: the tensors are set in place through the
  * vehicle's own setters, which recompute the inverse where they
@@ -274,6 +284,65 @@ static K26M3 kflrl_join_world_inertia_(const K26AstroVehicle *v,
     return out;
 }
 
+/* Which body each vehicle follows, and through which join entry.
+ * A body follows at most one leader, so the joins are a forest and
+ * this pair of tables is the whole of its shape. */
+static void kflrl_join_leaders_(const K26RlEnv *h, uint32_t e,
+                                int *leader, int *jidx)
+{
+    for (int v = 0; v < KFLRL_N_VEHICLES; v++) { leader[v] = -1; jidx[v] = -1; }
+    const KflrlJoin *jt = &h->join[(size_t)e * KFLRL_N_JOINS];
+    for (int k = 0; k < KFLRL_N_JOINS; k++) {
+        if (!jt[k].active) continue;
+        leader[jt[k].follower] = jt[k].leader;
+        jidx[jt[k].follower]   = k;
+    }
+}
+
+/* The top of a body's chain. The walk is bounded by the vehicle
+ * count, which the forest shape already guarantees; the bound states
+ * the guarantee rather than trusting it. */
+static int kflrl_join_root_(const int *leader, int v)
+{
+    for (int guard = 0; guard < KFLRL_N_VEHICLES; guard++) {
+        if (leader[v] < 0) break;
+        v = leader[v];
+    }
+    return v;
+}
+
+/* The members of the chain rooted at `root`, written into `out` and
+ * counted. The root comes first and every body appears after the one
+ * it follows, so a caller placing members in this order always has
+ * the leader already placed. Within one depth the order is ascending
+ * vehicle slot, which is declaration order, so the list is a function
+ * of the chain and not of the order the joins happened to form in. */
+static int kflrl_join_members_(const int *leader, int root, int *out)
+{
+    int n = 0;
+    out[n++] = root;
+    for (int k = 0; k < n; k++) {
+        for (int v = 0; v < KFLRL_N_VEHICLES; v++) {
+            if (leader[v] == out[k] && n < KFLRL_N_VEHICLES) out[n++] = v;
+        }
+    }
+    return n;
+}
+
+/* Whether a port is in an active join, which is what makes it
+ * occupied: a mated interface has nothing left to capture with. */
+static int kflrl_port_occupied_(const K26RlEnv *h, uint32_t e, int port)
+{
+    const KflrlJoin *jt = &h->join[(size_t)e * KFLRL_N_JOINS];
+    for (int k = 0; k < KFLRL_N_JOINS; k++) {
+        if (!jt[k].active) continue;
+        if (jt[k].port_leader == port || jt[k].port_follower == port) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static K26V3 kflrl_m3_mul_(K26M3 m, K26V3 v)
 {
     return k26m3d_v3(m.m[0][0]*v.x + m.m[0][1]*v.y + m.m[0][2]*v.z,
@@ -281,152 +350,296 @@ static K26V3 kflrl_m3_mul_(K26M3 m, K26V3 v)
                      m.m[2][0]*v.x + m.m[2][1]*v.y + m.m[2][2]*v.z);
 }
 
-/* Make the joined pair one body again, at the end of a sub-advance
- * in which the two were integrated separately.
+/* Make a joined chain one body again, at the end of a sub-advance in
+ * which its members were integrated separately.
  *
- * Configuration first: the follower is placed from the carrier at
- * the offset and relative attitude the capture froze, which is what
- * makes the pair rigid rather than merely close.
+ * Configuration first: each follower is placed from its leader at the
+ * offset and relative attitude the capture froze, which is what makes
+ * the chain rigid rather than merely close. The members are walked in
+ * an order that places a leader before anything that follows it, so
+ * one pass reaches the whole of a chain however deep it runs.
  *
- * Motion second, and this is why the pair is projected rather than
- * slaved: both bodies keep their own mass and their own forces, so
- * a thruster on either of them accelerates the pair. Their momenta
+ * Motion second, and this is why the chain is projected rather than
+ * slaved: every member keeps its own mass and its own forces, so a
+ * thruster anywhere on it accelerates the whole. The members' momenta
  * are summed and the sum is turned back into one rigid motion. Mass
- * is summed; linear momentum gives the joint velocity; angular
- * momentum about the joint centre of mass, each body contributing
- * its own spin and the moment of its own motion, gives the joint
- * rate against the joint inertia, which is the two tensors summed
- * about that centre by the parallel-axis theorem. Both quantities
- * are conserved exactly across the projection; the relative kinetic
- * energy is not, which is what a capture latch does. */
+ * is summed; linear momentum gives the composite velocity; angular
+ * momentum about the composite centre of mass, each member
+ * contributing its own spin and the moment of its own motion, gives
+ * the composite rate against the composite inertia, which is the
+ * members' tensors summed about that centre by the parallel-axis
+ * theorem. Both quantities are conserved exactly across the
+ * projection; the relative kinetic energy is not, which is what a
+ * capture latch does.
+ *
+ * The two sums are taken in two passes each, the spins before the
+ * moments and the tensors before the parallel-axis terms, because
+ * floating-point addition is not associative and the order a sum is
+ * taken in is part of what the artifact computes. */
 static void kflrl_join_impose_(K26RlEnv *h, uint32_t e,
                                const K26AstroPos *cref)
 {
-    KflrlJoin *j = &h->join[e];
-    if (!j->active) return;
-    K26AstroBody *cb = k26astro_world_body_at(h->worlds[e],
-        kflrl_body_idx_[kflrl_vehicle_body_[j->carrier]]);
-    K26AstroBody *fb = k26astro_world_body_at(h->worlds[e],
-        kflrl_body_idx_[kflrl_vehicle_body_[j->follower]]);
-    if (!cb || !fb) return;
+    int leader[KFLRL_N_VEHICLES], jidx[KFLRL_N_VEHICLES];
+    int order[KFLRL_N_VEHICLES];
+    K26V3 rel_pos[KFLRL_N_VEHICLES];
+    kflrl_join_leaders_(h, e, leader, jidx);
+    const KflrlJoin *jt = &h->join[(size_t)e * KFLRL_N_JOINS];
 
-    fb->attitude = k26m3d_quat_norm(k26m3d_quat_mul(cb->attitude,
-                                                    j->rel));
-    K26V3 arm  = k26m3d_quat_rotate_v3(cb->attitude, j->offset);
-    K26V3 cpos = k26astro_pos_sub(&cb->pos, cref);
-    K26V3 fpos = k26astro_pos_sub(&fb->pos, cref);
-    k26astro_pos_add(&fb->pos,
-        k26m3d_v3(cpos.x + arm.x - fpos.x, cpos.y + arm.y - fpos.y,
-                  cpos.z + arm.z - fpos.z));
-    fpos = k26m3d_v3(cpos.x + arm.x, cpos.y + arm.y, cpos.z + arm.z);
-    const double *cc_ = KFLRL_COM(h, e, j->carrier);
-    const double *cf_ = KFLRL_COM(h, e, j->follower);
-    K26V3 rc = k26m3d_quat_rotate_v3(cb->attitude,
-        k26m3d_v3(cc_[0], cc_[1], cc_[2]));
-    K26V3 rf = k26m3d_quat_rotate_v3(fb->attitude,
-        k26m3d_v3(cf_[0], cf_[1], cf_[2]));
-    K26V3 comc = k26m3d_v3(cpos.x + rc.x, cpos.y + rc.y, cpos.z + rc.z);
-    K26V3 comf = k26m3d_v3(fpos.x + rf.x, fpos.y + rf.y, fpos.z + rf.z);
-    double mc = cb->mass > 0.0 ? cb->mass : 0.0;
-    double mf = fb->mass > 0.0 ? fb->mass : 0.0;
-    double M = mc + mf;
-    if (!(M > 0.0)) return;
-    K26V3 R = k26m3d_v3((mc * comc.x + mf * comf.x) / M,
-                        (mc * comc.y + mf * comf.y) / M,
-                        (mc * comc.z + mf * comf.z) / M);
-    K26V3 V = k26m3d_v3((mc * cb->vel.x + mf * fb->vel.x) / M,
-                        (mc * cb->vel.y + mf * fb->vel.y) / M,
-                        (mc * cb->vel.z + mf * fb->vel.z) / M);
-    K26M3 Ic = kflrl_join_world_inertia_(
-        h->vehicles[(size_t)e * KFLRL_N_VEHICLES + j->carrier],
-        cb->attitude);
-    K26M3 If = kflrl_join_world_inertia_(
-        h->vehicles[(size_t)e * KFLRL_N_VEHICLES + j->follower],
-        fb->attitude);
-    K26V3 wc = k26m3d_quat_rotate_v3(cb->attitude, cb->omega);
-    K26V3 wf = k26m3d_quat_rotate_v3(fb->attitude, fb->omega);
-    K26V3 dc = k26m3d_v3(comc.x - R.x, comc.y - R.y, comc.z - R.z);
-    K26V3 df = k26m3d_v3(comf.x - R.x, comf.y - R.y, comf.z - R.z);
-    K26V3 Lc = kflrl_m3_mul_(Ic, wc);
-    K26V3 Lf = kflrl_m3_mul_(If, wf);
-    K26V3 mc_v = k26m3d_v3_cross(dc,
-        k26m3d_v3(mc * (cb->vel.x - V.x), mc * (cb->vel.y - V.y),
-                  mc * (cb->vel.z - V.z)));
-    K26V3 mf_v = k26m3d_v3_cross(df,
-        k26m3d_v3(mf * (fb->vel.x - V.x), mf * (fb->vel.y - V.y),
-                  mf * (fb->vel.z - V.z)));
-    K26V3 L = k26m3d_v3(Lc.x + Lf.x + mc_v.x + mf_v.x,
-                        Lc.y + Lf.y + mc_v.y + mf_v.y,
-                        Lc.z + Lf.z + mc_v.z + mf_v.z);
-    K26M3 J;
-    double dcc = k26m3d_v3_dot(dc, dc), dff = k26m3d_v3_dot(df, df);
-    double dcv[3] = { dc.x, dc.y, dc.z }, dfv[3] = { df.x, df.y, df.z };
-    for (int i = 0; i < 3; i++) {
-        for (int k = 0; k < 3; k++) {
-            double kron = (i == k) ? 1.0 : 0.0;
-            J.m[i][k] = Ic.m[i][k] + If.m[i][k]
-                      + mc * (kron * dcc - dcv[i] * dcv[k])
-                      + mf * (kron * dff - dfv[i] * dfv[k]);
+    for (int root = 0; root < KFLRL_N_VEHICLES; root++) {
+        if (leader[root] >= 0) continue;
+        int n = kflrl_join_members_(leader, root, order);
+        if (n < 2) continue;
+
+        K26AstroBody *rb = k26astro_world_body_at(h->worlds[e],
+            kflrl_body_idx_[kflrl_vehicle_body_[root]]);
+        if (!rb) continue;
+        rel_pos[root] = k26astro_pos_sub(&rb->pos, cref);
+
+        int placed = 1;
+        for (int k = 1; k < n; k++) {
+            int v  = order[k];
+            int lv = leader[v];
+            int ji = jidx[v];
+            K26AstroBody *lb = k26astro_world_body_at(h->worlds[e],
+                kflrl_body_idx_[kflrl_vehicle_body_[lv]]);
+            K26AstroBody *fb = k26astro_world_body_at(h->worlds[e],
+                kflrl_body_idx_[kflrl_vehicle_body_[v]]);
+            if (!lb || !fb || ji < 0) { placed = 0; break; }
+            fb->attitude = k26m3d_quat_norm(
+                k26m3d_quat_mul(lb->attitude, jt[ji].rel));
+            K26V3 arm  = k26m3d_quat_rotate_v3(lb->attitude, jt[ji].offset);
+            K26V3 lpos = rel_pos[lv];
+            K26V3 fpos = k26astro_pos_sub(&fb->pos, cref);
+            k26astro_pos_add(&fb->pos,
+                k26m3d_v3(lpos.x + arm.x - fpos.x,
+                          lpos.y + arm.y - fpos.y,
+                          lpos.z + arm.z - fpos.z));
+            rel_pos[v] = k26m3d_v3(lpos.x + arm.x, lpos.y + arm.y,
+                                   lpos.z + arm.z);
+        }
+        if (!placed) continue;
+
+        /* The members' masses, centres and velocities, gathered once
+         * so the four sums below read the same state. */
+        double mass[KFLRL_N_VEHICLES];
+        K26V3  com[KFLRL_N_VEHICLES], vel[KFLRL_N_VEHICLES];
+        K26V3  spin[KFLRL_N_VEHICLES];
+        K26M3  iner[KFLRL_N_VEHICLES];
+        for (int k = 0; k < n; k++) {
+            int v = order[k];
+            K26AstroBody *b = k26astro_world_body_at(h->worlds[e],
+                kflrl_body_idx_[kflrl_vehicle_body_[v]]);
+            if (!b) { placed = 0; break; }
+            const double *co = KFLRL_COM(h, e, v);
+            K26V3 r = k26m3d_quat_rotate_v3(b->attitude,
+                k26m3d_v3(co[0], co[1], co[2]));
+            mass[k] = b->mass > 0.0 ? b->mass : 0.0;
+            com[k]  = k26m3d_v3(rel_pos[v].x + r.x, rel_pos[v].y + r.y,
+                                rel_pos[v].z + r.z);
+            vel[k]  = b->vel;
+            iner[k] = kflrl_join_world_inertia_(
+                h->vehicles[(size_t)e * KFLRL_N_VEHICLES + v], b->attitude);
+            spin[k] = k26m3d_quat_rotate_v3(b->attitude, b->omega);
+        }
+        if (!placed) continue;
+
+        double M = mass[0];
+        K26V3  Rn = k26m3d_v3(mass[0] * com[0].x, mass[0] * com[0].y,
+                              mass[0] * com[0].z);
+        K26V3  Vn = k26m3d_v3(mass[0] * vel[0].x, mass[0] * vel[0].y,
+                              mass[0] * vel[0].z);
+        for (int k = 1; k < n; k++) {
+            M    = M + mass[k];
+            Rn.x = Rn.x + mass[k] * com[k].x;
+            Rn.y = Rn.y + mass[k] * com[k].y;
+            Rn.z = Rn.z + mass[k] * com[k].z;
+            Vn.x = Vn.x + mass[k] * vel[k].x;
+            Vn.y = Vn.y + mass[k] * vel[k].y;
+            Vn.z = Vn.z + mass[k] * vel[k].z;
+        }
+        if (!(M > 0.0)) continue;
+        K26V3 R = k26m3d_v3(Rn.x / M, Rn.y / M, Rn.z / M);
+        K26V3 V = k26m3d_v3(Vn.x / M, Vn.y / M, Vn.z / M);
+
+        K26V3 d[KFLRL_N_VEHICLES];
+        for (int k = 0; k < n; k++) {
+            d[k] = k26m3d_v3(com[k].x - R.x, com[k].y - R.y, com[k].z - R.z);
+        }
+
+        K26V3 L = kflrl_m3_mul_(iner[0], spin[0]);
+        for (int k = 1; k < n; k++) {
+            K26V3 Lk = kflrl_m3_mul_(iner[k], spin[k]);
+            L = k26m3d_v3(L.x + Lk.x, L.y + Lk.y, L.z + Lk.z);
+        }
+        for (int k = 0; k < n; k++) {
+            K26V3 mv = k26m3d_v3_cross(d[k],
+                k26m3d_v3(mass[k] * (vel[k].x - V.x),
+                          mass[k] * (vel[k].y - V.y),
+                          mass[k] * (vel[k].z - V.z)));
+            L = k26m3d_v3(L.x + mv.x, L.y + mv.y, L.z + mv.z);
+        }
+
+        K26M3 J = iner[0];
+        for (int k = 1; k < n; k++) {
+            for (int i = 0; i < 3; i++) {
+                for (int c = 0; c < 3; c++) J.m[i][c] += iner[k].m[i][c];
+            }
+        }
+        for (int k = 0; k < n; k++) {
+            double dd = k26m3d_v3_dot(d[k], d[k]);
+            double dv[3] = { d[k].x, d[k].y, d[k].z };
+            for (int i = 0; i < 3; i++) {
+                for (int c = 0; c < 3; c++) {
+                    double kron = (i == c) ? 1.0 : 0.0;
+                    J.m[i][c] += mass[k] * (kron * dd - dv[i] * dv[c]);
+                }
+            }
+        }
+
+        /* The composite rate is that momentum against the composite
+         * inertia. The inverse is written out here because the tensor
+         * is the chain's and no vehicle carries it. A singular one
+         * means the chain has no rotational answer, and the projection
+         * is left undone rather than continued with a fabricated
+         * one. */
+        K26M3 Jinv;
+        {
+            double c00 = J.m[1][1]*J.m[2][2] - J.m[1][2]*J.m[2][1];
+            double c01 = J.m[1][2]*J.m[2][0] - J.m[1][0]*J.m[2][2];
+            double c02 = J.m[1][0]*J.m[2][1] - J.m[1][1]*J.m[2][0];
+            double det = J.m[0][0]*c00 + J.m[0][1]*c01 + J.m[0][2]*c02;
+            if (!(det > 0.0) && !(det < 0.0)) continue;
+            double id = 1.0 / det;
+            Jinv.m[0][0] = c00 * id;
+            Jinv.m[1][0] = c01 * id;
+            Jinv.m[2][0] = c02 * id;
+            Jinv.m[0][1] = (J.m[0][2]*J.m[2][1] - J.m[0][1]*J.m[2][2]) * id;
+            Jinv.m[1][1] = (J.m[0][0]*J.m[2][2] - J.m[0][2]*J.m[2][0]) * id;
+            Jinv.m[2][1] = (J.m[0][1]*J.m[2][0] - J.m[0][0]*J.m[2][1]) * id;
+            Jinv.m[0][2] = (J.m[0][1]*J.m[1][2] - J.m[0][2]*J.m[1][1]) * id;
+            Jinv.m[1][2] = (J.m[0][2]*J.m[1][0] - J.m[0][0]*J.m[1][2]) * id;
+            Jinv.m[2][2] = (J.m[0][0]*J.m[1][1] - J.m[0][1]*J.m[1][0]) * id;
+        }
+        K26V3 W = kflrl_m3_mul_(Jinv, L);
+        for (int k = 0; k < n; k++) {
+            int v = order[k];
+            K26AstroBody *b = k26astro_world_body_at(h->worlds[e],
+                kflrl_body_idx_[kflrl_vehicle_body_[v]]);
+            if (!b) continue;
+            K26V3 vk = k26m3d_v3_cross(W, d[k]);
+            b->vel = k26m3d_v3(V.x + vk.x, V.y + vk.y, V.z + vk.z);
+            b->omega = k26m3d_quat_rotate_v3(k26m3d_quat_conj(b->attitude), W);
         }
     }
-    /* The joint rate is that momentum against the joint inertia.
-     * The inverse is written out here because the tensor is the
-     * pair's and no vehicle carries it. A singular one means the
-     * pair has no rotational answer, and the projection is left
-     * undone rather than continued with a fabricated one. */
-    K26M3 Jinv;
-    {
-        double c00 = J.m[1][1]*J.m[2][2] - J.m[1][2]*J.m[2][1];
-        double c01 = J.m[1][2]*J.m[2][0] - J.m[1][0]*J.m[2][2];
-        double c02 = J.m[1][0]*J.m[2][1] - J.m[1][1]*J.m[2][0];
-        double det = J.m[0][0]*c00 + J.m[0][1]*c01 + J.m[0][2]*c02;
-        if (!(det > 0.0) && !(det < 0.0)) return;
-        double id = 1.0 / det;
-        Jinv.m[0][0] = c00 * id;
-        Jinv.m[1][0] = c01 * id;
-        Jinv.m[2][0] = c02 * id;
-        Jinv.m[0][1] = (J.m[0][2]*J.m[2][1] - J.m[0][1]*J.m[2][2]) * id;
-        Jinv.m[1][1] = (J.m[0][0]*J.m[2][2] - J.m[0][2]*J.m[2][0]) * id;
-        Jinv.m[2][1] = (J.m[0][1]*J.m[2][0] - J.m[0][0]*J.m[2][1]) * id;
-        Jinv.m[0][2] = (J.m[0][1]*J.m[1][2] - J.m[0][2]*J.m[1][1]) * id;
-        Jinv.m[1][2] = (J.m[0][2]*J.m[1][0] - J.m[0][0]*J.m[1][2]) * id;
-        Jinv.m[2][2] = (J.m[0][0]*J.m[1][1] - J.m[0][1]*J.m[1][0]) * id;
-    }
-    K26V3 W = kflrl_m3_mul_(Jinv, L);
-    K26V3 vc = k26m3d_v3_cross(W, dc);
-    K26V3 vf = k26m3d_v3_cross(W, df);
-    cb->vel = k26m3d_v3(V.x + vc.x, V.y + vc.y, V.z + vc.z);
-    fb->vel = k26m3d_v3(V.x + vf.x, V.y + vf.y, V.z + vf.z);
-    cb->omega = k26m3d_quat_rotate_v3(k26m3d_quat_conj(cb->attitude), W);
-    fb->omega = k26m3d_quat_rotate_v3(k26m3d_quat_conj(fb->attitude), W);
 }
 
-/* Form the join at the impact configuration the sweep computed: put
- * both bodies there, freeze the relative configuration, and project
- * the motion. The carrier is the heavier of the two, since one of
- * them has to hold the pair's pose and the joint centre of mass
- * lies nearer that one; a tie goes to the lower vehicle slot, which
- * is declaration order, so the choice is never an accident. */
-static void kflrl_join_form_(K26RlEnv *h, uint32_t e,
-                             const K26AstroCollBody *cbody,
-                             int va, int vb, double time, double rem,
-                             const K26AstroPos *cref)
+/* The mass of a chain and its momentum, summed over its members in
+ * the order the chain enumerates them. */
+static void kflrl_chain_mass_mom_(const K26RlEnv *h, uint32_t e,
+                                  const int *leader, int root,
+                                  double *mass_out, K26V3 *mom_out)
 {
-    KflrlJoin *j = &h->join[e];
-    if (j->active) return;
+    int order[KFLRL_N_VEHICLES];
+    int n = kflrl_join_members_(leader, root, order);
+    double M = 0.0;
+    K26V3  P = k26m3d_v3(0.0, 0.0, 0.0);
+    /* The first member seeds the sums rather than a zero, so a chain
+     * of one is its own mass and its own momentum exactly and not the
+     * result of an addition. */
+    for (int k = 0; k < n; k++) {
+        const K26AstroBody *b = k26astro_world_body_at(h->worlds[e],
+            kflrl_body_idx_[kflrl_vehicle_body_[order[k]]]);
+        if (!b) continue;
+        double mk = b->mass > 0.0 ? b->mass : 0.0;
+        if (k == 0) {
+            M = mk;
+            P = k26m3d_v3(mk * b->vel.x, mk * b->vel.y, mk * b->vel.z);
+            continue;
+        }
+        M   = M + mk;
+        P.x = P.x + mk * b->vel.x;
+        P.y = P.y + mk * b->vel.y;
+        P.z = P.z + mk * b->vel.z;
+    }
+    *mass_out = M;
+    *mom_out  = P;
+}
+
+/* Form a join at the configuration the sweep computed: put the two
+ * bodies there, freeze the relative configuration, and project the
+ * motion of everything now attached.
+ *
+ * Which of the two leads is decided by composite mass, since one of
+ * them has to hold the chain's pose and the composite centre of mass
+ * lies nearer the heavier side; a tie goes to the lower vehicle slot,
+ * which is declaration order, so the choice is never an accident. A
+ * body that already follows a leader cannot take a second one, so
+ * where only one of the two is free that one follows whatever the
+ * masses say.
+ *
+ * Returns 1 when a join was formed and 0 when none was. A capture that
+ * forms no join is not suppressed: the caller resolves it as an
+ * ordinary contact under the environment's declared resolution, since
+ * a pair that cannot join and is not resolved is left interpenetrating
+ * and advancing through each other. */
+static int kflrl_join_form_(K26RlEnv *h, uint32_t e,
+                            const K26AstroCollBody *cbody,
+                            int va, int vb, int pa, int pb,
+                            double time, double rem,
+                            const K26AstroPos *cref)
+{
+    int leader[KFLRL_N_VEHICLES], jidx[KFLRL_N_VEHICLES];
+    kflrl_join_leaders_(h, e, leader, jidx);
+    /* An occupied port has nothing left to capture with, and two
+     * bodies of one chain are already one body: neither forms a join,
+     * and the contact between them is an ordinary one. */
+    if (kflrl_port_occupied_(h, e, pa) || kflrl_port_occupied_(h, e, pb)) {
+        return 0;
+    }
+    int ra = kflrl_join_root_(leader, va), rb_ = kflrl_join_root_(leader, vb);
+    if (ra == rb_) return 0;
+    /* Both already follow someone, so neither can take another
+     * leader and the join the contact asks for does not exist. */
+    if (leader[va] >= 0 && leader[vb] >= 0) return 0;
+
+    int slot = -1;
+    {
+        KflrlJoin *jt = &h->join[(size_t)e * KFLRL_N_JOINS];
+        for (int k = 0; k < KFLRL_N_JOINS && slot < 0; k++) {
+            if (!jt[k].active) slot = k;
+        }
+    }
+    if (slot < 0) return 0;
+
     K26AstroBody *ba = k26astro_world_body_at(h->worlds[e],
         kflrl_body_idx_[kflrl_vehicle_body_[va]]);
     K26AstroBody *bb = k26astro_world_body_at(h->worlds[e],
         kflrl_body_idx_[kflrl_vehicle_body_[vb]]);
-    if (!ba || !bb) return;
-    int carrier = va, follower = vb;
-    if (bb->mass > ba->mass || (bb->mass == ba->mass && vb < va)) {
-        carrier = vb; follower = va;
+    if (!ba || !bb) return 0;
+
+    /* The masses that decide which side leads are the composites',
+     * taken over each side's whole chain, so a laden craft weighs
+     * what it is carrying as well as itself. */
+    double ma, mb;
+    K26V3  pa_mom, pb_mom;
+    kflrl_chain_mass_mom_(h, e, leader, ra, &ma, &pa_mom);
+    kflrl_chain_mass_mom_(h, e, leader, rb_, &mb, &pb_mom);
+
+    int lead = va, follow = vb;
+    if (leader[va] >= 0) {
+        lead = va; follow = vb;
+    } else if (leader[vb] >= 0) {
+        lead = vb; follow = va;
+    } else if (mb > ma || (mb == ma && vb < va)) {
+        lead = vb; follow = va;
     }
-    K26AstroBody *cb = (carrier == va) ? ba : bb;
-    K26AstroBody *fb = (carrier == va) ? bb : ba;
-    const K26AstroCollBody *cc = &cbody[carrier];
-    const K26AstroCollBody *cf = &cbody[follower];
+    int lport = (lead == va) ? pa : pb;
+    int fport = (lead == va) ? pb : pa;
+
+    K26AstroBody *cb = (lead == va) ? ba : bb;
+    K26AstroBody *fb = (lead == va) ? bb : ba;
+    const K26AstroCollBody *cc = &cbody[lead];
+    const K26AstroCollBody *cf = &cbody[follow];
     K26V3 pc = k26m3d_v3(cc->pos0.x + (cc->pos1.x - cc->pos0.x) * time,
                          cc->pos0.y + (cc->pos1.y - cc->pos0.y) * time,
                          cc->pos0.z + (cc->pos1.z - cc->pos0.z) * time);
@@ -437,41 +650,54 @@ static void kflrl_join_form_(K26RlEnv *h, uint32_t e,
      * the sub-advance, and the world stands at its end, which is
      * where the observation is taken. The pair's own configuration is
      * the one the contact found, and the offset below holds it; what
-     * the capture changed of the pair's motion is the carrier's
-     * velocity, from the one it arrived with to the joint one the
-     * projection below gives it, so the carrier is moved by the
+     * the capture changed of the leader's motion is its velocity,
+     * from the one it arrived with to the composite one the
+     * projection below gives it, so the leader is moved by the
      * displacement that change makes over the rest of the
      * sub-advance and keeps the gravity and thrust of it. Left at the
-     * contact configuration instead, the pair would sit at a moment
+     * contact configuration instead, the chain would sit at a moment
      * the rest of the world had left, and every relative observe
      * taken from it would carry the travel it never made.
      *
-     * The follower is placed from the carrier below, so it needs no
-     * correction of its own. */
-    K26V3 vcs = k26m3d_v3(cc->vel0.x + (cc->vel1.x - cc->vel0.x) * time,
-                          cc->vel0.y + (cc->vel1.y - cc->vel0.y) * time,
-                          cc->vel0.z + (cc->vel1.z - cc->vel0.z) * time);
-    double mcj = cb->mass > 0.0 ? cb->mass : 0.0;
-    double mfj = fb->mass > 0.0 ? fb->mass : 0.0;
+     * Everything that follows the leader is placed from it below, so
+     * none of it needs a correction of its own. */
+    int rootv = kflrl_join_root_(leader, lead);
+    K26AstroBody *rbody = k26astro_world_body_at(h->worlds[e],
+        kflrl_body_idx_[kflrl_vehicle_body_[rootv]]);
+    if (!rbody) return 0;
+    const K26AstroCollBody *cr = &cbody[rootv];
+    K26V3 vcs = k26m3d_v3(cr->vel0.x + (cr->vel1.x - cr->vel0.x) * time,
+                          cr->vel0.y + (cr->vel1.y - cr->vel0.y) * time,
+                          cr->vel0.z + (cr->vel1.z - cr->vel0.z) * time);
+    double mcj = (lead == va) ? ma : mb;
+    double mfj = (lead == va) ? mb : ma;
+    K26V3  pcj = (lead == va) ? pa_mom : pb_mom;
+    K26V3  pfj = (lead == va) ? pb_mom : pa_mom;
     double mtj = mcj + mfj;
-    K26V3 vjn = cb->vel;
+    K26V3 vjn = rbody->vel;
     if (mtj > 0.0) {
-        vjn = k26m3d_v3((mcj * cb->vel.x + mfj * fb->vel.x) / mtj,
-                        (mcj * cb->vel.y + mfj * fb->vel.y) / mtj,
-                        (mcj * cb->vel.z + mfj * fb->vel.z) / mtj);
+        vjn = k26m3d_v3((pcj.x + pfj.x) / mtj, (pcj.y + pfj.y) / mtj,
+                        (pcj.z + pfj.z) / mtj);
     }
-    k26astro_pos_add(&cb->pos, k26m3d_v3((vjn.x - vcs.x) * rem,
+    /* The correction lands on the root of the merged chain, which is
+     * the one member whose position is its own: every other member is
+     * placed from the one it follows. */
+    k26astro_pos_add(&rbody->pos, k26m3d_v3((vjn.x - vcs.x) * rem,
                                          (vjn.y - vcs.y) * rem,
                                          (vjn.z - vcs.z) * rem));
     K26Quat qc_conj = k26m3d_quat_conj(cb->attitude);
-    j->carrier  = carrier;
-    j->follower = follower;
-    j->rel      = k26m3d_quat_norm(k26m3d_quat_mul(qc_conj,
-                                                   fb->attitude));
-    j->offset   = k26m3d_quat_rotate_v3(qc_conj,
+    KflrlJoin *j = &h->join[(size_t)e * KFLRL_N_JOINS + slot];
+    j->leader        = lead;
+    j->follower      = follow;
+    j->port_leader   = lport;
+    j->port_follower = fport;
+    j->rel           = k26m3d_quat_norm(k26m3d_quat_mul(qc_conj,
+                                                        fb->attitude));
+    j->offset        = k26m3d_quat_rotate_v3(qc_conj,
         k26m3d_v3(pf.x - pc.x, pf.y - pc.y, pf.z - pc.z));
-    j->active   = 1;
+    j->active        = 1;
     kflrl_join_impose_(h, e, cref);
+    return 1;
 }
 #endif
 
@@ -530,10 +756,17 @@ static void kflrl_reset_env_(K26RlEnv *h, uint32_t e, uint32_t ep)
      * so it is cleared here with the rest of the baseline. */
     memset(&h->contact[(size_t)e * KFLRL_N_CONTACT], 0,
            sizeof(KflrlContact) * KFLRL_N_CONTACT);
-    /* A pair joined by a capture belongs to its episode too. The
-     * join holds no property of either craft, only the pose that
-     * ties them, so dropping it is the whole of undoing it. */
-    memset(&h->join[e], 0, sizeof h->join[e]);
+    /* The joins a capture formed belong to their episode too. A join
+     * holds no property of either craft, only the pose that ties
+     * them, so dropping it is the whole of undoing it. The port
+     * latches go with them, being the contacts that formed them. */
+    memset(&h->join[(size_t)e * KFLRL_N_JOINS], 0,
+           sizeof(KflrlJoin) * KFLRL_N_JOINS);
+    memset(&h->plat[(size_t)e * KFLRL_N_PLAT], 0,
+           sizeof(KflrlPortLatch) * KFLRL_N_PLAT);
+    for (int q = 0; q < KFLRL_N_PLAT; q++) {
+        h->plat[(size_t)e * KFLRL_N_PLAT + q].partner = -1;
+    }
 #if KFLRL_N_BODIES > 0
     K26AstroBody *b0 = k26astro_world_body_at(w, 0);
     if (b0) {
@@ -608,7 +841,9 @@ static void kflrl_reset_env_(K26RlEnv *h, uint32_t e, uint32_t ep)
 #endif
     kflrl_observe_(w, h->obs + (size_t)e * KFLRL_OBS_TOTAL,
                    &h->contact[(size_t)e * KFLRL_N_CONTACT],
-                   &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),
+                   &h->join[(size_t)e * KFLRL_N_JOINS],
+                   &h->plat[(size_t)e * KFLRL_N_PLAT],
+                   KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),
                    KFLRL_VEHS(h, e), KFLRL_PROP(h, e),
                    KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),
                    KFLRL_INFOT(h, e), KFLRL_ENG(h, e), 0.0);
@@ -830,6 +1065,7 @@ static void kflrl_free_handle_(K26RlEnv *h)
     free(h->act);
     free(h->contact);
     free(h->join);
+    free(h->plat);
     free(h->thrust_ctx);
     free(h->prop);
     free(h->veh_com);
@@ -1028,7 +1264,10 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
         return K26RL_E_INTERNAL;
     }
 #endif
-    h->join = (KflrlJoin *)calloc(n_envs, sizeof(*h->join));
+    h->join = (KflrlJoin *)calloc((size_t)n_envs * KFLRL_N_JOINS,
+                                  sizeof(*h->join));
+    h->plat = (KflrlPortLatch *)calloc((size_t)n_envs * KFLRL_N_PLAT,
+                                       sizeof(*h->plat));
     h->contact = (KflrlContact *)calloc(
         (size_t)n_envs * KFLRL_N_CONTACT, sizeof(KflrlContact));
 #if KFLRL_N_SENSED > 0
@@ -1076,7 +1315,7 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
 #if KFLRL_N_VEHICLES > 0
         !h->vehicles || !h->act || !h->thrust_ctx ||
 #endif
-        !h->join ||
+        !h->join || !h->plat ||
         !h->contact || !h->scratch) {
         kflrl_free_handle_(h);
         return K26RL_E_INTERNAL;
@@ -1181,7 +1420,9 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
         kflrl_observe_(h->worlds[e],
                        h->obs + (size_t)e * KFLRL_OBS_TOTAL,
                        &h->contact[(size_t)e * KFLRL_N_CONTACT],
-                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),
+                       &h->join[(size_t)e * KFLRL_N_JOINS],
+                       &h->plat[(size_t)e * KFLRL_N_PLAT],
+                       KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),
                        KFLRL_VEHS(h, e), KFLRL_PROP(h, e),
                        KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),
                        KFLRL_INFOT(h, e), KFLRL_ENG(h, e), 0.0);
@@ -1547,9 +1788,15 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
 #endif
         /* A contact is a fact about one transition, so the latch is
          * cleared here and whatever the sub-advances below find is
-         * what this step reports. */
+         * what this step reports. The port latches go with it, for
+         * the same reason and on the same clock. */
         memset(&h->contact[(size_t)e * KFLRL_N_CONTACT], 0,
                sizeof(KflrlContact) * KFLRL_N_CONTACT);
+        memset(&h->plat[(size_t)e * KFLRL_N_PLAT], 0,
+               sizeof(KflrlPortLatch) * KFLRL_N_PLAT);
+        for (int q = 0; q < KFLRL_N_PLAT; q++) {
+            h->plat[(size_t)e * KFLRL_N_PLAT + q].partner = -1;
+        }
         /* One transition is `substeps` sub-advances. Translation
          * advances first, then attitude by the same interval with
          * the torque held at its start, which is the splitting the
@@ -1819,16 +2066,6 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                         cbody[vi].com_offset =
                             k26m3d_v3(co_[0], co_[1], co_[2]);
                     }
-#if KFLRL_N_PORTS > 1
-                    /* A joined pair is one body, and the pass tests
-                     * pairs of bodies, so the follower's primitives
-                     * leave it; left in, the join itself would be
-                     * reported as a contact on every sub-advance. */
-                    if (h->join[e].active &&
-                        h->join[e].follower == vi) {
-                        cbody[vi].n_shapes = 0;
-                    }
-#endif
                     cbody[vi].omega = cb->omega;
                     /* The inverse inertia the angular half of an
                      * impulse turns on, taken from the vehicle's own
@@ -1845,11 +2082,62 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                         if (cx) cbody[vi].inv_inertia = cx->inertia_inverse;
                     }
                 }
+                /* The pass, driven one pair at a time.
+                 *
+                 * Two bodies of one joined chain are one body, and a
+                 * pass that tested them against each other would
+                 * report the join itself as a contact on every
+                 * sub-advance. What leaves the pass is that pair and
+                 * only that pair: a member's shapes stay live against
+                 * every body outside its chain, so carried cargo
+                 * still reports what it runs into, which is what
+                 * removing a follower's shapes outright would hide.
+                 *
+                 * Exclusion is a property of a pair, so it cannot be
+                 * expressed by emptying a body's shape list, and the
+                 * pass over the whole set has no place to say it.
+                 * Driving the pass per pair says it exactly. The
+                 * selection is unchanged: the library's rule is least
+                 * impact time with a total-order tie-break on the two
+                 * body indices and then the two shape indices, and
+                 * the loop below applies the same rule to the pairs'
+                 * own winners in ascending index order, which reduces
+                 * to the same candidate. Nothing here allocates: the
+                 * two-body array is a copy of two structures. */
                 K26AstroCollContact cc;
-                if (k26astro_coll_pass(cbody, KFLRL_N_VEHICLES, step_dt,
-                                       &cc) == K26ASTRO_COLL_OK &&
-                    cc.hit) {
-                    int captured = 0;
+                memset(&cc, 0, sizeof cc);
+                cc.body_a = -1;
+                cc.body_b = -1;
+#if KFLRL_N_PORTS > 1
+                int cleader[KFLRL_N_VEHICLES], cjidx[KFLRL_N_VEHICLES];
+                kflrl_join_leaders_(h, e, cleader, cjidx);
+#endif
+                {
+                    for (int ia = 0; ia < KFLRL_N_VEHICLES; ia++) {
+                        for (int ib = ia + 1; ib < KFLRL_N_VEHICLES; ib++) {
+#if KFLRL_N_PORTS > 1
+                            if (kflrl_join_root_(cleader, ia) ==
+                                kflrl_join_root_(cleader, ib)) {
+                                continue;
+                            }
+#endif
+                            K26AstroCollBody two[2];
+                            K26AstroCollContact one;
+                            two[0] = cbody[ia];
+                            two[1] = cbody[ib];
+                            if (k26astro_coll_pass(two, 2, step_dt, &one)
+                                    != K26ASTRO_COLL_OK || !one.hit) {
+                                continue;
+                            }
+                            one.body_a = ia;
+                            one.body_b = ib;
+                            if (cc.hit && !(one.time < cc.time)) continue;
+                            cc = one;
+                        }
+                    }
+                }
+                if (cc.hit) {
+                    int captured = 0, joined = 0;
 #if KFLRL_N_PORTS > 1
                     /* Was this contact between two docking
                      * interfaces, and did it satisfy the envelope?
@@ -1895,6 +2183,23 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                             }
                         }
                     }
+                    /* The join is attempted here, before the
+                     * resolution is chosen, because whether one forms
+                     * decides which of the two happens. A capture
+                     * that forms a join replaces the resolution; a
+                     * capture that forms none, at an occupied port,
+                     * inside one chain, or where neither body is free
+                     * to follow, is an ordinary contact and is
+                     * resolved as one. Suppressing the resolution
+                     * there would leave the pair interpenetrating and
+                     * advancing through each other, which is worse
+                     * than either answer. */
+                    if (captured) {
+                        joined = kflrl_join_form_(
+                            h, e, cbody, cc.body_a, cc.body_b,
+                            pidx[0], pidx[1], cc.time,
+                            (1.0 - cc.time) * step_dt, cref);
+                    }
 #endif
                     /* Arrest, the default resolution: the pair meets
                      * at the sweep's own interpolated configuration,
@@ -1907,36 +2212,69 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                     K26V3 apos, avel, bpos, bvel;
                     K26V3 awb = cbody[cc.body_a].omega;
                     K26V3 bwb = cbody[cc.body_b].omega;
+                    /* The mass a resolution answers to is the mass of
+                     * everything that has to move with the struck
+                     * body, which is its whole chain: a tug carrying
+                     * cargo meets a third craft as the laden mass it
+                     * is, not as the tug alone. Resolving against the
+                     * body's own mass and letting the chain
+                     * projection redistribute the answer removes only
+                     * the share that body's mass carries, so the two
+                     * would keep closing for several transitions and
+                     * pass some way into each other before they
+                     * stopped.
+                     *
+                     * A chain of one is its own mass, so a world with
+                     * no join takes exactly the arithmetic it took
+                     * before this.
+                     *
+                     * The angular half of a bounce still turns on the
+                     * struck body's own tensor and its own lever arm,
+                     * which the projection then carries to the rest of
+                     * the chain. That is stated rather than hidden: it
+                     * is the linear half that decides whether a pair
+                     * comes to rest against each other, and the
+                     * composite tensor at the contact point is not a
+                     * quantity this pass holds. */
+                    K26AstroCollBody rbodies[2];
+                    rbodies[0] = cbody[cc.body_a];
+                    rbodies[1] = cbody[cc.body_b];
+#if KFLRL_N_PORTS > 1
+                    {
+                        int rpair[2] = { cc.body_a, cc.body_b };
+                        for (int q = 0; q < 2; q++) {
+                            double cm;
+                            K26V3  cp;
+                            kflrl_chain_mass_mom_(
+                                h, e, cleader,
+                                kflrl_join_root_(cleader, rpair[q]),
+                                &cm, &cp);
+                            if (cm > 0.0) rbodies[q].mass = cm;
+                        }
+                    }
+#endif
 #if KFLRL_CONTACT_BOUNCE
                     /* Bounce: one impulse at the contact point,
                      * using the effective mass there, so an
                      * off-centre impact spins the body by the
                      * amount the geometry gives. */
-                    K26AstroCollStatus cst = captured
+                    K26AstroCollStatus cst = joined
                         ? K26ASTRO_COLL_OK
                         : k26astro_coll_bounce(
-                        &cbody[cc.body_a], &cbody[cc.body_b], &cc,
+                        &rbodies[0], &rbodies[1], &cc,
                         h->restitution, h->friction,
                         &apos, &avel, &awb, &bpos, &bvel, &bwb);
 #else
-                    K26AstroCollStatus cst = captured
+                    K26AstroCollStatus cst = joined
                         ? K26ASTRO_COLL_OK
                         : k26astro_coll_arrest(
-                        &cbody[cc.body_a], &cbody[cc.body_b], cc.time,
+                        &rbodies[0], &rbodies[1], cc.time,
                         &apos, &avel, &bpos, &bvel);
 #endif
-                    /* A capture is not one of the declared
-                     * resolutions and does not run either of them.
-                     * It makes the pair one body instead. */
-                    if (captured) cst = K26ASTRO_COLL_E_NULL;
-#if KFLRL_N_PORTS > 1
-                    if (captured) {
-                        kflrl_join_form_(h, e, cbody, cc.body_a,
-                                         cc.body_b, cc.time,
-                                         (1.0 - cc.time) * step_dt,
-                                         cref);
-                    }
-#endif
+                    /* A join is not one of the declared resolutions
+                     * and does not run either of them. It makes the
+                     * chain one body instead. */
+                    if (joined) cst = K26ASTRO_COLL_E_NULL;
                     /* What the contact did, carried to the end of
                      * the sub-advance.
                      *
@@ -1999,13 +2337,44 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                             /* The correction is applied as a delta so
                              * the sector representation is preserved
                              * rather than rebuilt from a flattened
-                             * coordinate. */
+                             * coordinate.
+                             *
+                             * It reaches every member of the struck
+                             * body's chain, because the chain moves as
+                             * one and the resolution above answered
+                             * for the whole of it. A chain of one is
+                             * the body itself, which is what a world
+                             * with no join has. */
+                            cb->omega = nw[q];
+#if KFLRL_N_PORTS > 1
+                            {
+                                int cmem[KFLRL_N_VEHICLES];
+                                int cn = kflrl_join_members_(
+                                    cleader,
+                                    kflrl_join_root_(cleader, vi), cmem);
+                                for (int mi = 0; mi < cn; mi++) {
+                                    K26AstroBody *mb =
+                                        k26astro_world_body_at(
+                                            h->worlds[e],
+                                            kflrl_body_idx_[
+                                                kflrl_vehicle_body_[
+                                                    cmem[mi]]]);
+                                    if (!mb) continue;
+                                    k26astro_pos_add(&mb->pos, k26m3d_v3(
+                                        dv.x * crem, dv.y * crem,
+                                        dv.z * crem));
+                                    mb->vel = k26m3d_v3(mb->vel.x + dv.x,
+                                                        mb->vel.y + dv.y,
+                                                        mb->vel.z + dv.z);
+                                }
+                            }
+#else
                             k26astro_pos_add(&cb->pos, k26m3d_v3(
                                 dv.x * crem, dv.y * crem, dv.z * crem));
                             cb->vel = k26m3d_v3(cb->vel.x + dv.x,
                                                 cb->vel.y + dv.y,
                                                 cb->vel.z + dv.z);
-                            cb->omega = nw[q];
+#endif
                         }
                     }
                     /* The fraction the channels publish is of the
@@ -2024,33 +2393,48 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                         ct->hit      = 1.0;
                         ct->fraction = cfrac;
                         ct->speed    = cc.speed;
-#if KFLRL_N_PORTS > 1
-                        if (pidx[0] < 0 || pidx[1] < 0) continue;
-                        /* The residuals are of this body's own port
-                         * as the active one, which is the sense the
-                         * form that reads them names, taken at the
-                         * impact configuration and computed above,
-                         * before any resolution reached the world.
-                         * The capture flag is the pair's and is the
-                         * same on both ports. */
-                        ct->port_hit   = 1.0;
-                        ct->captured   = captured ? 1.0 : 0.0;
-                        ct->axial      = pst[q].axial;
-                        ct->lateral    = pst[q].lateral;
-                        ct->pitchyaw   = pst[q].pitchyaw;
-                        ct->roll       = pst[q].roll;
-                        ct->v_axial    = pst[q].v_axial;
-                        ct->v_lateral  = pst[q].v_lateral;
-                        ct->v_pitchyaw = pst[q].v_pitchyaw;
-                        ct->v_roll     = pst[q].v_roll;
-#endif
                     }
+#if KFLRL_N_PORTS > 1
+                    if (pidx[0] >= 0 && pidx[1] >= 0) {
+                        /* The residuals are of each port's own side as
+                         * the active one, which is the sense the form
+                         * that reads them names, taken at the impact
+                         * configuration and computed above, before any
+                         * resolution reached the world. The capture
+                         * flag is the pair's and is the same on both.
+                         *
+                         * The latch names the port it met. A body may
+                         * carry several interfaces, and a form
+                         * publishes these values only when the contact
+                         * was with the port it is paired against; any
+                         * other contact leaves it reading the state as
+                         * it stands, which is what an approach is
+                         * flown on. */
+                        for (int q = 0; q < 2; q++) {
+                            KflrlPortLatch *pl = &h->plat[
+                                (size_t)e * KFLRL_N_PLAT + pidx[q]];
+                            if (pl->hit != 0.0) continue;
+                            pl->hit        = 1.0;
+                            pl->partner    = pidx[1 - q];
+                            pl->captured   = captured ? 1.0 : 0.0;
+                            pl->axial      = pst[q].axial;
+                            pl->lateral    = pst[q].lateral;
+                            pl->pitchyaw   = pst[q].pitchyaw;
+                            pl->roll       = pst[q].roll;
+                            pl->v_axial    = pst[q].v_axial;
+                            pl->v_lateral  = pst[q].v_lateral;
+                            pl->v_pitchyaw = pst[q].v_pitchyaw;
+                            pl->v_roll     = pst[q].v_roll;
+                            pl->v_cg       = pst[q].v_lateral_cg;
+                        }
+                    }
+#endif
                 }
 #if KFLRL_N_PORTS > 1
-                /* A joined pair advances as one body: the follower
-                 * is placed from the carrier at the end of every
-                 * sub-advance, including the one that formed the
-                 * join, rather than integrated on its own. */
+                /* A joined chain advances as one body: every follower
+                 * is placed from the one it follows at the end of
+                 * every sub-advance, including the one that formed
+                 * the join, rather than integrated on its own. */
                 kflrl_join_impose_(h, e, cref);
 #endif
             }
@@ -2083,7 +2467,9 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
 
         kflrl_observe_(h->worlds[e], h->scratch,
                        &h->contact[(size_t)e * KFLRL_N_CONTACT],
-                       &h->join[e], KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),
+                       &h->join[(size_t)e * KFLRL_N_JOINS],
+                       &h->plat[(size_t)e * KFLRL_N_PLAT],
+                       KFLRL_PAYH(h, e), KFLRL_PAYP(h, e),
                        KFLRL_VEHS(h, e), KFLRL_PROP(h, e),
                        KFLRL_COM(h, e, 0), KFLRL_INFODAY(h, e),
                        KFLRL_INFOT(h, e), KFLRL_ENG(h, e),

@@ -1,14 +1,21 @@
-/* capture.c: the named capture envelopes and the one conversion.
+/* capture.c: the capture envelopes and the one conversion.
  *
  * The figures below are transcribed from the document each entry
  * names, in the units that document prints them in. Nothing here is
  * rounded, averaged, or adjusted: a transcription that changes a
  * figure is a transcription error, and the only way to keep that
  * checkable is to carry the printed number and convert it once.
+ *
+ * A program's own declarations join them in the table below the
+ * built-in one. They arrive in the same printed units and leave
+ * through the same conversion, so a declared envelope and a
+ * transcribed one differ in where their figures came from and in
+ * nothing else.
  */
 
 #include "capture.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* The International Docking System Standard's recommended initial
@@ -39,7 +46,21 @@ static const KflcCaptureEnvelope kflc_envelopes_[] = {
 #define KFLC_N_ENVELOPES \
     ((int)(sizeof kflc_envelopes_ / sizeof kflc_envelopes_[0]))
 
-const KflcCaptureEnvelope *kflc_capture_envelope(const char *name)
+/* What a program declared, this compilation. The name and the source
+ * note are held here rather than pointed at, because the tree they
+ * were read from is released before the last consumer of an envelope
+ * has finished with it. */
+typedef struct {
+    KflcCaptureEnvelope env;
+    char                name[KFLC_CAPTURE_NAME_MAX];
+    char                source[128];
+} KflcDeclaredEnvelope;
+
+static KflcDeclaredEnvelope kflc_declared_[KFLC_CAPTURE_MAX_DECLARED];
+
+static int kflc_n_declared_;
+
+const KflcCaptureEnvelope *kflc_capture_builtin(const char *name)
 {
     if (!name) return NULL;
     for (int i = 0; i < KFLC_N_ENVELOPES; i++) {
@@ -50,10 +71,46 @@ const KflcCaptureEnvelope *kflc_capture_envelope(const char *name)
     return NULL;
 }
 
+const KflcCaptureEnvelope *kflc_capture_envelope(const char *name)
+{
+    const KflcCaptureEnvelope *b = kflc_capture_builtin(name);
+    if (b) return b;
+    if (!name) return NULL;
+    for (int i = 0; i < kflc_n_declared_; i++) {
+        if (strcmp(kflc_declared_[i].name, name) == 0) {
+            return &kflc_declared_[i].env;
+        }
+    }
+    return NULL;
+}
+
 const char *kflc_capture_name_at(int i)
 {
-    if (i < 0 || i >= KFLC_N_ENVELOPES) return NULL;
-    return kflc_envelopes_[i].name;
+    if (i < 0) return NULL;
+    if (i < KFLC_N_ENVELOPES) return kflc_envelopes_[i].name;
+    i -= KFLC_N_ENVELOPES;
+    if (i >= kflc_n_declared_) return NULL;
+    return kflc_declared_[i].name;
+}
+
+void kflc_capture_declared_reset(void)
+{
+    kflc_n_declared_ = 0;
+}
+
+int kflc_capture_declare(const KflcCaptureEnvelope *e)
+{
+    if (!e || !e->name) return 1;
+    if (kflc_n_declared_ >= KFLC_CAPTURE_MAX_DECLARED) return 1;
+    KflcDeclaredEnvelope *d = &kflc_declared_[kflc_n_declared_];
+    d->env = *e;
+    snprintf(d->name, sizeof d->name, "%s", e->name);
+    snprintf(d->source, sizeof d->source, "%s",
+             e->source ? e->source : "declared in this program");
+    d->env.name   = d->name;
+    d->env.source = d->source;
+    kflc_n_declared_++;
+    return 0;
 }
 
 double kflc_capture_deg_to_rad(double deg)

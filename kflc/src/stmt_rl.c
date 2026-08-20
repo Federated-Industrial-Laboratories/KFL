@@ -62,7 +62,7 @@ int kfl_stmt_rl_word_is_construct(Lexer *L, const char *s)
     }
     if (strcmp(s, "sensor") == 0 || strcmp(s, "agent") == 0 ||
         strcmp(s, "astro_payload") == 0 || strcmp(s, "engage") == 0 ||
-        strcmp(s, "plan") == 0) {
+        strcmp(s, "plan") == 0 || strcmp(s, "capture_envelope") == 0) {
         return kfl_stmt_peek_kind(L, &k) && k == T_IDENT;
     }
     return 0;
@@ -496,6 +496,192 @@ KflcNode *kfl_stmt_parse_sensor(Lexer *L, Token *cur,
             kfl_stmt_append_attr(arena, t, akey, nv, lineK);
         }
         kfl_stmt_append_child(n, t);
+    }
+    return n;
+}
+
+/* `capture_envelope <name> ... end`. The limits a contact at a port
+ * carrying this envelope is judged against, in the units a published
+ * contact-condition table prints them in:
+ *
+ *   axial_rate <lower> <upper>   closing rate band, m/s
+ *   lateral_rate <v>             lateral rate at the interface, m/s
+ *   pitchyaw_rate <v>            vector sum of pitch and yaw, deg/s
+ *   roll_rate <v>                deg/s
+ *   lateral <v>                  lateral misalignment, m
+ *   pitchyaw <v>                 vector sum of pitch and yaw, deg
+ *   roll <v>                     deg
+ *   diameter <v>                 mating plane diameter, mm
+ *
+ * Every field is required and there are no defaults, because a
+ * tolerance nobody declared is a number the compiler invented. The
+ * operands are plain numbers rather than expressions, for the reason
+ * a sensor's are: an envelope becomes a compile-time constant, so
+ * there is nothing for an expression to close over. The whole of a
+ * number must be consumed, so a unit suffix is a refusal rather than
+ * a silent truncation.
+ *
+ * The values are checked here only for shape. What the numbers mean,
+ * and every refusal that depends on their meaning, belongs where the
+ * program model is built, which is the one place that also knows the
+ * built-in names a declaration may not take.
+ *
+ * `cur` is the `capture_envelope` keyword on entry. */
+
+/* The block's fields: the keyword, how many numbers follow it, and
+ * the attribute each number lands under. One table, so a field cannot
+ * be admitted without a place to put it. */
+static const struct {
+    const char *kw;
+    int         n_vals;
+    const char *key[2];
+} CAPENV_FIELDS_[] = {
+    { "axial_rate",    2, { "axial_rate_lo", "axial_rate_hi" } },
+    { "lateral_rate",  1, { "lateral_rate",  NULL } },
+    { "pitchyaw_rate", 1, { "pitchyaw_rate", NULL } },
+    { "roll_rate",     1, { "roll_rate",     NULL } },
+    { "lateral",       1, { "lateral",       NULL } },
+    { "pitchyaw",      1, { "pitchyaw",      NULL } },
+    { "roll",          1, { "roll",          NULL } },
+    { "diameter",      1, { "diameter",      NULL } }
+};
+
+#define CAPENV_N_FIELDS_ \
+    ((int)(sizeof CAPENV_FIELDS_ / sizeof CAPENV_FIELDS_[0]))
+
+KflcNode *kfl_stmt_parse_capture_envelope(Lexer *L, Token *cur,
+                                         KflcArena *arena, KflcDiag *diag,
+                                         int *had_error)
+{
+    int line0 = cur->line;
+    kfl_stmt_advance(L, cur, had_error);
+    if (cur->kind != T_IDENT) {
+        kflc_diag_errorf(diag, line0, "capture_envelope: expected a name");
+        *had_error = 1;
+        kfl_stmt_rl_drain_line(L, cur, arena, had_error);
+        return NULL;
+    }
+    KflcNode *n = kfl_stmt_new_node(arena, KFLN_STMT_CAPTURE_ENVELOPE,
+                                    line0);
+    n->name = cur->str;
+    kfl_stmt_advance(L, cur, had_error);
+    if (!kfl_stmt_at_nl(cur) && !kfl_stmt_at_eof2(cur)) {
+        kflc_diag_errorf(diag, line0,
+            "capture_envelope `%s`: expected end of line after the name",
+            n->name);
+        *had_error = 1;
+        kfl_stmt_rl_drain_line(L, cur, arena, had_error);
+    } else if (kfl_stmt_at_nl(cur)) {
+        kfl_stmt_advance(L, cur, had_error);
+    }
+
+    int seen[CAPENV_N_FIELDS_];
+    memset(seen, 0, sizeof seen);
+    for (;;) {
+        kfl_stmt_skip_newlines(L, cur, had_error);
+        if (kfl_stmt_at_eof2(cur)) {
+            kflc_diag_errorf(diag, line0,
+                "capture_envelope `%s`: unexpected EOF (missing `end`)",
+                n->name);
+            *had_error = 1;
+            return n;
+        }
+        if (kfl_stmt_is_ident_named(cur, "end")) {
+            kfl_stmt_advance(L, cur, had_error);
+            if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+            break;
+        }
+        if (cur->kind != T_IDENT) {
+            kflc_diag_errorf(diag, cur->line,
+                "capture_envelope `%s`: expected a field or `end`",
+                n->name);
+            *had_error = 1;
+            kfl_stmt_rl_drain_line(L, cur, arena, had_error);
+            continue;
+        }
+        char *kw = cur->str;
+        int lineK = cur->line;
+        char *rest = kfl_stmt_take_line_remainder(L, arena);
+        kfl_stmt_advance(L, cur, had_error);
+        if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
+
+        int f = -1;
+        for (int i = 0; i < CAPENV_N_FIELDS_; i++) {
+            if (strcmp(kw, CAPENV_FIELDS_[i].kw) == 0) f = i;
+        }
+        if (f < 0) {
+            kflc_diag_errorf(diag, lineK,
+                "capture_envelope `%s`: unknown field `%s`; the block "
+                "takes `axial_rate`, `lateral_rate`, `pitchyaw_rate`, "
+                "`roll_rate`, `lateral`, `pitchyaw`, `roll` and "
+                "`diameter`", n->name, kw);
+            *had_error = 1;
+            continue;
+        }
+        if (seen[f]) {
+            kflc_diag_errorf(diag, lineK,
+                "capture_envelope `%s`: `%s` is declared twice, and one "
+                "field states one limit; the earlier declaration is at "
+                "line %d", n->name, kw, seen[f]);
+            *had_error = 1;
+            continue;
+        }
+
+        char  *p = kfl_stmt_trim(rest);
+        double num[2];
+        int    n_num = 0, bad = 0;
+        while (*p) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            if (n_num == 2) { n_num++; break; }
+            char *w = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            char saved = *p;
+            *p = '\0';
+            char  *endp = NULL;
+            double v = strtod(w, &endp);
+            if (!endp || *endp != '\0' || endp == w) {
+                kflc_diag_errorf(diag, lineK,
+                    "capture_envelope `%s`: `%s` takes numbers and `%s` "
+                    "is not one", n->name, kw, w);
+                *had_error = 1;
+                bad = 1;
+                break;
+            }
+            num[n_num++] = v;
+            if (saved) { *p = saved; p++; } else break;
+        }
+        if (bad) continue;
+        if (n_num != CAPENV_FIELDS_[f].n_vals) {
+            kflc_diag_errorf(diag, lineK,
+                "capture_envelope `%s`: `%s` takes %d value%s and %d "
+                "%s given", n->name, kw, CAPENV_FIELDS_[f].n_vals,
+                CAPENV_FIELDS_[f].n_vals == 1 ? "" : "s", n_num,
+                n_num == 1 ? "was" : "were");
+            *had_error = 1;
+            continue;
+        }
+        seen[f] = lineK;
+        for (int i = 0; i < n_num; i++) {
+            KflcValue nv;
+            memset(&nv, 0, sizeof nv);
+            nv.kind = KFLV_FLOAT;
+            nv.u.f  = num[i];
+            kfl_stmt_append_attr(arena, n, CAPENV_FIELDS_[f].key[i], nv,
+                                 lineK);
+        }
+    }
+
+    /* A missing field is refused here, where the block's own line is
+     * still in hand, and every missing one is named rather than only
+     * the first, so an author fixes the declaration in one pass. */
+    for (int i = 0; i < CAPENV_N_FIELDS_; i++) {
+        if (seen[i]) continue;
+        kflc_diag_errorf(diag, line0,
+            "capture_envelope `%s`: `%s` is not declared, and every "
+            "field is required; a tolerance nobody declared would be a "
+            "number the compiler invented", n->name, CAPENV_FIELDS_[i].kw);
+        *had_error = 1;
     }
     return n;
 }

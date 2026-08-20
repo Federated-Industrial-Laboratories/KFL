@@ -146,6 +146,9 @@ KflcNode *kfl_stmt_parse_plan(Lexer *L, Token *cur,
 KflcNode *kfl_stmt_parse_sensor(Lexer *L, Token *cur,
                                KflcArena *arena, KflcDiag *diag,
                                int *had_error);
+KflcNode *kfl_stmt_parse_capture_envelope(Lexer *L, Token *cur,
+                                         KflcArena *arena, KflcDiag *diag,
+                                         int *had_error);
 void kfl_stmt_rl_drain_line(Lexer *L, Token *cur,
                            KflcArena *arena, int *had_error);
 int kfl_stmt_rl_word_is_construct(Lexer *L, const char *s);

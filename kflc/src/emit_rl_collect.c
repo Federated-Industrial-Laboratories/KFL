@@ -29,9 +29,14 @@ static const char *const RL_REL_COMP_[RL_REL_COMPS] = {
     "_r_x", "_r_y", "_r_z", "_v_x", "_v_y", "_v_z"
 };
 
-static const char *const RL_PORT_COMP_[RL_PORT_COMPS] = {
+static const char *const RL_PORT_COMP_[RL_PORT_FULL_COMPS] = {
     "_captured", "_axial", "_lateral", "_pitchyaw", "_roll",
-    "_v_axial", "_v_lateral", "_v_pitchyaw", "_v_roll"
+    "_v_axial", "_v_lateral", "_v_pitchyaw", "_v_roll",
+    /* The two the `full` mark adds, after the nine, so a marked form
+     * publishes the unmarked one's channels at the unmarked one's
+     * offsets and a program that adds the mark keeps every index it
+     * had. */
+    "_v_cg", "_joined"
 };
 
 static const char *const RL_DET_COMP_[RL_DET_COMPS] = {
@@ -265,6 +270,17 @@ int rl_observe_has_truth(const KflcNode *n)
     return 0;
 }
 
+/* Whether a port observe carries the `full` mark. */
+
+int rl_observe_is_full(const KflcNode *n)
+{
+    if (!n) return 0;
+    for (const KflcAttr *a = n->attrs; a; a = a->next) {
+        if (a->name && strcmp(a->name, "full") == 0) return 1;
+    }
+    return 0;
+}
+
 /* The components one form publishes, before any pairing. */
 
 int rl_observe_base_width(const KflcNode *n)
@@ -275,7 +291,8 @@ int rl_observe_base_width(const KflcNode *n)
     case RL_OBS_REF: return RL_REF_COMPS;
     case RL_OBS_CON: return RL_CON_COMPS;
     case RL_OBS_REL: return RL_REL_COMPS;
-    case RL_OBS_PORT: return RL_PORT_COMPS;
+    case RL_OBS_PORT:
+        return rl_observe_is_full(n) ? RL_PORT_FULL_COMPS : RL_PORT_COMPS;
     case RL_OBS_DET: return RL_DET_COMPS;
     case RL_OBS_TRK: return RL_TRK_COMPS;
     case RL_OBS_EFF: return rl_eff_comps_(rl_observe_eff_kind_(n));
@@ -938,6 +955,8 @@ static int rl_collect_actuators_(RlModel *m, KflcDiag *diag)
                  * compared against. */
                 pt->coll = ft->collider;
                 snprintf(pt->name, sizeof pt->name, "%s", ft->name);
+                snprintf(pt->env_name, sizeof pt->env_name, "%s",
+                         ft->capture);
                 const KflcAsmCollider *plate = &a->colliders[ft->collider];
                 for (int k = 0; k < 3; k++) {
                     pt->at[k] = ft->at[k];
@@ -1391,10 +1410,156 @@ int rl_veh_slot_of(const RlModel *m, int body)
     return -1;
 }
 
+/* One `capture_envelope` block, checked and admitted.
+ *
+ * The parser has already refused anything about the block's shape: a
+ * missing field, a repeated one, a field taking the wrong count, a
+ * value that is not a number. What is left is what the numbers mean,
+ * and the one thing only this pass knows, which is whether the name
+ * is already a published envelope's.
+ *
+ * The bounds are checked in the units they were written in, which is
+ * the point of checking them here rather than after conversion: an
+ * author reading the diagnostic sees the figure they typed.
+ */
+
+static double rl_capenv_field_(const KflcNode *n, const char *key,
+                               int *line)
+{
+    const KflcAttr *a = rl_attr(n, key);
+    if (!a) { if (line) *line = n->line; return 0.0; }
+    if (line) *line = a->line;
+    return a->value.u.f;
+}
+
+static int rl_collect_capture_envelope_(RlModel *m, const KflcNode *n,
+                                        KflcDiag *diag)
+{
+    const char *nm = n->name ? n->name : "?";
+    if (kflc_capture_builtin(nm)) {
+        kflc_diag_errorf(diag, n->line,
+            "capture_envelope `%s`: that name belongs to an envelope "
+            "this compiler defines, and a declaration may not shadow "
+            "one; a program's own envelope needs its own name", nm);
+        return 1;
+    }
+    for (int i = 0; i < m->n_capenv; i++) {
+        if (strcmp(m->capenv[i]->name ? m->capenv[i]->name : "", nm) != 0) {
+            continue;
+        }
+        kflc_diag_errorf(diag, n->line,
+            "capture_envelope `%s`: an envelope of that name is already "
+            "declared at line %d; a port's `capture` mark names one "
+            "envelope, so one name is one set of limits",
+            nm, m->capenv[i]->line);
+        return 1;
+    }
+    if (m->n_capenv >= KFLC_CAPTURE_MAX_DECLARED) {
+        kflc_diag_errorf(diag, n->line,
+            "capture_envelope `%s`: more than %d envelopes declared in "
+            "one program", nm, KFLC_CAPTURE_MAX_DECLARED);
+        return 1;
+    }
+
+    /* The eight fields, in the order the block writes them, with the
+     * rule each is held to beside it. `angle` marks a misalignment,
+     * which is bounded above as well as below: a misalignment past
+     * half a turn names the same configuration as its complement and
+     * a limit stated there admits every attitude there is. A rate in
+     * degrees per second carries no such bound, since a craft may
+     * legitimately turn faster than that. */
+    static const struct {
+        const char *key, *kw, *unit;
+        int         angle;
+    } F_[] = {
+        { "axial_rate_lo", "axial_rate",    "m/s",     0 },
+        { "axial_rate_hi", "axial_rate",    "m/s",     0 },
+        { "lateral_rate",  "lateral_rate",  "m/s",     0 },
+        { "pitchyaw_rate", "pitchyaw_rate", "deg/s",   0 },
+        { "roll_rate",     "roll_rate",     "deg/s",   0 },
+        { "lateral",       "lateral",       "m",       0 },
+        { "pitchyaw",      "pitchyaw",      "deg",     1 },
+        { "roll",          "roll",          "deg",     1 }
+    };
+    int err = 0;
+    for (int i = 0; i < (int)(sizeof F_ / sizeof F_[0]); i++) {
+        int    line = n->line;
+        double v = rl_capenv_field_(n, F_[i].key, &line);
+        if (!(v >= 0.0) || !(v < 1.0e300)) {
+            kflc_diag_errorf(diag, line,
+                "capture_envelope `%s`: `%s` is %.17g %s, and a limit on "
+                "a rate or a misalignment is a magnitude, so it cannot "
+                "be negative", nm, F_[i].kw, v, F_[i].unit);
+            err = 1;
+            continue;
+        }
+        if (F_[i].angle && v > 180.0) {
+            kflc_diag_errorf(diag, line,
+                "capture_envelope `%s`: `%s` is %.17g degrees, and an "
+                "angular misalignment runs from 0 to 180; a limit past "
+                "half a turn admits every attitude there is",
+                nm, F_[i].kw, v);
+            err = 1;
+        }
+    }
+    {
+        int    line_lo = n->line, line_hi = n->line;
+        double lo = rl_capenv_field_(n, "axial_rate_lo", &line_lo);
+        double hi = rl_capenv_field_(n, "axial_rate_hi", &line_hi);
+        if (lo > hi) {
+            kflc_diag_errorf(diag, line_lo,
+                "capture_envelope `%s`: `axial_rate %.17g %.17g` has its "
+                "lower bound above its upper, so no closing rate is "
+                "inside it and no contact could ever capture", nm, lo, hi);
+            err = 1;
+        }
+    }
+    {
+        int    line_d = n->line;
+        double d = rl_capenv_field_(n, "diameter", &line_d);
+        if (!(d > 0.0) || !(d < 1.0e300)) {
+            kflc_diag_errorf(diag, line_d,
+                "capture_envelope `%s`: `diameter` is %.17g mm, and the "
+                "mating plane it sizes is a real interface, so it must "
+                "be positive", nm, d);
+            err = 1;
+        }
+    }
+    if (err) return 1;
+
+    KflcCaptureEnvelope e;
+    memset(&e, 0, sizeof e);
+    e.name               = nm;
+    e.axial_rate_min     = rl_capenv_field_(n, "axial_rate_lo", NULL);
+    e.axial_rate_max     = rl_capenv_field_(n, "axial_rate_hi", NULL);
+    e.lateral_rate       = rl_capenv_field_(n, "lateral_rate",  NULL);
+    e.pitchyaw_rate_deg  = rl_capenv_field_(n, "pitchyaw_rate", NULL);
+    e.roll_rate_deg      = rl_capenv_field_(n, "roll_rate",     NULL);
+    e.lateral            = rl_capenv_field_(n, "lateral",       NULL);
+    e.pitchyaw_deg       = rl_capenv_field_(n, "pitchyaw",      NULL);
+    e.roll_deg           = rl_capenv_field_(n, "roll",          NULL);
+    e.mating_diameter_mm = rl_capenv_field_(n, "diameter",      NULL);
+    /* Where a built-in envelope carries its document, revision and
+     * table, a declared one carries the fact that the figures are the
+     * program's: the program's own review is what defends them. */
+    e.source = "declared by the program that names it";
+    if (kflc_capture_declare(&e)) {
+        kflc_diag_errorf(diag, n->line,
+            "capture_envelope `%s`: more than %d envelopes declared in "
+            "one program", nm, KFLC_CAPTURE_MAX_DECLARED);
+        return 1;
+    }
+    m->capenv[m->n_capenv++] = n;
+    return 0;
+}
+
 int rl_collect(RlModel *m, const KflcNode *form,
                        KflcArena *arena, KflcDiag *diag)
 {
     memset(m, 0, sizeof *m);
+    /* The declared envelopes are this program's, so the table they
+     * land in is emptied before this program fills it. */
+    kflc_capture_declared_reset();
 
     for (const KflcNode *c = form->children; c; c = c->next) {
         switch (c->kind) {
@@ -1477,6 +1642,9 @@ int rl_collect(RlModel *m, const KflcNode *form,
         case KFLN_STMT_SENSOR:
             if (rl_collect_sensor_(m, s, diag)) err = 1;
             break;
+        case KFLN_STMT_CAPTURE_ENVELOPE:
+            if (rl_collect_capture_envelope_(m, s, diag)) err = 1;
+            break;
         case KFLN_STMT_PLAN:
             /* The block's own record. Its action channels were
              * appended after it by the parser and are collected by
@@ -1554,6 +1722,17 @@ int rl_collect(RlModel *m, const KflcNode *form,
                         "astro_payload declarations in a reinforcement "
                         "learning world must be top level: the payload "
                         "set is part of the compiled program's identity");
+                    err = 1;
+                }
+                /* An envelope's limits become compile-time constants
+                 * of every port that names it, so the set of them
+                 * cannot be conditional either. */
+                if (c->kind == KFLN_STMT_CAPTURE_ENVELOPE) {
+                    kflc_diag_errorf(diag, c->line,
+                        "capture_envelope declarations in a "
+                        "reinforcement learning world must be top "
+                        "level: an envelope's limits are compile-time "
+                        "constants of the artifact");
                     err = 1;
                 }
             }

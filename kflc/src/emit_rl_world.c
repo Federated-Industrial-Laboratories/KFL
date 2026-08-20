@@ -305,14 +305,30 @@ int rl_emit_prologue(FILE *out, const RlModel *m,
 "    double hit;\n"
 "    double fraction;\n"
 "    double speed;\n"
-"    /* What a port observe form publishes on a transition whose\n"
-"     * contact was between two docking interfaces: whether it\n"
-"     * satisfied every condition of the declared envelope, and the\n"
-"     * residuals the test was given. They are latched because the\n"
-"     * test is a statement about the instant of contact, and by the\n"
-"     * end of the transition the resolution has already removed the\n"
-"     * relative velocity the test read. */\n"
-"    double port_hit;\n"
+"} KflrlContact;\n\n", out);
+    /* The port latch is per port rather than per body. A body may
+     * carry several docking interfaces and take part in several
+     * pairings, and a latch shared across them would publish one
+     * pairing's residuals under another pairing's name. */
+    fprintf(out, "#define KFLRL_N_PLAT %d\n\n",
+            m->n_ports > 0 ? m->n_ports : 1);
+    fputs(
+"/* What a port observe form publishes on a transition whose contact\n"
+" * was between two docking interfaces: which port this one met,\n"
+" * whether the pair satisfied every condition of the declared\n"
+" * envelope, and the residuals the test was given.\n"
+" *\n"
+" * They are latched because the test is a statement about the instant\n"
+" * of contact, and by the end of the transition the resolution has\n"
+" * already removed the relative velocity the test read.\n"
+" *\n"
+" * `partner` is what makes the latch a fact about a pairing rather\n"
+" * than about a port: a form publishes the latched values only when\n"
+" * the contact was with the port that form is paired against, and\n"
+" * reads the state as it stands otherwise. */\n"
+"typedef struct {\n"
+"    double hit;\n"
+"    int    partner;       /* port index met, -1 when none */\n"
 "    double captured;\n"
 "    double axial;\n"
 "    double lateral;\n"
@@ -322,38 +338,49 @@ int rl_emit_prologue(FILE *out, const RlModel *m,
 "    double v_lateral;\n"
 "    double v_pitchyaw;\n"
 "    double v_roll;\n"
-"} KflrlContact;\n\n", out);
+"    double v_cg;\n"
+"} KflrlPortLatch;\n\n", out);
+    /* Capacity one less than the vehicle count. Every join gives one
+     * body a leader and a body follows at most one leader, so a world
+     * of n vehicles admits at most n-1 joins and the table can never
+     * be the thing that refuses one. */
+    fprintf(out, "#define KFLRL_N_JOINS %d\n\n",
+            m->n_veh > 1 ? m->n_veh - 1 : 1);
     fputs(
-"/* A pair joined by a capture.\n"
+"/* One join, formed by a capture.\n"
 " *\n"
 " * A capture is not a resolution the environment declares. It takes\n"
 " * precedence over the declared one, because a programme told its\n"
 " * craft is docked and then shown it flung away has been told two\n"
 " * things that cannot both be true; and it does not merely stop the\n"
-" * pair, it makes it one body. Mass is summed, inertia is summed\n"
-" * about the joint centre of mass by the parallel-axis theorem, and\n"
-" * the joint body is carried by whichever of the two has the greater\n"
-" * mass, since one of them must carry it and the joint centre of mass\n"
-" * lies nearer that one.\n"
+" * pair, it makes them one body.\n"
 " *\n"
-" * Thereafter the pair is projected back onto one rigid motion at the\n"
-" * end of every sub-advance: the follower is placed from the carrier\n"
-" * at the frozen offset, and the two momenta are summed and turned\n"
-" * back into one velocity and one rate. Projecting rather than\n"
-" * slaving is what keeps a thruster on either craft accelerating the\n"
-" * pair, which is what a task that continues past docking needs. The\n"
-" * follower's own colliders leave the pass, the pair being one body\n"
-" * and the pass a test between bodies.\n"
+" * A join attaches a follower to a leader. The follower brings\n"
+" * whatever is already joined beneath it, so a chain of them is one\n"
+" * composite: mass summed over its members, centre of mass the\n"
+" * mass-weighted mean of theirs, inertia the sum of theirs carried to\n"
+" * that centre by the parallel-axis theorem. A body follows at most\n"
+" * one leader, which is what makes the set of joins a forest and the\n"
+" * composite well defined.\n"
 " *\n"
-" * One join per environment. A second capture while joined is left\n"
-" * alone rather than nested: the construction below describes a pair\n"
-" * and says so. */\n"
+" * The chain is projected back onto one rigid motion at the end of\n"
+" * every sub-advance: each follower is placed from its leader at the\n"
+" * frozen offset, and the members' momenta are summed and turned back\n"
+" * into one velocity and one rate. Projecting rather than slaving is\n"
+" * what keeps a thruster on any member accelerating the whole, which\n"
+" * is what a task that continues past docking needs.\n"
+" *\n"
+" * A member's colliders leave the pass against the other members of\n"
+" * its own chain and stay live against every other body, so carried\n"
+" * cargo still reports what it runs into. */\n"
 "typedef struct {\n"
 "    int     active;\n"
-"    int     carrier;      /* vehicle slot carrying the joint body */\n"
+"    int     leader;       /* vehicle slot carrying the follower */\n"
 "    int     follower;\n"
-"    K26V3   offset;       /* follower origin, carrier body frame */\n"
-"    K26Quat rel;          /* follower attitude = carrier's times this */\n"
+"    int     port_leader;  /* port index on the leader, -1 when none */\n"
+"    int     port_follower;\n"
+"    K26V3   offset;       /* follower origin, leader body frame */\n"
+"    K26Quat rel;          /* follower attitude = leader's times this */\n"
 "} KflrlJoin;\n\n", out);
     if (m->n_colliders > 0) {
         fputs("static const K26AstroCollShape kflrl_coll_[] = {\n", out);
@@ -465,6 +492,23 @@ int rl_emit_prologue(FILE *out, const RlModel *m,
 "    out->omega = b->omega;\n"
 "    out->mass = b->mass;\n"
 "    out->com_offset = com;\n"
+"}\n\n"
+"/* Whether the two ports of one pairing are held by an active join.\n"
+" * This is the standing state a `full` port observe publishes, which\n"
+" * the capture channel is not: that one is a pulse on the step whose\n"
+" * contact met every condition, and it is clear on every step after\n"
+" * it however long the two stay mated. */\n"
+"static double kflrl_ports_joined_(const KflrlJoin *jn, int pa, int pb)\n"
+"{\n"
+"    if (!jn) return 0.0;\n"
+"    for (int k = 0; k < KFLRL_N_JOINS; k++) {\n"
+"        if (!jn[k].active) continue;\n"
+"        if ((jn[k].port_leader == pa && jn[k].port_follower == pb) ||\n"
+"            (jn[k].port_leader == pb && jn[k].port_follower == pa)) {\n"
+"            return 1.0;\n"
+"        }\n"
+"    }\n"
+"    return 0.0;\n"
 "}\n\n", out);
     }
 
@@ -1047,7 +1091,8 @@ int rl_emit_build_world(FILE *out, const RlModel *m,
         if (s->kind == KFLN_STMT_EPISODE || s->kind == KFLN_STMT_ACTION ||
             s->kind == KFLN_STMT_ON_STEP || s->kind == KFLN_STMT_OBJECTIVE ||
             s->kind == KFLN_STMT_AGENT ||
-            s->kind == KFLN_STMT_ASTRO_PAYLOAD) {
+            s->kind == KFLN_STMT_ASTRO_PAYLOAD ||
+            s->kind == KFLN_STMT_CAPTURE_ENVELOPE) {
             continue;
         }
         rl_collect_lets(s, arena, &live, &live_n, &live_cap);
@@ -1097,6 +1142,10 @@ int rl_emit_build_world(FILE *out, const RlModel *m,
         /* A plan block declares an action space and a destination for
          * what that space produces; it builds nothing in the world. */
         case KFLN_STMT_PLAN:
+        /* A declared capture envelope is a set of compile-time
+         * constants already folded into the ports that name it, so
+         * the block builds nothing here either. */
+        case KFLN_STMT_CAPTURE_ENVELOPE:
             continue;
         case KFLN_STMT_OBSERVE:
             if (rl_observe_as(s)) continue;   /* channel, not a print */

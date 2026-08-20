@@ -707,20 +707,78 @@ roll reference must not be parallel to it. `capture` names the
 envelope a contact at this port is judged against, and the compiler
 builds the port's mating plane collider from the diameter that
 envelope publishes, so the interface geometry is the envelope's and
-not the author's. One envelope is defined, `idss_e`; any other name is
-refused. A port declaring no envelope is geometry the program can
-describe and carries no collider and no test.
+not the author's. The name resolves against the envelope the compiler
+defines, `idss_e`, together with whatever the program declares in a
+`capture_envelope` block; a name in neither is refused. A port
+declaring no envelope is geometry the program can describe and carries
+no collider and no test.
 
 The mating plane is a square plate circumscribing the published
 circle, because the collider set has no round primitive. The square
 contains the circle, so it reports every contact a disc would report
 and some a disc would miss: an approach passing between the circle's
-edge and the square's corner, which for the defined envelope is
-between 0.60 m and 0.85 m off the axis, the second figure rounded up
-from 0.8485 m, meets the plate where a disc would let it by. That
-band is far outside any capture, whose lateral misalignment limit is
-0.10 m, so it changes which approaches count as an impact and never
-which count as a capture.
+edge and the square's corner, which for `idss_e` is between 0.60 m and
+0.85 m off the axis, the second figure rounded up from 0.8485 m, meets
+the plate where a disc would let it by. That band is far outside that
+envelope's own lateral misalignment limit of 0.10 m, so it changes
+which approaches count as an impact and never which count as a
+capture. The same holds for a declared envelope whose lateral
+misalignment limit is inside its own plate's radius, which is the
+ordinary case; an envelope declaring a limit beyond that has a corner
+band a disc would not have, and this is where that is said.
+
+### Declared capture envelopes
+
+```
+capture_envelope grasp_s
+    axial_rate 0.00 0.05
+    lateral_rate 0.02
+    pitchyaw_rate 3.0
+    roll_rate 3.0
+    lateral 0.05
+    pitchyaw 10.0
+    roll 180.0
+    diameter 700.0
+end
+```
+
+Declares the limits a contact at a port naming this envelope is judged
+against. One block per name, in the world prefix, and the name is what
+a port's `capture` mark spells.
+
+| Field           | Meaning                                             | Unit    |
+|-----------------|-----------------------------------------------------|---------|
+| `axial_rate`    | Closing rate band, lower bound then upper.          | m/s     |
+| `lateral_rate`  | Lateral rate at the interface.                      | m/s     |
+| `pitchyaw_rate` | Vector sum of the pitch and yaw rate.               | deg/s   |
+| `roll_rate`     | Roll rate.                                          | deg/s   |
+| `lateral`       | Lateral misalignment.                               | m       |
+| `pitchyaw`      | Vector sum of the pitch and yaw misalignment.       | deg     |
+| `roll`          | Roll misalignment.                                  | deg     |
+| `diameter`      | Mating plane diameter.                              | mm      |
+
+The units are the ones a published contact-condition table prints, and
+the compiler converts them once into the SI units the artifact carries,
+so a figure written here is the figure a source document shows. The
+operands are plain numbers rather than expressions: an envelope becomes
+a set of compile-time constants, and the whole of each number must be
+consumed, so a unit suffix is a refusal rather than a silent
+truncation.
+
+Every field is required and there are no defaults, because a tolerance
+nobody declared would be a number the compiler invented. Refused, each
+naming what it refuses: a second block of the same name; a name the
+compiler already defines; a missing field; a field declared twice; a
+field taking the wrong count of numbers; a value that is not a number;
+a closing band with its lower bound above its upper; a negative rate or
+misalignment; a misalignment angle outside 0 to 180 degrees; a diameter
+that is not positive.
+
+The ninth binding condition needs no field of its own. The lateral rate
+the combination of lateral rate and pitch or yaw rate produces at the
+arriving craft's centre of mass is bounded by the declared
+`lateral_rate`, exactly as it is for the envelope the compiler defines.
+It is published by the `full` mark on a port observe.
 
 ### Observation channels
 
@@ -1028,12 +1086,12 @@ Neither runs on a contact that captures at a docking port; see below.
 #### Docking ports
 
 ```
-observe port <port> of <body> as <name>
+observe port <port> of <body> [against <port> of <body>] [full] as <name>
 ```
 
 Publishes how far a named docking port on a body is from mated with
-the port it faces, and whether the contact it just made was a capture.
-Nine components:
+the port it is paired against, and whether the contact it just made
+was a capture. Nine components, and two more with the `full` mark:
 
 | Component            | Value                                                                              |
 |----------------------|------------------------------------------------------------------------------------|
@@ -1046,6 +1104,20 @@ Nine components:
 | `<name>_v_lateral`   | Lateral rate at the ports, in metres per second.                                   |
 | `<name>_v_pitchyaw`  | Vector sum of the pitch and yaw rate, in radians per second.                        |
 | `<name>_v_roll`      | Roll rate, in radians per second.                                                  |
+| `<name>_v_cg`        | With `full` only. The lateral rate the combination of lateral rate and pitch or yaw rate produces at this craft's centre of mass, in metres per second. |
+| `<name>_joined`      | With `full` only. 1.0 while the two ports of this pairing are held by an active join, 0.0 otherwise. |
+
+The two the mark adds come after the nine, so a program that adds the
+mark keeps every channel index it had.
+
+`<name>_v_cg` is the ninth binding condition, and it is bounded by the
+envelope's own `lateral_rate` limit rather than by a limit of its own.
+It decides captures, so without the mark a craft can sit inside all
+eight published limits and be refused with nothing published that says
+why. `<name>_joined` is the standing state that the capture channel is
+not: that one is a pulse on the step whose contact met every
+condition, and it is clear on every step after it however long the two
+stay mated.
 
 Angles are the yaw, pitch and roll of this port's frame with respect
 to the mated configuration, taken in that order about the other port's
@@ -1061,10 +1133,25 @@ and the closing rate the test read is gone, so publishing the later
 state would hide the test's own inputs.
 
 The body must declare an `assembly=` carrying a port of that name with
-a `capture` envelope, and exactly one port carrying an envelope must
-be declared on some other body: that is the port this one is measured
-against, and a world with none or with several is refused rather than
-paired by declaration order.
+a `capture` envelope. Which port it is measured against is written in
+the statement when the statement says so, with `against <port> of
+<body>`, and resolved otherwise: the one port carrying an envelope
+declared on some other body. A statement with several candidates and
+no clause is refused naming them, rather than paired by declaration
+order, and a statement with none is refused too. The rule is per
+statement and not per world, so a world of several craft each carrying
+an enveloped port is ordinary, and every program written before the
+clause existed still resolves the same way.
+
+The two ports of a pairing must name the same envelope, refused
+otherwise naming both: two envelopes with equal figures are still two
+interfaces. A passive port may appear in any number of pairings; how
+many may join is the occupancy rule below.
+
+`against` and `full` are read as the clause and the mark only on this
+form, so a body or a sensor genuinely called `against` or `full` keeps
+its name everywhere, this form included: both are reached through the
+words that already introduce one, `of` and `through`.
 
 A port must stand proud of the hull it is mounted on. Its mating
 plane is an ordinary collider, so a hull that reaches past the plane
@@ -1081,16 +1168,44 @@ condition, the capture channel is set for that step, and a program
 ends the episode on it through an ordinary `terminated when`
 predicate.
 
-A capture takes precedence over whichever resolution the episode
-declared. Neither the arrest nor the bounce runs on a captured
-contact: the pair becomes one body instead, and stays one for the
-rest of the episode. Mass is summed, and the two inertia tensors are
-summed about the joint centre of mass, so the mated pair turns as the
-pair and not as either craft. Both craft keep their own thrusters and
-their own wheels, and either one accelerates the pair, which is what
-a task that continues past docking needs. A program that ends its
-episode on the capture channel never sees any of this; one that does
-not, does.
+A capture that forms a join takes precedence over whichever resolution
+the episode declared. Neither the arrest nor the bounce runs on it:
+the two craft become one body instead, and stay one for the rest of
+the episode. Mass is summed, and the inertia tensors are summed about
+the joint centre of mass, so the mated pair turns as the pair and not
+as either craft. Every craft in it keeps its own thrusters and its own
+wheels, and any of them accelerates the whole, which is what a task
+that continues past docking needs. A program that ends its episode on
+the capture channel never sees any of this; one that does not, does.
+
+A join attaches a follower to a leader, and the follower brings
+whatever is already joined beneath it, so joins chain. A craft that
+has grasped a piece of debris and then docks at a station is one
+composite of three: mass summed over its members, centre of mass their
+mass-weighted mean, inertia their tensors summed about that centre by
+the parallel-axis theorem. The rule is the same at every chain length,
+so a laden dock needs nothing of its own. A world of n craft admits at
+most n-1 joins, since a craft follows at most one leader.
+
+A member's colliders leave the collision pass against the other
+members of its own chain and stay live against every other body, so
+carried cargo still reports what it runs into.
+
+A port held by an active join is occupied and accepts no further
+capture, and a craft that already follows a leader cannot take a
+second one. A contact that meets an envelope but can form no join for
+one of those reasons is an ordinary contact and is resolved as one,
+under whichever resolution the episode declared. The capture channel
+still pulses, because it reports the verdict on the contact; the
+`full` mark's `<name>_joined` is what reports whether a join followed.
+
+A resolution between two joined chains is between the chains and not
+between the two craft that touched: the mass it answers to is the
+chain's, and the velocity it produces reaches every member. A chain of
+one craft is that craft, so a world with no join takes exactly the
+arithmetic it took before chains existed. The angular half of a bounce
+still turns on the struck craft's own tensor and its own lever arm,
+which the chain then carries to the rest of its members.
 
 The condition is judged from both ports and a capture needs both to
 accept. Either port can be read as the arriving one and the two

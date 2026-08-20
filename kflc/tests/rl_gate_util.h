@@ -400,6 +400,30 @@ static inline uint32_t rl_measured_channels_(const RlSpecView *v,
 }
 
 /* Whole-file bitwise comparison; returns 1 when equal. */
+/* The observation index a published channel name resolves to, or -1
+ * when the blob carries no such name. */
+static inline int find_channel_(const uint8_t *blob, uint32_t len,
+                                const char *want)
+{
+    uint32_t off = 0;
+    int found = -1;
+    while (off + 6 <= len) {
+        uint16_t tag = rl_get_u16_(blob + off);
+        uint32_t l   = rl_get_u32_(blob + off + 2);
+        const uint8_t *val = blob + off + 6;
+        if (tag == K26RL_TAG_OBS_CHANNEL_NAME && l >= 4) {
+            char name[128];
+            uint32_t nl = l - 4;
+            if (nl > sizeof name - 1) nl = sizeof name - 1;
+            memcpy(name, val + 4, nl);
+            name[nl] = '\0';
+            if (strcmp(name, want) == 0) found = (int)rl_get_u32_(val);
+        }
+        off += 6 + l;
+    }
+    return found;
+}
+
 static inline int rl_files_equal_(const char *a, const char *b)
 {
     FILE *fa = fopen(a, "rb");

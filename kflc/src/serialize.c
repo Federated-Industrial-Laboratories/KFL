@@ -771,6 +771,32 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
         break;
     }
 
+    case KFLN_STMT_CAPTURE_ENVELOPE: {
+        /* The fields print in the order they were written, at full
+         * precision: an envelope's figures reach compile-time
+         * constants, so a round trip that rounded one would change
+         * which contacts the program calls a capture. The closing
+         * band's upper bound is printed with its lower one, the two
+         * having come from one line. */
+        indent(out, level);
+        fprintf(out, "capture_envelope %s\n", n->name ? n->name : "?");
+        for (const KflcAttr *a = n->attrs; a; a = a->next) {
+            if (!a->name) continue;
+            if (strcmp(a->name, "axial_rate_hi") == 0) continue;
+            indent(out, level + 1);
+            if (strcmp(a->name, "axial_rate_lo") == 0) {
+                const KflcAttr *hi = find_attr_(n->attrs, "axial_rate_hi");
+                fprintf(out, "axial_rate %.17g %.17g\n", a->value.u.f,
+                        hi ? hi->value.u.f : 0.0);
+                continue;
+            }
+            fprintf(out, "%s %.17g\n", a->name, a->value.u.f);
+        }
+        indent(out, level);
+        fputs("end\n", out);
+        break;
+    }
+
     case KFLN_STMT_SENSOR: {
         indent(out, level);
         fprintf(out, "sensor %s\n", n->name ? n->name : "?");

@@ -341,29 +341,6 @@ static void pilot_(const double *o, const GateChan *c, double v_close,
     }
 }
 
-/* ---- the spec's channel names ------------------------------------ */
-
-static int find_channel_(const uint8_t *blob, uint32_t len, const char *want)
-{
-    uint32_t off = 0;
-    int found = -1;
-    while (off + 6 <= len) {
-        uint16_t tag = rl_get_u16_(blob + off);
-        uint32_t l   = rl_get_u32_(blob + off + 2);
-        const uint8_t *val = blob + off + 6;
-        if (tag == K26RL_TAG_OBS_CHANNEL_NAME && l >= 4) {
-            char name[128];
-            uint32_t nl = l - 4;
-            if (nl > sizeof name - 1) nl = sizeof name - 1;
-            memcpy(name, val + 4, nl);
-            name[nl] = '\0';
-            if (strcmp(name, want) == 0) found = (int)rl_get_u32_(val);
-        }
-        off += 6 + l;
-    }
-    return found;
-}
-
 int main(void)
 {
     if (!rl_libs_present_("test_rl_docking")) return 77;
@@ -1532,6 +1509,253 @@ int main(void)
                    "alone would gain %+.12g\n", gained,
                    thrust_n * burn * dt_s / m1);
             ms.destroy(me);
+        }
+    }
+    n_pass++;
+
+    /* ---- the joined pair turns with the pair's tensor ------------ *
+     *
+     * The mass arm above fires along the line of centres, so the
+     * composite inertia enters with a zero lever arm and the arm
+     * measures the summed mass and nothing else. This one is its
+     * other half: the same construction fired ACROSS that line, where
+     * the answer is the composite tensor and where the parallel-axis
+     * terms are most of it.
+     *
+     * The fixture is built so the tensor is known in advance. Each
+     * craft is one uniform box centred on its own origin, so its own
+     * tensor is the analytic one for a solid box; the mating planes
+     * meet, so the two centres stand at the sum of the two port arms
+     * apart; both boxes are axis aligned and both centres are on the
+     * line of centres, so the composite tensor is diagonal and its
+     * third component is the two boxes' own third components carried
+     * to the composite centre by the parallel-axis theorem. Every one
+     * of those figures is arithmetic on this fixture's own
+     * declarations, written here.
+     *
+     * Three things make it a measurement rather than a restatement.
+     * The torque is exactly constant: the thrust direction and the
+     * lever arm both turn with the craft, and both are perpendicular
+     * to the axis the pair turns about, so their cross product's
+     * third component does not change as the pair rotates; and the
+     * composite tensor's third component is unchanged by a rotation
+     * about that same axis. A control run fires the same thruster on
+     * the same craft before the two are joined, where the line of
+     * action passes through that craft's own centre of mass and the
+     * answer is no rotation at all, so a thruster wired to a torque
+     * fails there first. And the two answers this rules out are the
+     * tensor without its parallel-axis terms, which is seven times
+     * the answer, and the thrusting craft's own tensor, which is
+     * twenty-nine times it.
+     */
+    printf("the joined pair turns with the pair's own tensor\n");
+    {
+        /* The fixture's own numbers, in one place. */
+        const double m1 = 1000.0, m2 = 3000.0, mt = m1 + m2;
+        const double hx = 1.0, hy = 0.5;        /* box half extents */
+        const double arm1 = 1.2, arm2 = 2.5;    /* the two port arms */
+        const double thrust_n = 400.0, dt_s = 0.25;
+        const int burn = 4;
+        /* Each box's own third inertia component about its own centre,
+         * for a uniform solid box: the mass over three times the sum
+         * of the squares of the two half extents across that axis. */
+        const double j1 = m1 / 3.0 * (hx * hx + hy * hy);
+        const double j2 = m2 / 3.0 * (hx * hx + hy * hy);
+        /* The frozen separation, and where the composite centre of
+         * mass sits on it. */
+        const double sep = arm1 + arm2;
+        const double d1  = m2 * sep / mt;
+        const double d2  = m1 * sep / mt;
+        const double j_pair = j1 + m1 * d1 * d1 + j2 + m2 * d2 * d2;
+        /* The thruster sits on the first craft's own centre, so its
+         * lever arm about the composite centre is that craft's own
+         * offset from it, and the torque is that arm times the
+         * thrust. The sign is the geometry's: the thrusting craft is
+         * the lighter one and sits on the negative side of the
+         * composite centre along the line of centres, while the
+         * thrust is along the positive second axis, so the turn is
+         * about the negative third axis. */
+        const double torque = -d1 * thrust_n;
+        const double want_alpha = torque / j_pair;
+        const double want_dw = want_alpha * burn * dt_s;
+        /* Body 0 is the anchor; the two craft follow it in
+         * declaration order. */
+        enum { ONE = 1, TWO = 2, NB = 3 };
+        const int32_t nvals = (int32_t)(NB * 6);
+        const int32_t nquat = (int32_t)(NB * 7);
+        double fire[1] = { 1.0 }, coast[1] = { 0.0 };
+        char prog[3072];
+        void *tso;
+        RlSurface ts;
+
+        rl_write_file_(WORK_DIR "/joint_a.k26asm",
+            "assembly joint_a\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"gate fixture, not a craft\" computed\n"
+            "    component hull\n"
+            "        mass 1000.0\n"
+            "        at 0 0 0\n"
+            "        collider box 1.0 0.5 0.5\n"
+            "    end\n"
+            "    port dock\n"
+            "        at 1.2 0.0 0.0\n"
+            "        axis 1.0 0.0 0.0\n"
+            "        roll_ref 0.0 1.0 0.0\n"
+            "        capture idss_e\n"
+            "    end\n"
+            "    thruster side\n"
+            "        at 0.0 0.0 0.0\n"
+            "        dir 0.0 1.0 0.0\n"
+            "        thrust 400.0\n"
+            "    end\n"
+            "end\n");
+        rl_write_file_(WORK_DIR "/joint_b.k26asm",
+            "assembly joint_b\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"gate fixture, not a craft\" computed\n"
+            "    component hull\n"
+            "        mass 3000.0\n"
+            "        at 0 0 0\n"
+            "        collider box 1.0 0.5 0.5\n"
+            "    end\n"
+            "    port dock\n"
+            "        at 2.5 0.0 0.0\n"
+            "        axis 1.0 0.0 0.0\n"
+            "        roll_ref 0.0 1.0 0.0\n"
+            "        capture idss_e\n"
+            "    end\n"
+            "end\n");
+        /* The anchor is here for the reason the mass arm's is: to
+         * occupy the index the integrator treats as the immobile
+         * central mass. The velocity across the line of centres is
+         * shared by both craft, so every relative quantity is what it
+         * would be without it; it is there because a craft left at
+         * rest sits near this anchor's own escape speed, where a
+         * two-body propagation is at its worst conditioned. */
+        snprintf(prog, sizeof prog,
+            "form RL_JOINT\n"
+            "fn world w\n"
+            "    astro_body anchor gm=1.0e-6 mass=1.0"
+            " pos_x=0.0 pos_y=1.0e9 pos_z=0.0\n"
+            "    astro_body one assembly=\"%s/joint_a.k26asm\""
+            " pos_x=0.0 pos_y=0.0 pos_z=0.0 vel_z=1.0 quat_w=1.0\n"
+            "    astro_body two assembly=\"%s/joint_b.k26asm\""
+            " pos_x=5.3 pos_y=0.0 pos_z=0.0 vel_x=-0.07 vel_z=1.0"
+            " quat_w=0.0 quat_x=0.0 quat_y=1.0 quat_z=0.0\n"
+            "    episode\n"
+            "        control_dt %.17g\n"
+            "        substeps 5\n"
+            "        horizon 400\n"
+            "        contact bounce restitution 0.9 friction 0.1\n"
+            "    end\n"
+            "    action push box 0.0 1.0 default 0.0\n"
+            "    on_step\n"
+            "        one.side.throttle = push\n"
+            "    end\n"
+            "    observe port dock of one as pa\n"
+            "    observe contact of one as tc\n"
+            "    objective\n"
+            "        reward pa_axial\n"
+            "    end\n"
+            "end\n"
+            "end\n", WORK_DIR, WORK_DIR, dt_s);
+        rl_write_file_(WORK_DIR "/joint.kfl", prog);
+        rl_compile_(WORK_DIR "/joint.kfl", WORK_DIR "/joint", WORK_DIR);
+        tso = rl_dlopen_(WORK_DIR "/joint.rlenv.so");
+        rl_resolve_surface_(tso, &ts);
+
+        /* The control: before anything is joined the thrust line runs
+         * through the thrusting craft's own centre of mass, so it
+         * turns not at all and answers its own mass across the line. */
+        {
+            K26RlEnv *te = NULL;
+            double s0[NB * 6], s1[NB * 6], q1[NB * 7];
+
+            ASSERT(ts.create(5u, 1u, &te) == K26RL_OK);
+            ASSERT(ts.bodies(te, K26RL_BODY_REF_ORIGIN, s0, (uint32_t)nvals)
+                   == nvals);
+            for (int k = 0; k < burn; k++) {
+                ASSERT(ts.step(te, fire) == K26RL_OK);
+            }
+            ASSERT(ts.bodies(te, K26RL_BODY_REF_ORIGIN, s1, (uint32_t)nvals)
+                   == nvals);
+            ASSERT(ts.attitudes(te, q1, (uint32_t)nquat) == nquat);
+            near_("unjoined craft answers its own mass across the line",
+                  s1[ONE * 6 + 4] - s0[ONE * 6 + 4],
+                  thrust_n * burn * dt_s / m1, 1e-6);
+            for (int k = 0; k < 3; k++) {
+                ASSERT(fabs(q1[ONE * 7 + 4 + k]) < 1e-12);
+            }
+            printf("  and it did not turn: rate %.3e rad/s\n",
+                   fabs(q1[ONE * 7 + 6]));
+            ts.destroy(te);
+        }
+
+        {
+            K26RlEnv *te = NULL;
+            uint8_t tb[16384];
+            double obs[32];
+            double s1[NB * 6], q0[NB * 7], q1[NB * 7];
+            int32_t tlen;
+            int hit, capd, cap_step = -1, k;
+            double measured_sep, dw;
+
+            ASSERT(ts.create(5u, 1u, &te) == K26RL_OK);
+            tlen = ts.spec(te, tb, sizeof tb);
+            ASSERT(tlen > 0);
+            hit  = find_channel_(tb, (uint32_t)tlen, "tc_hit");
+            capd = find_channel_(tb, (uint32_t)tlen, "pa_captured");
+            ASSERT(hit >= 0 && capd >= 0);
+            for (k = 0; k < 300; k++) {
+                ASSERT(ts.step(te, coast) == K26RL_OK);
+                ASSERT(ts.obs(te, obs) == K26RL_OK);
+                if (obs[hit] != 0.0) { cap_step = k; break; }
+            }
+            ASSERT(cap_step >= 0);
+            printf("  contact at step %d, captured %.0f\n", cap_step,
+                   obs[capd]);
+            ASSERT(obs[capd] != 0.0);
+
+            /* The separation the join froze, which is what the
+             * parallel-axis arms above are taken from. The two mating
+             * planes meet, so it is the sum of the two port arms. */
+            ASSERT(ts.bodies(te, K26RL_BODY_REF_ORIGIN, s1, (uint32_t)nvals)
+                   == nvals);
+            measured_sep = s1[TWO * 6] - s1[ONE * 6];
+            near_("the frozen separation is the two port arms",
+                  measured_sep, sep, 2e-3);
+
+            ASSERT(ts.attitudes(te, q0, (uint32_t)nquat) == nquat);
+            for (k = 0; k < burn; k++) {
+                ASSERT(ts.step(te, fire) == K26RL_OK);
+            }
+            ASSERT(ts.attitudes(te, q1, (uint32_t)nquat) == nquat);
+            /* The rate is read in each craft's own body frame. The
+             * far craft is turned half a turn about its second axis
+             * to face the near one, so its third axis is the world's
+             * reversed and its reading is the near one's negated:
+             * both are compared, because a pair that had come apart
+             * under the burn would leave them unrelated. */
+            dw = q1[ONE * 7 + 6] - q0[ONE * 7 + 6];
+            printf("  composite tensor %.6f kg m^2 against %.6f for the "
+                   "two boxes alone\n", j_pair, j1 + j2);
+            near_("the pair turns at the composite tensor's rate", dw,
+                  want_dw, 2e-4);
+            near_("and the far craft turns with it",
+                  q1[TWO * 7 + 6] - q0[TWO * 7 + 6], -want_dw, 2e-4);
+            /* Without the parallel-axis terms the tensor is seven
+             * times smaller and the rate seven times larger; the
+             * thrusting craft's own tensor is smaller again. Both are
+             * orders outside the bound asserted. */
+            ASSERT(fabs(dw - torque * burn * dt_s / (j1 + j2)) > 0.4);
+            ASSERT(fabs(dw - torque * burn * dt_s / j1) > 2.0);
+            /* And the pair turned about that axis alone, which is what
+             * makes the third component the whole of the answer. */
+            for (k = 0; k < 2; k++) {
+                ASSERT(fabs(q1[ONE * 7 + 4 + k]) < 1e-9);
+                ASSERT(fabs(q1[TWO * 7 + 4 + k]) < 1e-9);
+            }
+            ts.destroy(te);
         }
     }
     n_pass++;

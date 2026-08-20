@@ -1,12 +1,13 @@
 /* test_rl_contextual_keywords.c: a construct word is still a name.
  *
- * `agent`, `sensor`, `on_step`, `astro_payload` and `engage` introduce
- * constructs at statement position inside a `fn world` body, and `at`
- * and `effect` are read as connectives inside two of those statements.
- * None of the seven is a reserved word: a Grammar 3.1 program that
- * binds one of them as an ordinary identifier compiles and behaves as
- * it always did, because each opens its construct only when what
- * follows is what that construct's form requires.
+ * `agent`, `sensor`, `on_step`, `astro_payload`, `capture_envelope`
+ * and `engage` introduce constructs at statement position inside a
+ * `fn world` body, and `at`, `effect`, `against` and `full` are read
+ * as connectives or marks inside three of those statements. None of
+ * the ten is a reserved word: a Grammar 3.1 program that binds one of
+ * them as an ordinary identifier compiles and behaves as it always
+ * did, because each opens its construct only when what follows is
+ * what that construct's form requires.
  *
  * Gates, one arm per keyword per shape:
  *   1. The identifier readings. `<word> = 2.0`, `<word>(3.0)` as a
@@ -58,10 +59,10 @@
  * `effect` are connectives inside two statements and are here because
  * a word read anywhere is a word that can be lost everywhere. */
 static const char *const WORDS[] = {
-    "agent", "sensor", "on_step", "astro_payload", "engage", "at",
-    "effect", NULL
+    "agent", "sensor", "on_step", "astro_payload", "capture_envelope",
+    "engage", "at", "effect", "against", "full", NULL
 };
-#define WORD_COUNT 7
+#define WORD_COUNT 10
 
 static int g_arms;
 
@@ -473,9 +474,152 @@ static void arm_effect_as_body_(void)
                   "observe", SRC);
 }
 
+/* The `capture_envelope` block opens where its form is written, and
+ * the port observe's two words are read as the clause and the mark
+ * they are. */
+static void arm_capture_forms_(void)
+{
+    static const char *const SRC =
+        "form CTXCAPENV\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    capture_envelope grasp_s\n"
+        "        axial_rate 0.00 0.60\n"
+        "        lateral_rate 0.50\n"
+        "        pitchyaw_rate 30.0\n"
+        "        roll_rate 30.0\n"
+        "        lateral 0.30\n"
+        "        pitchyaw 20.0\n"
+        "        roll 180.0\n"
+        "        diameter 700.0\n"
+        "    end\n"
+        "    astro_body one assembly=\"ctx_port_a.k26asm\""
+        " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+        "    astro_body two assembly=\"ctx_port_b.k26asm\""
+        " parent=earth pos_x=7.0e6 pos_y=30.0 vel_y=7546.0"
+        " quat_w=0.0 quat_y=1.0\n"
+        "    episode\n"
+        "        control_dt 0.5\n"
+        "        horizon 8\n"
+        "    end\n"
+        "    action thrust box -1.0 1.0 default 0.0\n"
+        "    observe port grasp of one against face of two full as gr\n"
+        "    objective\n"
+        "        reward gr_axial\n"
+        "    end\n"
+        "end\n"
+        "end\n";
+    must_compile_("the capture_envelope block, the `against` clause and "
+                  "the `full` mark in one program", SRC);
+}
+
+/* Bodies and sensors genuinely called `against` and `full`, reached
+ * through the port observe's own trailing-clause scan. A greedy
+ * reading of either word takes these names away; a fixture holding
+ * only the clause form could not tell the two apart. */
+static void arm_port_clause_names_(void)
+{
+    static const char *const HEAD =
+        "form CTXPORTNAME\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    capture_envelope grasp_s\n"
+        "        axial_rate 0.00 0.60\n"
+        "        lateral_rate 0.50\n"
+        "        pitchyaw_rate 30.0\n"
+        "        roll_rate 30.0\n"
+        "        lateral 0.30\n"
+        "        pitchyaw 20.0\n"
+        "        roll 180.0\n"
+        "        diameter 700.0\n"
+        "    end\n";
+    /* One case per shape: the passive body named by each word, and a
+     * sensor named by each word routing the same statement. */
+    static const struct { const char *what, *body, *stmt; } CASE_[] = {
+        { "a body called `against` carrying the passive port",
+          "against",
+          "    observe port grasp of one against face of against as gr\n" },
+        { "a body called `full` carrying the passive port",
+          "full",
+          "    observe port grasp of one against face of full as gr\n" },
+        { "a sensor called `against` on a marked port observe",
+          "two",
+          "    observe port grasp of one against face of two full "
+          "through against as gr\n" },
+        { "a sensor called `full` on a marked port observe",
+          "two",
+          "    observe port grasp of one against face of two full "
+          "through full as gr\n" }
+    };
+    for (size_t i = 0; i < sizeof CASE_ / sizeof CASE_[0]; i++) {
+        char src[4096];
+        snprintf(src, sizeof src,
+            "%s"
+            "    astro_body one assembly=\"ctx_port_a.k26asm\""
+            " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+            "    astro_body %s assembly=\"ctx_port_b.k26asm\""
+            " parent=earth pos_x=7.0e6 pos_y=30.0 vel_y=7546.0"
+            " quat_w=0.0 quat_y=1.0\n"
+            "    sensor against\n"
+            "        noise normal 0.0 0.001\n"
+            "    end\n"
+            "    sensor full\n"
+            "        noise normal 0.0 0.001\n"
+            "    end\n"
+            "    episode\n"
+            "        control_dt 0.5\n"
+            "        horizon 8\n"
+            "    end\n"
+            "    action thrust box -1.0 1.0 default 0.0\n"
+            "%s"
+            "    objective\n"
+            "        reward gr_axial\n"
+            "    end\n"
+            "end\n"
+            "end\n", HEAD, CASE_[i].body, CASE_[i].stmt);
+        must_compile_(CASE_[i].what, src);
+    }
+}
+
 int main(void)
 {
     rl_run_or_die_("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
+    /* Two craft with a docking port each, for the port form's arms.
+     * The port stands proud of its own hull and the mating plate is
+     * narrower than the hull it sits on, which is what the grammar
+     * asks of a port that is meant to be met first. */
+    rl_write_file_(WORK_DIR "/ctx_port_a.k26asm",
+        "assembly ctx_port_a\n"
+        "    frame x_to_port\n"
+        "    provenance mass \"gate fixture, not a craft\" computed\n"
+        "    component hull\n"
+        "        mass 1000.0\n"
+        "        at 0 0 0\n"
+        "        collider box 0.5 0.4 0.4\n"
+        "    end\n"
+        "    port grasp\n"
+        "        at 0.9 0.0 0.0\n"
+        "        axis 1.0 0.0 0.0\n"
+        "        roll_ref 0.0 1.0 0.0\n"
+        "        capture grasp_s\n"
+        "    end\n"
+        "end\n");
+    rl_write_file_(WORK_DIR "/ctx_port_b.k26asm",
+        "assembly ctx_port_b\n"
+        "    frame x_to_port\n"
+        "    provenance mass \"gate fixture, not a craft\" computed\n"
+        "    component hull\n"
+        "        mass 2000.0\n"
+        "        at 0 0 0\n"
+        "        collider box 0.5 0.4 0.4\n"
+        "    end\n"
+        "    port face\n"
+        "        at 0.9 0.0 0.0\n"
+        "        axis 1.0 0.0 0.0\n"
+        "        roll_ref 0.0 1.0 0.0\n"
+        "        capture grasp_s\n"
+        "    end\n"
+        "end\n");
     /* The construct arms declare a payload, which needs a body that
      * carries a vehicle, so the assembly and its mesh travel with the
      * generated sources: an assembly path resolves against the
@@ -500,6 +644,8 @@ int main(void)
     arm_both_readings_();
     arm_effector_forms_();
     arm_effect_as_body_();
+    arm_capture_forms_();
+    arm_port_clause_names_();
 
     printf("test_rl_contextual_keywords: %d arm(s) passed over %d "
            "word(s), run arms %s\n", g_arms, WORD_COUNT,

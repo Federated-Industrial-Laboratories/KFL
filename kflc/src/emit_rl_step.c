@@ -149,6 +149,7 @@ static const char *rl_step_stmt_why_(const KflcNode *s, const char **what)
     case KFLN_STMT_SENSOR_TERM:
     case KFLN_STMT_AGENT:
     case KFLN_STMT_PLAN:
+    case KFLN_STMT_CAPTURE_ENVELOPE:
         *what = "a reinforcement learning construct";
         return "these are declarations of the environment, not acts of "
                "a step";

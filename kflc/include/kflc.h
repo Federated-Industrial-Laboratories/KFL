@@ -229,7 +229,15 @@ typedef enum {
      * the `at` attr names the body it is aimed at. An engagement is an
      * act rather than a declaration, so the statement is admissible
      * inside an `on_step` block and nowhere else. */
-    KFLN_STMT_ENGAGE
+    KFLN_STMT_ENGAGE,
+    /* `capture_envelope <name> ... end`. The limits a contact at a
+     * docking port carrying this envelope is judged against, declared
+     * by the program rather than taken from the compiler's table.
+     * `name` is the envelope's name, which a port's `capture` mark
+     * spells a second time; the attrs carry the eight fields as
+     * verbatim text, in the units a published contact-condition table
+     * prints them in. */
+    KFLN_STMT_CAPTURE_ENVELOPE
 } KflcNodeKind;
 
 /* Type system. The base scalar kinds are joined by KFLT_VECTOR /

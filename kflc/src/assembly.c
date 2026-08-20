@@ -1020,9 +1020,10 @@ KflcAssembly *kflc_assembly_load(const char *path, const char *src_path,
                     used += (size_t)wrote;
                 }
                 kflc_diag_errorf(diag, f->line,
-                    "%s: port `%s`: `capture %s` names no defined envelope; "
-                    "this version defines %s, and an envelope declared in a "
-                    "program is not a surface this version carries",
+                    "%s: port `%s`: `capture %s` names no envelope in "
+                    "scope; in scope here are %s, which is the compiler's "
+                    "own table together with whatever the program being "
+                    "compiled declared in a `capture_envelope` block",
                     resolved, f->name, f->capture, known);
                 return NULL;
             }

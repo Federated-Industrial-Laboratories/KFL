@@ -2523,7 +2523,7 @@ int main(void)
               "        axis 1.0 0.0 0.0\n"
               "        roll_ref 0.0 1.0 0.0\n"
               "        capture idss_f\n",
-              "names no defined envelope" }
+              "names no envelope in scope" }
         };
         for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
             char asset[1024];

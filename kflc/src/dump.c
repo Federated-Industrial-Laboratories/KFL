@@ -47,6 +47,7 @@ static const char *kind_name(KflcNodeKind k)
     case KFLN_STMT_ASTRO_PAYLOAD: return "STMT_ASTRO_PAYLOAD";
     case KFLN_STMT_PLAN: return "STMT_PLAN";
     case KFLN_STMT_ENGAGE:        return "STMT_ENGAGE";
+    case KFLN_STMT_CAPTURE_ENVELOPE: return "STMT_CAPTURE_ENVELOPE";
     }
     return "?";
 }

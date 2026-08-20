@@ -110,6 +110,7 @@ static int stmts_have_rl_(const KflcNode *stmts, const KflcNode *form)
         case KFLN_STMT_AGENT:
         case KFLN_STMT_ASTRO_PAYLOAD:
         case KFLN_STMT_PLAN:
+        case KFLN_STMT_CAPTURE_ENVELOPE:
             return 1;
         case KFLN_STMT_OBSERVE:
             if (observe_as_name_(s)) return 1;

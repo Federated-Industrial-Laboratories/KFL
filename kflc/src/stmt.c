@@ -318,6 +318,9 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
                 return kfl_stmt_parse_astro_payload(L, cur, arena, diag, had_error);
             if (strcmp(cur->str, "plan") == 0)
                 return kfl_stmt_parse_plan(L, cur, arena, diag, had_error);
+            if (strcmp(cur->str, "capture_envelope") == 0)
+                return kfl_stmt_parse_capture_envelope(L, cur, arena, diag,
+                                                       had_error);
         }
     }
 
@@ -1071,6 +1074,70 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
             char *kbeg = p;
             while (*p && *p != '=' && *p != ' ' && *p != '\t') p++;
             if (*p != '=') {
+                /* `against <port> of <body>` names the passive port a
+                 * port observe measures against, and `full` asks that
+                 * form for its two optional channels. Both are read
+                 * only on the port form: a body or a sensor called
+                 * `against` or `full` is reached through the words
+                 * that already introduce one, `of` and `through`, so
+                 * claiming these two everywhere would take names away
+                 * from every other form for no gain. They must precede
+                 * `as`, which remains the last clause on the line. */
+                if (port_form && (size_t)(p - kbeg) == 7 &&
+                    strncmp(kbeg, "against", 7) == 0) {
+                    char *pbeg, *obeg, *bbeg, *pend, *oend, *bend;
+                    char  saved_b;
+                    while (*p == ' ' || *p == '\t') p++;
+                    pbeg = p;
+                    while (*p && *p != ' ' && *p != '\t') p++;
+                    pend = p;
+                    while (*p == ' ' || *p == '\t') p++;
+                    obeg = p;
+                    while (*p && *p != ' ' && *p != '\t') p++;
+                    oend = p;
+                    while (*p == ' ' || *p == '\t') p++;
+                    bbeg = p;
+                    while (*p && *p != ' ' && *p != '\t') p++;
+                    bend = p;
+                    saved_b = *bend;
+                    *pend = '\0'; *oend = '\0'; *bend = '\0';
+                    if (pbeg[0] == '\0' || bbeg[0] == '\0' ||
+                        strcmp(obeg, "of") != 0) {
+                        kflc_diag_errorf(diag, line0,
+                            "observe port %s of %s: `against` names the "
+                            "port this one is measured against and the "
+                            "body that carries it, as `against <port> of "
+                            "<body>`", port_ident, target_ident);
+                        *had_error = 1;
+                        return n;
+                    }
+                    {
+                        KflcValue av, bv;
+                        memset(&av, 0, sizeof av);
+                        memset(&bv, 0, sizeof bv);
+                        av.kind = KFLV_IDENT;
+                        av.u.s  = kflc_arena_strdup(arena, pbeg);
+                        bv.kind = KFLV_IDENT;
+                        bv.u.s  = kflc_arena_strdup(arena, bbeg);
+                        kfl_stmt_append_attr(arena, n, "against", av, line0);
+                        kfl_stmt_append_attr(arena, n, "against_body", bv,
+                                             line0);
+                    }
+                    p = bend;
+                    if (saved_b) { *p = saved_b; p++; }
+                    continue;
+                }
+                if (port_form && (size_t)(p - kbeg) == 4 &&
+                    strncmp(kbeg, "full", 4) == 0) {
+                    char saved_f = *p;
+                    KflcValue fv;
+                    memset(&fv, 0, sizeof fv);
+                    fv.kind = KFLV_IDENT;
+                    fv.u.s  = kflc_arena_strdup(arena, "1");
+                    kfl_stmt_append_attr(arena, n, "full", fv, line0);
+                    if (saved_f) p++;
+                    continue;
+                }
                 /* `through <sensor>` routes the observe's numeric
                  * components through a declared model chain, and
                  * `with truth` publishes the uncorrupted components

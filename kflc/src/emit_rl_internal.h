@@ -211,6 +211,17 @@
 
 #define RL_PORT_COMPS 9
 
+/* The `full` mark adds two more: the rate the envelope's own note
+ * binds, carried to the arriving vehicle's centre of mass, which
+ * decides captures and was published nowhere; and whether the two
+ * ports are joined, which is the standing state the capture channel
+ * deliberately does not carry, being a pulse on the step of the
+ * contact. Both are additive: an unmarked form publishes the nine
+ * above and nothing else, so no program's observation vector changes
+ * width or meaning when these arrive. */
+
+#define RL_PORT_FULL_COMPS 11
+
 /* A detection observe publishes whether the target was seen, the
  * continuous quantity that decision was taken on, and the geometry it
  * was taken from. Both the hard decision and the continuous quantity
@@ -692,6 +703,11 @@ typedef struct {
 typedef struct {
     int    veh, body, coll;
     char   name[KFLC_ASM_NAME_MAX];
+    /* The envelope the port's `capture` mark named. Two ports of one
+     * pairing must name the same one, which is a comparison of names
+     * and not of the limits behind them: two envelopes with equal
+     * figures are still two interfaces. */
+    char   env_name[KFLC_CAPTURE_NAME_MAX];
     double com[3];
     double at[3];
     double basis[3][3];
@@ -860,6 +876,13 @@ typedef struct {
     int         n_thrusters;
     RlPort      ports[RL_MAX_ACT];
     int         n_ports;
+    /* The `capture_envelope` blocks this program declared, in source
+     * order. The values themselves live in the compiler's envelope
+     * table, which is what a port's `capture` mark resolves against;
+     * what is kept here is the declaration, so a second block of the
+     * same name can be refused naming the first one's line. */
+    const KflcNode *capenv[KFLC_CAPTURE_MAX_DECLARED];
+    int         n_capenv;
     double      veh_com[RL_MAX_VEH][3];
     double      veh_bound[RL_MAX_VEH];
     /* Per vehicle, the mass properties as a function of the
@@ -1036,6 +1059,7 @@ const char *rl_observe_comp(const KflcNode *n, int c,
                                     char *buf, size_t cap);
 RlObserveForm rl_observe_form(const KflcNode *n);
 int rl_observe_has_truth(const KflcNode *n);
+int rl_observe_is_full(const KflcNode *n);
 int rl_observe_is_attitude(const KflcNode *n);
 uint16_t rl_observe_mode(const KflcNode *n);
 const char *rl_observe_payload(const KflcNode *n);

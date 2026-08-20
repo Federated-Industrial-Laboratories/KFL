@@ -157,6 +157,23 @@ $(RL_DOCKING_TEST): tests/test_rl_docking.c $(RL_GATE_DEPS) \
 	    ../libk26rl/libk26rl.a ../libk26astro_coll/libk26astro_coll.a \
 	    ../libk26m3d/libk26m3d.a -ldl -lm
 
+# Declared envelopes, explicit pairing, and the join chain: the block
+# a program declares its own capture limits in, the clause that says
+# which port a statement is measured against, joins that chain rather
+# than stopping at the first pair, and the two shipped programs
+# compared byte for byte against the compiler from before this work.
+# Links the collision library for the port geometry the fixtures read
+# back.
+RL_CAPTURE_TEST = tests/test_rl_capture
+$(RL_CAPTURE_TEST): tests/test_rl_capture.c $(RL_GATE_DEPS) \
+                    ../libk26rl/include/k26rl_env.h \
+                    ../libk26rl/libk26rl.a \
+                    ../libk26astro_coll/libk26astro_coll.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -I../libk26astro_coll/include \
+	    -I../libk26m3d/include -o $@ $< \
+	    ../libk26rl/libk26rl.a ../libk26astro_coll/libk26astro_coll.a \
+	    ../libk26m3d/libk26m3d.a -ldl -lm
+
 RL_GRAMMAR_TEST = tests/test_rl_grammar
 $(RL_GRAMMAR_TEST): tests/test_rl_grammar.c $(LIB) $(RL_LIB) $(BIN)
 	$(CC) $(CFLAGS) -o $@ $< $(LIB) $(RL_LIB) $(LDFLAGS) -lm
@@ -728,7 +745,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_MAVIEW_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_MAVIEW_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_CAPTURE_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
 else
 RL_DRIVE_GATES =
 endif
@@ -759,6 +776,7 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	          $(RL_COLL_TEST) $(RL_CONOBS_TEST) \
 	          $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	          $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
+	          $(RL_CAPTURE_TEST) \
 	          $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) \
 	          $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) \
 	          $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) \
@@ -903,7 +921,7 @@ clean:
 	      $(ATT_SUBSTEP_TEST) $(ATT_SUBSTEP_RED) \
 	      $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) \
 	      $(RL_REFERENCE_TEST) \
-	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) \
+	      $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_CAPTURE_TEST) \
 	      $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) \
 	      $(RL_REALTIME_TEST) \
 	      tests/bench_parse
