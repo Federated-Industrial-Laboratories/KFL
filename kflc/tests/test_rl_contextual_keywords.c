@@ -83,6 +83,25 @@ static int check_(const char *src, char **out_log)
     return WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
 }
 
+/* A fixture the compiler must refuse, and what its diagnostic must
+ * say. The identifier arms show a word surviving; this shows a word
+ * not being claimed where it has no business being claimed, which is
+ * the other half of a contextual reading and the half a fixture of
+ * accepted programs cannot see. */
+static void must_refuse_(const char *what, const char *src,
+                         const char *expect)
+{
+    char *log = NULL;
+    int rc = check_(src, &log);
+    if (rc == 0 || strstr(log, expect) == NULL) {
+        fprintf(stderr, "FAIL %s: rc=%d, log lacks \"%s\"\n---\n%s---\n%s",
+                what, rc, expect, log, src);
+        exit(1);
+    }
+    g_arms++;
+    printf("  refused: %s\n", what);
+}
+
 static void must_compile_(const char *what, const char *src)
 {
     char *log = NULL;
@@ -536,6 +555,13 @@ static void arm_port_clause_names_(void)
     /* One case per shape: the passive body named by each word, and a
      * sensor named by each word routing the same statement. */
     static const struct { const char *what, *body, *stmt; } CASE_[] = {
+        { "a body called `against` carrying the active port",
+          "two",
+          "    observe port grasp of against against face of two as gr\n" },
+        { "a body called `full` carrying the active port, with the mark",
+          "two",
+          "    observe port grasp of full against face of two full "
+          "as gr\n" },
         { "a body called `against` carrying the passive port",
           "against",
           "    observe port grasp of one against face of against as gr\n" },
@@ -553,9 +579,14 @@ static void arm_port_clause_names_(void)
     };
     for (size_t i = 0; i < sizeof CASE_ / sizeof CASE_[0]; i++) {
         char src[4096];
+        /* The craft carrying the active port takes the name the case
+         * names, so the same fixture covers a body called `against`
+         * or `full` on either side of the pairing. */
+        const char *active = (i < 2) ? (i == 0 ? "against" : "full")
+                                     : "one";
         snprintf(src, sizeof src,
             "%s"
-            "    astro_body one assembly=\"ctx_port_a.k26asm\""
+            "    astro_body %s assembly=\"ctx_port_a.k26asm\""
             " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
             "    astro_body %s assembly=\"ctx_port_b.k26asm\""
             " parent=earth pos_x=7.0e6 pos_y=30.0 vel_y=7546.0"
@@ -576,8 +607,59 @@ static void arm_port_clause_names_(void)
             "        reward gr_axial\n"
             "    end\n"
             "end\n"
-            "end\n", HEAD, CASE_[i].body, CASE_[i].stmt);
+            "end\n", HEAD, active, CASE_[i].body, CASE_[i].stmt);
         must_compile_(CASE_[i].what, src);
+    }
+}
+
+/* `against` and `full` are the port observe's own clause and mark, and
+ * they are read there and nowhere else. These arms put both words at
+ * the position a clause is read from, on forms that have no such
+ * clause, and require the compiler to refuse them as it refuses any
+ * other bare word there.
+ *
+ * They are the red half of the two arms above. Deleting the
+ * form guard that makes the reading contextual leaves every
+ * identifier arm passing, because those words are still bindable
+ * names; what changes is that the two clauses start being claimed on
+ * every observe form in the language, and only a fixture that writes
+ * them where they do not belong can see it.
+ */
+static void arm_port_clause_not_greedy_(void)
+{
+    static const struct { const char *what, *stmt; } CASE_[] = {
+        { "`against` at a clause position on a line-of-sight observe",
+          "    observe craft from earth against face of mark as los\n" },
+        { "`full` at a clause position on a line-of-sight observe",
+          "    observe craft from earth full as los\n" },
+        { "`against` at a clause position on an attitude observe",
+          "    observe attitude of craft against face of mark as los\n" },
+        { "`full` at a clause position on an attitude observe",
+          "    observe attitude of craft full as los\n" }
+    };
+    for (size_t i = 0; i < sizeof CASE_ / sizeof CASE_[0]; i++) {
+        char src[2048];
+        snprintf(src, sizeof src,
+            "form CTXNOTGREEDY\n"
+            "fn world w\n"
+            "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+            "    astro_body craft assembly=\"calibration_box.k26asm\""
+            " parent=earth pos_x=7.0e6 vel_y=7546.0 quat_w=1.0\n"
+            "    astro_body mark assembly=\"calibration_box.k26asm\""
+            " parent=earth pos_x=7.02e6 vel_y=7535.0 quat_w=1.0\n"
+            "    episode\n"
+            "        control_dt 0.5\n"
+            "        horizon 8\n"
+            "    end\n"
+            "    action thrust box -1.0 1.0 default 0.0\n"
+            "%s"
+            "    objective\n"
+            "        reward 1.0\n"
+            "    end\n"
+            "end\n"
+            "end\n", CASE_[i].stmt);
+        must_refuse_(CASE_[i].what, src,
+                     "expected `name=value` after observer");
     }
 }
 
@@ -646,6 +728,7 @@ int main(void)
     arm_effect_as_body_();
     arm_capture_forms_();
     arm_port_clause_names_();
+    arm_port_clause_not_greedy_();
 
     printf("test_rl_contextual_keywords: %d arm(s) passed over %d "
            "word(s), run arms %s\n", g_arms, WORD_COUNT,

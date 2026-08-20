@@ -1,0 +1,58 @@
+# rl_capture.kfl - the capture surface's spellings, for the round trip.
+#
+# Three things a programme can write about a docking interface are
+# written here so that printing the parsed tree back out and parsing it
+# again reproduces them: the block a programme declares its own capture
+# envelope in, the clause that names which port an observe is measured
+# against, and the mark that asks that observe for its two optional
+# channels.
+#
+# The declared envelope is not named by any port here. That is
+# deliberate and it is what makes the fixture useful for what it is
+# for: the ports come from assets this tree already ships, which name
+# the envelope the compiler defines, and the block is present so its
+# spelling is pinned beside the two clauses without a new asset having
+# to ship with it.
+#
+# The task is a stand-in and not a benchmark. A servicer approaches a
+# derelict, the reward pays for closing the gap, and the episode ends
+# on contact.
+
+form RL_CAPTURE
+
+fn world w
+    astro_body earth gm=3.986004418e14 mass=5.972e24
+
+    capture_envelope grasp_s
+        axial_rate 0 0.050000000000000003
+        lateral_rate 0.02
+        pitchyaw_rate 3
+        roll_rate 3
+        lateral 0.050000000000000003
+        pitchyaw 10
+        roll 180
+        diameter 700
+    end
+
+    astro_body servicer assembly="../examples/assets/servicer_2t.k26asm" parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=1.0 quat_x=0.0 quat_y=0.0 quat_z=0.0
+
+    astro_body derelict assembly="../examples/assets/derelict_satellite.k26asm" parent=earth pos_x=7.0e6 pos_y=30.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=0.0 quat_x=0.0 quat_y=1.0 quat_z=0.0
+
+    episode
+        control_dt 0.5
+        horizon 64
+        substeps 5
+        terminated when hit_hit > 0.5
+    end
+
+    action push box -1.0 1.0 default 0.0
+
+    observe port forward of servicer against dock of derelict full as dock
+    observe contact of servicer as hit
+
+    objective
+        reward 0.0 - dock_axial
+    end
+end
+
+end

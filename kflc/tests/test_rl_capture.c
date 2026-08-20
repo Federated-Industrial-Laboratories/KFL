@@ -217,13 +217,32 @@ static void write_craft_(const char *path, const char *name, double mass,
     rl_write_file_(path, buf);
 }
 
+/* A plain box with no port at all: something to strike a chain with,
+ * whose only geometry is the one collider its contact is taken on. */
+static void write_block_(const char *path, const char *name, double mass,
+                         double hx, double hy, double hz)
+{
+    char buf[1024];
+    snprintf(buf, sizeof buf,
+        "assembly %s\n"
+        "    frame x_to_port\n"
+        "    provenance mass \"gate fixture, not a craft\" computed\n"
+        "    component hull\n"
+        "        mass %.17g\n"
+        "        at 0 0 0\n"
+        "        collider box %.17g %.17g %.17g\n"
+        "    end\n"
+        "end\n", name, mass, hx, hy, hz);
+    rl_write_file_(path, buf);
+}
+
 /* The same with a second port on the negative first axis, and an
  * optional thruster on the hull centre line. */
 static void write_craft2_(const char *path, const char *name, double mass,
                           double hx, double hy, double hz,
                           const char *port_a, double at_a, const char *env_a,
                           const char *port_b, double at_b, const char *env_b,
-                          double thrust)
+                          double thrust, double lat_thrust)
 {
     char buf[4096];
     int n = snprintf(buf, sizeof buf,
@@ -255,6 +274,17 @@ static void write_craft2_(const char *path, const char *name, double mass,
             "        dir 1.0 0.0 0.0\n"
             "        thrust %.17g\n"
             "    end\n", thrust);
+    }
+    /* Across the line of centres, and on the craft's own centre, so
+     * its whole lever arm about a composite is that craft's offset
+     * from the composite centre and nothing else. */
+    if (lat_thrust > 0.0) {
+        n += snprintf(buf + n, sizeof buf - (size_t)n,
+            "    thruster lat\n"
+            "        at 0.0 0.0 0.0\n"
+            "        dir 0.0 1.0 0.0\n"
+            "        thrust %.17g\n"
+            "    end\n", lat_thrust);
     }
     n += snprintf(buf + n, sizeof buf - (size_t)n, "end\n");
     ASSERT((size_t)n < sizeof buf);
@@ -491,21 +521,38 @@ int main(void)
               "        pitchyaw_rate 3.0\n        roll_rate 3.0\n"
               "        lateral 0.05\n        pitchyaw 10.0\n"
               "        roll 4.0\n        diameter 700.0\n    end\n",
-              "so it cannot be negative" },
+              "`lateral_rate` is -0.02 m/s, and a limit on a rate or a "
+              "misalignment is a magnitude, so it cannot be negative" },
+            { "a closing band whose lower bound is negative",
+              "    capture_envelope grasp_s\n"
+              "        axial_rate -0.10 0.05\n        lateral_rate 0.02\n"
+              "        pitchyaw_rate 3.0\n        roll_rate 3.0\n"
+              "        lateral 0.05\n        pitchyaw 10.0\n"
+              "        roll 4.0\n        diameter 700.0\n    end\n",
+              "`axial_rate`'s lower bound is -0.10000000000000001 m/s" },
+            { "a value that is not a finite number",
+              "    capture_envelope grasp_s\n"
+              "        axial_rate 0.0 0.05\n        lateral_rate inf\n"
+              "        pitchyaw_rate 3.0\n        roll_rate 3.0\n"
+              "        lateral 0.05\n        pitchyaw 10.0\n"
+              "        roll 4.0\n        diameter 700.0\n    end\n",
+              "`lateral_rate` is inf, which is not a finite number" },
             { "an angle past half a turn",
               "    capture_envelope grasp_s\n"
               "        axial_rate 0.0 0.05\n        lateral_rate 0.02\n"
               "        pitchyaw_rate 3.0\n        roll_rate 3.0\n"
               "        lateral 0.05\n        pitchyaw 200.0\n"
               "        roll 4.0\n        diameter 700.0\n    end\n",
-              "an angular misalignment runs from 0 to 180" },
+              "`pitchyaw` is 200 degrees, and an angular misalignment "
+              "runs from 0 to 180" },
             { "a diameter of nothing",
               "    capture_envelope grasp_s\n"
               "        axial_rate 0.0 0.05\n        lateral_rate 0.02\n"
               "        pitchyaw_rate 3.0\n        roll_rate 3.0\n"
               "        lateral 0.05\n        pitchyaw 10.0\n"
               "        roll 4.0\n        diameter 0.0\n    end\n",
-              "so it must be positive" },
+              "`diameter` is 0 mm, and the mating plane it sizes is a "
+              "real interface, so it must be positive" },
             { "a field declared twice",
               "    capture_envelope grasp_s\n"
               "        axial_rate 0.0 0.05\n        lateral_rate 0.02\n"
@@ -589,7 +636,7 @@ int main(void)
                 "end\n"
                 "end\n", WORK_DIR, WORK_DIR);
             refuse_("a mark naming no envelope in scope", prog,
-                    "names no envelope in scope");
+                    "`capture grasp_z` names no envelope in scope");
         }
     }
     n_pass++;
@@ -745,12 +792,12 @@ int main(void)
 
         write_craft2_(WORK_DIR "/a1.k26asm", "a1", mA1, 0.5, 0.4, 0.4,
                       "grasp", 0.6, "grasp_s", "tail", -0.6, "grasp_s",
-                      THRUST);
+                      THRUST, THRUST);
         write_craft_(WORK_DIR "/a2.k26asm", "a2", mA2, 0.5, 0.4, 0.4,
                      "face", 0.9, "grasp_s");
         write_craft2_(WORK_DIR "/b1.k26asm", "b1", mB1, 0.5, 0.4, 0.4,
                       "grasp", 0.6, "grasp_s", "tail", -0.6, "grasp_s",
-                      THRUST);
+                      THRUST, 0.0);
         write_craft_(WORK_DIR "/b2.k26asm", "b2", mB2, 0.5, 0.4, 0.4,
                      "face", 0.9, "grasp_s");
 
@@ -777,9 +824,11 @@ int main(void)
             "    end\n"
             "    action pa box 0.0 1.0 default 0.0\n"
             "    action pb box 0.0 1.0 default 0.0\n"
+            "    action qa box 0.0 1.0 default 0.0\n"
             "    on_step\n"
             "        a1.main.throttle = pa\n"
             "        b1.main.throttle = pb\n"
+            "        a1.lat.throttle = qa\n"
             "    end\n"
             "    observe port grasp of a1 against face of a2 full as ga\n"
             "    observe port grasp of b1 against face of b2 full as gb\n"
@@ -802,7 +851,7 @@ int main(void)
         int jb = find_channel_(blob, (uint32_t)len, "gb_joined");
         ASSERT(ca >= 0 && cb >= 0 && ja >= 0 && jb >= 0);
 
-        double obs[64], coast[2] = { 0.0, 0.0 };
+        double obs[64], coast[3] = { 0.0, 0.0, 0.0 };
         uint32_t flags[1];
         int step_a = -1, step_b = -1;
         for (int k = 0; k < 200; k++) {
@@ -828,7 +877,7 @@ int main(void)
          * The line of action runs through each pair's centre of mass,
          * so the prediction is the mass sum. */
         double s0[NB * 6], s1[NB * 6];
-        double fire[2] = { 1.0, 1.0 };
+        double fire[3] = { 1.0, 1.0, 0.0 };
         ASSERT(s.bodies(env, K26RL_BODY_REF_ORIGIN, s0, (uint32_t)nvals)
                == nvals);
         for (int k = 0; k < BURN; k++) {
@@ -861,18 +910,83 @@ int main(void)
             ASSERT(fabs((s1[B1 * 6 + 3] - s0[B1 * 6 + 3]) -
                         (s1[B2 * 6 + 3] - s0[B2 * 6 + 3])) < 1e-9);
         }
-        /* The composite centre, from the geometry the join froze. The
-         * two mating planes meet, so the craft's centres stand at the
-         * sum of the two port arms apart, and the centre of mass sits
-         * on that line at the mass-weighted point. Both figures are
-         * arithmetic on the fixture's own declarations. */
+        /* The frozen geometry: the two mating planes meet, so the
+         * craft's centres stand at the sum of the two port arms
+         * apart. That figure is arithmetic on the fixture's own
+         * declarations and the measurement is the body-state
+         * getter's. */
         {
             double sep = s1[A2 * 6] - s1[A1 * 6];
             near_("first pair's centres, at the two port arms", sep,
                   0.6 + 0.9, 2e-3);
-            near_("first pair's centre of mass from its leader",
-                  mA2 * sep / (mA1 + mA2),
-                  mA2 * (0.6 + 0.9) / (mA1 + mA2), 2e-3);
+        }
+
+        /* Where the composite centre of mass sits on that line, and
+         * what the composite turns like about it.
+         *
+         * A separation alone does not locate the centre: the centre
+         * enters behaviour only through the lever arms a rotation is
+         * taken on, so it is reachable only by turning the pair. The
+         * lighter craft's transverse thruster runs through its own
+         * centre and therefore has a lever arm about the composite
+         * centre equal to that craft's own offset from it, and both
+         * the arm and the tensor are hand-computed from the fixture's
+         * declarations. A wrong centre with a correct separation
+         * changes the arm and fails here; the arm above cannot see it.
+         *
+         * The torque is exactly constant as the pair turns: the
+         * thrust direction and the lever arm both turn with the
+         * lighter craft and both lie across the axis the pair turns
+         * about, and a rotation about that axis leaves the composite
+         * tensor's third component unchanged.
+         */
+        {
+            const double HX = 0.5, HY = 0.4;   /* box half extents */
+            const double sep = 0.6 + 0.9;
+            const double mt = mA1 + mA2;
+            const double j1 = mA1 / 3.0 * (HX * HX + HY * HY);
+            const double j2 = mA2 / 3.0 * (HX * HX + HY * HY);
+            const double d1 = mA2 * sep / mt;   /* the light craft's arm */
+            const double d2 = mA1 * sep / mt;
+            const double j_pair = j1 + mA1 * d1 * d1 + j2 + mA2 * d2 * d2;
+            /* The lighter craft sits on the negative side of the
+             * composite centre and thrusts along the positive second
+             * axis, so the turn is about the negative third. */
+            const double torque = -d1 * THRUST;
+            const int    turn = 2;
+            const double want_dw = torque / j_pair * turn * DT;
+            double turn_fire[3] = { 0.0, 0.0, 1.0 };
+            double q0[NB * 7], q1[NB * 7];
+            const int32_t nquat = (int32_t)(NB * 7);
+
+            ASSERT(s.attitudes(env, q0, (uint32_t)nquat) == nquat);
+            for (int k = 0; k < turn; k++) {
+                ASSERT(s.step(env, turn_fire) == K26RL_OK);
+            }
+            ASSERT(s.attitudes(env, q1, (uint32_t)nquat) == nquat);
+            printf("  composite centre %.6f m from the lighter craft, "
+                   "tensor %.6f kg m^2\n", d1, j_pair);
+            near_("first pair turns about its composite centre",
+                  q1[A1 * 7 + 6] - q0[A1 * 7 + 6], want_dw, 2e-3);
+            /* The two answers this rules out: the centre taken at the
+             * midpoint of the line rather than at the mass-weighted
+             * point, which is a third of the way off; and the tensor
+             * without its parallel-axis terms, which is four times
+             * smaller. Both are orders outside the bound asserted. */
+            ASSERT(fabs((q1[A1 * 7 + 6] - q0[A1 * 7 + 6]) -
+                        (-0.5 * sep * THRUST / j_pair * turn * DT)) > 0.05);
+            ASSERT(fabs((q1[A1 * 7 + 6] - q0[A1 * 7 + 6]) -
+                        torque / (j1 + j2) * turn * DT) > 0.5);
+            /* And the far craft turned with it. Its frame is turned
+             * half a turn about its second axis to face the near one,
+             * so its third axis is the world's reversed. */
+            near_("and the far craft of that pair turns with it",
+                  q1[A2 * 7 + 6] - q0[A2 * 7 + 6], -want_dw, 2e-3);
+            /* The second pair, which fired nothing, did not turn. */
+            for (int k = 0; k < 3; k++) {
+                ASSERT(fabs(q1[B1 * 7 + 4 + k]) < 1e-9);
+                ASSERT(fabs(q1[B2 * 7 + 4 + k]) < 1e-9);
+            }
         }
         s.destroy(env);
         dlclose(so);
@@ -883,11 +997,16 @@ int main(void)
      *
      * A drone grasps a rock, then the laden drone docks at a host. The
      * composite of the composite answers a thrust with three masses
-     * summed. A third body meeting the carried rock registers the
-     * contact, which a runtime that took the follower's shapes out of
-     * the pass could not report. And a contact at a port already in a
-     * join forms no join and is resolved as an ordinary contact rather
-     * than passed through.
+     * summed, which is what says the second join carried the first
+     * one's members with it.
+     *
+     * What this arm does not cover is stated so it is not read into
+     * it. The cargo's own collisions, and what a chain answers to a
+     * strike, are the arm on carried cargo below. The two ways a
+     * capture forms no join are the two arms after that one. The
+     * composite tensor under a thrust of its own is the docking
+     * suite's arm, and the composite centre is measured in the arm
+     * above this one.
      */
     printf("a laden re-dock, and what the chain still collides with\n");
     {
@@ -902,7 +1021,7 @@ int main(void)
         write_craft2_(WORK_DIR "/drone.k26asm", "drone", mDRONE,
                       0.5, 0.4, 0.4,
                       "grasp", 1.2, "grasp_s", "dock", -1.2, "grasp_s",
-                      THRUST);
+                      THRUST, 0.0);
         write_craft_(WORK_DIR "/rock.k26asm", "rock", mROCK, 0.4, 0.4, 0.4,
                      "face", 0.9, "grasp_s");
 
@@ -1000,18 +1119,58 @@ int main(void)
     }
     n_pass++;
 
-    /* ---- 6. carried cargo is still there ------------------------- *
+    /* ---- 6. carried cargo is still there, and it answers as the
+     *         whole it belongs to ---------------------------------- *
      *
-     * A drone grasps a rock and a third craft arrives on the rock's
-     * far side, on a line that reaches nothing else. The rock's own
-     * contact channel must report it. A runtime that took a
-     * follower's colliders out of the pass reports nothing here, and
-     * the third craft passes through the cargo unrecorded.
+     * A drone grasps a rock, and a plain block then strikes the rock
+     * across the line the two are joined on. Two things are measured
+     * and each rules out a different defect.
+     *
+     * The contact is reported at all, on the cargo's own channel. A
+     * runtime that took a follower's colliders out of the collision
+     * pass reports nothing here and the block passes through the
+     * cargo unrecorded.
+     *
+     * And the chain answers as the chain. The linear half gives the
+     * impulse, which is the chain's mass times the change in its
+     * centre-of-gravity velocity, and the angular half is then that
+     * impulse on the lever arm from the CHAIN's centre against the
+     * CHAIN's inertia about it. Both figures are hand-computed from
+     * the fixture's own declarations. A resolution given the struck
+     * craft's own centre answers with almost no turn at all, since
+     * the block strikes the rock nearly through its middle; one given
+     * the rock's own tensor answers with thirty-four times the turn.
+     *
+     * The fixture is arranged so the arithmetic is closed. The two
+     * craft carry equal and opposite momentum, so the chain is at
+     * rest once it forms and the block can be aimed at a fixed place.
+     * The block is narrow along the line of centres, so the lever arm
+     * of the contact is known to a fiftieth of a metre whatever point
+     * on the overlap the kernel reports. And the block arrives square
+     * on, with no relative motion across the contact, so no friction
+     * impulse enters and the impulse is along the normal alone.
      */
-    printf("a third body meeting carried cargo is reported\n");
+    printf("carried cargo is struck, and the whole answers for it\n");
     {
-        write_craft_(WORK_DIR "/probe.k26asm", "probe", 200.0,
-                     0.4, 0.4, 0.4, "nose", 0.9, "grasp_s");
+        const double mDRONE = 1000.0, mROCK = 400.0, mBLOCK = 200.0;
+        /* The frozen separation, from the two port arms, and where the
+         * chain's centre of gravity sits on it. */
+        const double SEP = 1.2 + 0.9;
+        const double MT  = mDRONE + mROCK;
+        const double dDRONE = mROCK * SEP / MT;
+        const double dROCK  = mDRONE * SEP / MT;
+        /* Each craft's own third inertia component about its own
+         * centre, for a uniform solid box. */
+        const double jDRONE = mDRONE / 3.0 * (0.5 * 0.5 + 0.4 * 0.4);
+        const double jROCK  = mROCK  / 3.0 * (0.4 * 0.4 + 0.4 * 0.4);
+        const double J_CHAIN = jDRONE + mDRONE * dDRONE * dDRONE
+                             + jROCK  + mROCK  * dROCK  * dROCK;
+        enum { ANCHOR = 0, DRONE = 1, ROCK = 2, BLOCK = 3, NB = 4 };
+        const int32_t nvals = (int32_t)(NB * 6);
+        const int32_t nquat = (int32_t)(NB * 7);
+
+        write_block_(WORK_DIR "/block.k26asm", "block", mBLOCK,
+                     0.02, 0.3, 0.3);
         char prog[8192];
         snprintf(prog, sizeof prog,
             "form RL_CARGO\n"
@@ -1019,11 +1178,11 @@ int main(void)
             GRASP_BLOCK
             ANCHOR_BODY
             "    astro_body drone assembly=\"%s/drone.k26asm\"" DRIFT
-            " pos_x=0.0 quat_w=1.0\n"
+            " pos_x=0.0 vel_x=0.04 quat_w=1.0\n"
             "    astro_body rock assembly=\"%s/rock.k26asm\"" DRIFT
-            " pos_x=4.0 vel_x=-0.3 quat_w=0.0 quat_y=1.0\n"
-            "    astro_body probe assembly=\"%s/probe.k26asm\"" DRIFT
-            " pos_x=40.0 vel_x=-1.0 quat_w=0.0 quat_y=1.0\n"
+            " pos_x=5.0 vel_x=-0.10 quat_w=0.0 quat_y=1.0\n"
+            "    astro_body block assembly=\"%s/block.k26asm\"" DRIFT
+            " pos_x=2.93 pos_y=40.0 vel_y=-1.0 quat_w=1.0\n"
             "    episode\n"
             "        control_dt %.17g\n"
             "        substeps 5\n"
@@ -1031,11 +1190,10 @@ int main(void)
             "        terminated when episode.steps > 300\n"
             "        contact bounce restitution 0.9 friction 0.1\n"
             "    end\n"
-            "    action pd box 0.0 1.0 default 0.0\n"
+            "    action pd box -1.0 1.0 default 0.0\n"
             "    observe port grasp of drone against face of rock full "
             "as gr\n"
             "    observe contact of rock as cr\n"
-            "    observe contact of drone as cd\n"
             "    objective\n"
             "        reward gr_axial\n"
             "    end\n"
@@ -1051,19 +1209,35 @@ int main(void)
         ASSERT(len > 0);
         int jr = find_channel_(blob, (uint32_t)len, "gr_joined");
         int hr = find_channel_(blob, (uint32_t)len, "cr_hit");
-        int hd = find_channel_(blob, (uint32_t)len, "cd_hit");
-        ASSERT(jr >= 0 && hr >= 0 && hd >= 0);
+        ASSERT(jr >= 0 && hr >= 0);
         double obs[64], act[1] = { 0.0 };
+        double s0[NB * 6], s1[NB * 6], q0[NB * 7], q1[NB * 7];
+        double com_x_at_join = 0.0, rock_x_at_join = 0.0;
+        double sep_at_join = 0.0;
         int joined_at = -1, cargo_hit = -1;
         for (int k = 0; k < 300; k++) {
+            ASSERT(s.bodies(env, K26RL_BODY_REF_ORIGIN, s0,
+                            (uint32_t)nvals) == nvals);
+            ASSERT(s.attitudes(env, q0, (uint32_t)nquat) == nquat);
             ASSERT(s.step(env, act) == K26RL_OK);
             ASSERT(s.obs(env, obs) == K26RL_OK);
-            if (obs[jr] != 0.0 && joined_at < 0) joined_at = k;
+            if (obs[jr] != 0.0 && joined_at < 0) {
+                joined_at = k;
+                ASSERT(s.bodies(env, K26RL_BODY_REF_ORIGIN, s1,
+                                (uint32_t)nvals) == nvals);
+                com_x_at_join = (mDRONE * s1[DRONE * 6] +
+                                 mROCK * s1[ROCK * 6]) / MT;
+                rock_x_at_join = s1[ROCK * 6];
+                sep_at_join = s1[ROCK * 6] - s1[DRONE * 6];
+            }
             if (joined_at >= 0 && k > joined_at && obs[hr] != 0.0) {
                 cargo_hit = k;
                 break;
             }
         }
+        ASSERT(s.bodies(env, K26RL_BODY_REF_ORIGIN, s1,
+                        (uint32_t)nvals) == nvals);
+        ASSERT(s.attitudes(env, q1, (uint32_t)nquat) == nquat);
         printf("  joined at step %d, the cargo was struck at step %d\n",
                joined_at, cargo_hit);
         ASSERT(joined_at >= 0);
@@ -1071,6 +1245,55 @@ int main(void)
         /* The join is still whole: the contact was with a body
          * outside the chain, and nothing about it undid the grasp. */
         ASSERT(obs[jr] == 1.0);
+        /* The separation the join froze, read at the step it formed:
+         * the two mating planes meet, so it is the sum of the two
+         * port arms. It is read there and not at the end, because by
+         * then the strike has turned the pair and a separation taken
+         * along one axis would be reading the cosine of that turn. */
+        near_("the frozen separation is the two port arms",
+              sep_at_join, SEP, 2e-3);
+        /* And the strike did not stretch the pair: the distance
+         * between the two craft is what the join froze, whatever the
+         * turn has done to its direction. */
+        {
+            double dx = s1[ROCK * 6]     - s1[DRONE * 6];
+            double dy = s1[ROCK * 6 + 1] - s1[DRONE * 6 + 1];
+            double dz = s1[ROCK * 6 + 2] - s1[DRONE * 6 + 2];
+            near_("and the pair is still that far apart after the strike",
+                  sqrt(dx * dx + dy * dy + dz * dz), sep_at_join, 1e-9);
+        }
+        /* The chain was at rest before the strike, by construction. */
+        {
+            double v_before = (mDRONE * s0[DRONE * 6 + 4] +
+                               mROCK * s0[ROCK * 6 + 4]) / MT;
+            double v_after  = (mDRONE * s1[DRONE * 6 + 4] +
+                               mROCK * s1[ROCK * 6 + 4]) / MT;
+            double impulse  = MT * (v_before - v_after);
+            /* The lever arm the strike had about the chain's centre,
+             * from the fixture's own geometry: the block is aimed at
+             * the rock's centre and is narrow enough that whatever
+             * point on the overlap the kernel reports lies within two
+             * hundredths of a metre of it. */
+            double lever = rock_x_at_join - com_x_at_join;
+            double dw    = q1[DRONE * 7 + 6] - q0[DRONE * 7 + 6];
+            double want  = -lever * impulse / J_CHAIN;
+            printf("  chain centre %.6f m from the rock, tensor %.6f "
+                   "kg m^2, impulse %.6f N s\n", lever, J_CHAIN, impulse);
+            near_("the chain's lever arm is the parallel-axis one",
+                  lever, dROCK, 0.02);
+            ASSERT(impulse > 100.0);
+            near_("the chain turns at its own composite tensor's rate",
+                  dw, want, 0.02 * fabs(want) + 1e-4);
+            /* The rock's own tensor would give thirty-four times the
+             * turn, and the rock's own centre almost none of it. */
+            ASSERT(fabs(dw - (-lever * impulse / jROCK)) > 0.5);
+            ASSERT(fabs(dw) > 0.02);
+            /* And the cargo turned with its carrier: the frame of the
+             * rock is turned half a turn about its second axis, so
+             * its third axis is the world's reversed. */
+            near_("and the cargo turns with its carrier",
+                  q1[ROCK * 7 + 6] - q0[ROCK * 7 + 6], -dw, 1e-9);
+        }
         s.destroy(env);
         dlclose(so);
     }
@@ -1089,13 +1312,13 @@ int main(void)
      * and passing through each other, which is worse than either
      * answer the environment declares.
      *
-     * The other two ways a capture forms no join are not reachable by
-     * a trajectory and are stated here rather than gated. A contact
-     * between two members of one chain never happens, because such
-     * pairs leave the collision pass; a cycle can only be closed by
-     * such a contact, so it never happens either. What is left of both
-     * rules is the guard in the runtime, and this arm is the one that
-     * can fire.
+     * The other reachable way a capture forms no join is a port
+     * already in one, and that is the arm below. The remaining way is
+     * not reachable by a trajectory and is stated here rather than
+     * gated: a contact between two members of one chain never
+     * happens, because such pairs leave the collision pass, and a
+     * cycle can only be closed by such a contact. What is left of
+     * that rule is the guard in the runtime.
      */
     printf("a capture that can form no join is resolved and not passed "
            "through\n");
@@ -1108,7 +1331,8 @@ int main(void)
                      0.5, 0.4, 0.4, "berth", 0.9, "grasp_s");
         write_craft2_(WORK_DIR "/tug.k26asm", "tug", mDRONE,
                       0.5, 0.4, 0.4,
-                      "fore", 1.2, "grasp_s", "aft", -1.2, "grasp_s", 0.0);
+                      "fore", 1.2, "grasp_s", "aft", -1.2, "grasp_s",
+                      0.0, 0.0);
 
         char prog[8192];
         snprintf(prog, sizeof prog,
@@ -1217,6 +1441,180 @@ int main(void)
     }
     n_pass++;
 
+    /* ---- 7b. a capture at a port already in a join ---------------- *
+     *
+     * Two craft mate. A third then reaches the very interface they
+     * mated at, inside every limit of its own envelope, and the port
+     * it arrives at is occupied. No second join forms there and the
+     * contact is resolved as an ordinary one.
+     *
+     * Reaching a mated interface takes a geometry, and this one is
+     * built rather than found. A mated pair fills its own interface
+     * along the approach line, so a third craft has to arrive beside
+     * it: the two mated craft are slender and their mating rings are
+     * wide, and the arriving craft comes down a line offset far enough
+     * across to clear both hulls while its own ring still overlaps the
+     * leader's. The follower's ring is the small one, so the arriving
+     * craft passes it without touching and meets the leader's, which
+     * is the occupied port this arm is about.
+     *
+     * The envelope is permissive because the arriving craft is
+     * measured against the leader's ring from well off its centre
+     * line, and a limit that refused that would make the contact an
+     * ordinary impact and this arm vacuous. The limits are the
+     * program's own statement, which is what a declared envelope is
+     * for.
+     *
+     * The mated pair's two ports name envelopes of different
+     * diameters, so no statement pairs them and the join between them
+     * is read from behaviour instead: their separation is frozen and
+     * their velocities are one. That is what a join is, and a runtime
+     * that had not formed one would fail it.
+     */
+    printf("a capture at a port already in a join forms no join\n");
+    {
+        const double mLEAD = 1000.0, mFOLLOW = 3000.0, mTHIRD = 500.0;
+        enum { ANCHOR = 0, LEAD = 1, FOLLOW = 2, THIRD = 3, NB = 4 };
+        const int32_t nvals = (int32_t)(NB * 6);
+
+        /* A slender hull with a wide ring, and the ring standing well
+         * proud of it. */
+        write_craft_(WORK_DIR "/wlead.k26asm", "wlead", mLEAD,
+                     0.5, 0.15, 0.15, "ring", 1.2, "wide_s");
+        write_craft_(WORK_DIR "/wfollow.k26asm", "wfollow", mFOLLOW,
+                     0.5, 0.15, 0.15, "peg", 1.0, "tiny_s");
+        write_craft_(WORK_DIR "/wthird.k26asm", "wthird", mTHIRD,
+                     0.5, 0.15, 0.15, "ring", 1.2, "wide_s");
+
+        char prog[8192];
+        snprintf(prog, sizeof prog,
+            "form RL_OCCUPIED\n"
+            "fn world w\n"
+            "    capture_envelope wide_s\n"
+            "        axial_rate 0.00 5.00\n"
+            "        lateral_rate 5.00\n"
+            "        pitchyaw_rate 300.0\n"
+            "        roll_rate 300.0\n"
+            "        lateral 5.00\n"
+            "        pitchyaw 20.0\n"
+            "        roll 180.0\n"
+            "        diameter 2000.0\n"
+            "    end\n"
+            "    capture_envelope tiny_s\n"
+            "        axial_rate 0.00 5.00\n"
+            "        lateral_rate 5.00\n"
+            "        pitchyaw_rate 300.0\n"
+            "        roll_rate 300.0\n"
+            "        lateral 5.00\n"
+            "        pitchyaw 20.0\n"
+            "        roll 180.0\n"
+            "        diameter 200.0\n"
+            "    end\n"
+            ANCHOR_BODY
+            "    astro_body lead assembly=\"%s/wlead.k26asm\"" DRIFT
+            " pos_x=0.0 pos_y=0.0 quat_w=1.0\n"
+            "    astro_body follow assembly=\"%s/wfollow.k26asm\"" DRIFT
+            " pos_x=6.0 pos_y=0.0 vel_x=-0.3 quat_w=0.0 quat_y=1.0\n"
+            "    astro_body third assembly=\"%s/wthird.k26asm\"" DRIFT
+            " pos_x=15.0 pos_y=1.5 vel_x=-0.5 quat_w=0.0 quat_y=1.0\n"
+            "    episode\n"
+            "        control_dt 0.5\n"
+            "        substeps 5\n"
+            "        horizon 500\n"
+            "        terminated when episode.steps > 400\n"
+            "    end\n"
+            "    action pd box -1.0 1.0 default 0.0\n"
+            "    observe port ring of third against ring of lead full "
+            "as gt\n"
+            "    observe contact of third as ct\n"
+            "    objective\n"
+            "        reward gt_axial\n"
+            "    end\n"
+            "end\n"
+            "end\n", WORK_DIR, WORK_DIR, WORK_DIR);
+        compile_("occupied", prog);
+        RlSurface s;
+        void *so = open_("occupied", &s);
+        K26RlEnv *env = NULL;
+        ASSERT(s.create(31u, 1u, &env) == K26RL_OK);
+        uint8_t blob[16384];
+        int32_t len = s.spec(env, blob, sizeof blob);
+        ASSERT(len > 0);
+        int gc = find_channel_(blob, (uint32_t)len, "gt_captured");
+        int gj = find_channel_(blob, (uint32_t)len, "gt_joined");
+        int ga = find_channel_(blob, (uint32_t)len, "gt_axial");
+        int ch = find_channel_(blob, (uint32_t)len, "ct_hit");
+        ASSERT(gc >= 0 && gj >= 0 && ga >= 0 && ch >= 0);
+
+        double obs[64], act[1] = { 0.0 };
+        double st[NB * 6], before[NB * 6], after[NB * 6];
+        double mated_sep = 0.0, mated_at = -1.0;
+        int mated_step = -1, met = -1;
+        for (int k = 0; k < 400; k++) {
+            ASSERT(s.bodies(env, K26RL_BODY_REF_ORIGIN, before,
+                            (uint32_t)nvals) == nvals);
+            ASSERT(s.step(env, act) == K26RL_OK);
+            ASSERT(s.obs(env, obs) == K26RL_OK);
+            ASSERT(s.bodies(env, K26RL_BODY_REF_ORIGIN, st,
+                            (uint32_t)nvals) == nvals);
+            /* The mated pair is read from behaviour: the step on which
+             * the two stop closing and start moving as one. */
+            if (mated_step < 0 &&
+                fabs(st[FOLLOW * 6 + 3] - st[LEAD * 6 + 3]) < 1e-12 &&
+                fabs(st[LEAD * 6 + 3]) > 1e-9) {
+                mated_step = k;
+                mated_sep  = st[FOLLOW * 6] - st[LEAD * 6];
+            }
+            if (mated_step >= 0 && obs[ch] != 0.0) { met = k; break; }
+        }
+        ASSERT(s.bodies(env, K26RL_BODY_REF_ORIGIN, after,
+                        (uint32_t)nvals) == nvals);
+        printf("  the pair mated at step %d, the third craft arrived at "
+               "step %d\n", mated_step, met);
+        ASSERT(mated_step >= 0);
+        ASSERT(met > mated_step);
+        /* The mated pair is a join: its separation is frozen and its
+         * two velocities are one, before the third craft arrives and
+         * after it. */
+        mated_at = after[FOLLOW * 6] - after[LEAD * 6];
+        printf("  its separation was %+.9f at mating and %+.9f after\n",
+               mated_sep, mated_at);
+        ASSERT(fabs(mated_at - mated_sep) < 1e-6);
+        ASSERT(fabs(after[FOLLOW * 6 + 3] - after[LEAD * 6 + 3]) < 1e-9);
+        /* The arriving craft met the envelope: the pulse is the
+         * verdict on the contact and does not depend on a join. */
+        printf("  the arrival satisfied the envelope (captured %.0f, "
+               "axial %+.6f)\n", obs[gc], obs[ga]);
+        ASSERT(obs[gc] != 0.0);
+        /* And no join formed at the occupied port. */
+        ASSERT(obs[gj] == 0.0);
+        /* The contact was resolved rather than suppressed: the
+         * arriving craft was closing and is not any more. */
+        printf("  it closed at %+.6f and leaves at %+.6f\n",
+               before[LEAD * 6 + 3] - before[THIRD * 6 + 3],
+               after[LEAD * 6 + 3] - after[THIRD * 6 + 3]);
+        ASSERT(before[LEAD * 6 + 3] - before[THIRD * 6 + 3] > 0.2);
+        ASSERT(after[LEAD * 6 + 3] - after[THIRD * 6 + 3] <
+               (before[LEAD * 6 + 3] - before[THIRD * 6 + 3]) - 0.2);
+        /* And it does not go on through: the two rings never come
+         * closer than they are at the contact. */
+        {
+            double worst = 1.0e9;
+            for (int k = 0; k < 60; k++) {
+                ASSERT(s.step(env, act) == K26RL_OK);
+                ASSERT(s.obs(env, obs) == K26RL_OK);
+                if (obs[ga] < worst) worst = obs[ga];
+            }
+            printf("  the closest the two rings come afterwards is "
+                   "%+.6f m\n", worst);
+            ASSERT(worst > -0.05);
+            ASSERT(obs[gj] == 0.0);
+        }
+        s.destroy(env);
+        dlclose(so);
+    }
+    n_pass++;
+
     /* ---- 8. the combined rate the `full` mark publishes ------------ *
      *
      * The ninth binding condition is the lateral rate carried along
@@ -1229,6 +1627,17 @@ int main(void)
      * The expected value is computed here from the body-state and
      * attitude getters and the fixture's own port geometry, in code
      * that shares nothing with the library that computes the channel.
+     *
+     * What that reaches, and what it does not, since a re-implemented
+     * formula is only as good as the formula. It catches a channel
+     * wired to the wrong index, a sign taken the wrong way, an arm
+     * measured from the wrong body, and a component dropped: each
+     * would move the number by far more than the bound. It does not
+     * catch the two implementations agreeing on a wrong definition of
+     * the rate itself, because it is the same definition written
+     * twice. What holds that end is the document the definition comes
+     * from, and the arm beside it showing the channel differs from
+     * the interface rate it would be confused with.
      */
     printf("the combined rate against an independent computation\n");
     {
@@ -1445,8 +1854,27 @@ int main(void)
     printf("the shipped programs against the compiler before this work\n");
     if (run_("git -C .. rev-parse --verify --quiet " PRIOR_COMMIT
              "^{commit} > /dev/null 2>&1") != 0) {
-        printf("  SKIP: " PRIOR_COMMIT " is not in this checkout's "
-               "history\n");
+        /* A gate that cannot run is not a gate that passed. Without
+         * the commit it compares against there is nothing to compare,
+         * and reporting that as green would put a tick beside an
+         * unmeasured claim. It fails, and the only way past it is an
+         * explicit choice that says so in the output. */
+        if (getenv("KFLC_CAPTURE_ALLOW_NO_PRIOR")) {
+            printf("  NOT MEASURED: " PRIOR_COMMIT " is not in this "
+                   "checkout's history, and KFLC_CAPTURE_ALLOW_NO_PRIOR "
+                   "is set, so this gate is being stood down by "
+                   "request. Nothing about compatibility has been "
+                   "checked in this run.\n");
+        } else {
+            fprintf(stderr,
+                "FAIL test_rl_capture: " PRIOR_COMMIT " is not in this "
+                "checkout's history, so the compatibility gate has "
+                "nothing to compare against and has measured nothing. "
+                "Fetch the history, or set "
+                "KFLC_CAPTURE_ALLOW_NO_PRIOR to stand the gate down "
+                "deliberately.\n");
+            exit(1);
+        }
     } else {
         ASSERT(run_("rm -rf " WORK_DIR "/prior && mkdir -p "
                     WORK_DIR "/prior") == 0);

@@ -766,13 +766,15 @@ consumed, so a unit suffix is a refusal rather than a silent
 truncation.
 
 Every field is required and there are no defaults, because a tolerance
-nobody declared would be a number the compiler invented. Refused, each
-naming what it refuses: a second block of the same name; a name the
-compiler already defines; a missing field; a field declared twice; a
-field taking the wrong count of numbers; a value that is not a number;
-a closing band with its lower bound above its upper; a negative rate or
+nobody declared would be a number the compiler invented. Twelve
+refusals, each naming what it refuses: a second block of the same name;
+a name the compiler already defines; a missing field; a field declared
+twice; an unknown field; a field taking the wrong count of numbers; a
+value that is not a number; a value that is not a finite number; a
+closing band with its lower bound above its upper; a negative rate or
 misalignment; a misalignment angle outside 0 to 180 degrees; a diameter
-that is not positive.
+that is not positive. The closing band's two bounds are written on one
+line under one keyword, so a refusal about one of them says which.
 
 The ninth binding condition needs no field of its own. The lateral rate
 the combination of lateral rate and pitch or yaw rate produces at the

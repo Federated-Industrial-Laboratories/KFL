@@ -703,6 +703,11 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
             if (strcmp(a->name, "as") == 0) continue;
             if (strcmp(a->name, "through") == 0) continue;
             if (strcmp(a->name, "truth") == 0) continue;
+            /* The port form's own two clauses, printed in their
+             * source spelling below for the same reason. */
+            if (strcmp(a->name, "against") == 0) continue;
+            if (strcmp(a->name, "against_body") == 0) continue;
+            if (strcmp(a->name, "full") == 0) continue;
             if (strcmp(a->name, "attitude") == 0) continue;
             if (strcmp(a->name, "contact") == 0) continue;
             if (strcmp(a->name, "propulsion") == 0) continue;
@@ -720,6 +725,20 @@ static void emit_node(FILE *out, const KflcNode *n, int level)
                             ? a->value.u.s : "?";
             fprintf(out, " %s=%s", a->name, v);
         }
+        /* The port form's clauses come before `through`, which is the
+         * order the scanner accepts them in and therefore the order a
+         * round trip has to print them in. */
+        {
+            const KflcAttr *ag = find_attr_(n->attrs, "against");
+            const KflcAttr *ab = find_attr_(n->attrs, "against_body");
+            if (ag && ab && ag->value.kind == KFLV_IDENT &&
+                ab->value.kind == KFLV_IDENT && ag->value.u.s &&
+                ab->value.u.s) {
+                fprintf(out, " against %s of %s", ag->value.u.s,
+                        ab->value.u.s);
+            }
+        }
+        if (find_attr_(n->attrs, "full")) fputs(" full", out);
         const KflcAttr *th_a = find_attr_(n->attrs, "through");
         if (th_a && th_a->value.kind == KFLV_IDENT && th_a->value.u.s) {
             fprintf(out, " through %s", th_a->value.u.s);

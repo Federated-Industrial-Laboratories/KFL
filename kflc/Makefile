@@ -757,6 +757,7 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	./$(TEST_BIN) integration_tests/rl_multi_agent.kfl
 	./$(TEST_BIN) integration_tests/rl_defense.kfl
 	./$(TEST_BIN) integration_tests/rl_propulsion.kfl
+	./$(TEST_BIN) integration_tests/rl_capture.kfl
 	./$(MANIFEST_TEST)
 	./$(BODY_BINDING_TEST)
 	./$(W8_ARENA_TEST)

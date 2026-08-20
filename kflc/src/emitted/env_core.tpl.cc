@@ -350,6 +350,61 @@ static K26V3 kflrl_m3_mul_(K26M3 m, K26V3 v)
                      m.m[2][0]*v.x + m.m[2][1]*v.y + m.m[2][2]*v.z);
 }
 
+/* A three by three inverse, written out. Returns 0 when the matrix is
+ * singular and leaves the output untouched, so a caller can decline
+ * rather than continue with a fabricated answer. */
+static int kflrl_m3_inv_(K26M3 J, K26M3 *out)
+{
+    double c00 = J.m[1][1]*J.m[2][2] - J.m[1][2]*J.m[2][1];
+    double c01 = J.m[1][2]*J.m[2][0] - J.m[1][0]*J.m[2][2];
+    double c02 = J.m[1][0]*J.m[2][1] - J.m[1][1]*J.m[2][0];
+    double det = J.m[0][0]*c00 + J.m[0][1]*c01 + J.m[0][2]*c02;
+    if (!(det > 0.0) && !(det < 0.0)) return 0;
+    double id = 1.0 / det;
+    out->m[0][0] = c00 * id;
+    out->m[1][0] = c01 * id;
+    out->m[2][0] = c02 * id;
+    out->m[0][1] = (J.m[0][2]*J.m[2][1] - J.m[0][1]*J.m[2][2]) * id;
+    out->m[1][1] = (J.m[0][0]*J.m[2][2] - J.m[0][2]*J.m[2][0]) * id;
+    out->m[2][1] = (J.m[0][1]*J.m[2][0] - J.m[0][0]*J.m[2][1]) * id;
+    out->m[0][2] = (J.m[0][1]*J.m[1][2] - J.m[0][2]*J.m[1][1]) * id;
+    out->m[1][2] = (J.m[0][2]*J.m[1][0] - J.m[0][0]*J.m[1][2]) * id;
+    out->m[2][2] = (J.m[0][0]*J.m[1][1] - J.m[0][1]*J.m[1][0]) * id;
+    return 1;
+}
+
+/* A tensor carried from the frame the collision pass shares into a
+ * body frame: R-transpose M R, where R is the rotation the given
+ * attitude names. It is the inverse of what kflrl_join_world_inertia_
+ * does, and it is here because the pass takes an inverse inertia in
+ * the body frame and conjugates it back out itself. */
+static K26M3 kflrl_m3_to_body_(K26M3 m, K26Quat q)
+{
+    K26V3 e0 = k26m3d_quat_rotate_v3(q, k26m3d_v3(1, 0, 0));
+    K26V3 e1 = k26m3d_quat_rotate_v3(q, k26m3d_v3(0, 1, 0));
+    K26V3 e2 = k26m3d_quat_rotate_v3(q, k26m3d_v3(0, 0, 1));
+    K26M3 R, tmp, out;
+    R.m[0][0] = e0.x; R.m[0][1] = e1.x; R.m[0][2] = e2.x;
+    R.m[1][0] = e0.y; R.m[1][1] = e1.y; R.m[1][2] = e2.y;
+    R.m[2][0] = e0.z; R.m[2][1] = e1.z; R.m[2][2] = e2.z;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            double a = 0.0;
+            for (int k = 0; k < 3; k++) a += R.m[k][i] * m.m[k][j];
+            tmp.m[i][j] = a;
+        }
+    }
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) {
+            double a = 0.0;
+            for (int k = 0; k < 3; k++) a += tmp.m[i][k] * R.m[k][j];
+            out.m[i][j] = a;
+        }
+    }
+    return out;
+}
+
+
 /* Make a joined chain one body again, at the end of a sub-advance in
  * which its members were integrated separately.
  *
@@ -503,23 +558,7 @@ static void kflrl_join_impose_(K26RlEnv *h, uint32_t e,
          * is left undone rather than continued with a fabricated
          * one. */
         K26M3 Jinv;
-        {
-            double c00 = J.m[1][1]*J.m[2][2] - J.m[1][2]*J.m[2][1];
-            double c01 = J.m[1][2]*J.m[2][0] - J.m[1][0]*J.m[2][2];
-            double c02 = J.m[1][0]*J.m[2][1] - J.m[1][1]*J.m[2][0];
-            double det = J.m[0][0]*c00 + J.m[0][1]*c01 + J.m[0][2]*c02;
-            if (!(det > 0.0) && !(det < 0.0)) continue;
-            double id = 1.0 / det;
-            Jinv.m[0][0] = c00 * id;
-            Jinv.m[1][0] = c01 * id;
-            Jinv.m[2][0] = c02 * id;
-            Jinv.m[0][1] = (J.m[0][2]*J.m[2][1] - J.m[0][1]*J.m[2][2]) * id;
-            Jinv.m[1][1] = (J.m[0][0]*J.m[2][2] - J.m[0][2]*J.m[2][0]) * id;
-            Jinv.m[2][1] = (J.m[0][1]*J.m[2][0] - J.m[0][0]*J.m[2][1]) * id;
-            Jinv.m[0][2] = (J.m[0][1]*J.m[1][2] - J.m[0][2]*J.m[1][1]) * id;
-            Jinv.m[1][2] = (J.m[0][2]*J.m[1][0] - J.m[0][0]*J.m[1][2]) * id;
-            Jinv.m[2][2] = (J.m[0][0]*J.m[1][1] - J.m[0][1]*J.m[1][0]) * id;
-        }
+        if (!kflrl_m3_inv_(J, &Jinv)) continue;
         K26V3 W = kflrl_m3_mul_(Jinv, L);
         for (int k = 0; k < n; k++) {
             int v = order[k];
@@ -531,6 +570,82 @@ static void kflrl_join_impose_(K26RlEnv *h, uint32_t e,
             b->omega = k26m3d_quat_rotate_v3(k26m3d_quat_conj(b->attitude), W);
         }
     }
+}
+
+/* The mass properties of the chain a body belongs to, as the
+ * collision pass sees them: in the frame the pass works in and at the
+ * start of the interval, which is where the pass takes its own
+ * configuration from.
+ *
+ * A resolution answers for everything that has to move with the
+ * struck body, so it must be given the chain's mass, the chain's
+ * centre of mass and the chain's inertia about that centre. Given
+ * only the member's own three, the impulse denominator mixes a
+ * composite mass with a member's resistance to turning, and the
+ * angular half is taken about the member's centre instead of the
+ * chain's: an off-centre strike on a laden craft then spins it as
+ * though the cargo were not there.
+ *
+ * Returns the member count. One member is a chain of one, and the
+ * caller leaves that body exactly as the pass built it. */
+static int kflrl_chain_coll_props_(const K26RlEnv *h, uint32_t e,
+                                   const K26AstroCollBody *cbody,
+                                   const int *leader, int v,
+                                   double *mass_out, K26V3 *com_out,
+                                   K26M3 *inertia_out)
+{
+    int order[KFLRL_N_VEHICLES];
+    int n = kflrl_join_members_(leader, kflrl_join_root_(leader, v), order);
+    if (n < 2) return n;
+
+    double mass[KFLRL_N_VEHICLES];
+    K26V3  com[KFLRL_N_VEHICLES];
+    K26M3  iner[KFLRL_N_VEHICLES];
+    for (int k = 0; k < n; k++) {
+        const K26AstroCollBody *b = &cbody[order[k]];
+        K26V3 o = k26m3d_quat_rotate_v3(b->orientation, b->com_offset);
+        mass[k] = b->mass > 0.0 ? b->mass : 0.0;
+        com[k]  = k26m3d_v3(b->pos0.x + o.x, b->pos0.y + o.y,
+                            b->pos0.z + o.z);
+        iner[k] = kflrl_join_world_inertia_(
+            h->vehicles[(size_t)e * KFLRL_N_VEHICLES + order[k]],
+            b->orientation);
+    }
+    double M = mass[0];
+    K26V3  Rn = k26m3d_v3(mass[0] * com[0].x, mass[0] * com[0].y,
+                          mass[0] * com[0].z);
+    for (int k = 1; k < n; k++) {
+        M    = M + mass[k];
+        Rn.x = Rn.x + mass[k] * com[k].x;
+        Rn.y = Rn.y + mass[k] * com[k].y;
+        Rn.z = Rn.z + mass[k] * com[k].z;
+    }
+    if (!(M > 0.0)) return n;
+    K26V3 R = k26m3d_v3(Rn.x / M, Rn.y / M, Rn.z / M);
+
+    /* The tensors first and the parallel-axis terms after, which is
+     * the order kflrl_join_impose_ takes them in. */
+    K26M3 J = iner[0];
+    for (int k = 1; k < n; k++) {
+        for (int i = 0; i < 3; i++) {
+            for (int c = 0; c < 3; c++) J.m[i][c] += iner[k].m[i][c];
+        }
+    }
+    for (int k = 0; k < n; k++) {
+        K26V3 d = k26m3d_v3(com[k].x - R.x, com[k].y - R.y, com[k].z - R.z);
+        double dd = k26m3d_v3_dot(d, d);
+        double dv[3] = { d.x, d.y, d.z };
+        for (int i = 0; i < 3; i++) {
+            for (int c = 0; c < 3; c++) {
+                double kron = (i == c) ? 1.0 : 0.0;
+                J.m[i][c] += mass[k] * (kron * dd - dv[i] * dv[c]);
+            }
+        }
+    }
+    *mass_out    = M;
+    *com_out     = R;
+    *inertia_out = J;
+    return n;
 }
 
 /* The mass of a chain and its momentum, summed over its members in
@@ -2224,18 +2339,20 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                      * pass some way into each other before they
                      * stopped.
                      *
-                     * A chain of one is its own mass, so a world with
-                     * no join takes exactly the arithmetic it took
-                     * before this.
+                     * The whole of the chain's mass properties go in,
+                     * not its mass alone: the mass the impulse divides
+                     * by, the centre the lever arm is taken from, and
+                     * the inertia the angular half turns on. Given a
+                     * composite mass beside a member's own tensor and
+                     * a member's own centre, a bounce answers with an
+                     * impulse denominator that mixes the two and a
+                     * spin about the wrong point, so an off-centre
+                     * strike on a laden craft turns it as though the
+                     * cargo were not attached.
                      *
-                     * The angular half of a bounce still turns on the
-                     * struck body's own tensor and its own lever arm,
-                     * which the projection then carries to the rest of
-                     * the chain. That is stated rather than hidden: it
-                     * is the linear half that decides whether a pair
-                     * comes to rest against each other, and the
-                     * composite tensor at the contact point is not a
-                     * quantity this pass holds. */
+                     * A chain of one is left exactly as the pass built
+                     * it, so a world with no join takes exactly the
+                     * arithmetic it took before this. */
                     K26AstroCollBody rbodies[2];
                     rbodies[0] = cbody[cc.body_a];
                     rbodies[1] = cbody[cc.body_b];
@@ -2243,13 +2360,24 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                     {
                         int rpair[2] = { cc.body_a, cc.body_b };
                         for (int q = 0; q < 2; q++) {
-                            double cm;
-                            K26V3  cp;
-                            kflrl_chain_mass_mom_(
-                                h, e, cleader,
-                                kflrl_join_root_(cleader, rpair[q]),
-                                &cm, &cp);
-                            if (cm > 0.0) rbodies[q].mass = cm;
+                            double cm = 0.0;
+                            K26V3  ccom;
+                            K26M3  cJ, cJinv;
+                            int cn = kflrl_chain_coll_props_(
+                                h, e, cbody, cleader, rpair[q],
+                                &cm, &ccom, &cJ);
+                            if (cn < 2 || !(cm > 0.0)) continue;
+                            if (!kflrl_m3_inv_(cJ, &cJinv)) continue;
+                            const K26AstroCollBody *mb = &cbody[rpair[q]];
+                            rbodies[q].mass = cm;
+                            rbodies[q].com_offset =
+                                k26m3d_quat_rotate_v3(
+                                    k26m3d_quat_conj(mb->orientation),
+                                    k26m3d_v3(ccom.x - mb->pos0.x,
+                                              ccom.y - mb->pos0.y,
+                                              ccom.z - mb->pos0.z));
+                            rbodies[q].inv_inertia =
+                                kflrl_m3_to_body_(cJinv, mb->orientation);
                         }
                     }
 #endif
@@ -2339,42 +2467,106 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
                              * rather than rebuilt from a flattened
                              * coordinate.
                              *
-                             * It reaches every member of the struck
-                             * body's chain, because the chain moves as
-                             * one and the resolution above answered
-                             * for the whole of it. A chain of one is
-                             * the body itself, which is what a world
-                             * with no join has. */
-                            cb->omega = nw[q];
+                             * A chain of one takes the delta and the
+                             * new rate as it stands, which is what a
+                             * world with no join has and what it took
+                             * before chains existed.
+                             *
+                             * A longer chain takes the whole rigid
+                             * state instead. The resolution answered
+                             * for the composite, so its new rate is
+                             * the composite's and its velocity change
+                             * is the composite centre's; every member
+                             * is then placed on that one motion, its
+                             * own velocity being the centre's plus the
+                             * rate across its own offset from the
+                             * centre. Writing the delta alone and
+                             * leaving the members' rates where they
+                             * were would hand the projection below a
+                             * state whose spin and whose moment of
+                             * motion disagree, and it would answer
+                             * with a rate that is neither. */
 #if KFLRL_N_PORTS > 1
                             {
                                 int cmem[KFLRL_N_VEHICLES];
                                 int cn = kflrl_join_members_(
                                     cleader,
                                     kflrl_join_root_(cleader, vi), cmem);
-                                for (int mi = 0; mi < cn; mi++) {
-                                    K26AstroBody *mb =
-                                        k26astro_world_body_at(
+                                if (cn > 1) {
+                                    K26V3 wnew = k26m3d_quat_rotate_v3(
+                                        cbody[vi].orientation, nw[q]);
+                                    K26AstroBody *mb[KFLRL_N_VEHICLES];
+                                    K26V3  mcom[KFLRL_N_VEHICLES];
+                                    double mmass[KFLRL_N_VEHICLES];
+                                    double M = 0.0;
+                                    K26V3  Rn = k26m3d_v3(0.0, 0.0, 0.0);
+                                    K26V3  Pn = k26m3d_v3(0.0, 0.0, 0.0);
+                                    int ok = 1;
+                                    for (int mi = 0; mi < cn; mi++) {
+                                        mb[mi] = k26astro_world_body_at(
                                             h->worlds[e],
                                             kflrl_body_idx_[
                                                 kflrl_vehicle_body_[
                                                     cmem[mi]]]);
-                                    if (!mb) continue;
-                                    k26astro_pos_add(&mb->pos, k26m3d_v3(
-                                        dv.x * crem, dv.y * crem,
-                                        dv.z * crem));
-                                    mb->vel = k26m3d_v3(mb->vel.x + dv.x,
-                                                        mb->vel.y + dv.y,
-                                                        mb->vel.z + dv.z);
+                                        if (!mb[mi]) { ok = 0; break; }
+                                        const double *co =
+                                            KFLRL_COM(h, e, cmem[mi]);
+                                        K26V3 r = k26m3d_quat_rotate_v3(
+                                            mb[mi]->attitude,
+                                            k26m3d_v3(co[0], co[1], co[2]));
+                                        K26V3 pr = k26astro_pos_sub(
+                                            &mb[mi]->pos, cref);
+                                        mmass[mi] = mb[mi]->mass > 0.0
+                                                    ? mb[mi]->mass : 0.0;
+                                        mcom[mi] = k26m3d_v3(pr.x + r.x,
+                                                             pr.y + r.y,
+                                                             pr.z + r.z);
+                                        M    = M + mmass[mi];
+                                        Rn.x = Rn.x + mmass[mi] * mcom[mi].x;
+                                        Rn.y = Rn.y + mmass[mi] * mcom[mi].y;
+                                        Rn.z = Rn.z + mmass[mi] * mcom[mi].z;
+                                        Pn.x = Pn.x + mmass[mi] * mb[mi]->vel.x;
+                                        Pn.y = Pn.y + mmass[mi] * mb[mi]->vel.y;
+                                        Pn.z = Pn.z + mmass[mi] * mb[mi]->vel.z;
+                                    }
+                                    if (ok && M > 0.0) {
+                                        K26V3 R = k26m3d_v3(Rn.x / M,
+                                                            Rn.y / M,
+                                                            Rn.z / M);
+                                        K26V3 V = k26m3d_v3(Pn.x / M + dv.x,
+                                                            Pn.y / M + dv.y,
+                                                            Pn.z / M + dv.z);
+                                        for (int mi = 0; mi < cn; mi++) {
+                                            K26V3 d = k26m3d_v3(
+                                                mcom[mi].x - R.x,
+                                                mcom[mi].y - R.y,
+                                                mcom[mi].z - R.z);
+                                            K26V3 vk =
+                                                k26m3d_v3_cross(wnew, d);
+                                            k26astro_pos_add(&mb[mi]->pos,
+                                                k26m3d_v3(dv.x * crem,
+                                                          dv.y * crem,
+                                                          dv.z * crem));
+                                            mb[mi]->vel = k26m3d_v3(
+                                                V.x + vk.x, V.y + vk.y,
+                                                V.z + vk.z);
+                                            mb[mi]->omega =
+                                                k26m3d_quat_rotate_v3(
+                                                    k26m3d_quat_conj(
+                                                        mb[mi]->attitude),
+                                                    wnew);
+                                        }
+                                        continue;
+                                    }
                                 }
                             }
-#else
+#endif
+                            cb->omega = nw[q];
                             k26astro_pos_add(&cb->pos, k26m3d_v3(
                                 dv.x * crem, dv.y * crem, dv.z * crem));
                             cb->vel = k26m3d_v3(cb->vel.x + dv.x,
                                                 cb->vel.y + dv.y,
                                                 cb->vel.z + dv.z);
-#endif
                         }
                     }
                     /* The fraction the channels publish is of the

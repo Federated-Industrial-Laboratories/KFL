@@ -1468,28 +1468,48 @@ static int rl_collect_capture_envelope_(RlModel *m, const KflcNode *n,
      * a limit stated there admits every attitude there is. A rate in
      * degrees per second carries no such bound, since a craft may
      * legitimately turn faster than that. */
+    /* `kw` is what the block spells, and `part` tells the closing
+     * band's two bounds apart, since both are written on one line
+     * under one keyword and a diagnostic naming only that keyword
+     * would leave an author checking both. */
     static const struct {
-        const char *key, *kw, *unit;
+        const char *key, *kw, *part, *unit;
         int         angle;
     } F_[] = {
-        { "axial_rate_lo", "axial_rate",    "m/s",     0 },
-        { "axial_rate_hi", "axial_rate",    "m/s",     0 },
-        { "lateral_rate",  "lateral_rate",  "m/s",     0 },
-        { "pitchyaw_rate", "pitchyaw_rate", "deg/s",   0 },
-        { "roll_rate",     "roll_rate",     "deg/s",   0 },
-        { "lateral",       "lateral",       "m",       0 },
-        { "pitchyaw",      "pitchyaw",      "deg",     1 },
-        { "roll",          "roll",          "deg",     1 }
+        { "axial_rate_lo", "axial_rate",    "'s lower bound", "m/s",   0 },
+        { "axial_rate_hi", "axial_rate",    "'s upper bound", "m/s",   0 },
+        { "lateral_rate",  "lateral_rate",  "",               "m/s",   0 },
+        { "pitchyaw_rate", "pitchyaw_rate", "",               "deg/s", 0 },
+        { "roll_rate",     "roll_rate",     "",               "deg/s", 0 },
+        { "lateral",       "lateral",       "",               "m",     0 },
+        { "pitchyaw",      "pitchyaw",      "",               "deg",   1 },
+        { "roll",          "roll",          "",               "deg",   1 }
     };
     int err = 0;
     for (int i = 0; i < (int)(sizeof F_ / sizeof F_[0]); i++) {
         int    line = n->line;
         double v = rl_capenv_field_(n, F_[i].key, &line);
-        if (!(v >= 0.0) || !(v < 1.0e300)) {
+        /* A value that is not finite is its own refusal and not a
+         * negative one. The two are told apart because they are
+         * different mistakes: an infinity or a not-a-number arrives
+         * from a word the number reader accepted, and saying it
+         * cannot be negative would send an author looking for a minus
+         * sign that is not there. The test is written as a pair of
+         * comparisons rather than as a library call because both are
+         * false for a not-a-number, which is what makes it catch one. */
+        if (!(v > -1.0e300) || !(v < 1.0e300)) {
             kflc_diag_errorf(diag, line,
-                "capture_envelope `%s`: `%s` is %.17g %s, and a limit on "
-                "a rate or a misalignment is a magnitude, so it cannot "
-                "be negative", nm, F_[i].kw, v, F_[i].unit);
+                "capture_envelope `%s`: `%s`%s is %.17g, which is not a "
+                "finite number; every limit here is a figure a document "
+                "prints", nm, F_[i].kw, F_[i].part, v);
+            err = 1;
+            continue;
+        }
+        if (v < 0.0) {
+            kflc_diag_errorf(diag, line,
+                "capture_envelope `%s`: `%s`%s is %.17g %s, and a limit "
+                "on a rate or a misalignment is a magnitude, so it cannot "
+                "be negative", nm, F_[i].kw, F_[i].part, v, F_[i].unit);
             err = 1;
             continue;
         }
@@ -1517,7 +1537,13 @@ static int rl_collect_capture_envelope_(RlModel *m, const KflcNode *n,
     {
         int    line_d = n->line;
         double d = rl_capenv_field_(n, "diameter", &line_d);
-        if (!(d > 0.0) || !(d < 1.0e300)) {
+        if (!(d > -1.0e300) || !(d < 1.0e300)) {
+            kflc_diag_errorf(diag, line_d,
+                "capture_envelope `%s`: `diameter` is %.17g, which is not "
+                "a finite number; every limit here is a figure a document "
+                "prints", nm, d);
+            err = 1;
+        } else if (!(d > 0.0)) {
             kflc_diag_errorf(diag, line_d,
                 "capture_envelope `%s`: `diameter` is %.17g mm, and the "
                 "mating plane it sizes is a real interface, so it must "
