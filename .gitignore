@@ -80,3 +80,5 @@ __pycache__/
 # Built host tools
 tools/k26rl_rtdrive/k26rl_rtdrive
 imgui.ini
+kflc/src/emitted/*_inc.h
+kflc/tools/text_to_header

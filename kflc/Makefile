@@ -41,7 +41,23 @@ LIB_OBJS = src/util.o src/lexer.o src/parser.o src/dump.o src/serialize.o \
            src/builtin_register_astro.o \
            src/builtin_loader.o src/runtime.o
 # Driver objects: emitters + CLI driver. Only the kflc binary needs these.
-DRV_OBJS = src/emit.o src/emit_rl.o src/main.o
+EMIT_RL_OBJS = src/emit_rl.o src/emit_rl_collect.o \
+               src/emit_rl_collect_defense.o src/emit_rl_helpers.o \
+               src/emit_rl_tables.o src/emit_rl_world.o \
+               src/emit_rl_observe.o src/emit_rl_step.o \
+               src/emit_rl_core.o
+DRV_OBJS = src/emit.o $(EMIT_RL_OBJS) src/main.o
+
+$(EMIT_RL_OBJS): src/emit_rl_internal.h
+
+# The emitted core's template, carried into a header by the tree's
+# own tool so the emitter ships no second copy of the text.
+TXT2H = tools/text_to_header
+$(TXT2H): tools/text_to_header.c
+	$(CC) $(CFLAGS) -o $@ $<
+src/emitted/env_core_inc.h: src/emitted/env_core.tpl.cc $(TXT2H)
+	$(TXT2H) $< $@ kflrl_tpl_env_core
+src/emit_rl_core.o: src/emitted/env_core_inc.h
 
 .PHONY: all install clean test
 all: $(BIN) $(LIB)
@@ -869,7 +885,8 @@ install: $(BIN) $(LIB)
 	done
 
 clean:
-	rm -f src/*.o $(BIN) $(LIB) $(TEST_BIN) $(MANIFEST_TEST) \
+	rm -f src/*.o src/emitted/*_inc.h $(TXT2H) \
+	      $(BIN) $(LIB) $(TEST_BIN) $(MANIFEST_TEST) \
 	      $(BODY_BINDING_TEST) $(W8_ARENA_TEST) $(MEMORY_QUAL_TEST) \
 	      $(RESERVED_KW_TEST) $(RL_GRAMMAR_TEST) $(RL_PURITY_TEST) \
 	      $(RL_EMIT_TEST) \
