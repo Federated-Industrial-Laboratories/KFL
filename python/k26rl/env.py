@@ -505,6 +505,110 @@ class _Session:
         self._untouched = True
         return self.read_obs()
 
+    # ---- the training-host surface -------------------------------------
+    #
+    # Three getters that postdate the frozen thirteen, bound here for
+    # a host that drives this package directly: the tap it arms to
+    # watch a run, and the two readbacks it takes of the world the
+    # observation channels are views of. Each is present on the
+    # session whatever the artifact reports; the binding layer says
+    # the absence of one the loaded artifact does not carry.
+
+    def tap(self, name):
+        """Arm the telemetry ring under ``name``, or disarm it with
+        None. Arming is the host's own act and publishes nothing back
+        into the simulation: the ring is read-only to its consumers,
+        and a run is bit-identical whether or not one is watching."""
+        if name is not None and not isinstance(name, str):
+            raise TypeError("tap name must be a str or None, not %s"
+                            % type(name).__name__)
+        self.artifact.tap(self._handle, name)
+
+    def resolve_body_reference(self, reference):
+        """The body getter's reference argument from a body index, a
+        declared body name, or the origin constant.
+
+        A name is resolved here because only the spec blob carries the
+        mapping; an index and the origin constant are passed through
+        untouched, so a reference naming no body is refused by the
+        getter itself rather than by a guess made here."""
+        if isinstance(reference, str):
+            for index, name in self.spec.body_names.items():
+                if name == reference:
+                    return index
+            known = sorted(self.spec.body_names.values())
+            raise ValueError(
+                "no body is named %r; this artifact declares %s"
+                % (reference, known if known else "no body names"))
+        if isinstance(reference, bool) or not isinstance(
+                reference, (int, np.integer)):
+            raise TypeError(
+                "body reference must be an index, a declared body "
+                "name, or BODY_REF_ORIGIN, not %s"
+                % type(reference).__name__)
+        index = int(reference)
+        if not 0 <= index <= 0xFFFFFFFF:
+            raise ValueError(
+                "body reference %d is outside the surface's unsigned "
+                "32-bit reference range" % index)
+        return index
+
+    def read_bodies(self, reference):
+        """Every body of every environment, env-major, as
+        ``(n_envs, body_count, 6)``: three position components then
+        three velocity components, positions relative to
+        ``reference``.
+
+        The array is freshly allocated for the call and returned as
+        the getter laid it out, reshaped and not reordered."""
+        index = self.resolve_body_reference(reference)
+        need = self.artifact.bodies(self._handle, index, None, 0)
+        return self._shaped_read(
+            "k26rl_env_bodies", _abi.BODY_STRIDE, need,
+            lambda buf, count: self.artifact.bodies(
+                self._handle, index,
+                self._ptr(buf, ctypes.c_double), count))
+
+    def read_actuators(self):
+        """The actuator set as the latest step drove it, env-major, as
+        ``(n_envs, actuator_count, 10)``.
+
+        The ten values are the getter's own and cross untouched: the
+        bound body's index, the kind, the mounting position, the axis
+        or thrust direction, the applied magnitude, and the full-scale
+        magnitude. The first two are exact small integers in binary64
+        and are not converted here."""
+        need = self.artifact.actuators(self._handle, None, 0)
+        return self._shaped_read(
+            "k26rl_env_actuators", _abi.ACTUATOR_STRIDE, need,
+            lambda buf, count: self.artifact.actuators(
+                self._handle, self._ptr(buf, ctypes.c_double), count))
+
+    def _shaped_read(self, symbol, stride, need, fill):
+        """One sized read of a getter following the spec getter's
+        sizing convention, shaped ``(n_envs, need // (n_envs * stride),
+        stride)``. A requirement that is not a whole number of rows
+        per environment is an artifact defect worth naming rather than
+        reshaping around."""
+        row = self.n_envs * stride
+        if need % row:
+            raise K26RlError(
+                None,
+                "%s requires %d doubles, which is not %d environments "
+                "times a whole number of rows of %d"
+                % (symbol, need, self.n_envs, stride))
+        count = need // row
+        buf = np.empty(need, dtype=np.float64)
+        got = fill(buf, need)
+        if got != need:
+            # The count is fixed after create, so two sizing answers
+            # disagreeing is an artifact defect worth naming.
+            raise K26RlError(
+                None,
+                "%s sized its output at %d doubles and then at %d"
+                % (symbol, need, got))
+        return buf.reshape(self.n_envs, count, stride)
+
     # ---- episode output ----------------------------------------------
 
     def set_output(self, path):
@@ -692,6 +796,61 @@ class K26RlEnv(gymnasium.Env):
         None."""
         self._session.ensure_open()
         self._session.set_output(path)
+
+    # ---- the training-host surface ------------------------------------
+    #
+    # The three getters that postdate the frozen set. Each method
+    # exists whatever the loaded artifact reports; one the artifact is
+    # too old to carry refuses by naming the symbol, the ABI minor it
+    # arrived at, and the minor the artifact reports.
+
+    def tap(self, name):
+        """Arm the telemetry ring under ``name``, or disarm it with
+        None, so a viewer can watch this environment while it runs.
+
+        Callable only at an episode boundary, as ``set_output`` is:
+        after construction, immediately after a reset, and before the
+        step that follows. Watching cannot change the run."""
+        self._session.ensure_open()
+        self._session.tap(name)
+
+    def bodies(self, reference):
+        """Every body's position and velocity, as
+        ``(1, body_count, 6)``: three position components then three
+        velocity components, positions taken relative to
+        ``reference``.
+
+        The leading axis is the handle's environment count, which is
+        one for this shape, so the layout is the getter's own on
+        either shape and a consumer reads row 0.
+
+        ``reference`` is a body index, a declared body name, or
+        :data:`k26rl.BODY_REF_ORIGIN` for the world origin. Positions
+        relative to a body are the runtime's exact subtraction;
+        relative to the origin they are the flattened coordinate and
+        carry that form's precision limit."""
+        self._session.ensure_open()
+        return self._session.read_bodies(reference)
+
+    def actuators(self):
+        """The actuator set as the latest step drove it, as
+        ``(1, actuator_count, 10)`` and in the getter's own order.
+
+        The ten values per actuator are the bound body's index, the
+        kind, the mounting position, the axis or thrust direction, the
+        applied magnitude, and the full-scale magnitude. They cross
+        untouched, the first two as the exact small integers the
+        getter writes."""
+        self._session.ensure_open()
+        return self._session.read_actuators()
+
+    @property
+    def body_names(self):
+        """Declared body name by index, in the order
+        :meth:`bodies` reports them. Empty for an artifact that
+        publishes no body names."""
+        self._session.ensure_open()
+        return dict(self._session.spec.body_names)
 
     @property
     def output_path(self):

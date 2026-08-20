@@ -30,6 +30,7 @@ TAG_OBS_CHANNEL_NAME = 0x000D
 TAG_OBS_CHANNEL_KIND = 0x000E
 TAG_EPISODE_FLAGS = 0x000F
 TAG_REWARD_COMPONENTS = 0x0010
+TAG_BODY_NAME = 0x0012
 TAG_OBS_CHANNEL_SOURCE = 0x0016
 
 ACT_KIND_BOX = 0
@@ -92,6 +93,10 @@ class Spec:
         self.obs_channel_kinds = {}
         self.obs_channel_sources = {}
         self.obs_channel_pairs = {}
+        # Body index to declared name, in the declaration order the
+        # body getter lays its output out in. Empty for an artifact
+        # older than the tag, which is served in full otherwise.
+        self.body_names = {}
         self.episode_flags = None
         self.act_channels = []
 
@@ -180,6 +185,13 @@ def parse(blob):
             name = blob[value_off + 4:value_off + length]
             spec.obs_channel_names[channel] = name.decode("utf-8",
                                                           "replace")
+        elif tag == TAG_BODY_NAME:
+            if length < 4:
+                _malformed("tag 0x%04x carries %d bytes, expected at "
+                           "least 4" % (tag, length))
+            (body,) = struct.unpack_from("<I", blob, value_off)
+            name = blob[value_off + 4:value_off + length]
+            spec.body_names[body] = name.decode("utf-8", "replace")
         elif tag == TAG_OBS_CHANNEL_KIND:
             _need_len(tag, length, 6)
             channel, kind = struct.unpack_from("<IH", blob, value_off)

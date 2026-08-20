@@ -25,11 +25,29 @@ training packages :func:`export_policy` reads a model through.
 The package is versioned against the stepping ABI, not against the
 grammar that produced an artifact: it serves every artifact whose
 ABI major equals :data:`ABI_MAJOR`.
+
+Three getters postdate the ABI's first version and are bound for a
+training host that drives the environments directly: ``tap`` arms the
+telemetry ring so a run can be watched while it trains, ``bodies``
+reports the world the observation channels are views of, and
+``actuators`` reports what the latest step drove. Each is present on
+both Gymnasium shapes whatever the artifact reports; against an
+artifact too old to carry one, the call says so, naming the symbol,
+the ABI minor it arrived at (:data:`ABI_MINOR_TAP`,
+:data:`ABI_MINOR_BODIES`, :data:`ABI_MINOR_ACTUATORS`), and the minor
+the artifact reports.
 """
 
 __version__ = "0.1.0"
 
-from ._abi import ABI_MAJOR, ABI_MINOR_MIN
+from ._abi import (
+    ABI_MAJOR,
+    ABI_MINOR_ACTUATORS,
+    ABI_MINOR_BODIES,
+    ABI_MINOR_MIN,
+    ABI_MINOR_TAP,
+    BODY_REF_ORIGIN,
+)
 from ._errors import (
     K26RlError,
     K26RlFaultError,
@@ -39,7 +57,11 @@ from ._errors import (
 
 __all__ = [
     "ABI_MAJOR",
+    "ABI_MINOR_ACTUATORS",
+    "ABI_MINOR_BODIES",
     "ABI_MINOR_MIN",
+    "ABI_MINOR_TAP",
+    "BODY_REF_ORIGIN",
     "K26RlEnv",
     "K26RlError",
     "K26RlFaultError",

@@ -9,6 +9,13 @@ The dlopen mode is RTLD_LOCAL, passed explicitly rather than left to a
 platform default, so concurrent artifacts in one process stay
 separate. RTLD_NOW matches the surface's C consumers: unresolved
 references surface at load, beside the all-symbols-at-load rule below.
+
+Three getters postdate the frozen thirteen and arrived under the
+surface's minor-version rule. Each is resolved only when the loaded
+artifact's reported minor admits it, and its absence is said rather
+than hidden: the Python surface exists whatever the artifact reports,
+and a call against a minor too low raises the package's error naming
+the symbol, the minor it needs, and the minor the artifact reports.
 """
 
 import ctypes
@@ -25,6 +32,24 @@ from ._errors import (
 # artifact passes the minor check.
 ABI_MAJOR = 1
 ABI_MINOR_MIN = 0
+
+# The minors the three post-1.0 getters arrived at. They do not raise
+# ABI_MINOR_MIN: an artifact that carries none of them is served in
+# full for everything else, and each call says its own absence.
+ABI_MINOR_TAP = 1
+ABI_MINOR_BODIES = 2
+ABI_MINOR_ACTUATORS = 6
+
+# Ask the body getter for the world origin rather than for a body's
+# frame.
+BODY_REF_ORIGIN = 0xFFFFFFFF
+
+# Doubles per body in the body getter's layout (three position
+# components then three velocity components), and per actuator in the
+# actuator getter's (body index, kind, mounting position, axis,
+# applied magnitude, full-scale magnitude).
+BODY_STRIDE = 6
+ACTUATOR_STRIDE = 10
 
 # Version 1 status registry values, used for control flow only:
 # exception typing below and fault-code recognition above. Message
@@ -75,6 +100,19 @@ _SIGNATURES = (
      (_C_HANDLE, ctypes.POINTER(ctypes.c_uint8), ctypes.c_uint32)),
     ("k26rl_status_str", ctypes.c_char_p, (_C_STATUS,)),
     ("k26rl_env_destroy", None, (_C_HANDLE,)),
+)
+
+# The three that postdate the frozen set, each with the minor it
+# arrived at. Resolution is conditional on the reported minor, so an
+# older artifact loads and serves the frozen surface unchanged.
+_CONDITIONAL_SIGNATURES = (
+    ("k26rl_env_tap", ABI_MINOR_TAP, _C_STATUS,
+     (_C_HANDLE, ctypes.c_char_p)),
+    ("k26rl_env_bodies", ABI_MINOR_BODIES, ctypes.c_int32,
+     (_C_HANDLE, ctypes.c_uint32, ctypes.POINTER(ctypes.c_double),
+      ctypes.c_uint32)),
+    ("k26rl_env_actuators", ABI_MINOR_ACTUATORS, ctypes.c_int32,
+     (_C_HANDLE, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32)),
 )
 
 
@@ -128,6 +166,42 @@ class Artifact:
                 "artifact %s reports ABI minor %d; this package "
                 "needs at least minor %d"
                 % (self.path, self.abi_minor, ABI_MINOR_MIN))
+
+        # The post-1.0 getters, resolved by the reported minor. An
+        # artifact whose minor promises one and does not export it is
+        # a defect worth naming, on the frozen set's own terms.
+        self._minor_needed = {}
+        for name, minor, restype, argtypes in _CONDITIONAL_SIGNATURES:
+            self._minor_needed[name] = minor
+            if self.abi_minor < minor:
+                continue
+            try:
+                fn = getattr(self._lib, name)
+            except AttributeError:
+                raise K26RlError(
+                    None,
+                    "artifact %s reports ABI minor %d, which carries "
+                    "%s, but does not export it"
+                    % (self.path, self.abi_minor, name)) from None
+            fn.restype = restype
+            fn.argtypes = list(argtypes)
+            self._fn[name] = fn
+
+    # ---- conditional symbols ------------------------------------------
+
+    def require(self, name):
+        """A conditional symbol, or the refusal that says its absence:
+        the symbol, the minor it arrived at, and the minor this
+        artifact reports."""
+        fn = self._fn.get(name)
+        if fn is None:
+            raise K26RlError(
+                None,
+                "artifact %s does not carry %s: that symbol arrived at "
+                "ABI minor %d and this artifact reports minor %d"
+                % (self.path, name, self._minor_needed[name],
+                   self.abi_minor))
+        return fn
 
     # ---- status decode ------------------------------------------------
 
@@ -229,3 +303,37 @@ class Artifact:
         # Void return; the one refusable condition (use after
         # destroy) is prevented by the owning object's closed guard.
         self._fn["k26rl_env_destroy"](handle)
+
+    # ---- the conditional getters --------------------------------------
+
+    def tap(self, handle, name):
+        """Arm the telemetry ring under ``name``, or disarm it with
+        None. The ring, its geometry, and its consumers are the
+        artifact's; this throws the switch and surfaces the refusals,
+        which are the boundary-timing one the output switch shares
+        and the tap's own name, existence, geometry, and availability
+        refusals."""
+        fn = self.require("k26rl_env_tap")
+        encoded = None if name is None else os.fsencode(name)
+        self._check(fn(handle, encoded), "k26rl_env_tap")
+
+    def bodies(self, handle, reference, out_ptr, capacity):
+        """The body-state getter, whose sizing follows the spec
+        getter's convention rather than the plain getters': the
+        required count of doubles is returned as a positive value, a
+        capacity below it writes nothing and still returns the
+        requirement, and a negative return is the negated status."""
+        fn = self.require("k26rl_env_bodies")
+        got = int(fn(handle, int(reference), out_ptr, int(capacity)))
+        if got < 0:
+            self._raise(-got, "k26rl_env_bodies")
+        return got
+
+    def actuators(self, handle, out_ptr, capacity):
+        """The actuator readback, sized by the same convention as the
+        body getter."""
+        fn = self.require("k26rl_env_actuators")
+        got = int(fn(handle, out_ptr, int(capacity)))
+        if got < 0:
+            self._raise(-got, "k26rl_env_actuators")
+        return got

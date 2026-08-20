@@ -33,6 +33,14 @@
  *
  *   A determinism arm comparing two runs in one process would share
  *   every cache and every allocation. The two runs are two processes.
+ *
+ *   A composite-mass arm that took the pair's mass from the artifact
+ *   and then compared it against the artifact would agree with any
+ *   error in it. The two masses are the fixture's own declarations,
+ *   written here, and the expected answer is arithmetic on them; the
+ *   two answers the arm rules out are the two single-craft ones,
+ *   each hundreds of thousands of times the bound asserted away from
+ *   what is measured.
  */
 #include "rl_gate_util.h"
 
@@ -1294,6 +1302,230 @@ int main(void)
          * rate, which is a thousand times the bound above. */
         ASSERT(fabs(before[3] - before[6 + 3]) > 0.06);
         js.destroy(je);
+    }
+    n_pass++;
+
+    /* ---- the joined pair answers a thrust with the pair's mass ---- *
+     *
+     * The join writes no summed mass anywhere: both craft keep their
+     * own mass and their own thrust, and the composite behaviour is
+     * what falls out of re-projecting the two momenta onto one rigid
+     * motion after each sub-advance. That makes the summed mass a
+     * claim about behaviour and reachable only by measuring
+     * behaviour, which the momentum arm above does not do: it drives
+     * a zero action throughout and asks only that a capture create no
+     * momentum.
+     *
+     * So this arm fires a thruster. The lighter craft carries one on
+     * its own centre line, pointing along the line of centres, and
+     * both craft sit on that line, so the line of action passes
+     * through the pair's centre of mass and the composite inertia
+     * enters with a zero lever arm: the parallel-axis prediction is
+     * the mass sum, and it is the mass sum this arm measures. The
+     * pair's centre-of-mass velocity is asserted to change by the
+     * impulse over the summed mass.
+     *
+     * Three things make that a measurement rather than a
+     * restatement. A control run fires the same thruster on the same
+     * craft before the two are joined, where the answer is that
+     * craft's own mass, so a thruster wired to nothing fails there
+     * first. The two predictions the arm rules out are the thrusting
+     * craft's own mass, which is four times the answer, and the other
+     * craft's, which is a third off it, both enormous beside the
+     * bound asserted. And the pair is required to have moved as one
+     * and not to have turned, so the zero lever arm the paragraph
+     * above claims is measured here and not assumed.
+     *
+     * What this arm does not pin is the other half of the composite,
+     * the inertia the join sums by the parallel-axis theorem. Its
+     * lever arm is zero by construction here, which is what makes the
+     * mass reachable on its own; a rotational arm needs a fixture
+     * whose composite tensor is known in advance and is separate
+     * work.
+     *
+     * The world is free space with one distant, nearly massless
+     * anchor. The anchor is not scenery: thrust reaches translation
+     * through the gravity integrator's perturbation registry, so a
+     * world with nothing gravitating never evaluates it and no
+     * thruster in such a world pushes anything. Its field at the pair
+     * is about 1e-24 m/s squared, twenty-three orders below the
+     * acceleration measured, so the arm is in free space for every
+     * purpose except the one that makes the thrust arrive.
+     */
+    printf("the joined pair answers a thrust with the pair's mass\n");
+    {
+        /* The fixture's own numbers, in one place, so no assertion
+         * can disagree with the run that produced it. */
+        const double m1 = 1000.0, m2 = 3000.0, mt = m1 + m2;
+        const double thrust_n = 400.0, dt_s = 0.5;
+        const int burn = 4;
+        const double want_pair = thrust_n * burn * dt_s / mt;
+        const double want_solo = thrust_n * dt_s / m1;
+        /* Body 0 is the anchor; the two craft follow it in
+         * declaration order. */
+        enum { ONE = 1, TWO = 2, NB = 3 };
+        const int32_t nvals = (int32_t)(NB * 6);
+        const int32_t nquat = (int32_t)(NB * 7);
+        double fire[1] = { 1.0 }, coast[1] = { 0.0 };
+        char prog[3072];
+        void *mso;
+        RlSurface ms;
+
+        rl_write_file_(WORK_DIR "/joinm_a.k26asm",
+            "assembly joinm_a\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"gate fixture, not a craft\" computed\n"
+            "    component hull\n"
+            "        mass 1000.0\n"
+            "        at 0 0 0\n"
+            "        collider box 1.0 0.5 0.5\n"
+            "    end\n"
+            "    port dock\n"
+            "        at 1.2 0.0 0.0\n"
+            "        axis 1.0 0.0 0.0\n"
+            "        roll_ref 0.0 1.0 0.0\n"
+            "        capture idss_e\n"
+            "    end\n"
+            "    thruster main\n"
+            "        at 0.0 0.0 0.0\n"
+            "        dir 1.0 0.0 0.0\n"
+            "        thrust 400.0\n"
+            "    end\n"
+            "end\n");
+        rl_write_file_(WORK_DIR "/joinm_b.k26asm",
+            "assembly joinm_b\n"
+            "    frame x_to_port\n"
+            "    provenance mass \"gate fixture, not a craft\" computed\n"
+            "    component hull\n"
+            "        mass 3000.0\n"
+            "        at 0 0 0\n"
+            "        collider box 1.0 0.5 0.5\n"
+            "    end\n"
+            "    port dock\n"
+            "        at 2.5 0.0 0.0\n"
+            "        axis 1.0 0.0 0.0\n"
+            "        roll_ref 0.0 1.0 0.0\n"
+            "        capture idss_e\n"
+            "    end\n"
+            "end\n");
+        snprintf(prog, sizeof prog,
+            "form RL_JOINM\n"
+            "fn world w\n"
+            "    astro_body anchor gm=1.0e-6 mass=1.0"
+            " pos_x=0.0 pos_y=1.0e9 pos_z=0.0\n"
+            "    astro_body one assembly=\"%s/joinm_a.k26asm\""
+            " pos_x=0.0 pos_y=0.0 pos_z=0.0 quat_w=1.0\n"
+            "    astro_body two assembly=\"%s/joinm_b.k26asm\""
+            " pos_x=5.3 pos_y=0.0 pos_z=0.0 vel_x=-0.07"
+            " quat_w=0.0 quat_x=0.0 quat_y=1.0 quat_z=0.0\n"
+            "    episode\n"
+            "        control_dt 0.5\n"
+            "        substeps 5\n"
+            "        horizon 200\n"
+            "        contact bounce restitution 0.9 friction 0.1\n"
+            "    end\n"
+            "    action push box 0.0 1.0 default 0.0\n"
+            "    on_step\n"
+            "        one.main.throttle = push\n"
+            "    end\n"
+            "    observe port dock of one as pa\n"
+            "    observe contact of one as tc\n"
+            "    objective\n"
+            "        reward pa_axial\n"
+            "    end\n"
+            "end\n"
+            "end\n", WORK_DIR, WORK_DIR);
+        rl_write_file_(WORK_DIR "/joinm.kfl", prog);
+        rl_compile_(WORK_DIR "/joinm.kfl", WORK_DIR "/joinm", WORK_DIR);
+        mso = rl_dlopen_(WORK_DIR "/joinm.rlenv.so");
+        rl_resolve_surface_(mso, &ms);
+
+        /* The control: the same thruster on the same craft before
+         * anything is joined answers that craft's own mass, and its
+         * neighbour, which is not attached to it, does not move. */
+        {
+            K26RlEnv *me = NULL;
+            double s0[NB * 6], s1[NB * 6];
+
+            ASSERT(ms.create(5u, 1u, &me) == K26RL_OK);
+            ASSERT(ms.bodies(me, K26RL_BODY_REF_ORIGIN, s0, (uint32_t)nvals)
+                   == nvals);
+            ASSERT(ms.step(me, fire) == K26RL_OK);
+            ASSERT(ms.bodies(me, K26RL_BODY_REF_ORIGIN, s1, (uint32_t)nvals)
+                   == nvals);
+            near_("unjoined craft answers its own mass",
+                  s1[ONE * 6 + 3] - s0[ONE * 6 + 3], want_solo, 1e-6);
+            ASSERT(fabs(s1[TWO * 6 + 3] - s0[TWO * 6 + 3]) < 1e-6);
+            ms.destroy(me);
+        }
+
+        {
+            K26RlEnv *me = NULL;
+            uint8_t mb[16384];
+            double obs[32];
+            double s0[NB * 6], s1[NB * 6];
+            double q1[NB * 7];
+            int32_t mlen;
+            int hit, capd, cap_step = -1, k;
+            double v0, v1, gained;
+
+            ASSERT(ms.create(5u, 1u, &me) == K26RL_OK);
+            mlen = ms.spec(me, mb, sizeof mb);
+            ASSERT(mlen > 0);
+            hit = find_channel_(mb, (uint32_t)mlen, "tc_hit");
+            capd = find_channel_(mb, (uint32_t)mlen, "pa_captured");
+            ASSERT(hit >= 0 && capd >= 0);
+            for (k = 0; k < 120; k++) {
+                ASSERT(ms.step(me, coast) == K26RL_OK);
+                ASSERT(ms.obs(me, obs) == K26RL_OK);
+                if (obs[hit] != 0.0) { cap_step = k; break; }
+            }
+            ASSERT(cap_step >= 0);
+            printf("  contact at step %d, captured %.0f\n", cap_step,
+                   obs[capd]);
+            ASSERT(obs[capd] != 0.0);
+
+            ASSERT(ms.bodies(me, K26RL_BODY_REF_ORIGIN, s0, (uint32_t)nvals)
+                   == nvals);
+            for (k = 0; k < burn; k++)
+                ASSERT(ms.step(me, fire) == K26RL_OK);
+            ASSERT(ms.bodies(me, K26RL_BODY_REF_ORIGIN, s1, (uint32_t)nvals)
+                   == nvals);
+            ASSERT(ms.attitudes(me, q1, (uint32_t)nquat) == nquat);
+
+            v0 = (m1 * s0[ONE * 6 + 3] + m2 * s0[TWO * 6 + 3]) / mt;
+            v1 = (m1 * s1[ONE * 6 + 3] + m2 * s1[TWO * 6 + 3]) / mt;
+            gained = v1 - v0;
+            /* The bound is not machine precision, though the measured
+             * error is near it: it is five orders inside the smaller
+             * of the two figures this has to tell the answer from. */
+            near_("joined pair answers the summed mass", gained,
+                  want_pair, 1e-6);
+            /* The thrusting craft's own mass would give four times
+             * this, and its neighbour's a third more. */
+            ASSERT(fabs(gained - thrust_n * burn * dt_s / m1) > 0.5);
+            ASSERT(fabs(gained - thrust_n * burn * dt_s / m2) > 0.06);
+            /* The pair moved as one: a join that had come apart under
+             * the burn would leave the thrusting craft ahead. */
+            ASSERT(fabs((s1[ONE * 6 + 3] - s0[ONE * 6 + 3]) -
+                        (s1[TWO * 6 + 3] - s0[TWO * 6 + 3])) < 1e-9);
+            /* And it did not turn and did not go sideways, so the
+             * thrust line ran through the pair's centre of mass and
+             * the composite inertia entered with a zero lever arm,
+             * which is measured here rather than assumed. */
+            for (k = 0; k < 3; k++) {
+                ASSERT(fabs(q1[ONE * 7 + 4 + k]) < 1e-9);
+                ASSERT(fabs(q1[TWO * 7 + 4 + k]) < 1e-9);
+            }
+            for (k = 1; k < 3; k++) {
+                ASSERT(fabs((s1[ONE * 6 + 3 + k] - s0[ONE * 6 + 3 + k]))
+                       < 1e-9);
+            }
+            printf("  the pair gained %+.12g m/s where its own craft "
+                   "alone would gain %+.12g\n", gained,
+                   thrust_n * burn * dt_s / m1);
+            ms.destroy(me);
+        }
     }
     n_pass++;
 

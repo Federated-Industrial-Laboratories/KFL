@@ -8,6 +8,10 @@
  *
  * Build variants, selected by compile-time defines:
  *   STUB_ABI_MAJOR2   k26rl_abi_version reports major 2
+ *   STUB_ABI_MINOR    k26rl_abi_version reports that minor, while the
+ *                     stub still exports only the version 1.0
+ *                     surface: an artifact claiming symbols a later
+ *                     minor added and carrying none of them
  *   STUB_OMIT_SYMBOL  k26rl_env_reset_seeded is not exported
  *   STUB_SPEC_SIZING_NEGATIVE
  *                     the spec sizing call (capacity 0) returns the
@@ -37,6 +41,10 @@
 #define STUB_ACT_TOTAL 2u
 #define STUB_UNKNOWN_STATUS ((K26RlStatus)300)
 
+#ifndef STUB_ABI_MINOR
+#define STUB_ABI_MINOR 0
+#endif
+
 struct K26RlEnv {
     uint32_t n_envs;
 };
@@ -57,7 +65,11 @@ uint32_t k26rl_abi_version(void)
 #ifdef STUB_ABI_MAJOR2
     return 0x00020000u;
 #else
-    return 0x00010000u;
+    /* Version 1.0 by default: the surface's first version, carrying
+     * none of the symbols later minors added. STUB_ABI_MINOR claims a
+     * higher minor without exporting what that minor carries, which
+     * is the artifact a consumer must not believe. */
+    return 0x00010000u | (uint32_t)STUB_ABI_MINOR;
 #endif
 }
 

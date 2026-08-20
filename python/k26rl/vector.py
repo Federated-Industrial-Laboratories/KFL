@@ -210,6 +210,60 @@ class K26RlVectorEnv(VectorEnv):
         self._session.ensure_open()
         self._session.set_output(path)
 
+    # ---- the training-host surface ------------------------------------
+    #
+    # The three getters that postdate the frozen set, as on the single
+    # shape. A training host that drives this shape directly arms the
+    # tap on a watch environment of its own and drives the throughput
+    # environments as fast as its learner can: the watched stream is
+    # then complete at its own cadence, and nothing about publication
+    # changes.
+
+    def tap(self, name):
+        """Arm the telemetry ring under ``name``, or disarm it with
+        None, so a viewer can watch this handle while it runs.
+
+        Callable only at an episode boundary, as ``set_output`` is:
+        after construction, immediately after a reset, and before the
+        step that follows. Watching cannot change the run."""
+        self._session.ensure_open()
+        self._session.tap(name)
+
+    def bodies(self, reference):
+        """Every body of every environment, env-major, as
+        ``(num_envs, body_count, 6)``: three position components then
+        three velocity components, positions taken relative to
+        ``reference``.
+
+        ``reference`` is a body index, a declared body name, or
+        :data:`k26rl.BODY_REF_ORIGIN` for the world origin. Positions
+        relative to a body are the runtime's exact subtraction;
+        relative to the origin they are the flattened coordinate and
+        carry that form's precision limit."""
+        self._session.ensure_open()
+        return self._session.read_bodies(reference)
+
+    def actuators(self):
+        """The actuator set as the latest step drove it, env-major, as
+        ``(num_envs, actuator_count, 10)`` and in the getter's own
+        order.
+
+        The ten values per actuator are the bound body's index, the
+        kind, the mounting position, the axis or thrust direction, the
+        applied magnitude, and the full-scale magnitude. They cross
+        untouched, the first two as the exact small integers the
+        getter writes."""
+        self._session.ensure_open()
+        return self._session.read_actuators()
+
+    @property
+    def body_names(self):
+        """Declared body name by index, in the order :meth:`bodies`
+        reports them. Empty for an artifact that publishes no body
+        names."""
+        self._session.ensure_open()
+        return dict(self._session.spec.body_names)
+
     @property
     def output_path(self):
         """The enabled episode-output path, or None. Still readable

@@ -36,6 +36,10 @@ _INCLUDE_DIRS = [
     "libk26m3d/include", "libk26rl/include",
     "libk26rng/include",
     "libk26sense/include",
+    # A vehicle assembly derives its mass properties from its
+    # components' shapes, so a fixture that declares actuators on an
+    # assembly reaches the collision library's headers.
+    "libk26astro_coll/include",
 ]
 
 _LINK_LIBS = [
@@ -44,6 +48,7 @@ _LINK_LIBS = [
     "libk26sense/libk26sense.a",
     "libk26astro_rt/libk26astro_rt.a",
     "libk26astro_att/libk26astro_att.a",
+    "libk26astro_coll/libk26astro_coll.a",
     "libk26astro_vehicle/libk26astro_vehicle.a",
     "libk26astro_atmos/libk26astro_atmos.a",
     "libk26astro_grav/libk26astro_grav.a",
@@ -103,13 +108,26 @@ def _mtime(path):
 _ABI_HEADER = ROOT / "libk26rl" / "include" / "k26rl_env.h"
 
 
-def compile_fixture(name, source_text=None):
+def write_work_file(name, text):
+    """Write a side file a fixture names (an assembly, say) into WORK,
+    only when its content differs, so an unchanged file keeps its
+    timestamp and the compile caches below stay usable."""
+    WORK.mkdir(parents=True, exist_ok=True)
+    path = WORK / name
+    if not path.exists() or path.read_text() != text:
+        path.write_text(text)
+    return path
+
+
+def compile_fixture(name, source_text=None, aux_files=None):
     """Compile a .kfl program into WORK and return the path of its
     companion shared object. With source_text None the source is the
     checked-in integration fixture of that name; otherwise the text
-    is written into WORK first. Cached on the timestamps of every
-    input: the source, the compiler, the linked archives, and the
-    frozen ABI header."""
+    is written into WORK first. aux_files maps the name of a side
+    file the source refers to onto its content; each is written into
+    WORK and counted as an input. Cached on the timestamps of every
+    input: the source, its side files, the compiler, the linked
+    archives, and the frozen ABI header."""
     WORK.mkdir(parents=True, exist_ok=True)
     if source_text is None:
         src = ROOT / "kflc" / "integration_tests" / (name + ".kfl")
@@ -118,9 +136,12 @@ def compile_fixture(name, source_text=None):
         stale = not src.exists() or src.read_text() != source_text
         if stale:
             src.write_text(source_text)
+    aux = [write_work_file(n, t)
+           for n, t in sorted((aux_files or {}).items())]
     out = WORK / name
     so = WORK / (name + ".rlenv.so")
-    inputs = [src, KFLC, _ABI_HEADER] + [ROOT / l for l in _LINK_LIBS]
+    inputs = [src, KFLC, _ABI_HEADER] + aux + \
+        [ROOT / l for l in _LINK_LIBS]
     if so.exists() and _mtime(so) >= max(_mtime(p) for p in inputs):
         return so
 
@@ -163,19 +184,20 @@ def refuse_fixture(name, source_text):
     return text
 
 
-def build_c(source_name, out_name, extra_args=()):
+def build_c(source_name, out_name, extra_args=(), extra_inputs=()):
     """Compile one helper C source from this directory into WORK,
-    cached on the timestamps of the source and the included ABI
-    header, and on the argument set. The helpers link no stack
-    archive (the C driver dlopens its artifact), so the archives are
-    not inputs here."""
+    cached on the timestamps of the source, the included ABI header,
+    and any extra_inputs named, and on the argument set. Most helpers
+    link no stack archive (the C driver dlopens its artifact), so the
+    archives are inputs only where a helper names one."""
     WORK.mkdir(parents=True, exist_ok=True)
     src = Path(__file__).resolve().parent / source_name
     out = WORK / out_name
     stamp = WORK / (out_name + ".args")
     args_text = " ".join(extra_args)
+    inputs = [src, _ABI_HEADER] + [Path(p) for p in extra_inputs]
     fresh = (out.exists()
-             and _mtime(out) >= max(_mtime(src), _mtime(_ABI_HEADER))
+             and _mtime(out) >= max(_mtime(p) for p in inputs)
              and stamp.exists() and stamp.read_text() == args_text)
     if not fresh:
         cmd = ["cc", "-O2", "-Wall",
@@ -198,6 +220,16 @@ def build_cdriver():
     marshalling gates."""
     return build_c("rl_shim_cdriver.c", "rl_shim_cdriver",
                    ["-ldl", "-lm"])
+
+
+def build_tap_drain():
+    """Build the telemetry-ring reader the tap gate drains with. It
+    links the record library, whose reader it uses rather than
+    reimplementing the ring's protocol in the gate that is meant to
+    check it."""
+    archive = ROOT / "libk26rl" / "libk26rl.a"
+    return build_c("rl_tap_drain.c", "rl_tap_drain",
+                   [str(archive), "-lrt", "-lm"], [archive])
 
 
 # ---- shared fixture programs ----------------------------------------

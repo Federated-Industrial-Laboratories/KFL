@@ -22,6 +22,12 @@
 # Gate numbers 8 and 9 belong to the telemetry transport suite and
 # land with that component; the numbering here stays aligned with
 # the full suite.
+#
+# The last three cover the getters that postdate the surface's first
+# version: the tap a training host arms to watch a run, the body and
+# actuator readbacks, and the refusal an artifact too old to carry
+# one of them earns. The tap gate spawns a reader of its own and
+# needs the record library built beside the compiler.
 
 PYTHON ?= python3
 
@@ -36,7 +42,10 @@ GATES = tests/gate01_cross_driver.py \
         tests/gate11_loading.py \
         tests/gate12_environments.py \
         tests/gate13_parallel.py \
-        tests/gate14_sensor_split.py
+        tests/gate14_sensor_split.py \
+        tests/gate15_tap_armed.py \
+        tests/gate16_body_surface.py \
+        tests/gate17_abi_absence.py
 
 .PHONY: test
 test:

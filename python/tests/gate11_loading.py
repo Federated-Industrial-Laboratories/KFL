@@ -18,8 +18,11 @@ maps confine their globals under either mode).
 
 Use after close: every stateful public method and every spec-reading
 property of a closed environment raises the Python-side refusal
-before any artifact call; the seeds_held and output_path records stay
-readable; close itself is idempotent.
+before any artifact call, the getters that postdate the frozen set
+included, so a closed environment reports being closed rather than
+reporting whatever the artifact does or does not carry; the
+seeds_held and output_path records stay readable; close itself is
+idempotent.
 
 The stub arms need only a C compiler and gymnasium; the coexistence
 arm also needs the built compiler and stack archives.
@@ -151,7 +154,7 @@ def main():
 
     refusing_properties = ("env_spec", "control_dt",
                            "obs_channel_names", "obs_channel_kinds",
-                           "on_fault")
+                           "body_names", "on_fault")
 
     venv = K26RlVectorEnv(point_so, seed=11, n_envs=n)
     venv.close()
@@ -162,6 +165,9 @@ def main():
     expect_closed(lambda: venv.reset(seed=12), "vector seeded reset")
     expect_closed(lambda: venv.set_output("/tmp/never.episode"),
                   "vector set_output")
+    expect_closed(lambda: venv.tap("k26rl_gate11_never"), "vector tap")
+    expect_closed(lambda: venv.bodies(0), "vector bodies")
+    expect_closed(lambda: venv.actuators(), "vector actuators")
     for prop in refusing_properties:
         expect_closed(lambda prop=prop: getattr(venv, prop),
                       "vector property %s" % prop)
@@ -180,6 +186,9 @@ def main():
     expect_closed(lambda: senv.reset(), "single reset")
     expect_closed(lambda: senv.set_output("/tmp/never.episode"),
                   "single set_output")
+    expect_closed(lambda: senv.tap("k26rl_gate11_never"), "single tap")
+    expect_closed(lambda: senv.bodies(0), "single bodies")
+    expect_closed(lambda: senv.actuators(), "single actuators")
     for prop in refusing_properties:
         expect_closed(lambda prop=prop: getattr(senv, prop),
                       "single property %s" % prop)
