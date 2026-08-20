@@ -330,6 +330,7 @@ class _Session:
         # so a fresh handle is untouched by construction.
         self._untouched = True
         self._output_path = None
+        self._tap_name = None
 
         # The two halves of the observation vector, as absolute
         # channel indices. Read once here because they are a property
@@ -364,6 +365,10 @@ class _Session:
     @property
     def output_path(self):
         return self._output_path
+
+    @property
+    def tap_name(self):
+        return self._tap_name
 
     def ensure_open(self):
         if self._closed:
@@ -486,6 +491,19 @@ class _Session:
                 "output is enabled; disable output with "
                 "set_output(None) at an episode boundary first, or "
                 "choose a seed not yet held" % seed)
+        # And refused while the tap is armed, for the same kind of
+        # reason: destroying the handle closes the ring and removes
+        # its name, so the fresh handle would publish nothing while a
+        # watching host went on stepping into a ring that is gone.
+        # Nothing silently stops publishing.
+        if self._tap_name is not None:
+            raise K26RlError(
+                None,
+                "reset(seed=%d) needs a fresh handle because this "
+                "environment has already held that seed, and the "
+                "telemetry tap is armed; disarm it with tap(None) at "
+                "an episode boundary first, or choose a seed not yet "
+                "held" % seed)
         self.artifact.destroy(self._handle)
         self._handle = None
         try:
@@ -518,11 +536,16 @@ class _Session:
         """Arm the telemetry ring under ``name``, or disarm it with
         None. Arming is the host's own act and publishes nothing back
         into the simulation: the ring is read-only to its consumers,
-        and a run is bit-identical whether or not one is watching."""
+        and a run is bit-identical whether or not one is watching.
+
+        The armed name is recorded because the handle can outlive it:
+        a seeded reset that recreates the handle would take the ring
+        with it, so the reset routes consult this."""
         if name is not None and not isinstance(name, str):
             raise TypeError("tap name must be a str or None, not %s"
                             % type(name).__name__)
         self.artifact.tap(self._handle, name)
+        self._tap_name = None if name is None else str(name)
 
     def resolve_body_reference(self, reference):
         """The body getter's reference argument from a body index, a
@@ -810,7 +833,12 @@ class K26RlEnv(gymnasium.Env):
 
         Callable only at an episode boundary, as ``set_output`` is:
         after construction, immediately after a reset, and before the
-        step that follows. Watching cannot change the run."""
+        step that follows. Watching cannot change the run.
+
+        While a tap is armed, a ``reset(seed=S)`` that would need a
+        fresh handle is refused rather than taking the ring with it;
+        disarm first or choose a seed this environment has not
+        held."""
         self._session.ensure_open()
         self._session.tap(name)
 
@@ -857,6 +885,12 @@ class K26RlEnv(gymnasium.Env):
         """The enabled episode-output path, or None. Still readable
         after close(): it locates the recorded file."""
         return self._session.output_path
+
+    @property
+    def tap_name(self):
+        """The armed telemetry ring's name, or None. Still readable
+        after close(): it names the ring the run published to."""
+        return self._session.tap_name
 
     def close(self):
         # Idempotent, as the ecosystem expects; everything else on a

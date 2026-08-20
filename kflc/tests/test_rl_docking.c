@@ -38,9 +38,9 @@
  *   and then compared it against the artifact would agree with any
  *   error in it. The two masses are the fixture's own declarations,
  *   written here, and the expected answer is arithmetic on them; the
- *   two answers the arm rules out are the two single-craft ones,
- *   each hundreds of thousands of times the bound asserted away from
- *   what is measured.
+ *   two answers the arm rules out are the two single-craft ones, the
+ *   nearer of them tens of thousands of times the bound asserted
+ *   away from what is measured.
  */
 #include "rl_gate_util.h"
 
@@ -1344,13 +1344,18 @@ int main(void)
      * work.
      *
      * The world is free space with one distant, nearly massless
-     * anchor. The anchor is not scenery: thrust reaches translation
-     * through the gravity integrator's perturbation registry, so a
-     * world with nothing gravitating never evaluates it and no
-     * thruster in such a world pushes anything. Its field at the pair
-     * is about 1e-24 m/s squared, twenty-three orders below the
-     * acceleration measured, so the arm is in free space for every
-     * purpose except the one that makes the thrust arrive.
+     * anchor, and the anchor is not scenery. The default integrator
+     * is the Wisdom-Holman one, which treats body 0 as the immobile
+     * central mass: its kick and drift loops run from index 1, so any
+     * acceleration computed for body 0 is discarded, a thruster's
+     * among them. The anchor is there to occupy index 0 so the two
+     * craft are bodies 1 and 2 and both are integrated. Its mass is
+     * also why it carries a positive gm rather than none: the drift
+     * is a Kepler propagation about body 0, and a central mass of
+     * zero does not converge. The field it makes at the pair is about
+     * 1e-24 m/s squared, twenty-three orders below the acceleration
+     * measured, so the arm is in free space for every purpose except
+     * the two structural ones just named.
      */
     printf("the joined pair answers a thrust with the pair's mass\n");
     {
@@ -1497,8 +1502,10 @@ int main(void)
             v1 = (m1 * s1[ONE * 6 + 3] + m2 * s1[TWO * 6 + 3]) / mt;
             gained = v1 - v0;
             /* The bound is not machine precision, though the measured
-             * error is near it: it is five orders inside the smaller
-             * of the two figures this has to tell the answer from. */
+             * error is near it: it is more than four orders inside
+             * the smaller of the two figures this has to tell the
+             * answer from, which is the 0.0667 m/s that separates the
+             * answer from the other craft's mass. */
             near_("joined pair answers the summed mass", gained,
                   want_pair, 1e-6);
             /* The thrusting craft's own mass would give four times

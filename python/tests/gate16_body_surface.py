@@ -27,7 +27,9 @@ The arms:
 * the actuator readback against the same kind of hand-computed
   fixture: descriptors in the getter's declared order with the body
   each binds, commands clamped as the actuator library clamps them,
-  and each environment's record at its own slot.
+  each environment's record at its own slot, and a program declaring
+  no actuator at all reporting a well-formed empty set rather than
+  refusing or returning something of another shape.
 
 Skips (77) when the built compiler, the stack archives, or gymnasium
 are absent.
@@ -338,6 +340,12 @@ def main():
     # limit and its throttle twice its own.
     env.step(np.array([[0.5, 0.25], [3.0, 2.0]], dtype=np.float64))
     after = env.actuators()
+    # A thruster's applied figure is the throttle clamped to the unit
+    # interval, times the fraction of the step its tank had propellant
+    # for, times its maximum thrust. This fixture declares no
+    # propellant, so nothing is spent and that fraction is 1.0
+    # throughout; the thruster figures below rest on that premise, and
+    # the assertion after them pins it rather than leaving it assumed.
     expected = ((0.5 * 0.2, 0.25 * 400.0), (0.20, 400.0))
     for e in range(N_ENVS):
         for a, want in enumerate(expected[e]):
@@ -345,6 +353,13 @@ def main():
             g.check(got == want,
                     "environment %d actuator %d applied %r, expected %r"
                     % (e, a, got, want))
+    for e, throttle in ((0, 0.25), (1, 2.0)):
+        clamped = min(max(throttle, 0.0), 1.0)
+        g.check(after[e, 1, 8] == clamped * after[e, 1, 9],
+                "environment %d thrust %r is not the clamped throttle "
+                "%r times the full scale %r, so the step's propellant "
+                "fraction was not 1"
+                % (e, after[e, 1, 8], clamped, after[e, 1, 9]))
         # The descriptors do not move when the commands do.
         g.check(tuple(after[e, 0, 0:8]) == wheel
                 and tuple(after[e, 1, 0:8]) == thruster,
@@ -357,6 +372,20 @@ def main():
     print("%s: two actuators of two environments report their "
           "descriptors and their clamped commands" % GATE)
     env.close()
+
+    # A program declaring no actuator reports an empty set of the
+    # right shape, not a refusal and not something of another shape:
+    # the body fixture above declares none.
+    env = K26RlVectorEnv(so, seed=SEED, n_envs=N_ENVS)
+    empty = env.actuators()
+    g.check(empty.shape == (N_ENVS, 0, 10),
+            "an artifact declaring no actuator reports %r, expected %r"
+            % (empty.shape, (N_ENVS, 0, 10)))
+    g.check(empty.dtype == np.float64,
+            "the empty actuator array's dtype is %r" % (empty.dtype,))
+    env.close()
+    print("%s: a program with no actuator reports an empty set of the "
+          "getter's own shape" % GATE)
 
     g.ok(GATE)
 

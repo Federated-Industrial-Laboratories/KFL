@@ -225,7 +225,12 @@ class K26RlVectorEnv(VectorEnv):
 
         Callable only at an episode boundary, as ``set_output`` is:
         after construction, immediately after a reset, and before the
-        step that follows. Watching cannot change the run."""
+        step that follows. Watching cannot change the run.
+
+        While a tap is armed, a ``reset(seed=S)`` that would need a
+        fresh handle is refused rather than taking the ring with it;
+        disarm first or choose a seed this environment has not
+        held."""
         self._session.ensure_open()
         self._session.tap(name)
 
@@ -269,6 +274,12 @@ class K26RlVectorEnv(VectorEnv):
         """The enabled episode-output path, or None. Still readable
         after close(): it locates the recorded file."""
         return self._session.output_path
+
+    @property
+    def tap_name(self):
+        """The armed telemetry ring's name, or None. Still readable
+        after close(): it names the ring the run published to."""
+        return self._session.tap_name
 
     def close_extras(self, **kwargs):
         self._session.close()

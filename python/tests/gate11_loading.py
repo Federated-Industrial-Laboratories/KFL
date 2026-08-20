@@ -21,8 +21,9 @@ property of a closed environment raises the Python-side refusal
 before any artifact call, the getters that postdate the frozen set
 included, so a closed environment reports being closed rather than
 reporting whatever the artifact does or does not carry; the
-seeds_held and output_path records stay readable; close itself is
-idempotent.
+seeds_held, output_path and tap_name records stay readable, because
+they record where a finished run's output and telemetry went; close
+itself is idempotent.
 
 The stub arms need only a C compiler and gymnasium; the coexistence
 arm also needs the built compiler and stack archives.
@@ -171,13 +172,17 @@ def main():
     for prop in refusing_properties:
         expect_closed(lambda prop=prop: getattr(venv, prop),
                       "vector property %s" % prop)
-    # The two record properties stay readable after close.
+    # The record properties stay readable after close: they say where
+    # the finished run's output and telemetry went.
     g.check(venv.seeds_held == frozenset({11}),
             "seeds_held unreadable or wrong after close: %r"
             % (venv.seeds_held,))
     g.check(venv.output_path is None,
             "output_path unreadable or wrong after close: %r"
             % (venv.output_path,))
+    g.check(venv.tap_name is None,
+            "tap_name unreadable or wrong after close: %r"
+            % (venv.tap_name,))
 
     senv = K26RlEnv(point_so, seed=13)
     senv.close()
@@ -198,6 +203,9 @@ def main():
     g.check(senv.output_path is None,
             "output_path unreadable or wrong after close: %r"
             % (senv.output_path,))
+    g.check(senv.tap_name is None,
+            "tap_name unreadable or wrong after close: %r"
+            % (senv.tap_name,))
 
     g.ok(GATE)
 
