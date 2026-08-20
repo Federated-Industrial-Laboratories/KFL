@@ -102,6 +102,12 @@ struct Ui {
      * frames arrive. Taking hold of the timeline drops it, because a
      * person who scrubbed back has said where they want to be. */
     bool follow;
+    /* Playback: the step advances against the wall clock at the
+     * chosen multiple of simulated time, so 1x plays a control
+     * period per control period. Window state, like the camera. */
+    bool playing;
+    double play_rate;
+    double play_accum;
     LiveOptions live;
 };
 
@@ -312,11 +318,79 @@ void panel_timeline_(Ui &ui, const Episode &ep)
                            "transition",
                            (unsigned)ep.fault_code);
     }
-    if (ImGui::Button("jump to ending"))
-        ui.step = ep.step_count ? ep.step_count - 1 : 0;
-    ImGui::SameLine();
-    if (ImGui::Button("jump to start"))
-        ui.step = 0;
+    /* Transport. Play advances the step against the wall clock at
+     * the chosen multiple of simulated time: one control period of
+     * recording per control period of watching at 1x. A frame-step
+     * pauses first, the way a transport does, and a completed
+     * episode pauses at its last step while a live one keeps
+     * playing as records arrive. */
+    {
+        const uint32_t last = ep.step_count ? ep.step_count - 1 : 0;
+        if (ImGui::Button("|<")) {
+            ui.step = 0;
+            ui.follow = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("<") && ui.step > 0) {
+            ui.playing = false;
+            ui.step--;
+            ui.follow = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(ui.playing ? "pause" : "play")) {
+            ui.playing = !ui.playing;
+            ui.play_accum = 0.0;
+            ui.follow = false;
+            /* Play at the ending starts over rather than sitting on
+             * one frame. */
+            if (ui.playing && ep.complete && ui.step >= last)
+                ui.step = 0;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(">") && ui.step < last) {
+            ui.playing = false;
+            ui.step++;
+            ui.follow = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(">|")) {
+            ui.step = last;
+            ui.follow = false;
+        }
+        ImGui::SameLine();
+        {
+            static const double rates[] = { 0.25, 0.5, 1.0, 2.0, 4.0,
+                                            8.0 };
+            int cur = 2;
+            for (int r = 0; r < 6; r++) {
+                if (ui.play_rate == rates[r])
+                    cur = r;
+            }
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+            if (ImGui::Combo("of wall clock", &cur,
+                             "0.25x\0" "0.5x\0" "1x\0" "2x\0"
+                             "4x\0" "8x\0"))
+                ui.play_rate = rates[cur];
+        }
+        if (ui.playing && ep.step_count) {
+            double dt = ui.model->spec().control_dt;
+            if (!(dt > 0.0))
+                dt = 1.0;
+            ui.play_accum += (double)ImGui::GetIO().DeltaTime *
+                             ui.play_rate / dt;
+            if (ui.play_accum >= 1.0) {
+                uint32_t whole = (uint32_t)ui.play_accum;
+                ui.play_accum -= (double)whole;
+                if (ui.step + whole < last) {
+                    ui.step += whole;
+                } else {
+                    ui.step = last;
+                    if (ep.complete)
+                        ui.playing = false;
+                }
+            }
+        }
+    }
 
     ImGui::Text("identity (ordinal %u, env %u, episode %u), %u steps, "
                 "%u transitions", ep.ordinal, ep.env, ep.episode,
@@ -1652,6 +1726,9 @@ int run_gui(Model &model, const DumpOptions &opt)
 
     ui.model = &model;
     ui.follow = true;
+    ui.playing = false;
+    ui.play_rate = 1.0;
+    ui.play_accum = 0.0;
     ui.live = opt.live;
     ui.artifact = opt.artifact;
     ui.asset_reqs = opt.assets;
