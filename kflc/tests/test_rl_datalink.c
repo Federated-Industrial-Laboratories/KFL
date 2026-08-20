@@ -513,6 +513,36 @@ static void gate_refusals_(void)
         must_refuse_("a datalink cadence of nought", bad, f);
     }
 
+    /* An identifier key handed a number. The value names a
+     * declaration of this world or a community of them, so a numeral
+     * there names neither, and it is refused on the ground the
+     * keyword-valued keys are refused on rather than being read as a
+     * community called `22`. */
+    {
+        static char bad[16384];
+        char *p;
+        snprintf(bad, sizeof bad, "%s", src);
+        p = strstr(bad, "network=swarm_a rate_hz=2000.0");
+        ASSERT(p != NULL);
+        memcpy(p, "network=22______ rate_hz=2000.0", 30);
+        const char *f[] = { "astro_payload `link1`", "`network=22",
+                            "takes an identifier and this is not one",
+                            NULL };
+        must_refuse_("a community named by a number", bad, f);
+    }
+    {
+        static char bad[16384];
+        char *p;
+        snprintf(bad, sizeof bad, "%s", src);
+        p = strstr(bad, "source=eye1");
+        ASSERT(p != NULL);
+        memcpy(p, "source=7___", 11);
+        const char *f[] = { "astro_payload `pic1`", "`source=7",
+                            "takes an identifier and this is not one",
+                            NULL };
+        must_refuse_("a gate named by a number", bad, f);
+    }
+
     /* A key of the datalink written on another kind, and one of
      * another kind written on a datalink: each refused naming the kind
      * it belongs to rather than reported as unknown. */
@@ -1540,6 +1570,176 @@ static void gate_one_generator_(void)
            "generator\n");
 }
 
+/* ---- The declaration-order tie, exercised rather than asserted ------ */
+
+/* Where two transmitters offer one target to one receiver on one
+ * boundary with entries at different instants, which of them the
+ * ring's drop-older rule keeps is decided by the order the transfers
+ * are applied in, and that order is the program's own declaration
+ * order. This is the one place the order rule has a consequence, so it
+ * is the one place a gate can measure it.
+ *
+ * The world: a relay that never sees the target itself, a far peer
+ * that broadcasts every boundary and whose offers arrive two
+ * boundaries stale, and a near peer that broadcasts once every eight
+ * boundaries and whose offers arrive one boundary stale. On the
+ * boundary the near peer's offer lands, the far peer's offer of an
+ * earlier instant lands with it, and both are newer than what the ring
+ * holds. Applied far first, both are kept; applied near first, the far
+ * peer's earlier entry is dropped behind the fresher one.
+ *
+ * What that changes is the bracket the retarded-time solution
+ * interpolates over, and the arm pins it exactly rather than by a
+ * magic number: with the far peer's transfer applied first the
+ * receiver's history is the far peer's own stream, so the world
+ * records what a world with no near peer at all records, byte for
+ * byte; with the near peer's applied first it does not. */
+
+#define DL_TIE_RADAR(n, body, p_tx, gain) \
+    "    astro_payload eye_" n " body=" body " kind=detect_radar" \
+    " p_tx_w=" p_tx " g_tx_db=" gain " g_rx_db=" gain \
+    " freq_hz=1.0e10 loss_sys_db=3.0 bandwidth_hz=1.0e6" \
+    " t_sys_k=290.0 noise_figure=2.0 snr_threshold=10.0\n"
+
+#define DL_TIE_LINK(n, body, rate, gain, p_tx) \
+    "    astro_payload link_" n " body=" body " kind=datalink" \
+    " network=swarm_a rate_hz=" rate " p_tx_w=" p_tx \
+    " g_tx_db=" gain " g_rx_db=" gain " freq_hz=2.2e9" \
+    " loss_sys_db=2.0 bandwidth_hz=1.0e6 t_sys_k=500.0" \
+    " noise_figure=2.0 snr_threshold=6.0\n"
+
+/* `order` 0 declares the far peer's datalink first, 1 the near peer's,
+ * and 2 leaves the near peer with no datalink at all. */
+static void dl_tie_(char *out, size_t cap, int order)
+{
+    static const char *const FAR_LINK =
+        DL_TIE_LINK("f", "far_eye", "2000.0", "25.0", "2.0");
+    static const char *const NEAR_LINK =
+        DL_TIE_LINK("n", "near_eye", "50.0", "3.0", "2.0");
+    const char *first = (order == 1) ? NEAR_LINK : FAR_LINK;
+    const char *second = (order == 1) ? FAR_LINK
+                       : (order == 2) ? "" : NEAR_LINK;
+    int n = snprintf(out, cap,
+        "form TIE\n"
+        "fn world w\n"
+        "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+        "    astro_body relay assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_y=7546.0"
+        " quat_w=1.0\n"
+        "    astro_body far_eye assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 pos_y=1.2e6 pos_z=0.0 vel_y=7546.0"
+        " quat_w=1.0\n"
+        "    astro_body near_eye assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 pos_y=-3.0e4 pos_z=0.0"
+        " vel_y=7546.0 quat_w=1.0\n"
+        "    astro_body bogey assembly=\"calibration_box.k26asm\""
+        " parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=2.62e6"
+        " vel_y=7546.0 quat_w=1.0\n"
+        "%s%s%s"
+        "    astro_payload pic_f body=far_eye kind=infostate"
+        " history=1024 source=eye_f\n"
+        "    astro_payload pic_n body=near_eye kind=infostate"
+        " history=1024 source=eye_n\n"
+        "    astro_payload pic_r body=relay kind=infostate"
+        " history=1024 source=eye_r\n"
+        "%s%s"
+        /* The relay transmits at a power that reaches nobody, so what
+         * it holds is never relayed back and the two peers' streams
+         * are the only thing in its history. */
+        DL_TIE_LINK("r", "relay", "2000.0", "3.0", "1.0e-9")
+        "%s"
+        "    agent alpha\n"
+        "        action n1 box -1.0 1.0 default 0.0\n"
+        "        observe track pic_f of bogey as trkf\n"
+        "        objective\n            reward 1.0\n        end\n"
+        "    end\n"
+        "    agent beta\n"
+        "        action n2 box -1.0 1.0 default 0.0\n"
+        "        observe track pic_n of bogey as trkn\n"
+        "        objective\n            reward 1.0\n        end\n"
+        "    end\n"
+        "    agent gamma\n"
+        "        action n3 box -1.0 1.0 default 0.0\n"
+        "        observe track pic_r of bogey as trkr\n"
+        "        objective\n"
+        "            reward gamma.trkr_valid\n"
+        "        end\n"
+        "    end\n"
+        "end\nend\n",
+        DL_TIE_RADAR("f", "far_eye", "1.0e6", "50.0"),
+        DL_TIE_RADAR("n", "near_eye", "1.0e6", "50.0"),
+        DL_TIE_RADAR("r", "relay", "1.0", "3.0"),
+        first, second, DL_EPISODE);
+    ASSERT((size_t)n < cap);
+}
+
+static void gate_tie_(void)
+{
+    static char src[24576];
+    static const char *const STEM[3] = { "tiedecl", "tieperm", "tiealone" };
+    char cmd[1024];
+
+    for (int order = 0; order < 3; order++) {
+        char path[512], out[512];
+
+        dl_tie_(src, sizeof src, order);
+        snprintf(path, sizeof path, WORK_DIR "/%s.kfl", STEM[order]);
+        snprintf(out, sizeof out, WORK_DIR "/%s", STEM[order]);
+        rl_write_file_(path, src);
+        rl_compile_(path, out, WORK_DIR);
+        snprintf(cmd, sizeof cmd,
+                 WORK_DIR "/%s --seed 7 --envs 1 --episodes 1 --out "
+                 WORK_DIR "/%s.k26ep > " WORK_DIR "/%s.log 2>&1",
+                 STEM[order], STEM[order], STEM[order]);
+        rl_run_or_die_(cmd);
+    }
+
+    /* The receiver holds a track at all, which is what makes the two
+     * comparisons below about the tie rather than about silence. */
+    {
+        DlRun run;
+        dl_tie_(src, sizeof src, 0);
+        dl_run_(&run, src, "tiedrive", 6);
+        for (int k = 0; k < run.n_steps; k++) {
+            ASSERT(dl_ch_(&run, k, "gamma.trkr_valid") == 1.0);
+        }
+        g_arms++;
+        printf("  the relay holds a shared track over all %d steps, its "
+               "own detection never seeing the target\n", run.n_steps);
+    }
+
+    if (rl_files_equal_(WORK_DIR "/tiedecl.k26ep",
+                        WORK_DIR "/tieperm.k26ep")) {
+        fprintf(stderr, "FAIL: permuting the two transmitters changed "
+                "nothing, so this world holds no tie for the order rule "
+                "to decide and the arm measures nothing\n");
+        exit(1);
+    }
+    g_arms++;
+    printf("  two transmitters offering one target on one boundary: "
+           "permuting their declaration changes what the run records\n");
+
+    if (!rl_files_equal_(WORK_DIR "/tiedecl.k26ep",
+                         WORK_DIR "/tiealone.k26ep")) {
+        fprintf(stderr, "FAIL: with the farther transmitter declared "
+                "first its own entry was not the one kept\n");
+        exit(1);
+    }
+    if (rl_files_equal_(WORK_DIR "/tieperm.k26ep",
+                        WORK_DIR "/tiealone.k26ep")) {
+        fprintf(stderr, "FAIL: with the nearer transmitter declared "
+                "first the farther one's entry survived anyway\n");
+        exit(1);
+    }
+    struct stat st;
+    ASSERT(stat(WORK_DIR "/tiedecl.k26ep", &st) == 0);
+    g_arms++;
+    printf("  the earlier-declared transmitter's entry is the one kept: "
+           "its world records what a world without the other peer "
+           "records, byte for byte (%lld bytes), and the permuted world "
+           "does not\n", (long long)st.st_size);
+}
+
 /* ---- 37a: determinism, and the order the design fixes --------------- */
 
 static void gate_determinism_(void)
@@ -1677,6 +1877,7 @@ int main(void)
     gate_undeclared_target_();
     gate_inflight_();
     gate_one_generator_();
+    gate_tie_();
     gate_determinism_();
 
     printf("test_rl_datalink: %d arm(s) passed\n", g_arms);

@@ -632,26 +632,13 @@ int rl_detect_observes(const RlModel *m, int p, int b)
  * in observe declaration order, so the push order is the program's own
  * and the same on every step and in every environment. */
 
-/* The datalinks this program declares, and where one sits among them.
- * Declaration order is the order transfers are offered in, which is
- * what decides the drop-older outcome where two transmitters offer the
- * same target on one instant; an index into that order is therefore
- * part of what the artifact computes rather than a convenience. */
+/* How many datalinks this program declares. Declaration order is the
+ * order transfers are offered in, and is what decides the drop-older
+ * outcome where two transmitters offer one target on one instant. */
 
 int rl_n_link(const RlModel *m)
 {
     return rl_n_pay_kind(m, RL_PAY_DATALINK);
-}
-
-int rl_link_index(const RlModel *m, int payload)
-{
-    int n = 0;
-    for (int p = 0; p < m->n_payloads; p++) {
-        if (m->payloads[p].kind != RL_PAY_DATALINK) continue;
-        if (p == payload) return n;
-        n++;
-    }
-    return -1;
 }
 
 /* The detection payload gating one track pair's push, or -1 where the

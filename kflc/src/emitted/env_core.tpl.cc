@@ -907,8 +907,18 @@ static void kflrl_info_push_(K26RlEnv *h, uint32_t e, int seed)
          * pair: the push happens only where the named detection's
          * verdict for this target meets its declared threshold, which
          * is the comparison the `_detected` channel publishes and the
-         * same emitted statements. Between detections the ring keeps
-         * its last entries and the track observe ages them. */
+         * same emitted statements.
+         *
+         * Between detections the ring keeps its last entries and
+         * `observe track` keeps publishing them, unchanged in age,
+         * for as long as the observer's light-time solution still
+         * falls inside retained history, that is while the gap since
+         * the last entry is shorter than the light time to the
+         * target. The age channel does not grow through the gap: it
+         * stays the converged light time to the reported position.
+         * Once the newest entry is older than that light time the
+         * channel reads invalid rather than an extrapolation being
+         * invented. */
         if (!seed &&
             !kflrl_track_gate_(h->worlds[e], KFLRL_PAYP(h, e),
                                KFLRL_ENG(h, e), i)) {
@@ -1020,7 +1030,16 @@ static void kflrl_link_pass_(K26RlEnv *h, uint32_t e)
             /* The push is the library's own, so an entry older than
              * what the receiver already holds for that target is
              * dropped by the standing rule rather than by a second
-             * rule written here. Staler knowledge is not knowledge. */
+             * rule written here. Staler knowledge is not knowledge.
+             *
+             * The queue is first in, first out per edge and nothing
+             * overtakes: an offer whose due time has come waits
+             * behind an earlier one whose has not. Two offers of one
+             * edge can only be ordered that way if the pair closed
+             * faster than the light between them, which no motion
+             * below the speed of light produces, so the rule costs
+             * nothing and keeps the arrival order the broadcast
+             * order. */
             if (is && tv) {
                 k26astro_infostate_target_push(is, tv, pd->t, pd->pos,
                                                pd->vel);
@@ -1061,9 +1080,12 @@ static void kflrl_link_pass_(K26RlEnv *h, uint32_t e)
         /* Closure to every member of this transmitter's community,
          * taken once per receiver rather than once per entry: the
          * budget is a property of the pair and the offer's content
-         * has nothing to do with it. The range is the separation at
-         * this instant, which is the emitter's own retarded time with
-         * respect to the arrival it decides. */
+         * has nothing to do with it.
+         *
+         * The range is the separation of the two carriers at this
+         * broadcast instant. The receiver's motion over the light
+         * time is not solved for, so this is the separation at
+         * emission and not the distance the signal actually runs. */
         double lrange[KFLRL_N_LINK];
         int    lclosed[KFLRL_N_LINK];
         for (int r = 0; r < KFLRL_N_LINK; r++) {

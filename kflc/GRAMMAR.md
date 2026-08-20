@@ -1565,11 +1565,16 @@ is carried by one body, for the reason given with the statement above.
 payload of the same body. With it, a target's push happens on a
 sub-advance only when that detection's verdict for that target at that
 instant meets its declared threshold, which is the same comparison the
-detection's own `_detected` channel publishes. Between detections the
-history keeps its last entries and the observation ages them; once the
-newest entry is older than the light time to the target, the observer
-would be reading light that had not left the target yet and `_valid`
-reads 0.0 rather than an extrapolation being invented.
+detection's own `_detected` channel publishes.
+
+Between detections the ring keeps its last entries and `observe track`
+keeps publishing them, unchanged in age, for as long as the observer's
+light-time solution still falls inside retained history, that is while
+the gap since the last entry is shorter than the light time to the
+target. The age channel does not grow through the gap: it stays the
+converged light time to the reported position. Once the newest entry is
+older than that light time the channel reads invalid rather than an
+extrapolation being invented.
 
 Without `source=` the push is truth-fed and the behaviour is what it
 was before the key existed, so no existing program changes. The
@@ -1605,7 +1610,13 @@ carrying that name participates, with no addressing and no
 acknowledgement. `rate_hz=` is the broadcast cadence, measured on the
 information state's own clock; each cadence instant takes effect at the
 first sub-advance boundary at or after it, and a cadence of nought or
-less is refused because it would name no instant at all. The nine radio
+less is refused because it would name no instant at all. Instants that
+fall in one sub-advance take effect together, so a payload broadcasts
+at most once per sub-advance boundary and a `rate_hz` above the
+sub-advance rate is capped to it in effect. That is not refused: the
+cap is a consequence of the grid every cadence is read on, and the
+programs that reach it are the ones asking for a faster link than the
+world is stepped. The nine radio
 keys are the ones `detect_radar` names, less the cross-section a
 one-way link has no use for, and they take distribution forms as every
 other payload key does.
@@ -1656,6 +1667,13 @@ dropped by the history's standing rule, because staler knowledge is not
 knowledge. Together they are why a truth-fed information state learns
 nothing from a peer and a gated one learns what its own sensors cannot
 reach.
+
+Offers in flight on one transmitter-receiver-target edge are delivered
+first in, first out, and nothing overtakes: an offer whose arrival time
+has come waits behind an earlier one whose has not. Two offers of one
+edge can only be in that order if the pair closed faster than the light
+between them, which no motion below the speed of light produces, so the
+rule costs nothing and keeps the arrival order the broadcast order.
 
 A datalink takes no slot of the defense tier and carries no tag in its
 kind registry: no evaluator of that tier consumes it, so there is

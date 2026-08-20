@@ -1192,7 +1192,6 @@ int rl_softkill_reaches(const RlModel *m, int p, int t,
                                 int want_jammer);
 int rl_track_pairs(const RlModel *m, int *pay, int *veh, int cap);
 int rl_n_link(const RlModel *m);
-int rl_link_index(const RlModel *m, int payload);
 int rl_track_gate_pay(const RlModel *m, int payload);
 int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag);
 void rl_emit_detect_eval(FILE *out, const RlModel *m, int p, int tgt);

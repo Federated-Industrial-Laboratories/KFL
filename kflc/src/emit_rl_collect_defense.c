@@ -255,6 +255,29 @@ const char *rl_pay_dtor(int kind)
     }
 }
 
+/* Is this value a name rather than a number or anything else? The
+ * test is the language's own for an identifier: a letter or an
+ * underscore, then letters, digits and underscores. It is applied to
+ * every key whose value is an open name, so `network=22` is refused
+ * where `pattern=2` is, and for the same reason. */
+
+static int rl_is_identifier_(const char *s)
+{
+    if (!s || !*s) return 0;
+    if (!((*s >= 'a' && *s <= 'z') || (*s >= 'A' && *s <= 'Z') ||
+          *s == '_')) {
+        return 0;
+    }
+    for (const char *p = s + 1; *p; p++) {
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+            (*p >= '0' && *p <= '9') || *p == '_') {
+            continue;
+        }
+        return 0;
+    }
+    return 1;
+}
+
 const char *rl_pay_attr_text(const KflcAttr *a)
 {
     if (a && a->value.kind == KFLV_IDENT && a->value.u.s) return a->value.u.s;
@@ -434,8 +457,26 @@ int rl_finish_payloads(RlModel *m, const KflcNode *form,
             /* An open identifier is resolved by this pass and carried
              * to the artifact as a table, not as a number: there is
              * nothing between two names to draw from, so no
-             * distribution form is read for it and none is stored. */
-            if (kd->keys[slot].ident) continue;
+             * distribution form is read for it and none is stored.
+             *
+             * A numeral there is refused on the ground the keyword
+             * keys are refused on. The value names a declaration of
+             * this world or a community of them, and a number names
+             * neither; accepting one would let a program depend on
+             * something no document promises it. */
+            if (kd->keys[slot].ident) {
+                const char *v = rl_pay_attr_text(a);
+                if (!rl_is_identifier_(v)) {
+                    kflc_diag_errorf(diag, a->line,
+                        "astro_payload `%s`: `%s=%s` takes an "
+                        "identifier and this is not one; the value "
+                        "names a declaration of this world or a "
+                        "community of them rather than a quantity",
+                        py->name, a->name, v ? v : "?");
+                    err = 1;
+                }
+                continue;
+            }
             int derr = 0;
             KflcExpr *d = rl_attr_dist(a, form, arena, diag, &derr);
             if (derr) err = 1;
