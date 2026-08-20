@@ -111,6 +111,33 @@ static const char *const SCENE_KFL =
     "end\n"
     "end\n";
 
+
+/* A fixture for the two dynamic elements: the craft above, spun up
+ * at reset and commanding its `fore` thruster from an action, so the
+ * spin element has a rate to draw and the force element has a firing
+ * step to draw and a coasting step to stay honestly absent from. */
+static const char *const DRIVE_KFL =
+    "form RL_SCENE_DRV\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body chaser assembly=\"scene_craft.k26asm\" parent=earth"
+    " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0 omega_z=0.05\n"
+    "    episode\n"
+    "        control_dt 0.5\n"
+    "        horizon 4\n"
+    "        substeps 2\n"
+    "    end\n"
+    "    action fire box 0.0 1.0 default 0.0\n"
+    "    on_step\n"
+    "        chaser.fore.throttle = fire\n"
+    "    end\n"
+    "    observe attitude of chaser as att\n"
+    "    objective\n"
+    "        reward att_omega_z\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
 /* An asymmetric tetrahedron. No reflection and no right-angle
  * rotation leaves it unchanged, so a transform applied on the wrong
  * side moves every vertex of it. */
@@ -1439,9 +1466,129 @@ int main(void)
         free(stripped_off);
     }
 
+
+    /* ---- gate 10: the two dynamic elements, on a fixture that has
+     * them. The scene fixture above is flown by a velocity poke and
+     * commands no actuator, so the imparted-force and spin arms live
+     * here, on a craft that spins and fires: each element alone
+     * yields elements of its kind and no other, the coasting step
+     * carries no force element at all, and the spinning craft
+     * carries its spin element on every step. ------------------- */
+    {
+        void *dso;
+        RlSurface ds;
+        K26RlEnv *denv = NULL;
+        char full[4096];
+        char dsel[512];
+        char *dump;
+        int w;
+
+        rl_write_file_(WORK_DIR "/scene_drv.kfl", DRIVE_KFL);
+        rl_compile_(WORK_DIR "/scene_drv.kfl", WORK_DIR "/scene_drv",
+                    WORK_DIR);
+        dso = rl_dlopen_(WORK_DIR "/scene_drv.rlenv.so");
+        rl_resolve_surface_(dso, &ds);
+        ASSERT(ds.actuators != NULL);
+        ASSERT(ds.create(3u, 1u, &denv) == K26RL_OK);
+        ASSERT(ds.output(denv, WORK_DIR "/drv.k26epi") == K26RL_OK);
+        {
+            /* To the horizon, so the episode closes and the file
+             * indexes it: a recording with no ended episode has
+             * nothing a dump can address. */
+            double coast_a[1] = { 0.0 }, fire_a[1] = { 0.7 };
+            ASSERT(ds.step(denv, coast_a) == K26RL_OK);
+            ASSERT(ds.step(denv, fire_a) == K26RL_OK);
+            ASSERT(ds.step(denv, fire_a) == K26RL_OK);
+            ASSERT(ds.step(denv, fire_a) == K26RL_OK);
+        }
+        ds.destroy(denv);
+
+        /* The firing step: `force` alone yields force elements and
+         * nothing else; `spin` alone likewise. */
+        {
+            static const char *const dyn[] = { "force", "spin" };
+            int dj;
+            for (dj = 0; dj < 2; dj++) {
+                int present = 0, other = 0;
+                snprintf(dsel, sizeof dsel, "--dump scene --episode 0"
+                         " --steps 1:2 --frame origin --elements %s"
+                         " --artifact " WORK_DIR "/scene_drv.rlenv.so ",
+                         dyn[dj]);
+                w = snprintf(full, sizeof full, "%s%s", dsel,
+                             WORK_DIR "/drv.k26epi");
+                ASSERT((size_t)w < sizeof full);
+                run_viewer_(full, WORK_DIR "/g10.txt");
+                dump = slurp_(WORK_DIR "/g10.txt", NULL);
+                {
+                    const char *p = dump;
+                    while (p && *p) {
+                        const char *eol = strchr(p, '\n');
+                        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+                        if (len > 20 &&
+                            memcmp(p, "scene_element 0 1 ", 18) == 0) {
+                            unsigned e2;
+                            char gk[32];
+                            if (sscanf(p + 18, "%u %31s", &e2, gk) == 2) {
+                                if (strcmp(gk, dyn[dj]) == 0)
+                                    present++;
+                                else
+                                    other++;
+                            }
+                        }
+                        p = eol ? eol + 1 : NULL;
+                    }
+                }
+                ASSERT(present > 0);
+                ASSERT(other == 0);
+                free(dump);
+                printf("gate 10: `%s` alone on the firing step yields %d"
+                       " element(s) of that kind and none of any other:"
+                       " OK\n", dyn[dj], present);
+            }
+        }
+
+        /* The coasting step: no thruster fired into it, so a force
+         * element would be asserting an impulse the dynamics never
+         * imparted; the spin element stays, because the craft turns
+         * whether or not it thrusts. */
+        {
+            int forces = 0, spins = 0;
+            snprintf(dsel, sizeof dsel, "--dump scene --episode 0"
+                     " --steps 0:1 --frame origin --elements force,spin"
+                     " --artifact " WORK_DIR "/scene_drv.rlenv.so ");
+            w = snprintf(full, sizeof full, "%s%s", dsel,
+                         WORK_DIR "/drv.k26epi");
+            ASSERT((size_t)w < sizeof full);
+            run_viewer_(full, WORK_DIR "/g10c.txt");
+            dump = slurp_(WORK_DIR "/g10c.txt", NULL);
+            {
+                const char *p = dump;
+                while (p && *p) {
+                    const char *eol = strchr(p, '\n');
+                    size_t len = eol ? (size_t)(eol - p) : strlen(p);
+                    if (len > 20 &&
+                        memcmp(p, "scene_element 0 0 ", 18) == 0) {
+                        unsigned e2;
+                        char gk[32];
+                        if (sscanf(p + 18, "%u %31s", &e2, gk) == 2) {
+                            if (strcmp(gk, "force") == 0) forces++;
+                            if (strcmp(gk, "spin") == 0) spins++;
+                        }
+                    }
+                    p = eol ? eol + 1 : NULL;
+                }
+            }
+            ASSERT(forces == 0);
+            ASSERT(spins > 0);
+            free(dump);
+            printf("gate 10: the coasting step carries no force element"
+                   " and keeps its spin element: OK\n");
+        }
+    }
+
     free(world);
     free(att);
     free(wire);
-    printf("test_rl_scene: 9 gates passed\n");
+    printf("test_rl_scene: 10 gates passed\n");
     return 0;
 }

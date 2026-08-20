@@ -18,6 +18,17 @@
  *      the field model's Fortran runtime; one that does not, does
  *      not, even when the archive and the runtime are both on the
  *      link line. The dependency follows the declaration.
+ *   6. The actuator getter reports what the step drove: sizing and
+ *      refusals by the surface convention, zeros before any step,
+ *      descriptors in declaration order with the body they bind,
+ *      commands clamped as the library clamps them, a non-finite
+ *      command reported as the zero the library makes of it, and
+ *      two environments' records at their own slots.
+ *   7. The thruster's applied figure is the step mean: on the step
+ *      its tank runs dry the getter reports the force whose impulse
+ *      the dynamics imparted, agreeing with the velocity the body
+ *      actually gained against a coasting control, and the step
+ *      after, tank empty, reports zero.
  *
  * On vacuity: each arm that asserts a quantity is unchanged is paired
  * with one that asserts the same quantity moves when commanded, so a
@@ -90,6 +101,85 @@ static const char *const ACT_KFL =
 /* The same program with the wheel's readings in the reward, so the
  * reading path is exercised through a real artifact rather than only
  * at the checker. */
+
+/* A tank the first step drains: one thruster whose full-throttle
+ * demand over a control period is over three times the propellant
+ * carried, so the scale is 1.0 on the first sub-interval, fractional
+ * on the second and 0.0 on the rest, and the step mean is none of
+ * the four. The thruster pushes through the centre of mass, so the
+ * velocity change is the impulse over the mass and nothing turns. */
+/* The driving twin of the fixture above: the same assembly and the
+ * same action shaping, with a reward that exists, so the getter
+ * gates below run on an artifact that compiles. */
+static const char *const DRV_KFL =
+    "form RL_DRV\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft assembly=\"act.k26asm\" parent=earth"
+    " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0 omega_z=0.0\n"
+    "    episode\n"
+    "        control_dt 0.5\n"
+    "        horizon 6\n"
+    "        substeps 4\n"
+    "    end\n"
+    "    action spin box -1.0 1.0 default 0.0\n"
+    "    action push box 0.0 1.0 default 0.0\n"
+    "    on_step\n"
+    "        craft.yaw.torque = spin * 0.2\n"
+    "        craft.rcs_py.throttle = push\n"
+    "    end\n"
+    "    observe attitude of craft as att\n"
+    "    objective\n"
+    "        reward att_omega_z\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+static const char *const TANK_ASM =
+    "assembly tank_box\n"
+    "    frame x_to_port\n"
+    "    provenance mass \"calibration shape, not a craft\" computed\n"
+    "    component hull\n"
+    "        mass 1000.0\n"
+    "        at 0.0 0.0 0.0\n"
+    "        collider box 1.0 0.5 0.5\n"
+    "    end\n"
+    "    component fuel\n"
+    "        mass 1.2\n"
+    "        at 0.0 0.0 0.0\n"
+    "        collider box 0.1 0.1 0.1\n"
+    "        propellant\n"
+    "    end\n"
+    "    thruster main\n"
+    "        at 1.0 0.0 0.0\n"
+    "        dir -1.0 0.0 0.0\n"
+    "        thrust 4000.0\n"
+    "        isp_s 100.0\n"
+    "    end\n"
+    "end\n";
+
+static const char *const TANK_KFL =
+    "form RL_TANK\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body craft assembly=\"tank.k26asm\" parent=earth"
+    " pos_x=7.0e6 vel_y=7546.0 quat_w=1.0 omega_z=0.0\n"
+    "    episode\n"
+    "        control_dt 1.0\n"
+    "        horizon 6\n"
+    "        substeps 4\n"
+    "    end\n"
+    "    action burn box 0.0 1.0 default 0.0\n"
+    "    on_step\n"
+    "        craft.main.throttle = burn\n"
+    "    end\n"
+    "    observe attitude of craft as att\n"
+    "    observe craft from earth mode=geometric as trk\n"
+    "    objective\n"
+    "        reward trk_range\n"
+    "    end\n"
+    "end\n"
+    "end\n";
 static const char *const ACT_KFL_READ =
     "form RL_ACTR\n"
     "fn world w\n"
@@ -482,6 +572,152 @@ int main(void)
         n_pass++;
         s3.destroy(quiet);
         s3.destroy(driven);
+    }
+
+
+    /* ---- 6. The getter reports what the step drove --------------- */
+    {
+        rl_write_file_(WORK_DIR "/drv.kfl", DRV_KFL);
+        rl_compile_(WORK_DIR "/drv.kfl", WORK_DIR "/drv", WORK_DIR);
+        void *so6 = rl_dlopen_(WORK_DIR "/drv.rlenv.so");
+        RlSurface s6;
+        rl_resolve_surface_(so6, &s6);
+
+        K26RlEnv *env = NULL;
+        ASSERT(s6.actuators != NULL);
+        ASSERT(s6.create(31u, 2u, &env) == K26RL_OK);
+
+        /* Sizing and refusals, the surface's own convention. Two
+         * environments, a wheel and a thruster each: 40 doubles. */
+        int32_t need = s6.actuators(env, NULL, 0);
+        ASSERT(need == 2 * 2 * 10);
+        double drv[40];
+        for (int i = 0; i < 40; i++) drv[i] = -777.0;
+        ASSERT(s6.actuators(env, drv, (uint32_t)need - 1) == need);
+        for (int i = 0; i < 40; i++) ASSERT(drv[i] == -777.0);
+        ASSERT(s6.actuators(env, NULL, (uint32_t)need) ==
+               -(int32_t)K26RL_E_NULL);
+
+        /* Before any step: descriptors filled, nothing applied. The
+         * order is fixed, wheels then thrusters, env-major, and the
+         * body index is the craft's declaration slot. */
+        ASSERT(s6.actuators(env, drv, (uint32_t)need) == need);
+        for (int e = 0; e < 2; e++) {
+            const double *w = drv + e * 20;
+            const double *t = drv + e * 20 + 10;
+            ASSERT(w[0] == 1.0 && w[1] == 0.0);
+            ASSERT(w[2] == 0.0 && w[3] == 0.0 && w[4] == 0.0);
+            ASSERT(w[5] == 0.0 && w[6] == 0.0 && w[7] == 1.0);
+            ASSERT(w[8] == 0.0 && w[9] == 0.20);
+            ASSERT(t[0] == 1.0 && t[1] == 2.0);
+            ASSERT(t[2] == 1.05 && t[3] == 0.92 && t[4] == 0.0);
+            ASSERT(t[5] == 0.0 && t[6] == -1.0 && t[7] == 0.0);
+            ASSERT(t[8] == 0.0 && t[9] == 400.0);
+        }
+        printf("  sizing, refusals, zeros before any step, and the "
+               "descriptors in order: OK\n");
+        n_pass++;
+
+        /* Each environment's records at its own slot, and the wheel's
+         * clamp: env 0 commands five times the wheel's limit and a
+         * 0.7 throttle, env 1 the mirror image at quarter throttle.
+         * The program scales the wheel action by 0.2, so an action of
+         * 5.0 commands 1.0 N m against a 0.20 N m limit and the
+         * getter must report the limit the library holds it to. */
+        double act6[4] = { 5.0, 0.7, -5.0, 0.25 };
+        ASSERT(s6.step(env, act6) == K26RL_OK);
+        ASSERT(s6.actuators(env, drv, (uint32_t)need) == need);
+        ASSERT(drv[8] == 0.20);            /* env 0 wheel, clamped   */
+        ASSERT(drv[18] == 0.7 * 400.0);    /* env 0 thruster, 280 N  */
+        ASSERT(drv[28] == -0.20);          /* env 1 wheel, clamped   */
+        ASSERT(drv[38] == 0.25 * 400.0);   /* env 1 thruster, 100 N  */
+        printf("  clamped commands and per-environment slots: 0.20, "
+               "280, -0.20, 100: OK\n");
+        n_pass++;
+
+        /* A non-finite command reports the zero the library makes of
+         * it, on every kind. The library's own clamp returns 0.0 for
+         * a non-finite value, so a getter reporting the limit for an
+         * infinite command, or a NaN for a NaN, would be reporting a
+         * torque the body never felt. */
+        double bad[4] = { INFINITY, NAN, NAN, -INFINITY };
+        ASSERT(s6.step(env, bad) == K26RL_OK);
+        ASSERT(s6.actuators(env, drv, (uint32_t)need) == need);
+        ASSERT(drv[8] == 0.0);
+        ASSERT(drv[18] == 0.0);
+        ASSERT(drv[28] == 0.0);
+        ASSERT(drv[38] == 0.0);
+        printf("  non-finite commands report zero on every kind: "
+               "OK\n");
+        n_pass++;
+
+        s6.destroy(env);
+    }
+
+    /* ---- 7. The applied figure is the step mean ------------------- */
+    {
+        rl_write_file_(WORK_DIR "/tank.k26asm", TANK_ASM);
+        rl_write_file_(WORK_DIR "/tank.kfl", TANK_KFL);
+        rl_compile_(WORK_DIR "/tank.kfl", WORK_DIR "/tank", WORK_DIR);
+        void *so7 = rl_dlopen_(WORK_DIR "/tank.rlenv.so");
+        RlSurface s7;
+        rl_resolve_surface_(so7, &s7);
+
+        /* The expectation, from the declared numbers alone: at full
+         * throttle the mass flow is thrust over exhaust speed, each
+         * of the four sub-intervals demands flow times a quarter
+         * second, the 1.2 kg tank pays the first in full and part of
+         * the second, and the mean of the four fractions is the
+         * fraction of the step the tank paid for. */
+        const double g0 = 9.80665;
+        const double flow = 4000.0 / (100.0 * g0);
+        const double demand = flow * 0.25;
+        const double s1 = (1.2 - demand) / demand;
+        const double mean = (1.0 + s1) * 0.25;
+        const double expected = mean * 4000.0;
+
+        ASSERT(s7.actuators != NULL);
+        K26RlEnv *powered = NULL, *coast = NULL;
+        ASSERT(s7.create(7u, 1u, &powered) == K26RL_OK);
+        ASSERT(s7.create(7u, 1u, &coast) == K26RL_OK);
+        double full7[1] = { 1.0 }, none7[1] = { 0.0 };
+        ASSERT(s7.step(powered, full7) == K26RL_OK);
+        ASSERT(s7.step(coast, none7) == K26RL_OK);
+
+        double rec[10];
+        ASSERT(s7.actuators(powered, rec, 10) == 10);
+        printf("  tank runs dry inside the step: getter %.6f N, "
+               "declared arithmetic %.6f N\n", rec[8], expected);
+        ASSERT(fabs(rec[8] - expected) <= 1.0e-9 * expected);
+
+        /* And the dynamics agree: the velocity the burn added over
+         * the coasting control is the reported force times the step
+         * over the craft's mass. The tank is 1.2 kg of 1001.2, so
+         * half a per cent bounds the mass the burn moved through.
+         * A getter reporting the last sub-interval (0 N) or the
+         * first (4000 N) fails this by three orders or by 3.4x. */
+        double bp[12], bc[12];
+        ASSERT(s7.bodies(powered, K26RL_BODY_REF_ORIGIN, bp, 12) == 12);
+        ASSERT(s7.bodies(coast, K26RL_BODY_REF_ORIGIN, bc, 12) == 12);
+        double dx = bp[9] - bc[9], dy = bp[10] - bc[10],
+               dz = bp[11] - bc[11];
+        double dv = sqrt(dx * dx + dy * dy + dz * dz);
+        double dv_pred = expected * 1.0 / 1000.6;
+        printf("  burn added %.5f m/s against %.5f predicted from the "
+               "reported force\n", dv, dv_pred);
+        ASSERT(fabs(dv - dv_pred) <= 0.005 * dv_pred);
+
+        /* The step after: the tank is empty, the throttle is still
+         * open, and zero is what an empty tank imparts. */
+        ASSERT(s7.step(powered, full7) == K26RL_OK);
+        ASSERT(s7.actuators(powered, rec, 10) == 10);
+        ASSERT(rec[8] == 0.0);
+        printf("  the dry step reports the impulse it imparted and "
+               "the empty one reports zero: OK\n");
+        n_pass++;
+
+        s7.destroy(powered);
+        s7.destroy(coast);
     }
 
     printf("test_rl_actuators: %d gates passed\n", n_pass);

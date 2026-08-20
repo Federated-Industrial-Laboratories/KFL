@@ -60,11 +60,13 @@ struct ResimResult {
      * the artifact's actuator getter: body index, kind (0 wheel,
      * 1 magnetorquer, 2 thruster), mounting position (body frame,
      * metres, three), axis or thrust direction (body frame, unit,
-     * three), applied magnitude, full-scale magnitude. Exact
-     * imparted force for a thruster; the command clamped to the
-     * limit for the others, per the getter's contract. Empty when
-     * the artifact predates that symbol, which a viewer reports
-     * rather than hides, exactly as it does for the bodies above. */
+     * three), applied magnitude, full-scale magnitude. For a
+     * thruster the applied figure is the step-mean imparted force,
+     * so force times step duration is the imparted impulse; the
+     * command clamped to the limit for the others, per the getter's
+     * contract. Empty when the artifact predates that symbol, which
+     * a viewer reports rather than hides, exactly as it does for
+     * the bodies above. */
     std::vector<double> actuators;
     uint32_t actuator_count = 0;
     bool has_actuators = false;

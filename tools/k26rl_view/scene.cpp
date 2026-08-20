@@ -473,7 +473,13 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
     }
     /* The actuator drives at this step, when the artifact publishes
      * them: what the step into this state applied, which is what a
-     * force line over this state should draw. */
+     * force line over this state should draw. An artifact without
+     * the getter is reported, not hidden, exactly as an artifact
+     * without attitudes is above. */
+    if (sc.pose_from_artifact && in.resim && !in.resim->has_actuators) {
+        sc.message += "; this artifact publishes no actuator drives, "
+                      "so no imparted force is drawn";
+    }
     const double *drv = 0;
     uint32_t drv_n = 0;
     if (in.resim && in.resim->ran && in.resim->has_actuators &&
@@ -812,8 +818,12 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
         const Asset *a = in.assets[i].asset;
         if (a && a->loaded && a->edges.empty()) {
             sc.message += "; " + scene_body_name(sp, in.assets[i].body) +
-                          " declares no mesh, so it draws its colliders "
-                          "and its axes";
+                          (a->mesh_vertices == 0
+                           ? " declares no mesh, so it draws its "
+                             "colliders and its axes"
+                           : " declares mesh vertices but no faces, so "
+                             "no wireframe can be drawn from it; it "
+                             "draws its colliders and its axes");
         }
     }
     if (o.enabled[ELEM_TRAJECTORY] && in.episode) {

@@ -169,6 +169,7 @@ typedef struct {
     int32_t     (*bodies)(const K26RlEnv *, uint32_t, double *,
                           uint32_t);
     int32_t     (*attitudes)(const K26RlEnv *, double *, uint32_t);
+    int32_t     (*actuators)(const K26RlEnv *, double *, uint32_t);
     const char *(*status_str)(K26RlStatus);
     void        (*destroy)(K26RlEnv *);
 } RlSurface;
@@ -196,6 +197,16 @@ static inline void rl_resolve_surface_(void *so, RlSurface *s)
     RL_RESOLVE_(spec,         "k26rl_env_spec");
     RL_RESOLVE_(bodies,       "k26rl_env_bodies");
     RL_RESOLVE_(attitudes,    "k26rl_env_attitudes");
+    /* Probed rather than required, the surface's own rule for a
+     * minor addition: a baseline artifact compiled by an older
+     * emitter still resolves, and a gate that needs the getter
+     * asserts its presence itself. */
+    {
+        void *p_ = dlsym(so, "k26rl_env_actuators");
+        s->actuators = NULL;
+        if (p_ != NULL)
+            memcpy(&s->actuators, &p_, sizeof p_);
+    }
     RL_RESOLVE_(status_str,   "k26rl_status_str");
     RL_RESOLVE_(destroy,      "k26rl_env_destroy");
 #undef RL_RESOLVE_

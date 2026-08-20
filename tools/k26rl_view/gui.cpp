@@ -853,8 +853,12 @@ void panel_wireframe_(Ui &ui, const Episode &ep)
                     as.mesh_vertices, (unsigned)as.edges.size(),
                     as.mesh_triangles);
         if (as.edges.empty()) {
-            ImGui::TextWrapped("this assembly declares no mesh; the "
-                               "scene draws its colliders and its axes");
+            ImGui::TextWrapped(as.mesh_vertices == 0
+                ? "this assembly declares no mesh; the scene draws "
+                  "its colliders and its axes"
+                : "this assembly declares mesh vertices but no faces, "
+                  "so no wireframe can be drawn from it; the scene "
+                  "draws its colliders and its axes");
             ImGui::PopID();
             continue;
         }
@@ -1708,9 +1712,10 @@ int run_gui(Model &model, const DumpOptions &opt)
         fprintf(stderr, "k26rl_view: %s\n", gl.error.c_str());
     }
 
-    /* The default arrangement is built on a first run, when there is
-     * no imgui.ini beside the tool to restore one from, and again on
-     * request. Its shape: view controls left, channel panels tabbed
+    /* The default arrangement is built on a first run, when the
+     * working directory holds no imgui.ini to restore one from (the
+     * layout file lives where the tool is run from, so each working
+     * directory keeps its own), and again on request. Its shape: view controls left, channel panels tabbed
      * right, the timeline and the reward across the bottom, and the
      * centre left open, because the centre is where the scene is. */
     bool build_layout = access("imgui.ini", F_OK) != 0;

@@ -431,10 +431,15 @@ int32_t      k26rl_env_attitudes(const K26RlEnv *env, double *out,
  *
  * The applied magnitude is exact for a thruster and a bound for the
  * others. A thruster reports newtons: the throttle clamped to the
- * unit interval, scaled by the fraction of the latest sub-interval
- * its tank had propellant for, times its maximum thrust, which is
- * the force the dynamics imparted along the reported direction, and
- * a dry tank reports zero because zero is what it imparted. A wheel
+ * unit interval, scaled by the fraction of the step its tank had
+ * propellant for, times its maximum thrust. The fraction is the
+ * step's own mean, integrated over its sub-intervals as they were
+ * taken, so the reported force times the step's duration is the
+ * impulse the dynamics imparted along the reported direction: the
+ * step a tank runs dry in reports the force it did impart, and a
+ * step that started dry reports zero because zero is what it
+ * imparted. A non-finite command reports zero for every kind, which
+ * is what the actuator library makes of one. A wheel
  * reports its commanded torque clamped to its limit in newton
  * metres; the torque the body felt can be smaller still, because
  * saturation and friction act inside the wheel's own advance and the
@@ -462,8 +467,9 @@ int32_t      k26rl_env_attitudes(const K26RlEnv *env, double *out,
  * After a faulted step it reports what the attempted advance was
  * driving, which the next boundary reset discards, for the body
  * getter's reason: it reads live actuator state, not a cached
- * output. After a reset and before the first step it reports zero
- * commands, which is what a reset leaves. */
+ * output; its propellant fraction covers the sub-intervals that
+ * completed. After a reset and before the first step it reports
+ * zero commands, which is what a reset leaves. */
 int32_t      k26rl_env_actuators(const K26RlEnv *env, double *out,
                                  uint32_t capacity);
 
