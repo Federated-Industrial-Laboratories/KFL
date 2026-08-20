@@ -285,7 +285,7 @@ static void dl_world_(char *out, size_t cap, double sep_m,
     if (radio) {
         n += snprintf(out + n, cap - (size_t)n,
             "    astro_payload link1 body=drone_1 kind=datalink"
-            " network=kite rate_hz=2000.0 %s\n"
+            " network=swarm_a rate_hz=2000.0 %s\n"
             "    astro_payload link2 body=drone_2 kind=datalink"
             " network=%s rate_hz=2000.0 %s\n", radio, net2, radio);
     }
@@ -414,7 +414,7 @@ static void gate_refusals_(void)
      * payload of another body. Each names both statements, because a
      * reader has two places to look and the diagnostic says which. */
     dl_world_(src, sizeof src, 3.0e4, "6.0", "150.0", "10.0", radio,
-              "kite", 1);
+              "swarm_a", 1);
     {
         static char bad[16384];
         char *p;
@@ -465,7 +465,7 @@ static void gate_refusals_(void)
         snprintf(tail, sizeof tail, "%s", p);
         snprintf(p, sizeof bad - (size_t)(p - bad),
             "    astro_payload link3 body=drone_1 kind=datalink"
-            " network=kite rate_hz=2000.0 %s\n%s", radio, tail);
+            " network=swarm_a rate_hz=2000.0 %s\n%s", radio, tail);
         const char *f[] = { "astro_payload `link3`",
                             "`drone_1` already carries the datalink "
                             "`link1`", "carries at most one", NULL };
@@ -532,9 +532,9 @@ static void gate_refusals_(void)
         static char bad[16384];
         char *p;
         snprintf(bad, sizeof bad, "%s", src);
-        p = strstr(bad, "network=kite rate_hz=2000.0");
+        p = strstr(bad, "network=swarm_a rate_hz=2000.0");
         ASSERT(p != NULL);
-        memcpy(p, "network=kite history=64444.", 27);
+        memcpy(p, "network=swarm_a history=64444.", 30);
         const char *f[] = { "astro_payload `link1`",
                             "`history=` belongs to kind `infostate`",
                             NULL };
@@ -551,7 +551,10 @@ static void gate_refusals_(void)
         snprintf(bad, sizeof bad, "%s", src);
         p = strstr(bad, "observe track pic1 of bogey as trk1");
         ASSERT(p != NULL);
-        memcpy(p, "observe track link1 of bogey as trk1", 35);
+        /* The same length as what it overwrites, so the statement
+         * that follows it is untouched; the channel loses its digit
+         * and the refusal below is what the arm is about. */
+        memcpy(p, "observe track link1 of bogey as trk", 35);
         const char *f[] = { "observe track link1 of bogey",
                             "is of kind `datalink`",
                             "takes a payload of kind `infostate`", NULL };
@@ -597,9 +600,9 @@ static void gate_cap_(void)
             "    astro_payload pic2 body=drone_2 kind=infostate"
             " source=eye2\n"
             "    astro_payload link1 body=drone_1 kind=datalink"
-            " network=kite rate_hz=1.0 %s\n"
+            " network=swarm_a rate_hz=1.0 %s\n"
             "    astro_payload link2 body=drone_2 kind=datalink"
-            " network=kite rate_hz=1.0 %s\n"
+            " network=swarm_a rate_hz=1.0 %s\n"
             "%s"
             "    agent alpha\n"
             "        action nudge1 box -1.0 1.0 default 0.0\n",
@@ -640,7 +643,7 @@ static void gate_verdict_(void)
      * its statistic sweeps, so the verdict changes several times in an
      * episode. */
     dl_world_(src, sizeof src, 3.0e4, "6.0", "150.0", "10.0", radio,
-              "kite", 1);
+              "swarm_a", 1);
     dl_run_(&run, src, "verdict", 24);
 
     for (int k = 0; k < run.n_steps; k++) {
@@ -703,7 +706,7 @@ static void gate_ungated_identity_(void)
     /* No spin and a threshold far below the statistic, so the verdict
      * is 1.0 at every instant of the run. */
     dl_world_(gated, sizeof gated, 3.0e4, "0.0", "1.0", "1.0e-30",
-              radio, "kite", 1);
+              radio, "swarm_a", 1);
     snprintf(plain, sizeof plain, "%s", gated);
     {
         char *p = strstr(plain, " source=eye1");
@@ -809,7 +812,7 @@ static void gate_base_identity_(void)
 
     /* A world with neither word in it. */
     dl_world_(src, sizeof src, 3.0e4, "6.0", "150.0", "10.0", NULL,
-              "kite", 0);
+              "swarm_a", 0);
     {
         char *p = strstr(src, " source=eye1");
         ASSERT(p != NULL);
@@ -853,9 +856,9 @@ static void gate_shared_track_(void)
 
     radio_str_(radio, sizeof radio, RADIO_);
     dl_world_(with_link, sizeof with_link, 3.0e4, "0.0", "10.0", "10.0",
-              radio, "kite", 1);
+              radio, "swarm_a", 1);
     dl_world_(without, sizeof without, 3.0e4, "0.0", "10.0", "10.0", NULL,
-              "kite", 1);
+              "swarm_a", 1);
     dl_run_(&a, with_link, "shared", 8);
     dl_run_(&b, without, "unshared", 8);
 
@@ -957,7 +960,7 @@ static void gate_budget_(void)
         double sep = rstar * (side ? 1.01 : 0.99);
         double snr = friis_snr_(RADIO_, sep);
         dl_world_(src, sizeof src, sep, "0.0", "10.0", "10.0", radio,
-                  "kite", 1);
+                  "swarm_a", 1);
         dl_run_(&run, src, side ? "beyond" : "inside", 6);
         double val = dl_ch_(&run, run.n_steps - 1, "beta.trk2_valid");
         double want = side ? 0.0 : 1.0;
@@ -1001,7 +1004,7 @@ static void gate_budget_(void)
             ASSERT(snr < v[K_THR]);
             radio_str_(perturbed, sizeof perturbed, v);
             dl_world_(src, sizeof src, sep, "0.0", "10.0", "10.0",
-                      perturbed, "kite", 1);
+                      perturbed, "swarm_a", 1);
             char stem[64];
             snprintf(stem, sizeof stem, "pert%d", key);
             dl_run_(&run, src, stem, 4);
@@ -1021,7 +1024,7 @@ static void gate_budget_(void)
          * the nine above are about their keys and not about the
          * separation. */
         dl_world_(src, sizeof src, sep, "0.0", "10.0", "10.0", radio,
-                  "kite", 1);
+                  "swarm_a", 1);
         dl_run_(&run, src, "unpert", 4);
         ASSERT(dl_ch_(&run, run.n_steps - 1, "beta.trk2_valid") == 1.0);
         g_arms++;
@@ -1065,11 +1068,11 @@ static void gate_two_receivers_(void)
         "    astro_payload pic3 body=drone_3 kind=infostate"
         " history=1024 source=eye3\n"
         "    astro_payload link1 body=drone_1 kind=datalink"
-        " network=kite rate_hz=2000.0 %s\n"
+        " network=swarm_a rate_hz=2000.0 %s\n"
         "    astro_payload link2 body=drone_2 kind=datalink"
-        " network=kite rate_hz=2000.0 %s\n"
+        " network=swarm_a rate_hz=2000.0 %s\n"
         "    astro_payload link3 body=drone_3 kind=datalink"
-        " network=kite rate_hz=2000.0 %s\n"
+        " network=swarm_a rate_hz=2000.0 %s\n"
         "%s"
         "    agent alpha\n"
         "        action nudge1 box -1.0 1.0 default 0.0\n"
@@ -1212,9 +1215,9 @@ static void gate_delay_(void)
             "    astro_payload pic2 body=drone_2 kind=infostate"
             " history=1024 source=eye2\n"
             "    astro_payload link1 body=drone_1 kind=datalink"
-            " network=kite rate_hz=2000.0 %s\n"
+            " network=swarm_a rate_hz=2000.0 %s\n"
             "    astro_payload link2 body=drone_2 kind=datalink"
-            " network=kite rate_hz=2000.0 %s\n"
+            " network=swarm_a rate_hz=2000.0 %s\n"
             "%s"
             "    agent alpha\n"
             "        action nudge1 box -1.0 1.0 default 0.0\n"
@@ -1263,7 +1266,7 @@ static void gate_networks_(void)
 
     radio_str_(radio, sizeof radio, RADIO_);
     dl_world_(src, sizeof src, 3.0e4, "0.0", "10.0", "10.0", radio,
-              "other", 1);
+              "swarm_b", 1);
     dl_run_(&run, src, "twonets", 6);
     for (int k = 0; k < run.n_steps; k++) {
         if (dl_ch_(&run, k, "beta.trk2_valid") != 0.0) {
@@ -1331,9 +1334,9 @@ static void gate_undeclared_target_(void)
         "    astro_payload pic2 body=drone_2 kind=infostate"
         " history=1024 source=eye2\n"
         "    astro_payload link1 body=drone_1 kind=datalink"
-        " network=kite rate_hz=2000.0 %s\n"
+        " network=swarm_a rate_hz=2000.0 %s\n"
         "    astro_payload link2 body=drone_2 kind=datalink"
-        " network=kite rate_hz=2000.0 %s\n"
+        " network=swarm_a rate_hz=2000.0 %s\n"
         "%s"
         "    agent alpha\n"
         "        action nudge1 box -1.0 1.0 default 0.0\n"
@@ -1430,7 +1433,7 @@ static void gate_inflight_(void)
 
         ASSERT(friis_snr_(v, sep) > v[K_THR]);
         dl_world_(src, sizeof src, sep, "0.0", "10.0", "10.0", radio,
-                  "kite", 1);
+                  "swarm_a", 1);
         snprintf(path, sizeof path, WORK_DIR "/%s.kfl", stem);
         snprintf(out, sizeof out, WORK_DIR "/%s", stem);
         snprintf(so, sizeof so, WORK_DIR "/%s.rlenv.so", stem);
@@ -1488,7 +1491,7 @@ static void gate_one_generator_(void)
 
     radio_str_(radio, sizeof radio, RADIO_);
     dl_world_(src, sizeof src, 3.0e4, "6.0", "150.0", "10.0", radio,
-              "kite", 1);
+              "swarm_a", 1);
     rl_write_file_(WORK_DIR "/gen.kfl", src);
     rl_run_or_die_("./bin/kflc --emit " WORK_DIR "/gen.kfl > "
                    WORK_DIR "/gen.cc 2> " WORK_DIR "/gen.err");
@@ -1548,7 +1551,7 @@ static void gate_determinism_(void)
 
     radio_str_(radio, sizeof radio, RADIO_);
     dl_world_(src, sizeof src, 3.0e4, "6.0", "150.0", "10.0", radio,
-              "kite", 1);
+              "swarm_a", 1);
     rl_write_file_(WORK_DIR "/det.kfl", src);
     rl_compile_(WORK_DIR "/det.kfl", WORK_DIR "/det", WORK_DIR);
     for (int i = 0; i < 2; i++) {
