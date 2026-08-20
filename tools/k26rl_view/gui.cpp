@@ -42,14 +42,21 @@
 #include "asset.h"
 #include "scene.h"
 
+#include <dirent.h>
+#include <float.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <map>
 
 #include "dump.h"
+#include "pngout.h"
+#include "prefs.h"
 #include "resim.h"
 
 #include "imgui.h"
@@ -108,6 +115,26 @@ struct Ui {
     bool playing;
     double play_rate;
     double play_accum;
+    /* The persisted settings, or null when running session-only. */
+    Prefs *prefs;
+    /* Windows the menu bar opens. */
+    bool show_settings;
+    bool show_help;
+    bool show_open;
+    /* The open window's state: the directory listed, the file
+     * picked, the artifact to rebuild with, and the last failure. */
+    std::string open_dir;
+    std::string open_pick;
+    char open_artifact[512];
+    std::string open_error;
+    /* A capture requested this frame: 0 none, 1 the window as
+     * rendered, 2 the scene alone. The note names the file the last
+     * capture wrote, shown in the menu bar for a while. */
+    int capture_kind;
+    std::string capture_note;
+    int capture_note_frames;
+    /* The observation table's filter. */
+    char obs_filter[64];
     LiveOptions live;
 };
 
@@ -242,6 +269,31 @@ ImVec4 ending_colour_(uint16_t reason)
     case K26RL_END_FAULT:      return rgb_(COL_ERROR);
     default:                   return rgb_(COL_TEXT_DIM);
     }
+}
+
+/* The standard table: alternating row ground, stretch sizing, one
+ * look everywhere so the panels read as one instrument. */
+bool table_(const char *id, int cols)
+{
+    return ImGui::BeginTable(id, cols,
+                             ImGuiTableFlags_RowBg |
+                             ImGuiTableFlags_SizingStretchProp |
+                             ImGuiTableFlags_PadOuterX);
+}
+
+/* One key-value row of a two-column table. */
+void kv_(const char *key, const char *fmt, ...)
+{
+    va_list ap;
+    char val[256];
+    va_start(ap, fmt);
+    vsnprintf(val, sizeof val, fmt, ap);
+    va_end(ap);
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextDisabled("%s", key);
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(val);
 }
 
 void panel_timeline_(Ui &ui, const Episode &ep)
@@ -392,12 +444,15 @@ void panel_timeline_(Ui &ui, const Episode &ep)
         }
     }
 
-    ImGui::Text("identity (ordinal %u, env %u, episode %u), %u steps, "
-                "%u transitions", ep.ordinal, ep.env, ep.episode,
-                ep.step_count, ep.transitions());
-    if (ui.step < ep.flags.size()) {
-        ImGui::Text("step %u flags: %s", ui.step,
-                    flag_marks_(ep.flags[ui.step], marks, sizeof marks));
+    if (table_("##identity", 2)) {
+        kv_("identity", "ordinal %u, env %u, episode %u", ep.ordinal,
+            ep.env, ep.episode);
+        kv_("steps", "%u (%u transitions)", ep.step_count,
+            ep.transitions());
+        if (ui.step < ep.flags.size())
+            kv_("step flags", "%s",
+                flag_marks_(ep.flags[ui.step], marks, sizeof marks));
+        ImGui::EndTable();
     }
     ImGui::End();
 }
@@ -506,13 +561,49 @@ void plot_channels_(Ui &ui, const Episode &ep, const char *title,
 
     for (uint32_t i = 0; i < ep.step_count; i++)
         xs[i] = (double)i;
-    for (size_t q = 0; q < pos.size(); q++) {
-        size_t c = pos[q];
-        bool on = ui.channel_on[c] != 0;
-        if (ImGui::Checkbox(sp.channels[c].name.c_str(), &on))
-            ui.channel_on[c] = on ? 1 : 0;
-        if ((q % 3) != 2 && q + 1 < pos.size())
-            ImGui::SameLine();
+    /* The channel table: which traces plot, and each channel's value
+     * at the shown step. The filter narrows by name. */
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+    ImGui::InputTextWithHint("##filter", "filter", ui.obs_filter,
+                             sizeof ui.obs_filter);
+    if (ImGui::BeginTable("##channels", 3,
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_ScrollY |
+                          ImGuiTableFlags_SizingStretchProp |
+                          ImGuiTableFlags_PadOuterX,
+                          ImVec2(0, ImGui::GetFontSize() * 9.0f))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("plot",
+                                ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::GetFontSize() * 2.5f);
+        ImGui::TableSetupColumn("channel");
+        ImGui::TableSetupColumn("value at step");
+        ImGui::TableHeadersRow();
+        for (size_t q = 0; q < pos.size(); q++) {
+            size_t c = pos[q];
+            const char *name = sp.channels[c].name.c_str();
+            if (ui.obs_filter[0] && !strstr(name, ui.obs_filter))
+                continue;
+            ImGui::PushID((int)c);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            bool on = ui.channel_on[c] != 0;
+            if (ImGui::Checkbox("##on", &on))
+                ui.channel_on[c] = on ? 1 : 0;
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(name);
+            ImGui::TableNextColumn();
+            {
+                size_t k = (size_t)ui.step * sp.obs_total +
+                           sp.channels[c].index;
+                if (k < ep.obs.size())
+                    ImGui::Text("%.6g", ep.obs[k]);
+                else
+                    ImGui::TextDisabled("-");
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
     }
     if (!ImPlot::BeginPlot(title, ImVec2(-1, 260)))
         return;
@@ -633,14 +724,47 @@ void plot_actions_(Ui &ui, const Episode &ep, const char *title,
         }
         ImPlot::EndPlot();
     }
-    for (size_t k = 0; k < sp.actions.size(); k++) {
-        const ActionDecl &a = sp.actions[k];
-        if (a.offset < off || a.offset >= off + count)
-            continue;
-        if (a.has_kind && a.kind == K26RL_ACT_KIND_DISCRETE)
-            ImGui::Text("action %u discrete, arity %u", a.offset, a.arity);
-        else if (a.has_bounds)
-            ImGui::Text("action %u box [%g, %g]", a.offset, a.lo, a.hi);
+    if (ImGui::BeginTable("##decl", 4,
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_ScrollY |
+                          ImGuiTableFlags_SizingStretchProp |
+                          ImGuiTableFlags_PadOuterX,
+                          ImVec2(0, ImGui::GetFontSize() * 7.0f))) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("channel");
+        ImGui::TableSetupColumn("kind");
+        ImGui::TableSetupColumn("range");
+        ImGui::TableSetupColumn("value at step");
+        ImGui::TableHeadersRow();
+        for (size_t k = 0; k < sp.actions.size(); k++) {
+            const ActionDecl &a = sp.actions[k];
+            if (a.offset < off || a.offset >= off + count)
+                continue;
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Text("%u", a.offset);
+            ImGui::TableNextColumn();
+            if (a.has_kind && a.kind == K26RL_ACT_KIND_DISCRETE)
+                ImGui::TextUnformatted("discrete");
+            else
+                ImGui::TextUnformatted("box");
+            ImGui::TableNextColumn();
+            if (a.has_kind && a.kind == K26RL_ACT_KIND_DISCRETE)
+                ImGui::Text("arity %u", a.arity);
+            else if (a.has_bounds)
+                ImGui::Text("%g to %g", a.lo, a.hi);
+            else
+                ImGui::TextDisabled("-");
+            ImGui::TableNextColumn();
+            {
+                size_t idx = (size_t)ui.step * sp.act_total + a.offset;
+                if (idx < ep.act.size())
+                    ImGui::Text("%.6g", ep.act[idx]);
+                else
+                    ImGui::TextDisabled("-");
+            }
+        }
+        ImGui::EndTable();
     }
 }
 
@@ -1385,7 +1509,7 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
         /* An artifact named on the command line is a request to see
          * the flight, so the first rebuild runs unasked; the button
          * stays for every rebuild after a frame or episode change. */
-        bool go = ImGui::Button("reconstruct body poses in this frame");
+        bool go = ImGui::Button("rebuild poses in this frame");
         if (ui.scene_auto_resim) {
             go = true;
             ui.scene_auto_resim = false;
@@ -1478,34 +1602,10 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
         }
     }
     ImGui::Separator();
-    for (int k = 0; k < ELEM_KIND_COUNT; k++) {
-        bool on = o.enabled[k];
-        if (ImGui::Checkbox(element_name((ElementKind)k), &on))
-            o.enabled[k] = on;
-        if ((k % 3) != 2 && k + 1 < ELEM_KIND_COUNT)
-            ImGui::SameLine();
-    }
-    {
-        bool on = o.shading;
-        float vs = (float)o.velocity_seconds;
-        float al = (float)o.axis_length;
-        if (ImGui::Checkbox("shading", &on))
-            o.shading = on;
-        if (o.shading)
-            ImGui::TextWrapped("%s", SHADING_LABEL);
-        float ts = (float)o.thruster_scale;
-        float ss = (float)o.spin_scale;
-        if (ImGui::DragFloat("velocity vector (s)", &vs, 0.1f, 0.0f, 1.0e6f))
-            o.velocity_seconds = vs;
-        if (ImGui::DragFloat("axis length (m)", &al, 0.05f, 0.0f, 1.0e6f))
-            o.axis_length = al;
-        if (ImGui::DragFloat("thrust line (m per N)", &ts, 0.0005f, 0.0f,
-                             1.0e6f, "%.4f"))
-            o.thruster_scale = ts;
-        if (ImGui::DragFloat("spin line (m per rad/s)", &ss, 0.5f, 0.0f,
-                             1.0e6f))
-            o.spin_scale = ss;
-    }
+    /* What is drawn, and at what scale, lives in the settings
+     * window, so this panel stays the working camera surface. */
+    if (ImGui::Button("elements and scales..."))
+        ui.show_settings = true;
 
     if (!ui.asset_tried && !ui.asset_reqs.empty()) {
         ui.assets = asset_bind(sp, ui.asset_reqs);
@@ -1544,19 +1644,36 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
     ui.scene_ready = true;
     ImGui::Separator();
     ImGui::TextWrapped("%s", ui.scene.message.c_str());
-    ImGui::Text("frame %s, %u elements at step %u",
-                ui.scene.frame_name.c_str(),
+    if (ImGui::CollapsingHeader("drawn")) {
+        if (table_("##drawnkv", 2)) {
+            kv_("frame", "%s", ui.scene.frame_name.c_str());
+            kv_("elements at step", "%u at %u",
                 (unsigned)ui.scene.elements.size(), ui.step);
-    ImGui::Text("eye %.3f %.3f %.3f m", ui.scene.eye[0], ui.scene.eye[1],
-                ui.scene.eye[2]);
-    for (size_t i = 0; i < ui.scene.elements.size(); i++) {
-        const SceneElement &e = ui.scene.elements[i];
-        size_t drawn = 0;
-        for (size_t sgi = 0; sgi < e.segments.size(); sgi++)
-            drawn += e.segments[sgi].drawn ? 1 : 0;
-        ImGui::BulletText("%s %s: %u of %u segments drawn",
-                          element_name(e.kind), e.name.c_str(),
-                          (unsigned)drawn, (unsigned)e.segments.size());
+            kv_("eye", "%.3f %.3f %.3f m", ui.scene.eye[0],
+                ui.scene.eye[1], ui.scene.eye[2]);
+            ImGui::EndTable();
+        }
+        if (table_("##drawn", 3)) {
+            ImGui::TableSetupColumn("element");
+            ImGui::TableSetupColumn("name");
+            ImGui::TableSetupColumn("segments");
+            ImGui::TableHeadersRow();
+            for (size_t i = 0; i < ui.scene.elements.size(); i++) {
+                const SceneElement &e = ui.scene.elements[i];
+                size_t drawn = 0;
+                for (size_t sgi = 0; sgi < e.segments.size(); sgi++)
+                    drawn += e.segments[sgi].drawn ? 1 : 0;
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(element_name(e.kind));
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(e.name.c_str());
+                ImGui::TableNextColumn();
+                ImGui::Text("%u of %u", (unsigned)drawn,
+                            (unsigned)e.segments.size());
+            }
+            ImGui::EndTable();
+        }
     }
     ImGui::End();
 }
@@ -1576,22 +1693,24 @@ void panel_live_(Ui &ui)
     uint64_t lost = m.frames_lost();
 
     ImGui::Begin("Live");
-    ImGui::Text("ring %s", fi.tap.c_str());
-    ImGui::Text("%u slots of %u bytes", m.ring_slot_count(),
-                m.ring_slot_size());
-    ImGui::Text("frames accepted %llu",
-                (unsigned long long)m.frames_accepted());
-    if (lost) {
+    if (table_("##live", 2)) {
+        kv_("ring", "%s", fi.tap.c_str());
+        kv_("slots", "%u of %u bytes", m.ring_slot_count(),
+            m.ring_slot_size());
+        kv_("frames accepted", "%llu",
+            (unsigned long long)m.frames_accepted());
         /* The count is the reading. The line beside it is a limit no
          * reading here states: those steps are gone, and the track
          * does not pass through them. */
-        ImGui::Text("frames lost %llu", (unsigned long long)lost);
-        ImGui::TextUnformatted("those steps are not held and not drawn");
-    } else {
-        ImGui::TextUnformatted("frames lost 0");
+        kv_("frames lost", "%llu", (unsigned long long)lost);
+        kv_("episodes", "%u", fi.episode_count);
+        kv_("producer", "%s", m.producer_closed() ? "closed"
+                                                  : "running");
+        ImGui::EndTable();
     }
-    ImGui::Text("episodes %u", fi.episode_count);
-    ImGui::Text("producer %s", m.producer_closed() ? "closed" : "running");
+    if (lost)
+        ImGui::TextColored(rgb_(COL_ACCENT),
+                           "lost steps are not held and not drawn");
     ImGui::Checkbox("follow the newest step", &ui.follow);
     ImGui::End();
 }
@@ -1602,43 +1721,450 @@ void panel_meta_(Ui &ui, const Episode &ep)
     const Spec &sp = ui.model->spec();
 
     ImGui::Begin("Run and episode");
-    ImGui::Text("governing seed at enable: 0x%016llx (ordinal %u)",
+    if (ImGui::CollapsingHeader("run", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (table_("##run", 2)) {
+            kv_("governing seed", "0x%016llx (ordinal %u)",
                 (unsigned long long)fi.governing_seed, fi.rekey_ordinal);
-    ImGui::Text("this episode's governing seed: 0x%016llx",
+            kv_("episode seed", "0x%016llx",
                 (unsigned long long)ep.seed);
-    ImGui::Text("environments %u, steps per chunk %u, episodes indexed %u",
-                fi.n_envs, fi.steps_per_chunk, fi.episode_count);
-    if (fi.unindexed_episode_starts) {
-        ImGui::Text("episode starts with no indexed episode: %u",
+            kv_("environments", "%u", fi.n_envs);
+            kv_("steps per chunk", "%u", fi.steps_per_chunk);
+            kv_("episodes indexed", "%u", fi.episode_count);
+            if (fi.unindexed_episode_starts)
+                kv_("starts not indexed", "%u",
                     fi.unindexed_episode_starts);
+            ImGui::EndTable();
+        }
     }
-    ImGui::Separator();
-    ImGui::Text("agents %u, observation channels %u, action channels %u",
-                sp.agent_count, sp.obs_total, sp.act_total);
-    ImGui::Text("control dt %g s, horizon %u, episode flags 0x%08x",
-                sp.control_dt, sp.horizon, sp.episode_flags);
-    ImGui::Text("spec blob %u bytes, endian probe 0x%08x",
-                (unsigned)sp.raw.size(), sp.endian_probe);
-    for (size_t k = 0; k < sp.unknown_tags.size(); k++) {
-        ImGui::Text("spec tag 0x%04x (%u bytes) is not known to this build",
-                    (unsigned)sp.unknown_tags[k].first,
+    if (ImGui::CollapsingHeader("shape", ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (table_("##shape", 2)) {
+            kv_("agents", "%u", sp.agent_count);
+            kv_("observation channels", "%u", sp.obs_total);
+            kv_("action channels", "%u", sp.act_total);
+            kv_("control dt", "%g s", sp.control_dt);
+            kv_("horizon", "%u", sp.horizon);
+            kv_("episode flags", "0x%08x", sp.episode_flags);
+            ImGui::EndTable();
+        }
+    }
+    if (ImGui::CollapsingHeader("specification")) {
+        if (table_("##spec", 2)) {
+            kv_("blob", "%u bytes", (unsigned)sp.raw.size());
+            kv_("endian probe", "0x%08x", sp.endian_probe);
+            for (size_t k = 0; k < sp.unknown_tags.size(); k++) {
+                char key[32];
+                snprintf(key, sizeof key, "tag 0x%04x",
+                         (unsigned)sp.unknown_tags[k].first);
+                kv_(key, "%u bytes, not known to this build",
                     sp.unknown_tags[k].second);
+            }
+            ImGui::EndTable();
+        }
     }
-    ImGui::Separator();
-    if (!ep.start_seen) {
-        /* Not none: unknown. The record carrying them never arrived,
-         * and a count of zero here would read as a fact about the
-         * episode rather than about this window. */
-        ImGui::TextUnformatted("randomisation draws: not known, the "
-                               "episode's opening record never arrived");
-    } else {
-        ImGui::Text("randomisation draws: %u", (unsigned)ep.dr_tags.size());
-        for (size_t k = 0; k < ep.dr_tags.size(); k++) {
-            ImGui::Text("  parameter %u = %.17g", ep.dr_tags[k],
-                        ep.dr_values[k]);
+    if (ImGui::CollapsingHeader("randomisation",
+                                ImGuiTreeNodeFlags_DefaultOpen)) {
+        if (!ep.start_seen) {
+            /* Not none: unknown. The record carrying them never
+             * arrived, and a count of zero here would read as a fact
+             * about the episode rather than about this window. */
+            ImGui::TextDisabled("not known: the opening record never "
+                                "arrived");
+        } else if (ep.dr_tags.empty()) {
+            ImGui::TextDisabled("no draws");
+        } else if (table_("##draws", 2)) {
+            ImGui::TableSetupColumn("parameter");
+            ImGui::TableSetupColumn("value");
+            ImGui::TableHeadersRow();
+            for (size_t k = 0; k < ep.dr_tags.size(); k++) {
+                char key[32];
+                snprintf(key, sizeof key, "%u", ep.dr_tags[k]);
+                kv_(key, "%.17g", ep.dr_values[k]);
+            }
+            ImGui::EndTable();
         }
     }
     ImGui::End();
+}
+
+/* Where a capture lands: beside the episode file, named by the step,
+ * numbered rather than overwritten when the name is taken. */
+std::string capture_path_(const Ui &ui, const char *what)
+{
+    char base[768];
+    struct stat st;
+    snprintf(base, sizeof base, "%s.step%04u.%s.png",
+             ui.model->info().path.c_str(), ui.step, what);
+    if (stat(base, &st) != 0)
+        return base;
+    for (int n = 2; n < 1000; n++) {
+        char alt[800];
+        snprintf(alt, sizeof alt, "%s.step%04u.%s.%d.png",
+                 ui.model->info().path.c_str(), ui.step, what, n);
+        if (stat(alt, &st) != 0)
+            return alt;
+    }
+    return base;
+}
+
+/* Read the framebuffer and write it as a PNG. GL rows run bottom
+ * up; the file's run top down, so the rows are flipped here. */
+void capture_now_(Ui &ui, int w, int h, const char *what)
+{
+    if (w <= 0 || h <= 0)
+        return;
+    std::vector<uint8_t> px((size_t)w * h * 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, &px[0]);
+    std::vector<uint8_t> flip((size_t)w * h * 3);
+    for (int y = 0; y < h; y++) {
+        memcpy(&flip[(size_t)y * w * 3],
+               &px[(size_t)(h - 1 - y) * w * 3], (size_t)w * 3);
+    }
+    std::string path = capture_path_(ui, what);
+    bool ok = png_write_rgb8(path.c_str(), &flip[0], (uint32_t)w,
+                             (uint32_t)h);
+    ui.capture_note = (ok ? "saved " : "cannot write ") + path;
+    ui.capture_note_frames = 480;
+}
+
+/* The settings window: what is drawn and at what scale, one row per
+ * element, and the depth cue beside them. Opened from the menu bar
+ * and closable, so the main layout stays working surface. */
+void panel_settings_(Ui &ui)
+{
+    SceneOptions &o = ui.scene_opt;
+
+    if (!ui.show_settings)
+        return;
+    ImGui::SetNextWindowSize(ImVec2(440, 460), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Settings", &ui.show_settings)) {
+        ImGui::End();
+        return;
+    }
+    if (ImGui::BeginTabBar("##settings")) {
+        if (ImGui::BeginTabItem("elements")) {
+            if (table_("##elements", 3)) {
+                ImGui::TableSetupColumn("show",
+                                        ImGuiTableColumnFlags_WidthFixed,
+                                        ImGui::GetFontSize() * 3.0f);
+                ImGui::TableSetupColumn("element");
+                ImGui::TableSetupColumn("scale");
+                ImGui::TableHeadersRow();
+                for (int k = 0; k < ELEM_KIND_COUNT; k++) {
+                    ImGui::PushID(k);
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    bool on = o.enabled[k];
+                    if (ImGui::Checkbox("##on", &on))
+                        o.enabled[k] = on;
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(
+                        element_name((ElementKind)k));
+                    ImGui::TableNextColumn();
+                    ImGui::SetNextItemWidth(-FLT_MIN);
+                    if (k == ELEM_VELOCITY) {
+                        float v = (float)o.velocity_seconds;
+                        if (ImGui::DragFloat("##vs", &v, 0.1f, 0.0f,
+                                             1.0e6f, "%.1f s"))
+                            o.velocity_seconds = v;
+                    } else if (k == ELEM_AXES) {
+                        float v = (float)o.axis_length;
+                        if (ImGui::DragFloat("##al", &v, 0.05f, 0.0f,
+                                             1.0e6f, "%.2f m"))
+                            o.axis_length = v;
+                    } else if (k == ELEM_THRUSTER || k == ELEM_FORCE) {
+                        float v = (float)o.thruster_scale;
+                        if (ImGui::DragFloat("##ts", &v, 0.0005f, 0.0f,
+                                             1.0e6f, "%.4f m per N"))
+                            o.thruster_scale = v;
+                    } else if (k == ELEM_SPIN) {
+                        float v = (float)o.spin_scale;
+                        if (ImGui::DragFloat("##ss", &v, 0.5f, 0.0f,
+                                             1.0e6f, "%.1f m per rad/s"))
+                            o.spin_scale = v;
+                    } else {
+                        ImGui::TextDisabled("-");
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+            ImGui::Spacing();
+            if (ImGui::CollapsingHeader("depth cue")) {
+                bool on = o.shading;
+                if (ImGui::Checkbox("shading", &on))
+                    o.shading = on;
+                ImGui::TextDisabled("%s", SHADING_LABEL);
+            }
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("settings file")) {
+            if (table_("##pf", 2)) {
+                kv_("state", ui.prefs ? "persists between runs"
+                                      : "session only");
+                kv_("file", ui.prefs && !ui.prefs->path.empty()
+                            ? ui.prefs->path.c_str() : "-");
+                ImGui::EndTable();
+            }
+            ImGui::TextDisabled("command-line flags override the "
+                                "file; --session-only ignores it; "
+                                "the headless dump never reads it");
+            if (ui.prefs && ImGui::Button("save now")) {
+                ui.prefs->play_rate = ui.play_rate;
+                prefs_save(*ui.prefs, ui.scene_opt);
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
+}
+
+/* The controls window, one table, opened from the help menu. */
+void panel_help_(Ui &ui)
+{
+    if (!ui.show_help)
+        return;
+    ImGui::SetNextWindowSize(ImVec2(380, 260), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Controls", &ui.show_help)) {
+        ImGui::End();
+        return;
+    }
+    if (table_("##keys", 2)) {
+        ImGui::TableSetupColumn("key");
+        ImGui::TableSetupColumn("function");
+        ImGui::TableHeadersRow();
+        kv_("space", "play or pause");
+        kv_("left arrow", "one step back");
+        kv_("right arrow", "one step forward");
+        kv_("home", "first step");
+        kv_("end", "last step");
+        ImGui::EndTable();
+    }
+    ImGui::TextDisabled("drag a panel by its title to move or dock "
+                        "it; view > reset layout restores the "
+                        "default");
+    ImGui::End();
+}
+
+/* Reopen the model over a different file, restoring the old file if
+ * the new one refuses, and resetting what a file change invalidates. */
+bool reopen_(Ui &ui, const std::string &path, std::string *err)
+{
+    std::string old = ui.model->info().path;
+    ui.model->close();
+    if (!ui.model->open(path, err)) {
+        std::string e2;
+        (void)ui.model->open(old, &e2);
+        return false;
+    }
+    ui.episode_index = 0;
+    ui.step = 0;
+    ui.follow = true;
+    ui.playing = false;
+    ui.resim_done = false;
+    ui.scene_resim_done = false;
+    ui.scene_auto_resim = !ui.artifact.empty();
+    ui.asset_tried = false;
+    ui.assets.clear();
+    ui.channel_on.assign(ui.model->spec().channels.size(), 1);
+    ui.traj_pick = 0;
+    if (ui.prefs) {
+        prefs_touch_recent(ui.prefs, path);
+        ui.prefs->play_rate = ui.play_rate;
+        prefs_save(*ui.prefs, ui.scene_opt);
+    }
+    return true;
+}
+
+/* The open window: a directory table, episode files selectable, and
+ * the artifact the rebuild will use. */
+void panel_open_(Ui &ui)
+{
+    if (!ui.show_open)
+        return;
+    if (ui.open_dir.empty()) {
+        char cwd[512];
+        ui.open_dir = getcwd(cwd, sizeof cwd) ? cwd : ".";
+    }
+    ImGui::SetNextWindowSize(ImVec2(560, 440), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Open", &ui.show_open)) {
+        ImGui::End();
+        return;
+    }
+    {
+        char buf[512];
+        snprintf(buf, sizeof buf, "%s", ui.open_dir.c_str());
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputText("##dir", buf, sizeof buf,
+                             ImGuiInputTextFlags_EnterReturnsTrue))
+            ui.open_dir = buf;
+    }
+    std::vector<std::string> dirs, files;
+    {
+        DIR *d = opendir(ui.open_dir.c_str());
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != 0) {
+                std::string name = e->d_name;
+                if (name == "." )
+                    continue;
+                std::string full = ui.open_dir + "/" + name;
+                struct stat st;
+                if (stat(full.c_str(), &st) != 0)
+                    continue;
+                if (S_ISDIR(st.st_mode)) {
+                    dirs.push_back(name);
+                } else {
+                    size_t n = name.size();
+                    if ((n > 6 && name.compare(n - 6, 6, ".k26ep") == 0) ||
+                        (n > 7 && name.compare(n - 7, 7, ".k26epi") == 0))
+                        files.push_back(name);
+                }
+            }
+            closedir(d);
+        } else {
+            ImGui::TextDisabled("cannot list this directory");
+        }
+    }
+    std::sort(dirs.begin(), dirs.end());
+    std::sort(files.begin(), files.end());
+    if (ImGui::BeginTable("##files", 2,
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_ScrollY |
+                          ImGuiTableFlags_SizingStretchProp,
+                          ImVec2(0, ImGui::GetFontSize() * 14.0f))) {
+        ImGui::TableSetupColumn("name");
+        ImGui::TableSetupColumn("type",
+                                ImGuiTableColumnFlags_WidthFixed,
+                                ImGui::GetFontSize() * 5.0f);
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < dirs.size(); i++) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            if (ImGui::Selectable((dirs[i] + "/").c_str(), false,
+                                  ImGuiSelectableFlags_SpanAllColumns)) {
+                if (dirs[i] == "..") {
+                    size_t cut = ui.open_dir.find_last_of('/');
+                    ui.open_dir = cut && cut != std::string::npos
+                                  ? ui.open_dir.substr(0, cut) : "/";
+                } else {
+                    ui.open_dir += "/" + dirs[i];
+                }
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("directory");
+        }
+        for (size_t i = 0; i < files.size(); i++) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            bool sel = ui.open_pick == files[i];
+            if (ImGui::Selectable(files[i].c_str(), sel,
+                                  ImGuiSelectableFlags_SpanAllColumns))
+                ui.open_pick = files[i];
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("episode file");
+        }
+        ImGui::EndTable();
+    }
+    if (table_("##openopts", 2)) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("artifact");
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##artifact", ui.open_artifact,
+                         sizeof ui.open_artifact);
+        ImGui::EndTable();
+    }
+    if (!ui.open_error.empty())
+        ImGui::TextColored(rgb_(COL_ERROR), "%s", ui.open_error.c_str());
+    {
+        bool can = !ui.open_pick.empty();
+        if (!can)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("open")) {
+            std::string full = ui.open_dir + "/" + ui.open_pick;
+            std::string err;
+            if (reopen_(ui, full, &err)) {
+                ui.artifact = ui.open_artifact;
+                ui.scene_auto_resim = !ui.artifact.empty();
+                ui.open_error.clear();
+                ui.show_open = false;
+            } else {
+                ui.open_error = err;
+            }
+        }
+        if (!can)
+            ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("cancel"))
+            ui.show_open = false;
+    }
+    ImGui::End();
+}
+
+/* The menu bar: files, settings, the layout, and help. The capture
+ * items ask for a picture of the next rendered frame, which is the
+ * one being built now. */
+void menu_bar_(Ui &ui, GLFWwindow *win, bool *build_layout)
+{
+    if (!ImGui::BeginMainMenuBar())
+        return;
+    if (ImGui::BeginMenu("file")) {
+        if (ImGui::MenuItem("open...")) {
+            ui.show_open = true;
+            ui.open_error.clear();
+            snprintf(ui.open_artifact, sizeof ui.open_artifact, "%s",
+                     ui.artifact.c_str());
+        }
+        if (ImGui::BeginMenu("open recent",
+                             ui.prefs && !ui.prefs->recent.empty())) {
+            for (size_t i = 0;
+                 ui.prefs && i < ui.prefs->recent.size(); i++) {
+                if (ImGui::MenuItem(ui.prefs->recent[i].c_str())) {
+                    std::string err;
+                    if (!reopen_(ui, ui.prefs->recent[i], &err)) {
+                        ui.open_error = err;
+                        ui.show_open = true;
+                    }
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("save image, window"))
+            ui.capture_kind = 1;
+        if (ImGui::MenuItem("save image, scene"))
+            ui.capture_kind = 2;
+        ImGui::Separator();
+        if (ImGui::MenuItem("quit"))
+            glfwSetWindowShouldClose(win, GLFW_TRUE);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("settings")) {
+        if (ImGui::MenuItem("visuals..."))
+            ui.show_settings = true;
+        ImGui::TextDisabled(ui.prefs ? "settings persist between runs"
+                                     : "session only");
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("view")) {
+        if (ImGui::MenuItem("reset layout"))
+            *build_layout = true;
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("help")) {
+        if (ImGui::MenuItem("controls..."))
+            ui.show_help = true;
+        ImGui::EndMenu();
+    }
+    if (ui.capture_note_frames > 0) {
+        ui.capture_note_frames--;
+        ImGui::Separator();
+        ImGui::TextDisabled("%s", ui.capture_note.c_str());
+    }
+    ImGui::EndMainMenuBar();
 }
 
 void panel_resim_(Ui &ui, const Episode &ep)
@@ -1653,7 +2179,7 @@ void panel_resim_(Ui &ui, const Episode &ep)
     }
     ImGui::Text("artifact %s", ui.artifact.c_str());
     if (!ui.resim_done) {
-        if (ImGui::Button("reconstruct and compare")) {
+        if (ImGui::Button("rebuild and compare")) {
             ui.resim = resimulate(*ui.model, ep, ui.artifact,
                                   K26RL_BODY_REF_ORIGIN);
             ui.resim_done = true;
@@ -1705,7 +2231,7 @@ void panel_resim_(Ui &ui, const Episode &ep)
 
 }  /* namespace */
 
-int run_gui(Model &model, const DumpOptions &opt)
+int run_gui(Model &model, const DumpOptions &opt, Prefs *prefs)
 {
     Ui ui;
     /* Value initialised rather than cleared: the entry-point table
@@ -1727,8 +2253,18 @@ int run_gui(Model &model, const DumpOptions &opt)
     ui.model = &model;
     ui.follow = true;
     ui.playing = false;
-    ui.play_rate = 1.0;
+    ui.play_rate = prefs ? prefs->play_rate : 1.0;
+    if (!(ui.play_rate > 0.0))
+        ui.play_rate = 1.0;
     ui.play_accum = 0.0;
+    ui.prefs = prefs;
+    ui.show_settings = false;
+    ui.show_help = false;
+    ui.show_open = false;
+    ui.open_artifact[0] = '\0';
+    ui.capture_kind = 0;
+    ui.capture_note_frames = 0;
+    ui.obs_filter[0] = '\0';
     ui.live = opt.live;
     ui.artifact = opt.artifact;
     ui.asset_reqs = opt.assets;
@@ -1813,14 +2349,10 @@ int run_gui(Model &model, const DumpOptions &opt)
          * that painted its own background would paint over the
          * picture the panels exist to annotate. Panels dock around it
          * or float over it, as they are dragged. */
-        if (ImGui::BeginMainMenuBar()) {
-            if (ImGui::BeginMenu("view")) {
-                if (ImGui::MenuItem("reset layout"))
-                    build_layout = true;
-                ImGui::EndMenu();
-            }
-            ImGui::EndMainMenuBar();
-        }
+        menu_bar_(ui, win, &build_layout);
+        panel_settings_(ui);
+        panel_help_(ui);
+        panel_open_(ui);
         {
             ImGuiID root = ImGui::DockSpaceOverViewport(
                 ImGui::GetMainViewport(),
@@ -1898,6 +2430,38 @@ int run_gui(Model &model, const DumpOptions &opt)
             panel_scene_(ui, *ep, gl);
             panel_meta_(ui, *ep);
             panel_resim_(ui, *ep);
+            /* The transport's keys, listed in the controls window.
+             * Text input keeps every key it captures. */
+            if (!ImGui::GetIO().WantTextInput && ep->step_count) {
+                uint32_t last = ep->step_count - 1;
+                if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
+                    ui.playing = !ui.playing;
+                    ui.play_accum = 0.0;
+                    ui.follow = false;
+                    if (ui.playing && ep->complete && ui.step >= last)
+                        ui.step = 0;
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) &&
+                    ui.step > 0) {
+                    ui.playing = false;
+                    ui.step--;
+                    ui.follow = false;
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) &&
+                    ui.step < last) {
+                    ui.playing = false;
+                    ui.step++;
+                    ui.follow = false;
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
+                    ui.step = 0;
+                    ui.follow = false;
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_End, false)) {
+                    ui.step = last;
+                    ui.follow = false;
+                }
+            }
         } else {
             ImGui::Begin("Error");
             ImGui::TextUnformatted(err.c_str());
@@ -1919,11 +2483,28 @@ int run_gui(Model &model, const DumpOptions &opt)
              * is large and the numbers beside it are readable. */
             if (ui.scene_ready)
                 scene_draw_(&gl, ui.scene, w, h);
+            /* The scene alone, before the interface is drawn over
+             * it. */
+            if (ui.capture_kind == 2) {
+                capture_now_(ui, w, h, "scene");
+                ui.capture_kind = 0;
+            }
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+            /* The window as shown, after everything has drawn. */
+            if (ui.capture_kind == 1) {
+                capture_now_(ui, w, h, "window");
+                ui.capture_kind = 0;
+            }
         }
-        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(win);
     }
 
+    /* The settings the session ends with are the settings the next
+     * one starts with, unless this run was session-only. */
+    if (ui.prefs) {
+        ui.prefs->play_rate = ui.play_rate;
+        prefs_save(*ui.prefs, ui.scene_opt);
+    }
     scene_gl_free_(&gl);
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

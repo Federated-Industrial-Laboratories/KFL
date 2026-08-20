@@ -92,6 +92,9 @@ static int usage_(const char *prog)
         "  --axis-length M         length of the body axis lines\n"
         "  --thruster-scale S      metres of line per newton of thrust\n"
         "  --spin-scale S          metres of line per radian per second\n"
+        "  --session-only          do not load or save window settings,\n"
+        "                          so the picture is reproducible from\n"
+        "                          these arguments alone\n"
         "  --shading               draw the shaded depth cue as well\n"
         "  --light X,Y,Z           view-space light direction for it\n"
         "\n"
@@ -175,10 +178,31 @@ static bool elements_(const char *list, k26rl_view::SceneOptions *o)
 int main(int argc, char **argv)
 {
     k26rl_view::DumpOptions opt;
+    k26rl_view::Prefs prefs;
     const char *path = 0;
     bool headless = false;
+    bool session_only = false;
     std::string frame_name, target_name;
     std::string err;
+
+    /* The persisted window settings load before the flags parse, so
+     * a flag overrides the file. Two runs never read it: a headless
+     * dump, whose output answers to its command line alone, which
+     * is what the gates rely on; and a --session-only run, which is
+     * how a picture stays reproducible from its arguments. The
+     * pre-scan is for those two flags only. */
+    {
+        bool scan_dump = false;
+        for (int i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--dump") == 0)
+                scan_dump = true;
+            if (strcmp(argv[i], "--session-only") == 0)
+                session_only = true;
+        }
+        if (!scan_dump && !session_only)
+            k26rl_view::prefs_load("k26rl_view.settings", &prefs,
+                                   &opt.scene);
+    }
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -332,6 +356,8 @@ int main(int argc, char **argv)
             if (!v)
                 return usage_(argv[0]);
             opt.scene.spin_scale = strtod(argv[++i], 0);
+        } else if (strcmp(a, "--session-only") == 0) {
+            /* Consumed by the pre-scan above. */
         } else if (strcmp(a, "--shading") == 0) {
             opt.scene.shading = true;
         } else if (strcmp(a, "--tap") == 0) {
@@ -422,5 +448,6 @@ int main(int argc, char **argv)
 
     if (headless)
         return k26rl_view::dump(stdout, model, opt);
-    return k26rl_view::run_gui(model, opt);
+    return k26rl_view::run_gui(model, opt,
+                               session_only ? 0 : &prefs);
 }

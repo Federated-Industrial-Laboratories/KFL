@@ -49,7 +49,7 @@ UPSTREAM_SRC = $(IMGUI_DIR)/imgui.cpp \
                $(IMGUI_DIR)/backends/imgui_impl_opengl3.cpp \
                upstream/implot/implot.cpp upstream/implot/implot_items.cpp
 OWN_SRC = main.cpp model.cpp live.cpp asset.cpp scene.cpp dump.cpp \
-          resim.cpp gui.cpp
+          resim.cpp gui.cpp pngout.cpp prefs.cpp
 
 # The compiler's capture envelope table, compiled in rather than
 # transcribed. A docking port's mating plane is the diameter its named
@@ -93,7 +93,10 @@ asset.o: asset.cpp asset.h
 scene.o: scene.cpp scene.h model.h asset.h resim.h
 dump.o:  dump.cpp dump.h model.h resim.h asset.h scene.h
 resim.o: resim.cpp resim.h model.h
-gui.o:   gui.cpp gui.h dump.h model.h resim.h asset.h scene.h live.h
+gui.o:   gui.cpp gui.h dump.h model.h resim.h asset.h scene.h live.h \
+         pngout.h prefs.h
+pngout.o: pngout.cpp pngout.h
+prefs.o:  prefs.cpp prefs.h scene.h
 
 clean:
 	rm -f k26rl_view $(OBJ)
