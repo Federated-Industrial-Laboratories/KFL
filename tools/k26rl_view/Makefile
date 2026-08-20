@@ -86,7 +86,7 @@ capture.o: $(SHARED_SRC) ../../kflc/src/capture.h
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) $(INC) -c -o $@ $<
 
-main.o:  main.cpp dump.h gui.h model.h scene.h
+main.o:  main.cpp dump.h gui.h model.h scene.h prefs.h
 model.o: model.cpp model.h live.h
 live.o:  live.cpp live.h model.h
 asset.o: asset.cpp asset.h

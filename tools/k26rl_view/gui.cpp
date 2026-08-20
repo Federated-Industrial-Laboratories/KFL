@@ -128,11 +128,19 @@ struct Ui {
     char open_artifact[512];
     std::string open_error;
     /* A capture requested this frame: 0 none, 1 the window as
-     * rendered, 2 the scene alone. The note names the file the last
-     * capture wrote, shown in the menu bar for a while. */
+     * rendered, 2 the scene alone, writing to capture_path. The
+     * note names the file the last capture wrote, shown in the menu
+     * bar for a while. */
     int capture_kind;
+    std::string capture_path;
     std::string capture_note;
     int capture_note_frames;
+    /* The save window: which capture it will request, where, and
+     * under what name. The directory is remembered between runs. */
+    bool show_save;
+    int save_kind;
+    std::string save_dir;
+    char save_name[256];
     /* The observation table's filter. */
     char obs_filter[64];
     LiveOptions live;
@@ -1786,29 +1794,24 @@ void panel_meta_(Ui &ui, const Episode &ep)
     ImGui::End();
 }
 
-/* Where a capture lands: beside the episode file, named by the step,
- * numbered rather than overwritten when the name is taken. */
-std::string capture_path_(const Ui &ui, const char *what)
+/* The name a capture proposes: the episode file's own base name,
+ * the step, and which picture it is. Where it lands is the save
+ * window's question, answered by hand. */
+std::string capture_name_(const Ui &ui, const char *what)
 {
-    char base[768];
-    struct stat st;
-    snprintf(base, sizeof base, "%s.step%04u.%s.png",
-             ui.model->info().path.c_str(), ui.step, what);
-    if (stat(base, &st) != 0)
-        return base;
-    for (int n = 2; n < 1000; n++) {
-        char alt[800];
-        snprintf(alt, sizeof alt, "%s.step%04u.%s.%d.png",
-                 ui.model->info().path.c_str(), ui.step, what, n);
-        if (stat(alt, &st) != 0)
-            return alt;
-    }
-    return base;
+    std::string base = ui.model->info().path;
+    size_t cut = base.find_last_of('/');
+    if (cut != std::string::npos)
+        base = base.substr(cut + 1);
+    char name[320];
+    snprintf(name, sizeof name, "%s.step%04u.%s.png", base.c_str(),
+             ui.step, what);
+    return name;
 }
 
 /* Read the framebuffer and write it as a PNG. GL rows run bottom
  * up; the file's run top down, so the rows are flipped here. */
-void capture_now_(Ui &ui, int w, int h, const char *what)
+void capture_now_(Ui &ui, int w, int h)
 {
     if (w <= 0 || h <= 0)
         return;
@@ -1820,10 +1823,10 @@ void capture_now_(Ui &ui, int w, int h, const char *what)
         memcpy(&flip[(size_t)y * w * 3],
                &px[(size_t)(h - 1 - y) * w * 3], (size_t)w * 3);
     }
-    std::string path = capture_path_(ui, what);
-    bool ok = png_write_rgb8(path.c_str(), &flip[0], (uint32_t)w,
-                             (uint32_t)h);
-    ui.capture_note = (ok ? "saved " : "cannot write ") + path;
+    bool ok = png_write_rgb8(ui.capture_path.c_str(), &flip[0],
+                             (uint32_t)w, (uint32_t)h);
+    ui.capture_note = (ok ? "saved " : "cannot write ") +
+                      ui.capture_path;
     ui.capture_note_frames = 480;
 }
 
@@ -1947,6 +1950,15 @@ void panel_help_(Ui &ui)
     ImGui::End();
 }
 
+/* Join a directory and a name without doubling the slash at the
+ * root, which a persisted path would then carry around. */
+std::string path_join_(const std::string &dir, const std::string &name)
+{
+    if (!dir.empty() && dir[dir.size() - 1] == '/')
+        return dir + name;
+    return dir + "/" + name;
+}
+
 /* Reopen the model over a different file, restoring the old file if
  * the new one refuses, and resetting what a file change invalidates. */
 bool reopen_(Ui &ui, const std::string &path, std::string *err)
@@ -2009,7 +2021,7 @@ void panel_open_(Ui &ui)
                 std::string name = e->d_name;
                 if (name == "." )
                     continue;
-                std::string full = ui.open_dir + "/" + name;
+                std::string full = path_join_(ui.open_dir, name);
                 struct stat st;
                 if (stat(full.c_str(), &st) != 0)
                     continue;
@@ -2049,7 +2061,7 @@ void panel_open_(Ui &ui)
                     ui.open_dir = cut && cut != std::string::npos
                                   ? ui.open_dir.substr(0, cut) : "/";
                 } else {
-                    ui.open_dir += "/" + dirs[i];
+                    ui.open_dir = path_join_(ui.open_dir, dirs[i]);
                 }
             }
             ImGui::TableNextColumn();
@@ -2084,7 +2096,7 @@ void panel_open_(Ui &ui)
         if (!can)
             ImGui::BeginDisabled();
         if (ImGui::Button("open")) {
-            std::string full = ui.open_dir + "/" + ui.open_pick;
+            std::string full = path_join_(ui.open_dir, ui.open_pick);
             std::string err;
             if (reopen_(ui, full, &err)) {
                 ui.artifact = ui.open_artifact;
@@ -2100,6 +2112,119 @@ void panel_open_(Ui &ui)
         ImGui::SameLine();
         if (ImGui::Button("cancel"))
             ui.show_open = false;
+    }
+    ImGui::End();
+}
+
+/* The save window: pick the directory by hand, keep or edit the
+ * proposed name, and the capture of the next rendered frame lands
+ * there. The directory is remembered between runs. */
+void panel_save_(Ui &ui)
+{
+    if (!ui.show_save)
+        return;
+    if (ui.save_dir.empty()) {
+        /* A picture is for a person, so the first default is their
+         * home, not the directory the recording happens to live
+         * in; every save after remembers where the last one went. */
+        const char *home = getenv("HOME");
+        if (home && *home) {
+            ui.save_dir = home;
+        } else {
+            std::string base = ui.model->info().path;
+            size_t cut = base.find_last_of('/');
+            ui.save_dir = cut != std::string::npos
+                          ? base.substr(0, cut) : ".";
+        }
+    }
+    ImGui::SetNextWindowSize(ImVec2(560, 420), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Save image", &ui.show_save)) {
+        ImGui::End();
+        return;
+    }
+    {
+        char buf[512];
+        snprintf(buf, sizeof buf, "%s", ui.save_dir.c_str());
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputText("##dir", buf, sizeof buf,
+                             ImGuiInputTextFlags_EnterReturnsTrue))
+            ui.save_dir = buf;
+    }
+    std::vector<std::string> dirs;
+    {
+        DIR *d = opendir(ui.save_dir.c_str());
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != 0) {
+                std::string name = e->d_name;
+                if (name == ".")
+                    continue;
+                std::string full = path_join_(ui.save_dir, name);
+                struct stat st;
+                if (stat(full.c_str(), &st) == 0 &&
+                    S_ISDIR(st.st_mode))
+                    dirs.push_back(name);
+            }
+            closedir(d);
+        } else {
+            ImGui::TextDisabled("cannot list this directory");
+        }
+    }
+    std::sort(dirs.begin(), dirs.end());
+    if (ImGui::BeginTable("##dirs", 1,
+                          ImGuiTableFlags_RowBg |
+                          ImGuiTableFlags_ScrollY |
+                          ImGuiTableFlags_SizingStretchProp,
+                          ImVec2(0, ImGui::GetFontSize() * 10.0f))) {
+        ImGui::TableSetupColumn("directory");
+        ImGui::TableHeadersRow();
+        for (size_t i = 0; i < dirs.size(); i++) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            if (ImGui::Selectable((dirs[i] + "/").c_str(), false)) {
+                if (dirs[i] == "..") {
+                    size_t cut = ui.save_dir.find_last_of('/');
+                    ui.save_dir = cut && cut != std::string::npos
+                                  ? ui.save_dir.substr(0, cut) : "/";
+                } else {
+                    ui.save_dir = path_join_(ui.save_dir, dirs[i]);
+                }
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (table_("##savename", 2)) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::TextDisabled("name");
+        ImGui::TableNextColumn();
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##name", ui.save_name, sizeof ui.save_name);
+        ImGui::EndTable();
+    }
+    {
+        std::string full = path_join_(ui.save_dir, ui.save_name);
+        struct stat st;
+        if (stat(full.c_str(), &st) == 0)
+            ImGui::TextColored(rgb_(COL_ACCENT),
+                               "this name exists; save replaces it");
+        bool can = ui.save_name[0] != '\0';
+        if (!can)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("save")) {
+            ui.capture_kind = ui.save_kind;
+            ui.capture_path = full;
+            ui.show_save = false;
+            if (ui.prefs) {
+                ui.prefs->save_dir = ui.save_dir;
+                prefs_save(*ui.prefs, ui.scene_opt);
+            }
+        }
+        if (!can)
+            ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("cancel"))
+            ui.show_save = false;
     }
     ImGui::End();
 }
@@ -2133,10 +2258,18 @@ void menu_bar_(Ui &ui, GLFWwindow *win, bool *build_layout)
             ImGui::EndMenu();
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("save image, window"))
-            ui.capture_kind = 1;
-        if (ImGui::MenuItem("save image, scene"))
-            ui.capture_kind = 2;
+        if (ImGui::MenuItem("save image, window...")) {
+            ui.show_save = true;
+            ui.save_kind = 1;
+            snprintf(ui.save_name, sizeof ui.save_name, "%s",
+                     capture_name_(ui, "window").c_str());
+        }
+        if (ImGui::MenuItem("save image, scene...")) {
+            ui.show_save = true;
+            ui.save_kind = 2;
+            snprintf(ui.save_name, sizeof ui.save_name, "%s",
+                     capture_name_(ui, "scene").c_str());
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("quit"))
             glfwSetWindowShouldClose(win, GLFW_TRUE);
@@ -2264,6 +2397,10 @@ int run_gui(Model &model, const DumpOptions &opt, Prefs *prefs)
     ui.open_artifact[0] = '\0';
     ui.capture_kind = 0;
     ui.capture_note_frames = 0;
+    ui.show_save = false;
+    ui.save_kind = 0;
+    ui.save_dir = prefs ? prefs->save_dir : "";
+    ui.save_name[0] = '\0';
     ui.obs_filter[0] = '\0';
     ui.live = opt.live;
     ui.artifact = opt.artifact;
@@ -2353,6 +2490,7 @@ int run_gui(Model &model, const DumpOptions &opt, Prefs *prefs)
         panel_settings_(ui);
         panel_help_(ui);
         panel_open_(ui);
+        panel_save_(ui);
         {
             ImGuiID root = ImGui::DockSpaceOverViewport(
                 ImGui::GetMainViewport(),
@@ -2486,13 +2624,13 @@ int run_gui(Model &model, const DumpOptions &opt, Prefs *prefs)
             /* The scene alone, before the interface is drawn over
              * it. */
             if (ui.capture_kind == 2) {
-                capture_now_(ui, w, h, "scene");
+                capture_now_(ui, w, h);
                 ui.capture_kind = 0;
             }
             ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
             /* The window as shown, after everything has drawn. */
             if (ui.capture_kind == 1) {
-                capture_now_(ui, w, h, "window");
+                capture_now_(ui, w, h);
                 ui.capture_kind = 0;
             }
         }
