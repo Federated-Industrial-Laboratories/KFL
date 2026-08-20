@@ -230,7 +230,7 @@ KflcNode *kfl_stmt_parse_plan(Lexer *L, Token *cur,
                 *had_error = 1;
                 continue;
             }
-            kfl_stmt_stmt_append_attr(arena, n, kflc_arena_strdup(arena, kw), v,
+            kfl_stmt_append_attr(arena, n, kflc_arena_strdup(arena, kw), v,
                              lineK);
             continue;
         }
@@ -251,8 +251,8 @@ KflcNode *kfl_stmt_parse_plan(Lexer *L, Token *cur,
             memset(&kv, 0, sizeof kv);
             bv.kind = KFLV_IDENT; bv.u.s = kflc_arena_strdup(arena, body);
             kv.kind = KFLV_IDENT; kv.u.s = kflc_arena_strdup(arena, kind);
-            kfl_stmt_stmt_append_attr(arena, n, "frame", bv, lineK);
-            kfl_stmt_stmt_append_attr(arena, n, "kind", kv, lineK);
+            kfl_stmt_append_attr(arena, n, "frame", bv, lineK);
+            kfl_stmt_append_attr(arena, n, "kind", kv, lineK);
             continue;
         }
         if (strcmp(kw, "time") == 0 || strcmp(kw, "position") == 0 ||
@@ -275,10 +275,10 @@ KflcNode *kfl_stmt_parse_plan(Lexer *L, Token *cur,
             lv.kind = KFLV_IDENT; lv.u.s = kflc_arena_strdup(arena, lo);
             hv.kind = KFLV_IDENT; hv.u.s = kflc_arena_strdup(arena, hi);
             snprintf(key, sizeof key, "%s_lo", kw);
-            kfl_stmt_stmt_append_attr(arena, n, kflc_arena_strdup(arena, key), lv,
+            kfl_stmt_append_attr(arena, n, kflc_arena_strdup(arena, key), lv,
                              lineK);
             snprintf(key, sizeof key, "%s_hi", kw);
-            kfl_stmt_stmt_append_attr(arena, n, kflc_arena_strdup(arena, key), hv,
+            kfl_stmt_append_attr(arena, n, kflc_arena_strdup(arena, key), hv,
                              lineK);
             continue;
         }
@@ -356,7 +356,7 @@ KflcNode *kfl_stmt_parse_plan(Lexer *L, Token *cur,
                 memset(&mark, 0, sizeof mark);
                 mark.kind = KFLV_IDENT;
                 mark.u.s  = kflc_arena_strdup(arena, n->name);
-                kfl_stmt_stmt_append_attr(arena, act, "plan", mark, line0);
+                kfl_stmt_append_attr(arena, act, "plan", mark, line0);
                 act->position.kind = KFLV_IDENT;
                 act->position.u.s  = kflc_arena_strdup(arena, "box");
                 act->expr  = kflc_parse_expr(alo->value.u.s, arena, diag,
@@ -485,7 +485,7 @@ KflcNode *kfl_stmt_parse_sensor(Lexer *L, Token *cur,
             KflcValue dv;
             memset(&dv, 0, sizeof dv);
             dv.kind = KFLV_IDENT; dv.u.s = dist;
-            kfl_stmt_stmt_append_attr(arena, t, "dist", dv, lineK);
+            kfl_stmt_append_attr(arena, t, "dist", dv, lineK);
         }
         for (int i = 0; i < n_num; i++) {
             KflcValue nv;
@@ -493,7 +493,7 @@ KflcNode *kfl_stmt_parse_sensor(Lexer *L, Token *cur,
             nv.kind = KFLV_FLOAT; nv.u.f = num[i];
             char akey[8];
             snprintf(akey, sizeof akey, "n%d", i);
-            kfl_stmt_stmt_append_attr(arena, t, akey, nv, lineK);
+            kfl_stmt_append_attr(arena, t, akey, nv, lineK);
         }
         kfl_stmt_append_child(n, t);
     }
@@ -554,7 +554,7 @@ KflcNode *kfl_stmt_parse_episode(Lexer *L, Token *cur,
             char *src = kfl_stmt_take_line_remainder(L, arena);
             kfl_stmt_advance(L, cur, had_error);
             if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
-            if (kfl_stmt_stmt_find_attr(n, key)) {
+            if (kfl_stmt_find_attr(n, key)) {
                 kflc_diag_errorf(diag, lineK,
                     "episode: duplicate `%s` (allowed at most once)", key);
                 *had_error = 1;
@@ -569,7 +569,7 @@ KflcNode *kfl_stmt_parse_episode(Lexer *L, Token *cur,
             }
             KflcValue none;
             memset(&none, 0, sizeof none);
-            KflcAttr *a = kfl_stmt_stmt_append_attr(arena, n, key, none, lineK);
+            KflcAttr *a = kfl_stmt_append_attr(arena, n, key, none, lineK);
             a->expr = kflc_parse_expr(t, arena, diag, lineK);
             if (!a->expr) *had_error = 1;
             continue;
@@ -593,7 +593,7 @@ KflcNode *kfl_stmt_parse_episode(Lexer *L, Token *cur,
             char *src = kfl_stmt_take_line_remainder(L, arena);
             kfl_stmt_advance(L, cur, had_error);
             if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
-            if (kfl_stmt_stmt_find_attr(n, "contact")) {
+            if (kfl_stmt_find_attr(n, "contact")) {
                 kflc_diag_errorf(diag, lineK,
                     "episode: duplicate `contact` (allowed at most once)");
                 *had_error = 1;
@@ -616,7 +616,7 @@ KflcNode *kfl_stmt_parse_episode(Lexer *L, Token *cur,
             kind.kind = KFLV_IDENT;
             kind.u.s  = kflc_arena_strdup(arena, is_arrest ? "arrest"
                                                            : "bounce");
-            kfl_stmt_stmt_append_attr(arena, n, "contact", kind, lineK);
+            kfl_stmt_append_attr(arena, n, "contact", kind, lineK);
             if (is_arrest) {
                 if (*kfl_stmt_trim(rest) != '\0') {
                     kflc_diag_errorf(diag, lineK,
@@ -661,11 +661,11 @@ KflcNode *kfl_stmt_parse_episode(Lexer *L, Token *cur,
             }
             KflcValue none;
             memset(&none, 0, sizeof none);
-            KflcAttr *ra = kfl_stmt_stmt_append_attr(arena, n, "restitution", none,
+            KflcAttr *ra = kfl_stmt_append_attr(arena, n, "restitution", none,
                                             lineK);
             ra->expr = kflc_parse_expr(rr, arena, diag, lineK);
             if (!ra->expr) *had_error = 1;
-            KflcAttr *fa = kfl_stmt_stmt_append_attr(arena, n, "friction", none,
+            KflcAttr *fa = kfl_stmt_append_attr(arena, n, "friction", none,
                                             lineK);
             fa->expr = kflc_parse_expr(ff, arena, diag, lineK);
             if (!fa->expr) *had_error = 1;
@@ -689,7 +689,7 @@ KflcNode *kfl_stmt_parse_episode(Lexer *L, Token *cur,
             char *src = kfl_stmt_take_line_remainder(L, arena);
             kfl_stmt_advance(L, cur, had_error);
             if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
-            if (kfl_stmt_stmt_find_attr(n, "terminated_when")) {
+            if (kfl_stmt_find_attr(n, "terminated_when")) {
                 kflc_diag_errorf(diag, lineK,
                     "episode: duplicate `terminated when` "
                     "(allowed at most once)");
@@ -705,7 +705,7 @@ KflcNode *kfl_stmt_parse_episode(Lexer *L, Token *cur,
             }
             KflcValue none;
             memset(&none, 0, sizeof none);
-            KflcAttr *a = kfl_stmt_stmt_append_attr(arena, n, "terminated_when",
+            KflcAttr *a = kfl_stmt_append_attr(arena, n, "terminated_when",
                                            none, lineK);
             a->expr = kflc_parse_expr(t, arena, diag, lineK);
             if (!a->expr) *had_error = 1;
@@ -780,7 +780,7 @@ KflcNode *kfl_stmt_parse_episode(Lexer *L, Token *cur,
         kfl_stmt_rl_drain_line(L, cur, arena, had_error);
     }
 
-    if (!kfl_stmt_stmt_find_attr(n, "control_dt")) {
+    if (!kfl_stmt_find_attr(n, "control_dt")) {
         kflc_diag_errorf(diag, line0,
             "episode: missing required `control_dt <expr>`");
         *had_error = 1;
@@ -893,7 +893,7 @@ KflcNode *kfl_stmt_parse_action(Lexer *L, Token *cur,
     if (have_default) {
         KflcValue none;
         memset(&none, 0, sizeof none);
-        KflcAttr *a = kfl_stmt_stmt_append_attr(arena, n, "default", none, line0);
+        KflcAttr *a = kfl_stmt_append_attr(arena, n, "default", none, line0);
         a->expr = kflc_parse_expr(chunks[expect + 1], arena, diag, line0);
         if (!a->expr) *had_error = 1;
     }
@@ -975,7 +975,7 @@ KflcNode *kfl_stmt_parse_objective(Lexer *L, Token *cur,
             char *src = kfl_stmt_take_line_remainder(L, arena);
             kfl_stmt_advance(L, cur, had_error);
             if (kfl_stmt_at_nl(cur)) kfl_stmt_advance(L, cur, had_error);
-            if (kfl_stmt_stmt_find_attr(n, key)) {
+            if (kfl_stmt_find_attr(n, key)) {
                 kflc_diag_errorf(diag, lineK,
                     "objective: duplicate `%s` (allowed at most once)", key);
                 *had_error = 1;
@@ -990,7 +990,7 @@ KflcNode *kfl_stmt_parse_objective(Lexer *L, Token *cur,
             }
             KflcValue none;
             memset(&none, 0, sizeof none);
-            KflcAttr *a = kfl_stmt_stmt_append_attr(arena, n, key, none, lineK);
+            KflcAttr *a = kfl_stmt_append_attr(arena, n, key, none, lineK);
             a->expr = kflc_parse_expr(t, arena, diag, lineK);
             if (!a->expr) *had_error = 1;
             continue;
@@ -1003,7 +1003,7 @@ KflcNode *kfl_stmt_parse_objective(Lexer *L, Token *cur,
         kfl_stmt_rl_drain_line(L, cur, arena, had_error);
     }
 
-    if (!kfl_stmt_stmt_find_attr(n, "reward")) {
+    if (!kfl_stmt_find_attr(n, "reward")) {
         kflc_diag_errorf(diag, line0,
             "objective: missing required `reward <expr>`");
         *had_error = 1;
@@ -1126,7 +1126,7 @@ KflcNode *kfl_stmt_parse_astro_payload(Lexer *L, Token *cur,
         memset(&v, 0, sizeof v);
         v.kind = KFLV_IDENT;
         v.u.s  = val;
-        kfl_stmt_stmt_append_attr(arena, n, key, v, line0);
+        kfl_stmt_append_attr(arena, n, key, v, line0);
     }
     return n;
 }
@@ -1189,6 +1189,6 @@ KflcNode *kfl_stmt_parse_engage(Lexer *L, Token *cur,
     memset(&v, 0, sizeof v);
     v.kind = KFLV_IDENT;
     v.u.s  = tgt;
-    kfl_stmt_stmt_append_attr(arena, n, "at", v, line0);
+    kfl_stmt_append_attr(arena, n, "at", v, line0);
     return n;
 }

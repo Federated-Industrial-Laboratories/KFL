@@ -8,6 +8,11 @@ int        g_b1_depth = 0;        /* 0 == fn-body root */
 static KflcArena *g_b1_arena = NULL;
 
 KflcType   g_b1_fn_return_type = KFLT_VOID;
+/* Opaque-subtype companion to g_b1_fn_return_type. Set at the same
+ * point and queried by the return-statement emitter when the fn
+ * returns an opaque handle. */
+
+static const char *g_b1_fn_return_subtype = NULL;
 
 /* ---- Grammar 3.2 reinforcement learning statements ---------------- */
 

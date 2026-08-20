@@ -173,6 +173,8 @@ void rl_rewrite_steps(KflcExpr *e, KflcArena *arena)
  * name joined to a channel name need not, and a mangled identifier
  * that could collide would silently read the wrong agent. */
 
+/* ---- Qualified channel names ---------------------------------------- */
+
 void rl_qual_ident(int agent, const char *chan, char *out,
                            size_t cap)
 {
@@ -274,6 +276,15 @@ void rl_action_sites(const RlModel *m, const char *name,
  * lets a zero-sum reward be written once as the negation of the other
  * agent's rather than twice as two expressions a later edit can pull
  * apart. */
+
+/* ---- RL expression scope -------------------------------------------- *
+ *
+ * The `terminated when`, `reward`, and `terminal` expressions read
+ * action channels, observation channel components, `episode.steps`,
+ * world scalar bindings, and form arguments. Emission declares one
+ * const double local per action, channel component, and captured
+ * world scalar so the expression emitter resolves the KFL names as
+ * ordinary scalar bindings. */
 
 void rl_emit_scope_prelude(FILE *out, const RlModel *m, int ag,
                                    int indent)

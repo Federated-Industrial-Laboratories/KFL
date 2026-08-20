@@ -188,7 +188,7 @@ KflcNode *kfl_stmt_new_node(KflcArena *arena, KflcNodeKind k, int line)
  * Returns the appended attr so callers can stash extras (e.g. a
  * pre-parsed KflcExpr * on the attr's `expr` field for `label`). */
 
-KflcAttr *kfl_stmt_stmt_append_attr(KflcArena *arena, KflcNode *n,
+KflcAttr *kfl_stmt_append_attr(KflcArena *arena, KflcNode *n,
                                    const char *key, KflcValue val, int line)
 {
     KflcAttr *a = (KflcAttr *)kflc_arena_alloc(arena, sizeof *a);
@@ -244,7 +244,7 @@ int kfl_stmt_peek_kind(Lexer *L, TokenKind *out)
     return ok;
 }
 
-const KflcAttr *kfl_stmt_stmt_find_attr(const KflcNode *n, const char *key)
+const KflcAttr *kfl_stmt_find_attr(const KflcNode *n, const char *key)
 {
     for (const KflcAttr *a = n->attrs; a; a = a->next) {
         if (a->name && strcmp(a->name, key) == 0) return a;
@@ -687,7 +687,7 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
             memset(&v, 0, sizeof v);
             v.kind = KFLV_IDENT;
             v.u.s  = val;
-            kfl_stmt_stmt_append_attr(arena, n, key, v, line0);
+            kfl_stmt_append_attr(arena, n, key, v, line0);
         }
         return n;
     }
@@ -788,7 +788,7 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
         memset(&wv, 0, sizeof wv);
         wv.kind = KFLV_IDENT;
         wv.u.s  = world_ident;
-        kfl_stmt_stmt_append_attr(arena, n, "world", wv, line0);
+        kfl_stmt_append_attr(arena, n, "world", wv, line0);
 
         const char *brk[] = { "end", NULL };
         KflcNode *blk = kfl_parse_stmt_block(L, cur, arena, diag,
@@ -1038,7 +1038,7 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
         KflcValue ov;
         memset(&ov, 0, sizeof ov);
         ov.kind = KFLV_IDENT; ov.u.s = observer_ident;
-        kfl_stmt_stmt_append_attr(arena, n, "observer", ov, line0);
+        kfl_stmt_append_attr(arena, n, "observer", ov, line0);
         if (attitude_form || relative_form) {
             KflcValue kv;
             memset(&kv, 0, sizeof kv);
@@ -1056,7 +1056,7 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
                                : defense_form == 2 ? "track"
                                : defense_form == 3 ? "effect"
                                : self_marker     ? self_marker : "attitude";
-            kfl_stmt_stmt_append_attr(arena, n, marker, kv, line0);
+            kfl_stmt_append_attr(arena, n, marker, kv, line0);
         }
 
         /* Parse trailing `key=value` pairs (whitespace-separated).
@@ -1096,7 +1096,7 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
                     memset(&tv, 0, sizeof tv);
                     tv.kind = KFLV_IDENT;
                     tv.u.s  = kflc_arena_strdup(arena, nbeg);
-                    kfl_stmt_stmt_append_attr(arena, n, "through", tv, line0);
+                    kfl_stmt_append_attr(arena, n, "through", tv, line0);
                     if (saved_t) { *p = saved_t; p++; }
                     continue;
                 }
@@ -1118,7 +1118,7 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
                     memset(&wv, 0, sizeof wv);
                     wv.kind = KFLV_IDENT;
                     wv.u.s  = kflc_arena_strdup(arena, "1");
-                    kfl_stmt_stmt_append_attr(arena, n, "truth", wv, line0);
+                    kfl_stmt_append_attr(arena, n, "truth", wv, line0);
                     if (saved_w) { *p = saved_w; p++; }
                     continue;
                 }
@@ -1150,7 +1150,7 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
                     memset(&av, 0, sizeof av);
                     av.kind = KFLV_IDENT;
                     av.u.s  = kflc_arena_strdup(arena, nbeg);
-                    kfl_stmt_stmt_append_attr(arena, n, "as", av, line0);
+                    kfl_stmt_append_attr(arena, n, "as", av, line0);
                     return n;
                 }
                 kflc_diag_errorf(diag, line0,
@@ -1171,7 +1171,7 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
             KflcValue v;
             memset(&v, 0, sizeof v);
             v.kind = KFLV_IDENT; v.u.s = val;
-            kfl_stmt_stmt_append_attr(arena, n, key, v, line0);
+            kfl_stmt_append_attr(arena, n, key, v, line0);
         }
         /* Reached only when no `as` clause was found; the clause
          * returns above. The line-of-sight form without one is a print

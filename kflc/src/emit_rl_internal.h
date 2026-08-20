@@ -1005,8 +1005,6 @@ typedef struct {
 
 /* ---- Entry ---------------------------------------------------------- */
 
-static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
-                                  KflcDiag *diag);
 
 extern const RlPayKindDesc RL_PAY_KIND_[RL_PAY_KINDS];
 

@@ -63,11 +63,6 @@ typedef struct {
 
 enum { B1_MAX_SCOPE_DEPTH = 16 };
 
-/* Opaque-subtype companion to g_b1_fn_return_type. Set at the same
- * point and queried by the return-statement emitter when the fn
- * returns an opaque handle. */
-
-static const char *g_b1_fn_return_subtype = NULL;
 
 #include <ctype.h>
 
@@ -118,14 +113,11 @@ KflcNode *kfl_stmt_parse_stmt(Lexer *L, Token *cur,
                              int *had_error);
 int kfl_stmt_peek_kind(Lexer *L, TokenKind *out);
 void kfl_stmt_skip_newlines(Lexer *L, Token *cur, int *had_error);
-KflcAttr *kfl_stmt_stmt_append_attr(KflcArena *arena, KflcNode *n,
+KflcAttr *kfl_stmt_append_attr(KflcArena *arena, KflcNode *n,
                                    const char *key, KflcValue val, int line);
-const KflcAttr *kfl_stmt_stmt_find_attr(const KflcNode *n, const char *key);
+const KflcAttr *kfl_stmt_find_attr(const KflcNode *n, const char *key);
 char *kfl_stmt_take_line_remainder(Lexer *L, KflcArena *arena);
 char *kfl_stmt_trim(char *s);
-int kfl_emit_stmt(FILE *out, const KflcNode *s,
-                   const KflcExprCtx *ctx, KflcDiag *diag,
-                   int indent);
 int kfl_stmt_is_on_step_world_stmt(const char *s);
 KflcNode *kfl_stmt_parse_action(Lexer *L, Token *cur,
                                KflcArena *arena, KflcDiag *diag,

@@ -81,6 +81,8 @@ static int rl_add_action_(RlModel *m, const KflcNode *s, int owner,
                           KflcDiag *diag);
 static int rl_add_observe_(RlModel *m, const KflcNode *s, int owner,
                            KflcDiag *diag);
+/* ---- Agents ---------------------------------------------------------- */
+
 static int rl_collect_agent_(RlModel *m, const KflcNode *s, KflcDiag *diag);
 static int rl_finish_agents_(RlModel *m, KflcDiag *diag);
 
@@ -184,6 +186,13 @@ const char *rl_observe_payload(const KflcNode *n)
     return NULL;
 }
 
+/* Which effector kind an effect observe publishes the channel set of.
+ * The kind is resolved onto the statement during collection, before the
+ * agent slices are computed, because the width of this form is its
+ * payload's kind's and the slices are a function of the widths. An
+ * unstamped statement is one whose payload did not resolve, which is
+ * an error already reported; the laser kind is returned so the widths
+ * stay consistent while the diagnostics are collected. */
 static int rl_observe_eff_kind_(const KflcNode *n)
 {
     if (!n) return RL_PAY_LASER;
