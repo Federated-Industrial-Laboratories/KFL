@@ -41,6 +41,8 @@ void prefs_load(const char *path, Prefs *p, SceneOptions *s)
         const char *v;
         if (key_(line, "play_rate", &v)) {
             p->play_rate = atof(v);
+        } else if (key_(line, "save_dir", &v)) {
+            p->save_dir = v;
         } else if (key_(line, "recent", &v)) {
             if (*v && p->recent.size() < 8)
                 p->recent.push_back(v);
@@ -102,6 +104,8 @@ bool prefs_save(const Prefs &p, const SceneOptions &s)
           "# these; --session-only ignores this file; the headless\n"
           "# dump never reads it.\n", f);
     put_(f, "play_rate", p.play_rate);
+    if (!p.save_dir.empty())
+        fprintf(f, "save_dir=%s\n", p.save_dir.c_str());
     put_(f, "shading", s.shading ? 1.0 : 0.0);
     put_(f, "velocity_seconds", s.velocity_seconds);
     put_(f, "axis_length", s.axis_length);

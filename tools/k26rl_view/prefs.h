@@ -29,6 +29,8 @@ struct Prefs {
     std::string path;
     /* Recently opened episode files, newest first. */
     std::vector<std::string> recent;
+    /* Where the save window last saved. */
+    std::string save_dir;
     double play_rate = 1.0;
 };
 
