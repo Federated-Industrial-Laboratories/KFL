@@ -150,7 +150,8 @@ void scene_colour_(ElementKind k, size_t segment, float *rgba)
         { 0.95f, 0.45f, 0.85f, 1.0f },   /* thruster */
         { 0.98f, 0.98f, 0.55f, 1.0f },   /* detection line of sight */
         { 1.00f, 0.30f, 0.10f, 1.0f },   /* imparted thrust */
-        { 0.60f, 0.45f, 0.95f, 1.0f }    /* angular velocity */
+        { 0.60f, 0.45f, 0.95f, 1.0f },   /* angular velocity */
+        { 0.35f, 0.95f, 0.80f, 1.0f }    /* closed datalink */
     };
     static const float axes[3][4] = {
         { 0.95f, 0.35f, 0.35f, 1.0f },
@@ -278,7 +279,14 @@ void scene_draw_(SceneGl *gl, const Scene &sc, int fbw, int fbh)
         gl->VertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float),
                                 (void *)0);
         gl->DisableVertexAttribArray(1);
-        gl->VertexAttrib1f(1, 1.0f);
+        /* A datalink line's fade travels as the shade the fragment
+         * stage already multiplies its colour by, so a stale link dims
+         * towards the scene's own ground; the alternative would be an
+         * alpha and a blending state this window does not otherwise
+         * keep. The figure is the model's: the window scales a colour
+         * by it and decides nothing. */
+        gl->VertexAttrib1f(1, e.kind == ELEM_DATALINK
+                              ? (float)e.link.fade : 1.0f);
         if (e.kind == ELEM_AXES) {
             for (size_t sgi = 0; sgi < e.segments.size(); sgi++) {
                 if (!e.segments[sgi].drawn)

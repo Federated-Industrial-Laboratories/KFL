@@ -201,7 +201,8 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
 
     if (n_links == 0) {
         fputs("#define KFLRL_N_LINKENT 0\n"
-              "#define KFLRL_N_LINKEDGE 0\n\n", out);
+              "#define KFLRL_N_LINKEDGE 0\n"
+              "#define KFLRL_N_LINKPAIR 0\n\n", out);
         return 0;
     }
 
@@ -230,8 +231,44 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
     int ent_nedge[RL_LINK_MAX_ENT];
     int edge_rx[RL_LINK_MAX_EDGE];
     int edge_ent[RL_LINK_MAX_EDGE];
+    int edge_pair[RL_LINK_MAX_EDGE];
     int link_ent0[RL_MAX_PAYLOADS], link_nent[RL_MAX_PAYLOADS];
     int n_ent = 0, n_edge = 0;
+
+    /* The ordered transmitter and receiver pairs of each community,
+     * which is what the datalink getter reports over. A pair is not an
+     * edge: an edge carries one entry to one receiver and exists only
+     * where that receiver declares a track over that entry's target,
+     * while a pair is the radio link itself and exists for every
+     * ordered pair of one network, whether or not anything is ever
+     * offered across it. The budget is the transmitter's own, so the
+     * two directions between one pair of craft are two pairs here.
+     *
+     * Contiguous per transmitter and in declaration order within it,
+     * so the transfer pass writes a transmitter's records with one
+     * bounded walk and the getter's order is the program's. */
+    int pair_tx[RL_MAX_PAYLOADS * RL_MAX_PAYLOADS];
+    int pair_rx[RL_MAX_PAYLOADS * RL_MAX_PAYLOADS];
+    int pair_of[RL_MAX_PAYLOADS][RL_MAX_PAYLOADS];
+    int link_pair0[RL_MAX_PAYLOADS], link_npair[RL_MAX_PAYLOADS];
+    int n_pair = 0;
+
+    for (int i = 0; i < n; i++) {
+        for (int r = 0; r < n; r++) pair_of[i][r] = -1;
+    }
+    for (int i = 0; i < n; i++) {
+        link_pair0[i] = n_pair;
+        link_npair[i] = 0;
+        for (int r = 0; r < n; r++) {
+            if (r == i) continue;
+            if (lnet[r] < 0 || lnet[r] != lnet[i]) continue;
+            pair_tx[n_pair] = i;
+            pair_rx[n_pair] = r;
+            pair_of[i][r] = n_pair;
+            n_pair++;
+            link_npair[i]++;
+        }
+    }
 
     for (int i = 0; i < n; i++) {
         int veh[RL_MAX_OBSERVES + 1], self[RL_MAX_OBSERVES + 1];
@@ -263,8 +300,9 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
                         "program", RL_LINK_MAX_EDGE);
                     return 1;
                 }
-                edge_rx[n_edge]  = r;
-                edge_ent[n_edge] = n_ent;
+                edge_rx[n_edge]   = r;
+                edge_ent[n_edge]  = n_ent;
+                edge_pair[n_edge] = pair_of[i][r];
                 n_edge++;
                 ent_nedge[n_ent]++;
             }
@@ -274,7 +312,8 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
     }
 
     fprintf(out, "#define KFLRL_N_LINKENT %d\n", n_ent);
-    fprintf(out, "#define KFLRL_N_LINKEDGE %d\n\n", n_edge);
+    fprintf(out, "#define KFLRL_N_LINKEDGE %d\n", n_edge);
+    fprintf(out, "#define KFLRL_N_LINKPAIR %d\n\n", n_pair);
 
     fputs("static const int kflrl_link_pay_[] = {\n", out);
     for (int i = 0; i < n; i++) fprintf(out, "    %d,\n", lpay[i]);
@@ -286,7 +325,21 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
     for (int i = 0; i < n; i++) fprintf(out, "    %d,\n", link_ent0[i]);
     fputs("};\n\nstatic const int kflrl_link_nent_[] = {\n", out);
     for (int i = 0; i < n; i++) fprintf(out, "    %d,\n", link_nent[i]);
+    fputs("};\n\nstatic const int kflrl_link_pair0_[] = {\n", out);
+    for (int i = 0; i < n; i++) fprintf(out, "    %d,\n", link_pair0[i]);
+    fputs("};\n\nstatic const int kflrl_link_npair_[] = {\n", out);
+    for (int i = 0; i < n; i++) fprintf(out, "    %d,\n", link_npair[i]);
     fputs("};\n\n", out);
+
+    if (n_pair > 0) {
+        fputs("static const int kflrl_lpair_tx_[] = {\n", out);
+        for (int p = 0; p < n_pair; p++)
+            fprintf(out, "    %d,\n", pair_tx[p]);
+        fputs("};\n\nstatic const int kflrl_lpair_rx_[] = {\n", out);
+        for (int p = 0; p < n_pair; p++)
+            fprintf(out, "    %d,\n", pair_rx[p]);
+        fputs("};\n\n", out);
+    }
 
     if (n_ent > 0) {
         fputs("static const int kflrl_lent_veh_[] = {\n", out);
@@ -304,6 +357,12 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
         for (int k = 0; k < n_edge; k++) fprintf(out, "    %d,\n", edge_rx[k]);
         fputs("};\n\nstatic const int kflrl_ledge_ent_[] = {\n", out);
         for (int k = 0; k < n_edge; k++) fprintf(out, "    %d,\n", edge_ent[k]);
+        /* Which pair an arriving offer belongs to, so the transfer
+         * pass records the arrival where the getter reads it without
+         * searching for the transmitter that owns the entry. */
+        fputs("};\n\nstatic const int kflrl_ledge_pair_[] = {\n", out);
+        for (int k = 0; k < n_edge; k++)
+            fprintf(out, "    %d,\n", edge_pair[k]);
         fputs("};\n\n", out);
     }
     return 0;

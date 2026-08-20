@@ -55,6 +55,7 @@ enum ElementKind {
     ELEM_DETECTION,       /* a detection's line of sight, while it detects */
     ELEM_FORCE,           /* imparted thrust, from the actuator getter */
     ELEM_SPIN,            /* the body's angular velocity, at a scale */
+    ELEM_DATALINK,        /* a closed link, from the datalink getter */
     ELEM_KIND_COUNT
 };
 
@@ -126,6 +127,10 @@ struct SceneOptions {
     double axis_length;             /* the body axes' declared length, m */
     double thruster_scale;          /* metres of line per newton */
     double spin_scale;              /* metres of line per radian per second */
+    /* The datalink line's own figure, and a duration rather than a
+     * scale: the seconds over which a closed link fades to nothing
+     * after a broadcast reached its receiver. */
+    double link_fade_seconds;
 
     SceneOptions();
 };
@@ -148,6 +153,24 @@ struct SceneFace {
     uint32_t c;
     float intensity;
     bool drawn;
+};
+
+/* What a datalink element is drawn from, carried on the element so
+ * the dump can report the figures behind the line rather than leaving
+ * a reader to infer them from its brightness.
+ *
+ * The element's own body is the transmitter, because the line is that
+ * transmitter's broadcast; the receiver is here beside it. The fade
+ * is the model's, not the window's: how faded a link is is a fact
+ * about the recording and the declared duration, and a headless dump
+ * must be able to check it. */
+struct SceneLink {
+    uint32_t receiver;              /* the receiving body */
+    double margin_db;               /* against the declared threshold */
+    double age_s;                   /* since it reached the receiver */
+    double fade;                    /* 1 at the arrival, 0 fully faded */
+
+    SceneLink() : receiver(0), margin_db(0.0), age_s(-1.0), fade(1.0) {}
 };
 
 /* One drawn thing: its identity, its geometry in its own local frame,
@@ -173,6 +196,9 @@ struct SceneElement {
     bool local_static;
     std::vector<SceneSegment> segments;
     std::vector<SceneFace> faces;
+    /* Set by the datalink element and left at its defaults by every
+     * other, which draw at full strength and belong to no pair. */
+    SceneLink link;
     float mvp[16];                  /* column major, as GL takes it */
     std::vector<float> ndc;         /* 3 per vertex */
     std::vector<uint8_t> behind;    /* 1 per vertex, at or behind the eye */
@@ -236,6 +262,11 @@ extern const char *const SCENE_TRAJECTORY_LABEL;
  * the channels of a detection but never the body that carried the
  * payload, so the line starts at the reference frame's origin. */
 extern const char *const SCENE_DETECTION_LABEL;
+
+/* The datalink line's standing statement: what the line asserts, and
+ * what its fading means. A closed link is a broadcast that reached a
+ * receiver, not a channel a policy read. */
+extern const char *const SCENE_DATALINK_LABEL;
 
 /* Build the scene at one step. Deterministic in its inputs: the same
  * recording, asset bytes, camera, projection and viewport give the

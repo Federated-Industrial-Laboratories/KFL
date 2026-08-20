@@ -212,7 +212,7 @@ class K26RlVectorEnv(VectorEnv):
 
     # ---- the training-host surface ------------------------------------
     #
-    # The three getters that postdate the frozen set, as on the single
+    # The four getters that postdate the frozen set, as on the single
     # shape. A training host that drives this shape directly arms the
     # tap on a watch environment of its own and drives the throughput
     # environments as fast as its learner can: the watched stream is
@@ -260,6 +260,23 @@ class K26RlVectorEnv(VectorEnv):
         getter writes."""
         self._session.ensure_open()
         return self._session.read_actuators()
+
+    def datalinks(self):
+        """The datalink state as the latest step left it, env-major,
+        as ``(num_envs, pair_count, 5)`` and in the getter's own
+        order: one row per ordered transmitter and receiver pair of a
+        network.
+
+        The five values per pair are the transmitting body's index,
+        the receiving body's index, the closure flag at the
+        transmitter's latest broadcast, the margin in decibels against
+        its declared threshold, and the seconds since a closed
+        broadcast last reached the receiver, negative when none has.
+        The pair is ordered because a link budget is: the powers, the
+        gains and the threshold are the transmitter's, so the two
+        directions between one pair of craft are two rows here."""
+        self._session.ensure_open()
+        return self._session.read_datalinks()
 
     @property
     def body_names(self):

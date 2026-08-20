@@ -47,6 +47,9 @@ struct Surface {
     /* Added at ABI 1.6, probed on the same terms: an artifact
      * without it re-simulates and loses the actuator drives alone. */
     int32_t (*actuators)(const K26RlEnv *, double *, uint32_t);
+    /* Added at ABI 1.7, probed on the same terms: an artifact
+     * without it re-simulates and loses the datalink lines alone. */
+    int32_t (*datalinks)(const K26RlEnv *, double *, uint32_t);
 };
 
 bool resolve_(void *so, const char *name, void *slot, std::string *err)
@@ -128,7 +131,11 @@ ResimResult resimulate(const Model &model, const Episode &ep,
         p = dlsym(so, "k26rl_env_actuators");
         if (p)
             memcpy(&s.actuators, &p, sizeof p);
+        p = dlsym(so, "k26rl_env_datalinks");
+        if (p)
+            memcpy(&s.datalinks, &p, sizeof p);
     }
+    r.datalink_symbol = s.datalinks != 0;
 
     r.abi_version = s.abi_version();
     if ((r.abi_version >> 16) != RESIM_ABI_MAJOR) {
@@ -222,6 +229,18 @@ ResimResult resimulate(const Model &model, const Episode &ep,
             r.has_actuators = true;
         }
     }
+    /* The datalink getter sizes itself the same way. Its count is its
+     * own again: ordered transmitter and receiver pairs, five doubles
+     * each, and zero for a program that declares no datalink. */
+    std::vector<double> lnk_buf;
+    if (s.datalinks) {
+        int32_t need = s.datalinks(env, 0, 0);
+        if (need > 0 && n && (uint32_t)need % (n * 5u) == 0) {
+            lnk_buf.resize((size_t)need);
+            r.datalink_count = (uint32_t)need / (n * 5u);
+            r.has_datalinks = true;
+        }
+    }
 
     r.ran = true;
     r.equal = true;
@@ -288,6 +307,16 @@ ResimResult resimulate(const Model &model, const Episode &ep,
             r.actuators.insert(r.actuators.end(), drv_buf.begin() + base,
                                drv_buf.begin() + base +
                                    r.actuator_count * 10);
+        }
+        /* The datalink state, at that same instant: what the step just
+         * taken left each pair holding, which is what a link line over
+         * this step should draw. */
+        if (r.has_datalinks &&
+            s.datalinks(env, &lnk_buf[0], (uint32_t)lnk_buf.size()) > 0) {
+            size_t base = (size_t)ep.env * r.datalink_count * 5;
+            r.datalinks.insert(r.datalinks.end(), lnk_buf.begin() + base,
+                               lnk_buf.begin() + base +
+                                   r.datalink_count * 5);
         }
         r.steps_compared++;
 

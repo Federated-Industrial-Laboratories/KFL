@@ -10,7 +10,7 @@ platform default, so concurrent artifacts in one process stay
 separate. RTLD_NOW matches the surface's C consumers: unresolved
 references surface at load, beside the all-symbols-at-load rule below.
 
-Three getters postdate the frozen thirteen and arrived under the
+Four getters postdate the frozen thirteen and arrived under the
 surface's minor-version rule. Each is resolved only when the loaded
 artifact's reported minor admits it, and its absence is said rather
 than hidden: the Python surface exists whatever the artifact reports,
@@ -33,23 +33,28 @@ from ._errors import (
 ABI_MAJOR = 1
 ABI_MINOR_MIN = 0
 
-# The minors the three post-1.0 getters arrived at. They do not raise
+# The minors the four post-1.0 getters arrived at. They do not raise
 # ABI_MINOR_MIN: an artifact that carries none of them is served in
 # full for everything else, and each call says its own absence.
 ABI_MINOR_TAP = 1
 ABI_MINOR_BODIES = 2
 ABI_MINOR_ACTUATORS = 6
+ABI_MINOR_DATALINKS = 7
 
 # Ask the body getter for the world origin rather than for a body's
 # frame.
 BODY_REF_ORIGIN = 0xFFFFFFFF
 
 # Doubles per body in the body getter's layout (three position
-# components then three velocity components), and per actuator in the
+# components then three velocity components), per actuator in the
 # actuator getter's (body index, kind, mounting position, axis,
-# applied magnitude, full-scale magnitude).
+# applied magnitude, full-scale magnitude), and per ordered
+# transmitter and receiver pair in the datalink getter's (the two body
+# indices, the closure flag, the margin in decibels, the seconds since
+# a closed broadcast reached the receiver).
 BODY_STRIDE = 6
 ACTUATOR_STRIDE = 10
+DATALINK_STRIDE = 5
 
 # Version 1 status registry values, used for control flow only:
 # exception typing below and fault-code recognition above. Message
@@ -102,7 +107,7 @@ _SIGNATURES = (
     ("k26rl_env_destroy", None, (_C_HANDLE,)),
 )
 
-# The three that postdate the frozen set, each with the minor it
+# The four that postdate the frozen set, each with the minor it
 # arrived at. Resolution is conditional on the reported minor, so an
 # older artifact loads and serves the frozen surface unchanged.
 _CONDITIONAL_SIGNATURES = (
@@ -112,6 +117,8 @@ _CONDITIONAL_SIGNATURES = (
      (_C_HANDLE, ctypes.c_uint32, ctypes.POINTER(ctypes.c_double),
       ctypes.c_uint32)),
     ("k26rl_env_actuators", ABI_MINOR_ACTUATORS, ctypes.c_int32,
+     (_C_HANDLE, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32)),
+    ("k26rl_env_datalinks", ABI_MINOR_DATALINKS, ctypes.c_int32,
      (_C_HANDLE, ctypes.POINTER(ctypes.c_double), ctypes.c_uint32)),
 )
 
@@ -336,4 +343,13 @@ class Artifact:
         got = int(fn(handle, out_ptr, int(capacity)))
         if got < 0:
             self._raise(-got, "k26rl_env_actuators")
+        return got
+
+    def datalinks(self, handle, out_ptr, capacity):
+        """The datalink readback, sized by the same convention as the
+        body getter."""
+        fn = self.require("k26rl_env_datalinks")
+        got = int(fn(handle, out_ptr, int(capacity)))
+        if got < 0:
+            self._raise(-got, "k26rl_env_datalinks")
         return got

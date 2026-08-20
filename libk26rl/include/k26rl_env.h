@@ -53,9 +53,9 @@ extern "C" {
  * k26rl_env_tap, minor 2 adds k26rl_env_bodies, minor 3 adds the two
  * assembly tags, minor 4 adds k26rl_env_attitudes and the subdivision
  * tag, minor 5 adds the channel-source tag, minor 6 adds
- * k26rl_env_actuators; a consumer checks major equality and minor
- * at-least. */
-#define K26RL_ABI_VERSION ((uint32_t)0x00010006u)
+ * k26rl_env_actuators, minor 7 adds k26rl_env_datalinks; a consumer
+ * checks major equality and minor at-least. */
+#define K26RL_ABI_VERSION ((uint32_t)0x00010007u)
 
 /* One handle owns n_envs worlds; layout is private to the artifact. */
 typedef struct K26RlEnv K26RlEnv;
@@ -471,6 +471,72 @@ int32_t      k26rl_env_attitudes(const K26RlEnv *env, double *out,
  * completed. After a reset and before the first step it reports
  * zero commands, which is what a reset leaves. */
 int32_t      k26rl_env_actuators(const K26RlEnv *env, double *out,
+                                 uint32_t capacity);
+
+/* The datalink state as the latest step left it, env-major, five
+ * doubles per ordered transmitter and receiver pair of one network:
+ * the index of the body the transmitter's vehicle binds, the index of
+ * the body the receiver's binds (the declaration order the body
+ * getter and the K26RL_TAG_BODY_NAME tags use), the closure flag at
+ * the transmitter's latest broadcast instant, the margin in decibels
+ * against that transmitter's declared threshold, and the seconds
+ * since a closed broadcast last reached the receiver.
+ *
+ * The pair is ordered because a link budget is. The powers, the
+ * gains, the losses and the threshold are the transmitter's alone, so
+ * the two directions between one pair of craft are two pairs here and
+ * may differ in closure at the same range. A pair exists for every
+ * ordered pair of one network whether or not the receiver declares a
+ * track over anything that transmitter offers, and pairs appear in a
+ * fixed order: transmitters in declaration order, and within each
+ * transmitter the other members of its network in declaration order,
+ * the same order on every call on the same artifact.
+ *
+ * The closure flag and the margin are what the transmitter's latest
+ * broadcast decided, against the separation of the two carriers at
+ * that instant; nothing here is recomputed at the time of the call.
+ * The margin is ten times the base-ten logarithm of the achieved
+ * signal-to-noise ratio over the declared threshold, so it is zero
+ * exactly at threshold, positive in closure and negative out of it.
+ * Where a declaration leaves that ratio undefined the margin is the
+ * limit rather than a number chosen to stand in for one: a budget the
+ * link kernel makes zero of, which a non-positive declared key or a
+ * zero range produces, reports negative infinity against a positive
+ * threshold; a threshold at or below zero, which nothing has to beat,
+ * reports positive infinity against a positive budget; the two
+ * together report zero, that comparison standing exactly at it. The
+ * closure flag is what the transfer was decided on in every case.
+ *
+ * The age is the seconds since an offer of a closed broadcast last
+ * arrived at the receiver, taken at the arrival instant the light
+ * time fixes rather than at the sub-advance boundary that delivered
+ * it. It is negative when no offer has arrived in this episode, which
+ * is what a reset leaves and what a receiver declaring a track over
+ * nothing the transmitter offers reports for a whole run: no offer is
+ * ever built for it, and an age of zero would say one had just
+ * landed.
+ *
+ * Sizing follows k26rl_env_spec's convention, as the other getters
+ * do: the required element count, n_envs * pair_count * 5, is
+ * returned as a positive value, the buffer is written when `capacity`
+ * is at least that, nothing is written and the requirement is still
+ * returned when it is smaller, so a capacity of 0 sizes it, and an
+ * error is the negated K26RlStatus. A program declaring no datalink,
+ * or one datalink with no other member on its network, returns 0.
+ *
+ * A pure read with the standing properties of this surface's getters:
+ * callable wherever they are and as often, allocating nothing,
+ * performing no I/O, never retaining a caller buffer, and bitwise
+ * deterministic under the same contract.
+ *
+ * After a faulted step it reports what the attempted advance left,
+ * which the next boundary reset discards, for the body getter's
+ * reason: it reads live state rather than a cached output. After a
+ * reset and before the first step it reports no closure, the
+ * unbounded deficit of a budget nothing has priced, and a negative
+ * age, which is what a reset leaves: nothing has been broadcast and
+ * nothing has arrived. */
+int32_t      k26rl_env_datalinks(const K26RlEnv *env, double *out,
                                  uint32_t capacity);
 
 #ifdef __cplusplus

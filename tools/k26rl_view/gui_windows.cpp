@@ -98,6 +98,14 @@ void panel_settings_(Ui &ui)
                         if (ImGui::DragFloat("##ss", &v, 0.5f, 0.0f,
                                              1.0e6f, "%.1f m per rad/s"))
                             o.spin_scale = v;
+                    } else if (k == ELEM_DATALINK) {
+                        /* A duration rather than a scale, and it sits
+                         * in the scale column because that is the
+                         * column an element's own figure lives in. */
+                        float v = (float)o.link_fade_seconds;
+                        if (ImGui::DragFloat("##lf", &v, 0.1f, 0.0f,
+                                             1.0e6f, "%.1f s to fade"))
+                            o.link_fade_seconds = v;
                     } else {
                         ImGui::TextDisabled("-");
                     }

@@ -138,6 +138,74 @@ static const char *const DRIVE_KFL =
     "end\n"
     "end\n";
 
+/* A fixture for the datalink element: two craft on one network whose
+ * radios are deliberately unequal, so the ordered pair one way closes
+ * and the pair the other way does not. Everything else about them is
+ * the same, which is what makes the drawn line a statement about the
+ * budget rather than about the two craft.
+ *
+ * The cadence is one broadcast a second against a control period of
+ * half a second, so an offer arrives on some steps and not on others
+ * and the age the getter reports rises and falls; a fade duration
+ * between the two values is what makes the fading gateable.
+ *
+ * The radar earns its place twice: the detection element has a
+ * fixture to appear on, and the compiler from before this work
+ * reaches the link kernel's constants only through a detection
+ * payload, which is the defect found beside the getter and fixed with
+ * it. The absence arm builds this same world with that compiler. */
+/* The declared cadence, written once and used both in the program
+ * and in the arm that holds the reported age against it. */
+#define LINK_RATE_S "1.0"
+
+#define LINK_RADIO \
+    " g_tx_db=3.0 g_rx_db=3.0 freq_hz=2.2e9 loss_sys_db=2.0" \
+    " bandwidth_hz=1.0e6 t_sys_k=500.0 noise_figure=2.0" \
+    " snr_threshold=6.0\n"
+
+static const char *const LINK_KFL =
+    "form RL_SCENE_LINK\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body drone_1 assembly=\"scene_craft.k26asm\" parent=earth"
+    " pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0"
+    " quat_w=1.0\n"
+    "    astro_body drone_2 assembly=\"scene_craft.k26asm\" parent=earth"
+    " pos_x=7.0e6 pos_y=3.0e4 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0"
+    " quat_w=1.0\n"
+    "    astro_payload eye1 body=drone_1 kind=detect_radar p_tx_w=1.0e6"
+    " g_tx_db=50.0 g_rx_db=50.0 freq_hz=1.0e10 loss_sys_db=3.0"
+    " bandwidth_hz=1.0e6 t_sys_k=290.0 noise_figure=2.0"
+    " snr_threshold=10.0\n"
+    "    astro_payload pic1 body=drone_1 kind=infostate history=1024\n"
+    "    astro_payload pic2 body=drone_2 kind=infostate history=1024\n"
+    "    astro_payload link1 body=drone_1 kind=datalink network=swarm_a"
+    " rate_hz=" LINK_RATE_S " p_tx_w=2.0" LINK_RADIO
+    "    astro_payload link2 body=drone_2 kind=datalink network=swarm_a"
+    " rate_hz=" LINK_RATE_S " p_tx_w=2.0e-6" LINK_RADIO
+    "    episode\n"
+    "        control_dt 0.5\n"
+    "        substeps 1\n"
+    "        horizon 8\n"
+    "    end\n"
+    "    action nudge box -1.0 1.0 default 0.0\n"
+    "    on_step\n"
+    "        drone_1.vel_x = drone_1.vel_x + nudge\n"
+    "    end\n"
+    "    observe detect eye1 of drone_2 as see1\n"
+    "    observe track pic1 of drone_2 as trk1\n"
+    "    observe track pic2 of drone_1 as trk2\n"
+    "    objective\n"
+    "        reward trk1_valid + trk2_valid\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The commit this work started at, whose compiler and surface header
+ * build the artifact the absence arm needs: ABI minor 6, and no
+ * datalink getter to ask. */
+#define LINK_BASE_COMMIT "7aaad1a"
+
 /* An asymmetric tetrahedron. No reflection and no right-angle
  * rotation leaves it unchanged, so a transform applied on the wrong
  * side moves every vertex of it. */
@@ -569,6 +637,49 @@ static char *lines_with_(const char *text, const char *prefix)
     }
     out[w] = '\0';
     return out;
+}
+
+/* One datalink element's own record, as the dump writes it: the pair
+ * it speaks for and the three figures the getter reported. Returns 0
+ * when the dump carries no such element at that step. */
+typedef struct {
+    char tx[64];
+    char rx[64];
+    double margin_db;
+    double age_s;
+    double fade;
+    int drawn;
+} LinkRecord;
+
+static int link_record_(const char *text, unsigned k, unsigned step,
+                        LinkRecord *out)
+{
+    char pre[64];
+    const char *p;
+    char a[24], b[24], c[24];
+    int idx;
+
+    idx = element_index_(text, k, step, "datalink", "drone_1");
+    if (idx < 0)
+        return 0;
+    snprintf(pre, sizeof pre, "scene_link %u %u %d ", k, step, idx);
+    p = line_(text, pre);
+    ASSERT(p != NULL);
+    ASSERT(sscanf(p, "%63s %63s %23s %23s %23s", out->tx, out->rx, a, b,
+                  c) == 5);
+    out->margin_db = hexd_(a);
+    out->age_s = hexd_(b);
+    out->fade = hexd_(c);
+    snprintf(pre, sizeof pre, "scene_segment %u %u %d 0 ", k, step, idx);
+    p = line_(text, pre);
+    ASSERT(p != NULL);
+    {
+        unsigned sa, sb;
+        int drawn = 0;
+        ASSERT(sscanf(p, "%u %u %d", &sa, &sb, &drawn) == 3);
+        out->drawn = drawn;
+    }
+    return 1;
 }
 
 /* Strip the scene's own lines, so what is left is every other panel's
@@ -1586,9 +1697,279 @@ int main(void)
         }
     }
 
+    /* ---- gate 11: the datalink element, on a fixture that has one.
+     * One line per ordered pair whose link closed at its
+     * transmitter's latest broadcast, carrier to carrier, fading over
+     * a declared number of seconds since that broadcast reached the
+     * receiver; a pair below margin draws nothing at all. --------- */
+    {
+        char lsel[1024], full[4096];
+        char *fresh = NULL, *stale = NULL, *slow = NULL;
+        LinkRecord rf, rs, rl;
+        const unsigned FRESH = 2, STALE = 3;
+        const double FADE_S = 0.75, SLOW_S = 2.0;
+        int w;
+
+        rl_write_file_(WORK_DIR "/link.kfl", LINK_KFL);
+        rl_compile_(WORK_DIR "/link.kfl", WORK_DIR "/link", WORK_DIR);
+        rl_run_or_die_(WORK_DIR "/link --seed 5 --envs 1 --episodes 1"
+                       " --out " WORK_DIR "/link.k26epi > " WORK_DIR
+                       "/link.log 2>&1");
+        ASSERT(rl_file_exists_(WORK_DIR "/link.k26epi"));
+        {
+            size_t n = 0;
+            char *bytes = slurp_(WORK_DIR "/link.k26epi", &n);
+            FILE *f = fopen(WORK_DIR "/link_before.bin", "wb");
+            ASSERT(f != NULL);
+            ASSERT(fwrite(bytes, 1, n, f) == n);
+            fclose(f);
+            free(bytes);
+        }
+
+/* The two craft are thirty kilometres apart in the reference body's
+ * frame, so an eye above the midpoint holds both and the line between
+ * them crosses the view. */
+#define LINK_CAM " --camera free --eye 0,15000,40000 --look 0,15000,0" \
+                 " --up 0,0,1 --clip 1.0,1.0e9 --frame drone_1"
+#define LINK_ART " --artifact " WORK_DIR "/link.rlenv.so "
+
+        /* The element alone, at a step an offer has just arrived on. */
+        snprintf(lsel, sizeof lsel,
+                 "--dump scene --episode 0 --steps %u:%u --elements "
+                 "datalink --link-fade-seconds %.17g" LINK_CAM LINK_ART
+                 WORK_DIR "/link.k26epi", FRESH, FRESH + 1, FADE_S);
+        run_viewer_(lsel, WORK_DIR "/g11a.txt");
+        fresh = slurp_(WORK_DIR "/g11a.txt", NULL);
+
+        /* The declared duration reaches the dump's own record, beside
+         * the scales, as a duration. */
+        {
+            const char *p = line_(fresh, "scene_scale ");
+            char v[5][24];
+            ASSERT(p != NULL);
+            ASSERT(sscanf(p, "%23s %23s %23s %23s %23s", v[0], v[1], v[2],
+                          v[3], v[4]) == 5);
+            ASSERT(hexd_(v[4]) == FADE_S);
+        }
+        /* One line, for the pair that closed, and none for the pair
+         * the other way: the weak transmitter's budget does not close
+         * at this separation, and a line drawn for it would assert a
+         * transfer the artifact never made. */
+        {
+            int present = 0, other = 0;
+            const char *p = fresh;
+            char head[64];
+            size_t hlen;
+            snprintf(head, sizeof head, "scene_element 0 %u ", FRESH);
+            hlen = strlen(head);
+            while (p && *p) {
+                const char *eol = strchr(p, '\n');
+                size_t len = eol ? (size_t)(eol - p) : strlen(p);
+                if (len >= hlen && memcmp(p, head, hlen) == 0) {
+                    unsigned e2;
+                    char gk[32];
+                    if (sscanf(p + hlen, "%u %31s", &e2, gk) == 2) {
+                        if (strcmp(gk, "datalink") == 0)
+                            present++;
+                        else
+                            other++;
+                    }
+                }
+                p = eol ? eol + 1 : NULL;
+            }
+            ASSERT(present == 1);
+            ASSERT(other == 0);
+            ASSERT(element_index_(fresh, 0, FRESH, "datalink",
+                                  "drone_2") < 0);
+        }
+        ASSERT(link_record_(fresh, 0, FRESH, &rf));
+        ASSERT(strcmp(rf.tx, "drone_1") == 0);
+        ASSERT(strcmp(rf.rx, "drone_2") == 0);
+        ASSERT(rf.margin_db > 0.0);
+        /* A closed pair on a one-hertz cadence cannot be older than a
+         * cadence period and a light time, and this step is one an
+         * offer arrived on. */
+        ASSERT(rf.age_s > 0.0 && rf.age_s < 1.0 / atof(LINK_RATE_S));
+        ASSERT(rf.drawn == 1);
+        printf("gate 11: the closed pair draws one line from %s to %s at "
+               "a margin of %.3f dB and %.6f s since it reached the "
+               "receiver, and the pair the other way draws nothing: OK\n",
+               rf.tx, rf.rx, rf.margin_db, rf.age_s);
+
+        /* The fade, at its declared seconds: fresh it is the declared
+         * fraction of the duration left, and past the duration the
+         * line is gone. The element stays either way, so a reader can
+         * tell a faded link from a toggle that is off. */
+        {
+            double want = 1.0 - rf.age_s / FADE_S;
+            ASSERT(fabs(rf.fade - want) < 1.0e-12);
+        }
+        snprintf(lsel, sizeof lsel,
+                 "--dump scene --episode 0 --steps %u:%u --elements "
+                 "datalink --link-fade-seconds %.17g" LINK_CAM LINK_ART
+                 WORK_DIR "/link.k26epi", STALE, STALE + 1, FADE_S);
+        run_viewer_(lsel, WORK_DIR "/g11b.txt");
+        stale = slurp_(WORK_DIR "/g11b.txt", NULL);
+        ASSERT(link_record_(stale, 0, STALE, &rs));
+        ASSERT(rs.age_s > FADE_S);
+        ASSERT(rs.fade == 0.0);
+        ASSERT(rs.drawn == 0);
+
+        /* The same recording and the same step at a longer declared
+         * duration: the line is back. What moved is the declaration,
+         * which is the arm's own credibility check, since a fade
+         * keyed on nothing would give the same answer twice. */
+        snprintf(lsel, sizeof lsel,
+                 "--dump scene --episode 0 --steps %u:%u --elements "
+                 "datalink --link-fade-seconds %.17g" LINK_CAM LINK_ART
+                 WORK_DIR "/link.k26epi", STALE, STALE + 1, SLOW_S);
+        run_viewer_(lsel, WORK_DIR "/g11c.txt");
+        slow = slurp_(WORK_DIR "/g11c.txt", NULL);
+        ASSERT(link_record_(slow, 0, STALE, &rl));
+        ASSERT(rl.age_s == rs.age_s);
+        ASSERT(fabs(rl.fade - (1.0 - rl.age_s / SLOW_S)) < 1.0e-12);
+        ASSERT(rl.fade > 0.0 && rl.drawn == 1);
+        printf("gate 11: at %.6f s since the broadcast reached it, the "
+               "line fades to %.4f over a declared %.2f s and is not "
+               "drawn, and to %.4f over %.2f s and is: OK\n",
+               rs.age_s, rs.fade, FADE_S, rl.fade, SLOW_S);
+        free(fresh);
+        free(stale);
+        free(slow);
+
+        /* The toggle, on the element's own terms: off, the scene is
+         * empty and the header says the toggle is off. */
+        {
+            char *off;
+            const char *p;
+            snprintf(lsel, sizeof lsel,
+                     "--dump scene --episode 0 --steps %u:%u --elements "
+                     "none" LINK_CAM LINK_ART WORK_DIR "/link.k26epi",
+                     FRESH, FRESH + 1);
+            run_viewer_(lsel, WORK_DIR "/g11d.txt");
+            off = slurp_(WORK_DIR "/g11d.txt", NULL);
+            ASSERT(line_(off, "scene_toggle datalink 0") != NULL);
+            {
+                char pre[64];
+                snprintf(pre, sizeof pre, "scene_elements 0 %u ", FRESH);
+                p = line_(off, pre);
+                ASSERT(p != NULL);
+                ASSERT(atoi(p) == 0);
+            }
+            free(off);
+            printf("gate 11: the element toggled off leaves the scene "
+                   "empty and the dump says the toggle is off: OK\n");
+        }
+
+        /* The read-only invariant, on this fixture and this element:
+         * the recording is what it was before the viewer opened it,
+         * and every other panel's bytes are the same with the element
+         * drawn and with it off. */
+        {
+            char *on, *offd, *stripped_on, *stripped_off;
+            snprintf(lsel, sizeof lsel,
+                     "--dump all --episode 0 --elements all"
+                     " --link-fade-seconds %.17g" LINK_CAM LINK_ART
+                     WORK_DIR "/link.k26epi", FADE_S);
+            w = snprintf(full, sizeof full, "%s", lsel);
+            ASSERT((size_t)w < sizeof full);
+            run_viewer_(full, WORK_DIR "/g11on.txt");
+            snprintf(lsel, sizeof lsel,
+                     "--dump all --episode 0 --elements none"
+                     LINK_CAM LINK_ART WORK_DIR "/link.k26epi");
+            run_viewer_(lsel, WORK_DIR "/g11off.txt");
+            on = slurp_(WORK_DIR "/g11on.txt", NULL);
+            offd = slurp_(WORK_DIR "/g11off.txt", NULL);
+            ASSERT(strstr(on, "scene_element 0 2 ") != NULL);
+            ASSERT(strstr(on, "resim_verdict 0 equal-bitwise") != NULL);
+            ASSERT(strstr(offd, "resim_verdict 0 equal-bitwise") != NULL);
+            stripped_on = without_scene_(on);
+            stripped_off = without_scene_(offd);
+            ASSERT(strcmp(stripped_on, stripped_off) == 0);
+            {
+                size_t na = 0, nb = 0;
+                char *a = slurp_(WORK_DIR "/link_before.bin", &na);
+                char *b = slurp_(WORK_DIR "/link.k26epi", &nb);
+                ASSERT(na == nb);
+                ASSERT(memcmp(a, b, na) == 0);
+                printf("gate 11: the recording's %u bytes are unchanged by "
+                       "every run above, and every other panel's %u bytes "
+                       "are identical with the link lines drawn and with "
+                       "them off, the reconstruction bitwise equal both "
+                       "ways: OK\n", (unsigned)na,
+                       (unsigned)strlen(stripped_on));
+                free(a);
+                free(b);
+            }
+            free(on);
+            free(offd);
+            free(stripped_on);
+            free(stripped_off);
+        }
+
+        /* The absence arm: the same world built by the compiler and
+         * the surface header from before the getter existed. The
+         * viewer says the getter is missing rather than drawing
+         * nothing and leaving a reader to guess why. */
+        if (!rl_base_build_(LINK_BASE_COMMIT, WORK_DIR)) {
+            printf("gate 11: SKIP: the base commit " LINK_BASE_COMMIT
+                   " is not in this checkout's history, so the absent "
+                   "getter has no artifact to be reported on\n");
+        } else {
+            char *old;
+            const char *msg;
+            void *so;
+            RlSurface bs;
+
+            rl_base_compile_(WORK_DIR, WORK_DIR "/link.kfl",
+                             WORK_DIR "/link16", 1);
+            so = rl_dlopen_(WORK_DIR "/link16.rlenv.so");
+            rl_resolve_surface_(so, &bs);
+            ASSERT(bs.abi_version() == 0x00010006u);
+            ASSERT(bs.datalinks == NULL);
+            dlclose(so);
+
+            snprintf(lsel, sizeof lsel,
+                     "--dump scene --episode 0 --steps %u:%u --elements "
+                     "all" LINK_CAM " --artifact " WORK_DIR
+                     "/link16.rlenv.so " WORK_DIR "/link.k26epi",
+                     FRESH, FRESH + 1);
+            run_viewer_(lsel, WORK_DIR "/g11e.txt");
+            old = slurp_(WORK_DIR "/g11e.txt", NULL);
+            {
+                char pre[64];
+                snprintf(pre, sizeof pre, "scene_pose 0 %u ", FRESH);
+                msg = line_(old, pre);
+                ASSERT(msg != NULL);
+            }
+            if (!strstr(msg, "predates the datalink getter")) {
+                fprintf(stderr, "FAIL: an artifact without the getter is "
+                        "reported as `%.200s`, which does not say the "
+                        "getter is missing\n", msg);
+                exit(1);
+            }
+            ASSERT(element_index_(old, 0, FRESH, "datalink",
+                                  "drone_1") < 0);
+            /* And the sentence is absent where the getter is present,
+             * so it reports an absence rather than being printed
+             * always. */
+            {
+                char *now = slurp_(WORK_DIR "/g11on.txt", NULL);
+                ASSERT(strstr(now, "predates the datalink getter") == NULL);
+                free(now);
+            }
+            free(old);
+            printf("gate 11: an artifact at ABI 1.6 draws no link lines "
+                   "and the scene says the getter is missing, which an "
+                   "artifact carrying it does not: OK\n");
+        }
+#undef LINK_CAM
+#undef LINK_ART
+    }
+
     free(world);
     free(att);
     free(wire);
-    printf("test_rl_scene: 10 gates passed\n");
+    printf("test_rl_scene: 11 gates passed\n");
     return 0;
 }

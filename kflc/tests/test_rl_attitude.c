@@ -284,7 +284,7 @@ int main(void)
     void *so = rl_dlopen_(WORK_DIR "/att.rlenv.so");
     RlSurface s;
     rl_resolve_surface_(so, &s);
-    ASSERT(s.abi_version() == 0x00010006u);
+    ASSERT(s.abi_version() == 0x00010007u);
 
     /* ---- 1. Geometry -------------------------------------------- */
     {

@@ -53,6 +53,10 @@ const char *const SCENE_DETECTION_LABEL =
     "line of sight from the reference origin, drawn while detected; "
     "exact when the reference body carries the payload";
 
+const char *const SCENE_DATALINK_LABEL =
+    "a broadcast that closed on the transmitter's link budget, carrier "
+    "to carrier, fading with the seconds since it reached the receiver";
+
 namespace {
 
 /* The angle at which the up vector is too close to the view direction
@@ -64,7 +68,7 @@ const double UP_DEGENERATE = 1.0e-6;
 
 const char *const ELEMENT_NAMES[ELEM_KIND_COUNT] = {
     "wireframe", "collider", "axes", "trajectory", "velocity", "port",
-    "thruster", "detection", "force", "spin"
+    "thruster", "detection", "force", "spin", "datalink"
 };
 
 K26V3 v3_(const double a[3]) { return k26m3d_v3(a[0], a[1], a[2]); }
@@ -339,7 +343,11 @@ Camera::Camera()
 
 SceneOptions::SceneOptions()
     : frame(SCENE_ORIGIN), shading(false), velocity_seconds(1.0),
-      axis_length(1.0), thruster_scale(0.0025), spin_scale(10.0)
+      axis_length(1.0), thruster_scale(0.0025), spin_scale(10.0),
+      /* Two seconds, which shows a link cadence of a hertz or faster
+       * as a line that holds and a link that has stopped as a line
+       * that goes. */
+      link_fade_seconds(2.0)
 {
     for (int i = 0; i < ELEM_KIND_COUNT; i++)
         enabled[i] = true;
@@ -489,6 +497,25 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
             in.resim->actuators.size()) {
             drv = &in.resim->actuators[base];
             drv_n = in.resim->actuator_count;
+        }
+    }
+    /* The datalink state at this step, on the same terms. An artifact
+     * from before the getter is reported rather than hidden; an
+     * artifact that carries it and declares no datalink says nothing,
+     * because there is nothing to say. */
+    if (sc.pose_from_artifact && in.resim && !in.resim->datalink_symbol) {
+        sc.message += "; this artifact predates the datalink getter, so "
+                      "no link lines are drawn";
+    }
+    const double *lnk = 0;
+    uint32_t lnk_n = 0;
+    if (in.resim && in.resim->ran && in.resim->has_datalinks &&
+        step < in.resim->steps_compared) {
+        size_t base = (size_t)step * in.resim->datalink_count * 5;
+        if (base + (size_t)in.resim->datalink_count * 5 <=
+            in.resim->datalinks.size()) {
+            lnk = &in.resim->datalinks[base];
+            lnk_n = in.resim->datalink_count;
         }
     }
 
@@ -905,6 +932,67 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
                               xyz[2] - eye.z));
             finish_(&e, bl, &view, &pv, false);
             if (flag != 1.0) {
+                for (size_t s = 0; s < e.segments.size(); s++)
+                    e.segments[s].drawn = false;
+            }
+            sc.elements.push_back(e);
+        }
+    }
+    /* The datalink lines: one per ordered transmitter and receiver
+     * pair whose link closed at that transmitter's latest broadcast,
+     * drawn carrier to carrier and fading over the declared seconds
+     * since the broadcast reached the receiver.
+     *
+     * A pair below margin draws nothing at all, which is the design's
+     * own choice and is the honest picture of a link that did not
+     * close: there is no line between those two craft. A pair that
+     * closed and has since gone stale keeps its element and loses its
+     * segment, on the detection element's reasoning: a reader can then
+     * tell a link that has faded from a toggle that is off.
+     *
+     * A pair that has closed and whose first offer is still in flight
+     * has no arrival to age from, and draws at full: what the line
+     * asserts is the closure, and that is this instant's fact. A
+     * declared duration of nought is no fading at all, which is how a
+     * reader asks for every closed link at one strength.
+     *
+     * Whether the link closed is the artifact's answer and never this
+     * viewer's. Re-deriving it from the positions and the declared
+     * keys would put a second copy of the budget in a program that
+     * exists to show what the first one did. */
+    if (o.enabled[ELEM_DATALINK] && lnk_n && sc.pose_from_artifact) {
+        for (uint32_t i = 0; i < lnk_n; i++) {
+            const double *d = lnk + (size_t)i * 5;
+            uint32_t tx = (uint32_t)d[0];
+            uint32_t rx = (uint32_t)d[1];
+            SceneElement e;
+            Builder bl;
+            double fade = 1.0;
+
+            if (d[2] != 1.0 || tx >= bodies || rx >= bodies)
+                continue;
+            if (d[4] >= 0.0 && o.link_fade_seconds > 0.0) {
+                fade = 1.0 - d[4] / o.link_fade_seconds;
+                if (fade < 0.0)
+                    fade = 0.0;
+                if (fade > 1.0)
+                    fade = 1.0;
+            }
+            e.kind = ELEM_DATALINK;
+            e.body = tx;
+            e.name = scene_body_name(sp, tx) + "/link/" +
+                     scene_body_name(sp, rx);
+            e.note = SCENE_DATALINK_LABEL;
+            e.link.receiver = rx;
+            e.link.margin_db = d[3];
+            e.link.age_s = d[4];
+            e.link.fade = fade;
+            bl.line(k26m3d_v3(pos[tx * 3] - eye.x, pos[tx * 3 + 1] - eye.y,
+                              pos[tx * 3 + 2] - eye.z),
+                    k26m3d_v3(pos[rx * 3] - eye.x, pos[rx * 3 + 1] - eye.y,
+                              pos[rx * 3 + 2] - eye.z));
+            finish_(&e, bl, &view, &pv, false);
+            if (fade <= 0.0) {
                 for (size_t s = 0; s < e.segments.size(); s++)
                     e.segments[s].drawn = false;
             }

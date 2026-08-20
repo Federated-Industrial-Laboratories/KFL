@@ -152,6 +152,101 @@ static inline void rl_compile_(const char *kfl_path, const char *out_path,
     }
 }
 
+/* ---- Building an artifact of an earlier ABI minor -------------------- */
+
+/* The compiler and the stepping surface's header as one commit in this
+ * checkout's history had them, built under <work>/base. It is what
+ * lets a gate hold today's tree against an artifact from before a
+ * minor addition: the archived compiler emits the code that commit
+ * emitted, and its own copy of the header is what makes the artifact
+ * report that commit's version rather than this one's.
+ *
+ * The archived tree carries only those two directories, so the sibling
+ * libraries of this checkout are linked in beside them and their
+ * archives are what the artifact links; that is sound because the
+ * addition under test is additive, and the byte-identity arm each
+ * caller runs is what says so rather than this comment.
+ *
+ * Returns 0 when the commit is not in this checkout's history, which
+ * is a skip for the caller and never a silent pass. */
+static inline int rl_base_build_(const char *commit, const char *work)
+{
+    char cmd[2048];
+
+    snprintf(cmd, sizeof cmd,
+             "git -C .. rev-parse --verify --quiet %s^{commit} "
+             "> /dev/null 2>&1", commit);
+    if (system(cmd) != 0)
+        return 0;
+    snprintf(cmd, sizeof cmd, "rm -rf %s/base && mkdir -p %s/base", work,
+             work);
+    rl_run_or_die_(cmd);
+    snprintf(cmd, sizeof cmd,
+             "git -C .. archive %s kflc libk26rl | tar -x -C %s/base",
+             commit, work);
+    rl_run_or_die_(cmd);
+    snprintf(cmd, sizeof cmd,
+             "for d in ../lib* ../common; do "
+             "case \"$d\" in */libk26rl) continue;; esac; "
+             "ln -sfn \"$(cd $d && pwd)\" %s/base/; done", work);
+    rl_run_or_die_(cmd);
+    snprintf(cmd, sizeof cmd,
+             "make -C %s/base/kflc bin/kflc > %s/base/build.log 2>&1",
+             work, work);
+    rl_run_or_die_(cmd);
+    return 1;
+}
+
+/* Compile a .kfl through a built base compiler.
+ *
+ * `base_header` chooses which copy of the surface header the artifact
+ * is compiled against, and the two answer different questions. With
+ * it, that commit's header goes first and the artifact reports the
+ * version that commit published, which is what an arm about an
+ * artifact from before a minor addition needs. Without it, this
+ * checkout's header is the only one, so the artifact differs from a
+ * current build in emitted code alone, which is what an arm about
+ * whether the addition changed a run needs. */
+static inline void rl_base_compile_(const char *work, const char *kfl_path,
+                                    const char *out_path, int base_header)
+{
+    char cflags[4096];
+    int n = snprintf(cflags, sizeof cflags,
+        "-O2 -g -std=c++11 -Wno-format-truncation "
+        "-ffp-contract=off -fexcess-precision=standard%s%s%s",
+        base_header ? " -I" : "", base_header ? work : "",
+        base_header ? "/base/libk26rl/include" : "");
+    for (int i = 0; RL_INCLUDE_DIRS_[i]; i++) {
+        n += snprintf(cflags + n, sizeof cflags - (size_t)n, " -I%s",
+                      RL_INCLUDE_DIRS_[i]);
+    }
+    ASSERT((size_t)n < sizeof cflags);
+
+    char ldlibs[4096];
+    n = 0;
+    for (int i = 0; RL_LINK_LIBS_[i]; i++) {
+        n += snprintf(ldlibs + n, sizeof ldlibs - (size_t)n, "%s%s",
+                      i ? " " : "", RL_LINK_LIBS_[i]);
+    }
+    n += snprintf(ldlibs + n, sizeof ldlibs - (size_t)n, " -lgfortran -lm");
+    ASSERT((size_t)n < sizeof ldlibs);
+
+    char cmd[16384];
+    n = snprintf(cmd, sizeof cmd,
+        "KFLC_CFLAGS=\"%s\" KFLC_LDLIBS=\"%s\" %s/base/kflc/bin/kflc %s "
+        "-o %s > %s/base/compile.log 2>&1", cflags, ldlibs, work,
+        kfl_path, out_path, work);
+    ASSERT((size_t)n < sizeof cmd);
+    if (system(cmd) != 0) {
+        char show[512];
+        snprintf(show, sizeof show, "cat %s/base/compile.log", work);
+        (void)!system(show);
+        fprintf(stderr, "the base compiler could not compile %s\n",
+                kfl_path);
+        exit(1);
+    }
+}
+
 /* Resolved frozen surface, filled by dlsym. */
 typedef struct {
     uint32_t    (*abi_version)(void);
@@ -170,6 +265,7 @@ typedef struct {
                           uint32_t);
     int32_t     (*attitudes)(const K26RlEnv *, double *, uint32_t);
     int32_t     (*actuators)(const K26RlEnv *, double *, uint32_t);
+    int32_t     (*datalinks)(const K26RlEnv *, double *, uint32_t);
     const char *(*status_str)(K26RlStatus);
     void        (*destroy)(K26RlEnv *);
 } RlSurface;
@@ -206,6 +302,10 @@ static inline void rl_resolve_surface_(void *so, RlSurface *s)
         s->actuators = NULL;
         if (p_ != NULL)
             memcpy(&s->actuators, &p_, sizeof p_);
+        p_ = dlsym(so, "k26rl_env_datalinks");
+        s->datalinks = NULL;
+        if (p_ != NULL)
+            memcpy(&s->datalinks, &p_, sizeof p_);
     }
     RL_RESOLVE_(status_str,   "k26rl_status_str");
     RL_RESOLVE_(destroy,      "k26rl_env_destroy");

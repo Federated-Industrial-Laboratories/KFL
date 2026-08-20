@@ -835,7 +835,13 @@ static void dump_scene_header_(FILE *f, Model &m, const DumpOptions &o)
     hx(f, s.thruster_scale);
     fprintf(f, " ");
     hx(f, s.spin_scale);
+    /* The datalink element's figure sits with the scales because that
+     * is where a reader looks for what governs an element's drawing,
+     * though it is a duration and not a scale. */
+    fprintf(f, " ");
+    hx(f, s.link_fade_seconds);
     fprintf(f, "\n");
+    fprintf(f, "scene_datalink_label %s\n", SCENE_DATALINK_LABEL);
 }
 
 static void dump_scene_element_(FILE *f, const Spec &sp, uint32_t k,
@@ -852,6 +858,20 @@ static void dump_scene_element_(FILE *f, const Spec &sp, uint32_t k,
             (unsigned)e.faces.size(), e.name.c_str());
     fprintf(f, "scene_note %u %u %u %s\n", k, step, (unsigned)i,
             e.note.c_str());
+    /* What a datalink line was drawn from: its receiver, and the three
+     * figures the getter reported, so a reader holds the line against
+     * the budget and the age rather than against its brightness. */
+    if (e.kind == ELEM_DATALINK) {
+        fprintf(f, "scene_link %u %u %u %s %s ", k, step, (unsigned)i,
+                scene_body_name(sp, e.body).c_str(),
+                scene_body_name(sp, e.link.receiver).c_str());
+        hx(f, e.link.margin_db);
+        fprintf(f, " ");
+        hx(f, e.link.age_s);
+        fprintf(f, " ");
+        hx(f, e.link.fade);
+        fprintf(f, "\n");
+    }
     fprintf(f, "scene_mvp %u %u %u", k, step, (unsigned)i);
     for (int c = 0; c < 16; c++) {
         fprintf(f, " ");

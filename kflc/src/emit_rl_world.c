@@ -83,9 +83,13 @@ int rl_emit_prologue(FILE *out, const RlModel *m,
     if (rl_n_pay_kind(m, RL_PAY_LASER) > 0) {
         fputs("#include <k26astro_laser/laser.h>\n", out);
     }
-    /* The mathematical constants the three closed-form models read,
-     * pulled in once for whichever of them the program declares. */
-    if (rl_n_detect(m) > 0 || rl_n_effector(m) > 0) {
+    /* The mathematical constants the closed-form models read, pulled
+     * in once for whichever of them the program declares. The
+     * datalink's own budget is among them: its kernel reads the speed
+     * of light, pi and the Boltzmann constant from this header, and a
+     * program that declares a datalink and no detection payload
+     * otherwise reaches the compiler without them. */
+    if (rl_n_detect(m) > 0 || rl_n_effector(m) > 0 || rl_n_link(m) > 0) {
         fputs("#include <k26astro_core/consts.h>\n", out);
     }
     if (m->n_payloads > 0) {

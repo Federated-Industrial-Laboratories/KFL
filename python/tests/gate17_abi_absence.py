@@ -1,14 +1,14 @@
 """Gate 17: absence said, not hidden.
 
-Three getters postdate the surface's first version, and an artifact
+Four getters postdate the surface's first version, and an artifact
 compiled before one of them arrived does not carry it. This package
-binds all three, resolves each by the minor the loaded artifact
+binds all four, resolves each by the minor the loaded artifact
 reports, and keeps the Python method present whatever that minor is,
 so a consumer meets a refusal that says what is missing rather than an
 attribute that is not there.
 
 Against a stub artifact reporting version 1.0, which carries none of
-the three: every one of the three calls, on both environment shapes,
+the four: every one of the four calls, on both environment shapes,
 raises the package's error naming the symbol, the minor that symbol
 arrived at, and the minor the artifact reports. Beside them the
 frozen surface is unchanged, which is the half that stops this from
@@ -18,7 +18,7 @@ episode-output switch works, its reset delivers an observation, and
 its status values still decode through the artifact itself.
 
 The last arm is the one an artifact can fail rather than a consumer:
-a stub reporting a minor high enough to carry all three while
+a stub reporting a minor high enough to carry all four while
 exporting none is refused at load, naming the first symbol its claim
 did not cover, because a consumer that believed the claim would meet
 the absence as an attribute error at the far end of a training run.
@@ -43,6 +43,7 @@ def main():
     from k26rl import (
         ABI_MINOR_ACTUATORS,
         ABI_MINOR_BODIES,
+        ABI_MINOR_DATALINKS,
         ABI_MINOR_TAP,
         BODY_REF_ORIGIN,
         K26RlError,
@@ -52,7 +53,7 @@ def main():
 
     stub = g.build_stub("default")
 
-    # ---- the three absences, on both shapes --------------------------
+    # ---- the four absences, on both shapes ---------------------------
     vector = K26RlVectorEnv(stub, seed=1, n_envs=2)
     single = K26RlEnv(stub, seed=1)
     calls = (
@@ -61,6 +62,8 @@ def main():
          lambda e: e.bodies(BODY_REF_ORIGIN)),
         ("k26rl_env_actuators", ABI_MINOR_ACTUATORS,
          lambda e: e.actuators()),
+        ("k26rl_env_datalinks", ABI_MINOR_DATALINKS,
+         lambda e: e.datalinks()),
     )
     for shape, env in (("vectorised", vector), ("single", single)):
         for symbol, minor, call in calls:
@@ -148,8 +151,8 @@ def main():
                                                          STUB_MINOR))
 
     # ---- an artifact whose claim outruns its exports -----------------
-    liar = g.build_stub("minor6",
-                        ["STUB_ABI_MINOR=%d" % ABI_MINOR_ACTUATORS])
+    liar = g.build_stub("minor7",
+                        ["STUB_ABI_MINOR=%d" % ABI_MINOR_DATALINKS])
     try:
         K26RlVectorEnv(liar, seed=1, n_envs=1)
     except K26RlError as exc:
@@ -157,11 +160,11 @@ def main():
         g.check("k26rl_env_tap" in text,
                 "the refusal does not name the symbol the claimed "
                 "minor carries: %s" % text)
-        g.check("minor %d" % ABI_MINOR_ACTUATORS in text,
+        g.check("minor %d" % ABI_MINOR_DATALINKS in text,
                 "the refusal does not name the claimed minor: %s"
                 % text)
         print("%s: an artifact claiming minor %d without the symbols "
-              "is refused: %s" % (GATE, ABI_MINOR_ACTUATORS, text))
+              "is refused: %s" % (GATE, ABI_MINOR_DATALINKS, text))
     else:
         g.check(False, "an artifact claiming a minor it does not "
                 "carry was accepted")

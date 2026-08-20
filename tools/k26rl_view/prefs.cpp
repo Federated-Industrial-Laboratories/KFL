@@ -56,6 +56,8 @@ void prefs_load(const char *path, Prefs *p, SceneOptions *s)
             s->thruster_scale = atof(v);
         } else if (key_(line, "spin_scale", &v)) {
             s->spin_scale = atof(v);
+        } else if (key_(line, "link_fade_seconds", &v)) {
+            s->link_fade_seconds = atof(v);
         } else if (key_(line, "camera_mode", &v)) {
             int m = atoi(v);
             if (m >= 0 && m <= 2)
@@ -111,6 +113,7 @@ bool prefs_save(const Prefs &p, const SceneOptions &s)
     put_(f, "axis_length", s.axis_length);
     put_(f, "thruster_scale", s.thruster_scale);
     put_(f, "spin_scale", s.spin_scale);
+    put_(f, "link_fade_seconds", s.link_fade_seconds);
     put_(f, "camera_mode", (double)s.camera.mode);
     put_(f, "projection", (double)s.camera.projection);
     put_(f, "fov_deg", s.camera.fov_y_deg);

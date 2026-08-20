@@ -525,9 +525,9 @@ class _Session:
 
     # ---- the training-host surface -------------------------------------
     #
-    # Three getters that postdate the frozen thirteen, bound here for
+    # Four getters that postdate the frozen thirteen, bound here for
     # a host that drives this package directly: the tap it arms to
-    # watch a run, and the two readbacks it takes of the world the
+    # watch a run, and the three readbacks it takes of the world the
     # observation channels are views of. Each is present on the
     # session whatever the artifact reports; the binding layer says
     # the absence of one the loaded artifact does not carry.
@@ -605,6 +605,23 @@ class _Session:
         return self._shaped_read(
             "k26rl_env_actuators", _abi.ACTUATOR_STRIDE, need,
             lambda buf, count: self.artifact.actuators(
+                self._handle, self._ptr(buf, ctypes.c_double), count))
+
+    def read_datalinks(self):
+        """The datalink state as the latest step left it, env-major,
+        as ``(n_envs, pair_count, 5)``.
+
+        The five values are the getter's own and cross untouched: the
+        transmitting body's index, the receiving body's index, the
+        closure flag at the transmitter's latest broadcast, the margin
+        in decibels against its declared threshold, and the seconds
+        since a closed broadcast last reached the receiver, which is
+        negative when none has. The first three are exact small
+        integers in binary64 and are not converted here."""
+        need = self.artifact.datalinks(self._handle, None, 0)
+        return self._shaped_read(
+            "k26rl_env_datalinks", _abi.DATALINK_STRIDE, need,
+            lambda buf, count: self.artifact.datalinks(
                 self._handle, self._ptr(buf, ctypes.c_double), count))
 
     def _shaped_read(self, symbol, stride, need, fill):
@@ -822,7 +839,7 @@ class K26RlEnv(gymnasium.Env):
 
     # ---- the training-host surface ------------------------------------
     #
-    # The three getters that postdate the frozen set. Each method
+    # The four getters that postdate the frozen set. Each method
     # exists whatever the loaded artifact reports; one the artifact is
     # too old to carry refuses by naming the symbol, the ABI minor it
     # arrived at, and the minor the artifact reports.
@@ -871,6 +888,22 @@ class K26RlEnv(gymnasium.Env):
         getter writes."""
         self._session.ensure_open()
         return self._session.read_actuators()
+
+    def datalinks(self):
+        """The datalink state as the latest step left it, as
+        ``(1, pair_count, 5)`` and in the getter's own order: one row
+        per ordered transmitter and receiver pair of a network.
+
+        The five values per pair are the transmitting body's index,
+        the receiving body's index, the closure flag at the
+        transmitter's latest broadcast, the margin in decibels against
+        its declared threshold, and the seconds since a closed
+        broadcast last reached the receiver, negative when none has.
+        The pair is ordered because a link budget is: the powers, the
+        gains and the threshold are the transmitter's, so the two
+        directions between one pair of craft are two rows here."""
+        self._session.ensure_open()
+        return self._session.read_datalinks()
 
     @property
     def body_names(self):

@@ -92,6 +92,9 @@ static int usage_(const char *prog)
         "  --axis-length M         length of the body axis lines\n"
         "  --thruster-scale S      metres of line per newton of thrust\n"
         "  --spin-scale S          metres of line per radian per second\n"
+        "  --link-fade-seconds S   seconds a closed datalink line takes\n"
+        "                          to fade to nothing after a broadcast\n"
+        "                          reached its receiver\n"
         "  --session-only          do not load or save window settings,\n"
         "                          so the picture is reproducible from\n"
         "                          these arguments alone\n"
@@ -356,6 +359,10 @@ int main(int argc, char **argv)
             if (!v)
                 return usage_(argv[0]);
             opt.scene.spin_scale = strtod(argv[++i], 0);
+        } else if (strcmp(a, "--link-fade-seconds") == 0) {
+            if (!v)
+                return usage_(argv[0]);
+            opt.scene.link_fade_seconds = strtod(argv[++i], 0);
         } else if (strcmp(a, "--session-only") == 0) {
             /* Consumed by the pre-scan above. */
         } else if (strcmp(a, "--shading") == 0) {

@@ -95,6 +95,7 @@ static const char *const FROZEN_EXPORTS =
     "k26rl_env_attitudes\n"
     "k26rl_env_bodies\n"
     "k26rl_env_create\n"
+    "k26rl_env_datalinks\n"
     "k26rl_env_destroy\n"
     "k26rl_env_fault_codes\n"
     "k26rl_env_flags\n"

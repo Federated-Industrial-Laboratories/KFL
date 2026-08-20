@@ -70,6 +70,23 @@ struct ResimResult {
     std::vector<double> actuators;
     uint32_t actuator_count = 0;
     bool has_actuators = false;
+    /* Datalink state, steps_compared * datalink_count * 5, from the
+     * artifact's datalink getter: the transmitting body's index, the
+     * receiving body's index, the closure flag at the transmitter's
+     * latest broadcast, the margin in decibels against its declared
+     * threshold, and the seconds since a closed broadcast last reached
+     * the receiver, negative when none has.
+     *
+     * The two flags are not the same statement and a viewer needs
+     * both. `datalink_symbol` says the artifact carries the getter at
+     * all, which is what separates an artifact from before ABI minor 7
+     * from a program that simply declares no datalink; `has_datalinks`
+     * says there are pairs to report. Only the first is worth telling
+     * a reader about, and it is told rather than hidden. */
+    std::vector<double> datalinks;
+    uint32_t datalink_count = 0;
+    bool has_datalinks = false;
+    bool datalink_symbol = false;
 };
 
 /* Load an artifact and rebuild one episode of a model's file.

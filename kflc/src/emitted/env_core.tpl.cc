@@ -19,6 +19,24 @@ typedef struct {
 } KflrlLinkPend;
 #endif
 
+#if KFLRL_N_LINKPAIR > 0
+/* What one ordered transmitter and receiver pair of a network has
+ * done this episode: the budget the transmitter's latest broadcast
+ * achieved and whether it closed, and the instant an offer of a
+ * closed broadcast last reached the receiver.
+ *
+ * The achieved ratio is kept rather than the decibel margin the
+ * getter reports, so the logarithm is taken where a consumer asks for
+ * it instead of once per pair per broadcast on the stepping path.
+ * Nothing on that path reads any of this: it is a record of what the
+ * transfer decided, not a state the transfer decides from. */
+typedef struct {
+    double  snr;      /* achieved signal-to-noise ratio, linear */
+    double  arrival;  /* episode seconds, negative until one arrives */
+    uint8_t closed;
+} KflrlLinkPair;
+#endif
+
 /* The context a thrust perturbation is registered with: the handle
  * and which environment it speaks for. Both are fixed at create. */
 typedef struct KflrlThrustCtx {
@@ -179,6 +197,14 @@ struct K26RlEnv {
     uint8_t       *link_qh;
     uint8_t       *link_qn;
     uint8_t       *link_over;
+#endif
+#if KFLRL_N_LINKPAIR > 0
+    /* One record per environment per ordered transmitter and receiver
+     * pair of a network, written where the transfer decides and read
+     * only by k26rl_env_datalinks. It is episode state, since both
+     * halves of it are: a closure belongs to the broadcast that
+     * decided it and an arrival to the offer that landed. */
+    KflrlLinkPair *lpair;
 #endif
 #if KFLRL_N_EFFECTOR > 0
     /* One engagement block per environment, holding the channels
@@ -939,6 +965,39 @@ static void kflrl_info_push_(K26RlEnv *h, uint32_t e, int seed)
 #endif
 
 #if KFLRL_N_LINK > 0
+#if KFLRL_N_LINKPAIR > 0
+/* The per-pair record a reset leaves, and the state a fresh handle
+ * starts in: nothing broadcast, nothing closed, nothing arrived. The
+ * arrival is negative rather than zero because zero is a time an
+ * offer could genuinely have landed at, and the getter reports the
+ * negative as a negative age, which says no offer has landed instead
+ * of dressing an absence as a fresh arrival. */
+static void kflrl_link_pairs_clear_(K26RlEnv *h, uint32_t e)
+{
+    for (int p = 0; p < KFLRL_N_LINKPAIR; p++) {
+        KflrlLinkPair *lp = &h->lpair[(size_t)e * KFLRL_N_LINKPAIR + p];
+        lp->snr     = 0.0;
+        lp->arrival = -1.0;
+        lp->closed  = 0;
+    }
+}
+
+/* The decibel margin of an achieved budget against a declared
+ * threshold, formed for the getter rather than on the stepping path.
+ * Zero is exactly at threshold. Where a declaration leaves the ratio
+ * undefined the limit is reported rather than a number chosen to
+ * stand in for one: nothing to beat is an unbounded margin, no budget
+ * at all is an unbounded deficit, and neither is the comparison
+ * standing exactly at the threshold it was made against. */
+static double kflrl_link_margin_db_(double snr, double threshold)
+{
+    if (snr > 0.0 && threshold > 0.0) return 10.0 * log10(snr / threshold);
+    if (snr > 0.0) return HUGE_VAL;
+    if (threshold > 0.0) return -HUGE_VAL;
+    return 0.0;
+}
+#endif
+
 /* The one-way link budget, and it is not the radar's.
  *
  * Received power over a single path of range R, with both antennas'
@@ -1044,6 +1103,22 @@ static void kflrl_link_pass_(K26RlEnv *h, uint32_t e)
                 k26astro_infostate_target_push(is, tv, pd->t, pd->pos,
                                                pd->vel);
             }
+#if KFLRL_N_LINKPAIR > 0
+            /* The offer reached this receiver at the instant the
+             * light time fixed, which is what the record holds and
+             * not the boundary that delivered it. It is recorded
+             * whether or not the ring kept the entry: what the pair
+             * did was carry it, and the drop-older rule is a
+             * statement about the knowledge, not about the link.
+             * The later of the two survives, so an edge walked after
+             * one carrying an earlier offer cannot age the pair. */
+            {
+                KflrlLinkPair *lp =
+                    &h->lpair[(size_t)e * KFLRL_N_LINKPAIR
+                              + kflrl_ledge_pair_[k]];
+                if (pd->due > lp->arrival) lp->arrival = pd->due;
+            }
+#endif
             h->link_qh[qi] = (uint8_t)((h->link_qh[qi] + 1)
                                        % KFLRL_LINK_QCAP);
             h->link_qn[qi] = (uint8_t)(h->link_qn[qi] - 1);
@@ -1087,9 +1162,11 @@ static void kflrl_link_pass_(K26RlEnv *h, uint32_t e)
          * time is not solved for, so this is the separation at
          * emission and not the distance the signal actually runs. */
         double lrange[KFLRL_N_LINK];
+        double lsnr[KFLRL_N_LINK];
         int    lclosed[KFLRL_N_LINK];
         for (int r = 0; r < KFLRL_N_LINK; r++) {
             lrange[r]  = 0.0;
+            lsnr[r]    = 0.0;
             lclosed[r] = 0;
             if (r == i) continue;
             const K26AstroBody *rb = k26astro_world_body_at(
@@ -1098,9 +1175,25 @@ static void kflrl_link_pass_(K26RlEnv *h, uint32_t e)
             if (!rb) continue;
             K26V3 d = k26astro_pos_sub(&rb->pos, &tb->pos);
             lrange[r] = k26m3d_v3_len(d);
-            lclosed[r] = kflrl_link_snr_(pp, lrange[r])
-                         >= pp[KFLRL_LINK_THRESHOLD];
+            lsnr[r]   = kflrl_link_snr_(pp, lrange[r]);
+            lclosed[r] = lsnr[r] >= pp[KFLRL_LINK_THRESHOLD];
         }
+#if KFLRL_N_LINKPAIR > 0
+        /* What this broadcast decided, kept for the datalink getter.
+         * The pairs of one transmitter are contiguous and in the
+         * receivers' declaration order, so this is the same walk the
+         * closure loop above just made, over its own community. */
+        {
+            int p0 = kflrl_link_pair0_[i];
+            for (int p = p0; p < p0 + kflrl_link_npair_[i]; p++) {
+                KflrlLinkPair *lp =
+                    &h->lpair[(size_t)e * KFLRL_N_LINKPAIR + p];
+                int r = kflrl_lpair_rx_[p];
+                lp->snr    = lsnr[r];
+                lp->closed = (uint8_t)(lclosed[r] ? 1 : 0);
+            }
+        }
+#endif
 
         K26AstroEpoch t_now = kflrl_info_epoch_(h->info_day[e], now);
         int j0 = kflrl_link_ent0_[i];
@@ -1256,6 +1349,9 @@ static void kflrl_reset_env_(K26RlEnv *h, uint32_t e, uint32_t ep)
     memset(&h->link_qn[(size_t)e * KFLRL_N_LINKEDGE], 0,
            sizeof(uint8_t) * KFLRL_N_LINKEDGE);
     h->link_over[e] = 0;
+#endif
+#if KFLRL_N_LINKPAIR > 0
+    kflrl_link_pairs_clear_(h, e);
 #endif
     h->episode[e] = ep;
     h->steps[e]   = 0;
@@ -1480,6 +1576,9 @@ static void kflrl_free_handle_(K26RlEnv *h)
     free(h->link_qh);
     free(h->link_qn);
     free(h->link_over);
+#endif
+#if KFLRL_N_LINKPAIR > 0
+    free(h->lpair);
 #endif
 #if KFLRL_N_EFFECTOR > 0
     free(h->eng);
@@ -1762,6 +1861,18 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
         kflrl_free_handle_(h);
         return K26RL_E_INTERNAL;
     }
+#endif
+#if KFLRL_N_LINKPAIR > 0
+    h->lpair = (KflrlLinkPair *)calloc(
+        (size_t)n_envs * KFLRL_N_LINKPAIR, sizeof(KflrlLinkPair));
+    if (!h->lpair) {
+        kflrl_free_handle_(h);
+        return K26RL_E_INTERNAL;
+    }
+    /* The world prefix below reaches its first episode without going
+     * through a reset, so the record a reset leaves is written here
+     * as well: a fresh handle reports what a reset one does. */
+    for (uint32_t e = 0; e < n_envs; e++) kflrl_link_pairs_clear_(h, e);
 #endif
 #if KFLRL_N_EFFECTOR > 0
     h->eng = (KflrlEng *)calloc(n_envs, sizeof(KflrlEng));
@@ -3460,6 +3571,49 @@ extern "C" int32_t k26rl_env_actuators(const K26RlEnv *h, double *out,
             o[9] = d->max_thrust;
         }
 #endif
+    }
+    return (int32_t)need;
+#endif
+}
+
+/* The datalink getter reports what each transmitter's latest
+ * broadcast decided and when an offer of one last reached the
+ * receiver, per the header's contract. Both are recorded where they
+ * happen, inside the transfer pass, so nothing here re-prices a
+ * budget or re-solves an arrival; the decibel margin is formed here
+ * from the recorded ratio and the transmitter's declared threshold,
+ * which is a logarithm the stepping path has no use for. */
+extern "C" int32_t k26rl_env_datalinks(const K26RlEnv *h, double *out,
+                                       uint32_t capacity)
+{
+    if (!h) return -(int32_t)K26RL_E_NULL;
+    if (!kflrl_live_(h)) return -(int32_t)K26RL_E_USE_AFTER_DESTROY;
+#if KFLRL_N_LINKPAIR <= 0
+    (void)out; (void)capacity;
+    return 0;
+#else
+    uint64_t need = (uint64_t)h->n_envs * (uint32_t)KFLRL_N_LINKPAIR * 5u;
+    if (need > 0x7FFFFFFFu) return -(int32_t)K26RL_E_GEOMETRY;
+    if (capacity < need) return (int32_t)need;
+    if (!out) return -(int32_t)K26RL_E_NULL;
+    for (uint32_t e = 0; e < h->n_envs; e++) {
+        const double *payp = KFLRL_PAYP(h, e);
+        double now = h->info_t[e];
+        double *o = out + (size_t)e * (uint32_t)KFLRL_N_LINKPAIR * 5;
+        for (int p = 0; p < KFLRL_N_LINKPAIR; p++, o += 5) {
+            const KflrlLinkPair *lp =
+                &h->lpair[(size_t)e * KFLRL_N_LINKPAIR + p];
+            int tx = kflrl_lpair_tx_[p];
+            int rx = kflrl_lpair_rx_[p];
+            const double *pp = payp + (size_t)kflrl_link_pay_[tx]
+                                    * KFLRL_PAY_NPARAM;
+            o[0] = (double)kflrl_vehicle_body_[kflrl_link_veh_[tx]];
+            o[1] = (double)kflrl_vehicle_body_[kflrl_link_veh_[rx]];
+            o[2] = lp->closed ? 1.0 : 0.0;
+            o[3] = kflrl_link_margin_db_(lp->snr,
+                                         pp[KFLRL_LINK_THRESHOLD]);
+            o[4] = lp->arrival < 0.0 ? -1.0 : now - lp->arrival;
+        }
     }
     return (int32_t)need;
 #endif

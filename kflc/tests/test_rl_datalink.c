@@ -1849,6 +1849,372 @@ static void gate_determinism_(void)
     }
 }
 
+/* ---- The datalink getter, at ABI minor 7 ---------------------------- */
+
+/* The commit this getter was built from, whose compiler and surface
+ * header are the witness for the two arms below: what the record
+ * changed about a run (nothing), and what an artifact from before it
+ * reports (minor 6, and no such symbol). */
+#define GETTER_BASE_COMMIT "7aaad1a"
+
+/* Two members and nothing else: no detection payload, no third craft,
+ * and each carrier tracking the other so the offers a broadcast makes
+ * have somewhere to land. The radios are deliberately unequal, because
+ * a link budget is the transmitter's own: at one separation the strong
+ * member's broadcast closes and the weak member's does not, which is
+ * one pair inside the threshold and one beyond it in a world of two
+ * craft.
+ *
+ * `nudge` moves the first craft along the separation, so two
+ * environments driven differently hold different ranges and a getter
+ * reporting one environment's record at another's slot would say so. */
+#define GET_HEAD \
+    "form DL_GET\n" \
+    "fn world w\n" \
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n" \
+    "    astro_body drone_1 assembly=\"calibration_box.k26asm\"" \
+    " parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0" \
+    " vel_y=7546.0 vel_z=0.0 quat_w=1.0\n" \
+    "    astro_body drone_2 assembly=\"calibration_box.k26asm\"" \
+    " parent=earth pos_x=7.0e6 pos_y=3.0e4 pos_z=0.0 vel_x=0.0" \
+    " vel_y=7546.0 vel_z=0.0 quat_w=1.0\n" \
+    "    astro_payload pic1 body=drone_1 kind=infostate history=1024\n" \
+    "    astro_payload pic2 body=drone_2 kind=infostate history=1024\n"
+
+#define GET_TAIL \
+    "    episode\n" \
+    "        control_dt 0.5\n" \
+    "        substeps 1\n" \
+    "        horizon 12\n" \
+    "    end\n" \
+    "    action nudge box -1000.0 1000.0 default 0.0\n" \
+    "    on_step\n" \
+    "        drone_1.vel_y = drone_1.vel_y + nudge\n" \
+    "    end\n" \
+    "    observe track pic1 of drone_2 as trk1\n" \
+    "    observe track pic2 of drone_1 as trk2\n" \
+    "    objective\n" \
+    "        reward trk1_valid + trk2_valid\n" \
+    "    end\n" \
+    "end\n" \
+    "end\n"
+
+/* The transmitter's own copy of the radio keys, scaled in power. The
+ * weak member carries a millionth of the strong member's transmitter
+ * and nothing else different, so the pair that fails is the pair whose
+ * transmitter cannot reach and not a pair with a different threshold
+ * to meet. */
+#define GET_RATE_HZ  1.0
+#define GET_DT       0.5
+#define GET_WEAK_TX  2.0e-6
+
+static void get_world_(char *out, size_t cap)
+{
+    double weak[K_COUNT];
+    char strong_s[1024], weak_s[1024];
+    int n;
+
+    for (int i = 0; i < K_COUNT; i++) weak[i] = RADIO_[i];
+    weak[K_P_TX] = GET_WEAK_TX;
+    radio_str_(strong_s, sizeof strong_s, RADIO_);
+    radio_str_(weak_s, sizeof weak_s, weak);
+    n = snprintf(out, cap,
+        "%s"
+        "    astro_payload link1 body=drone_1 kind=datalink"
+        " network=swarm_a rate_hz=%.17g %s\n"
+        "    astro_payload link2 body=drone_2 kind=datalink"
+        " network=swarm_a rate_hz=%.17g %s\n"
+        "%s", GET_HEAD, GET_RATE_HZ, strong_s, GET_RATE_HZ, weak_s,
+        GET_TAIL);
+    ASSERT((size_t)n < cap);
+}
+
+/* The separation of the two carriers in one environment, from the body
+ * getter, which is the range the budget is priced over. */
+static double get_range_(const RlSurface *s, K26RlEnv *env, uint32_t envs,
+                         uint32_t e)
+{
+    double b[64];
+    int32_t need = s->bodies(env, K26RL_BODY_REF_ORIGIN, NULL, 0);
+
+    ASSERT(need > 0 && (size_t)need <= sizeof b / sizeof b[0]);
+    ASSERT(s->bodies(env, K26RL_BODY_REF_ORIGIN, b, (uint32_t)need) == need);
+    ASSERT(need == (int32_t)(envs * 3u * 6u));
+    {
+        const double *p = b + (size_t)e * 3 * 6;
+        double dx = p[6] - p[12], dy = p[7] - p[13], dz = p[8] - p[14];
+        return sqrt(dx * dx + dy * dy + dz * dz);
+    }
+}
+
+/* The broadcast schedule the design fixes, derived here rather than
+ * read from the artifact: the cadence names instants at k / rate, each
+ * takes effect at the first sub-advance boundary at or after it, and at
+ * most one broadcast leaves per boundary, so several instants falling
+ * inside one boundary's interval still broadcast once. */
+static int get_broadcasts_(int step_index, double *now_out, int64_t *count)
+{
+    double now = GET_DT * (double)(step_index + 1);
+
+    *now_out = now;
+    if (now < (double)*count / GET_RATE_HZ)
+        return 0;
+    {
+        int64_t passed = (int64_t)floor(now * GET_RATE_HZ) + 1;
+        if (passed > *count) *count = passed;
+    }
+    return 1;
+}
+
+static void gate_getter_(void)
+{
+    static char src[16384];
+    void *so;
+    RlSurface s;
+    K26RlEnv *env = NULL;
+    const uint32_t ENVS = 2;
+    double buf[64] = { 0.0 }, prev[64] = { 0.0 };
+    int32_t need;
+
+    get_world_(src, sizeof src);
+    rl_write_file_(WORK_DIR "/getter.kfl", src);
+    rl_compile_(WORK_DIR "/getter.kfl", WORK_DIR "/getter", WORK_DIR);
+    so = rl_dlopen_(WORK_DIR "/getter.rlenv.so");
+    rl_resolve_surface_(so, &s);
+    ASSERT(s.abi_version() == K26RL_ABI_VERSION);
+    if (s.datalinks == NULL) {
+        fprintf(stderr, "FAIL: an artifact at ABI %08x carries no "
+                "k26rl_env_datalinks\n", s.abi_version());
+        exit(1);
+    }
+    g_arms++;
+    printf("  a program declaring a datalink and no detection payload "
+           "compiles, and the artifact reports ABI %u.%u with the "
+           "getter\n", s.abi_version() >> 16, s.abi_version() & 0xFFFFu);
+
+    ASSERT(s.create(23u, ENVS, &env) == K26RL_OK);
+
+    /* Sizing and refusals, the surface's own convention: two
+     * environments and two ordered pairs of one network, five doubles
+     * each. */
+    need = s.datalinks(env, NULL, 0);
+    ASSERT(need == (int32_t)(ENVS * 2u * 5u));
+    for (int i = 0; i < need; i++) buf[i] = -777.0;
+    ASSERT(s.datalinks(env, buf, (uint32_t)need - 1) == need);
+    for (int i = 0; i < need; i++) ASSERT(buf[i] == -777.0);
+    ASSERT(s.datalinks(env, NULL, (uint32_t)need) ==
+           -(int32_t)K26RL_E_NULL);
+
+    /* Before any step: the two ordered pairs of the community, in the
+     * transmitters' declaration order, each naming the bodies its two
+     * carriers bind; nothing closed, nothing priced, nothing arrived. */
+    ASSERT(s.datalinks(env, buf, (uint32_t)need) == need);
+    for (uint32_t e = 0; e < ENVS; e++) {
+        const double *a = buf + (size_t)e * 10;
+        ASSERT(a[0] == 1.0 && a[1] == 2.0);
+        ASSERT(a[5] == 2.0 && a[6] == 1.0);
+        for (int p = 0; p < 2; p++) {
+            ASSERT(a[p * 5 + 2] == 0.0);
+            ASSERT(a[p * 5 + 3] == -HUGE_VAL);
+            ASSERT(a[p * 5 + 4] < 0.0);
+        }
+    }
+    g_arms++;
+    printf("  sizing, refusals, the two ordered pairs in declaration "
+           "order, and the record a reset leaves: OK\n");
+
+    /* The run. Environment 0 is driven along the separation and
+     * environment 1 is not, so the two hold different ranges. */
+    {
+        double act[2] = { 500.0, 0.0 };
+        int64_t count[2] = { 0, 0 };
+        double arrival[2] = { -1.0, -1.0 };
+        double pending[2][8];
+        int n_pend[2] = { 0, 0 };
+        double margin_seen[2] = { 0.0, 0.0 };
+        int broadcasts = 0, aged = 0, held = 0;
+
+        for (int k = 0; k < 8; k++) {
+            memcpy(prev, buf, sizeof buf);
+            ASSERT(s.step(env, act) == K26RL_OK);
+            ASSERT(s.datalinks(env, buf, (uint32_t)need) == need);
+            for (uint32_t e = 0; e < ENVS; e++) {
+                const double *a = buf + (size_t)e * 10;
+                const double *b = prev + (size_t)e * 10;
+                double range = get_range_(&s, env, ENVS, e);
+                double snr = friis_snr_(RADIO_, range);
+                double want = 10.0 * log10(snr / RADIO_[K_THR]);
+                double now = 0.0;
+                int fired = get_broadcasts_(k, &now, &count[e]);
+
+                /* The strong member closes at every broadcast, the
+                 * first sub-advance boundary included, so the flag
+                 * stands from the first step. The weak member's budget
+                 * is the same relation with a millionth of the power,
+                 * so its margin is the strong one's less sixty
+                 * decibels and it closes at no range in this world. */
+                ASSERT(a[2] == 1.0);
+                ASSERT(a[7] == 0.0);
+                if (fired) {
+                    double weak_want = want + 10.0 * log10(GET_WEAK_TX
+                                                           / RADIO_[K_P_TX]);
+                    if (fabs(a[3] - want) > 1.0e-9 * fabs(want)) {
+                        fprintf(stderr, "FAIL: env %u step %d reports a "
+                                "margin of %.17g against %.17g computed "
+                                "here\n", e, k + 1, a[3], want);
+                        exit(1);
+                    }
+                    if (fabs(a[8] - weak_want) > 1.0e-9 * fabs(weak_want)) {
+                        fprintf(stderr, "FAIL: env %u step %d reports the "
+                                "weak member's margin as %.17g against "
+                                "%.17g\n", e, k + 1, a[8], weak_want);
+                        exit(1);
+                    }
+                    margin_seen[e] = a[3];
+                    if (e == 0) broadcasts++;
+                    ASSERT(n_pend[e] < 8);
+                    pending[e][n_pend[e]++] = now + range / K26A_C;
+                } else {
+                    /* No broadcast on this boundary, so the record is
+                     * the last one's, bit for bit. A getter pricing
+                     * the budget at the time of the call would move
+                     * here, the craft having moved. */
+                    ASSERT(a[3] == b[3] && a[8] == b[8]);
+                    if (e == 0) held++;
+                }
+                /* The arrivals, first in and first out, at the instant
+                 * the light time fixes. */
+                {
+                    int taken = 0;
+                    double now2 = GET_DT * (double)(k + 1);
+                    while (taken < n_pend[e] && pending[e][taken] <= now2)
+                        arrival[e] = pending[e][taken++];
+                    if (taken) {
+                        for (int q = taken; q < n_pend[e]; q++)
+                            pending[e][q - taken] = pending[e][q];
+                        n_pend[e] -= taken;
+                    }
+                }
+                {
+                    double want_age = arrival[e] < 0.0
+                                      ? -1.0
+                                      : GET_DT * (double)(k + 1) - arrival[e];
+                    if (fabs(a[4] - want_age) > 1.0e-9) {
+                        fprintf(stderr, "FAIL: env %u step %d reports an "
+                                "age of %.17g against %.17g derived from "
+                                "the declared cadence\n", e, k + 1, a[4],
+                                want_age);
+                        exit(1);
+                    }
+                    if (e == 0 && want_age > GET_DT) aged++;
+                }
+                /* The pair the other way round never closes, so no
+                 * offer is ever built for it and its age says so for
+                 * the whole run. */
+                ASSERT(a[9] < 0.0);
+            }
+            /* The two environments hold their own records: driven and
+             * undriven, their ranges differ and so do their margins. */
+            if (k >= 2) {
+                ASSERT(margin_seen[0] != margin_seen[1]);
+            }
+        }
+        ASSERT(broadcasts > 0 && held > 0 && aged > 0);
+        printf("    %d broadcast steps, %d steps holding the last "
+               "broadcast's figures, %d steps aged past the control "
+               "period\n", broadcasts, held, aged);
+        g_arms++;
+        printf("  closure, margin and age against hand Friis figures and "
+               "the declared cadence, on both pairs and both "
+               "environments: OK\n");
+        g_arms++;
+        printf("  two environments driven differently report their own "
+               "margins at their own slots: %.6f dB against %.6f dB\n",
+               margin_seen[0], margin_seen[1]);
+    }
+
+    s.destroy(env);
+    dlclose(so);
+}
+
+/* The getter records what the transfer decides and the transfer reads
+ * none of it, so a run must record what it recorded before the getter
+ * existed. The witness is the compiler and the surface header from the
+ * commit this work started at, which is also the artifact the viewer's
+ * absence arm needs: it reports minor 6 and exports no such symbol. */
+static void gate_getter_identity_(void)
+{
+    static char src[16384];
+    char radio[1024];
+    char cmd[2048];
+
+    if (!rl_base_build_(GETTER_BASE_COMMIT, WORK_DIR)) {
+        printf("  SKIP: the base commit " GETTER_BASE_COMMIT " is not in "
+               "this checkout's history, so the datalink getter has no "
+               "witness to be compared against\n");
+        return;
+    }
+    /* The world the behaviour arms above are built on, rather than the
+     * getter arm's own: it carries a detection payload, and the base
+     * compiler needs one to reach the link kernel's constants at all,
+     * which is the defect this work found and fixed beside the getter. */
+    radio_str_(radio, sizeof radio, RADIO_);
+    dl_world_(src, sizeof src, 3.0e4, "0.0", "10.0", "10.0", radio,
+              "swarm_a", 1);
+    rl_write_file_(WORK_DIR "/gbase.kfl", src);
+    /* The version travels in the spec blob and the spec blob is
+     * recorded, so the byte comparison is made between two artifacts
+     * compiled against one header: what differs between them is the
+     * emitted code, which is what the record was added to. */
+    rl_base_compile_(WORK_DIR, WORK_DIR "/gbase.kfl", WORK_DIR "/gbase", 0);
+    rl_compile_(WORK_DIR "/gbase.kfl", WORK_DIR "/gnow", WORK_DIR);
+
+    /* The same compiler against its own header, which is the artifact
+     * a consumer met before this minor existed. */
+    {
+        void *so;
+        RlSurface s;
+        rl_base_compile_(WORK_DIR, WORK_DIR "/gbase.kfl",
+                         WORK_DIR "/g16", 1);
+        so = rl_dlopen_(WORK_DIR "/g16.rlenv.so");
+        rl_resolve_surface_(so, &s);
+        if (s.abi_version() != 0x00010006u || s.datalinks != NULL) {
+            fprintf(stderr, "FAIL: the artifact built at "
+                    GETTER_BASE_COMMIT " reports ABI %08x and %s the "
+                    "getter, so it is not the witness this arm needs\n",
+                    s.abi_version(), s.datalinks ? "carries" : "lacks");
+            exit(1);
+        }
+        dlclose(so);
+        g_arms++;
+        printf("  the compiler at " GETTER_BASE_COMMIT " builds an "
+               "artifact reporting ABI 1.6 and exporting no datalink "
+               "getter\n");
+    }
+
+    for (int i = 0; i < 2; i++) {
+        const char *stem = i ? "gnow" : "gbase";
+        snprintf(cmd, sizeof cmd,
+                 WORK_DIR "/%s --seed 909 --envs 2 --episodes 2 --out "
+                 WORK_DIR "/%s.k26ep > " WORK_DIR "/%s.log 2>&1",
+                 stem, stem, stem);
+        rl_run_or_die_(cmd);
+    }
+    if (!rl_files_equal_(WORK_DIR "/gbase.k26ep", WORK_DIR "/gnow.k26ep")) {
+        fprintf(stderr, "FAIL: a world with a datalink records different "
+                "bytes than it did before the getter's record existed\n");
+        exit(1);
+    }
+    {
+        struct stat st;
+        ASSERT(stat(WORK_DIR "/gnow.k26ep", &st) == 0);
+        g_arms++;
+        printf("  a datalink world records what the compiler at "
+               GETTER_BASE_COMMIT " recorded, byte for byte (%lld "
+               "bytes)\n", (long long)st.st_size);
+    }
+}
+
 int main(void)
 {
     rl_run_or_die_("rm -rf " WORK_DIR " && mkdir -p " WORK_DIR);
@@ -1879,6 +2245,8 @@ int main(void)
     gate_one_generator_();
     gate_tie_();
     gate_determinism_();
+    gate_getter_();
+    gate_getter_identity_();
 
     printf("test_rl_datalink: %d arm(s) passed\n", g_arms);
     return 0;

@@ -70,6 +70,7 @@ static int write_rl_exports_map(const char *path)
         "k26rl_env_bodies",
         "k26rl_env_attitudes",
         "k26rl_env_actuators",
+        "k26rl_env_datalinks",
         NULL
     };
     FILE *f = fopen(path, "w");
