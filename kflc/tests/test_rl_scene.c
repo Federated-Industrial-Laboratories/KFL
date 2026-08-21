@@ -59,6 +59,11 @@
 #include "k26rl_episode.h"
 
 #define WORK_DIR "/tmp/kflc_rl_scene_test"
+
+/* The arms this run actually made. Printed at the end rather than a
+ * figure typed beside them, so an arm stood down for want of history,
+ * or one lost to an edit, changes the number the suite reports. */
+static int g_arms;
 #define VIEWER "../tools/k26rl_view/k26rl_view"
 
 /* The fixture's own numbers, in one place so an arm cannot disagree
@@ -158,6 +163,10 @@ static const char *const DRIVE_KFL =
  * and in the arm that holds the reported age against it. */
 #define LINK_RATE_S "1.0"
 
+/* The moving arm drives to the fixture's horizon, so the episode it
+ * records closes and the dump can address it. */
+#define MOVE_STEPS 8
+
 #define LINK_RADIO \
     " g_tx_db=3.0 g_rx_db=3.0 freq_hz=2.2e9 loss_sys_db=2.0" \
     " bandwidth_hz=1.0e6 t_sys_k=500.0 noise_figure=2.0" \
@@ -188,7 +197,7 @@ static const char *const LINK_KFL =
     "        substeps 1\n"
     "        horizon 8\n"
     "    end\n"
-    "    action nudge box -1.0 1.0 default 0.0\n"
+    "    action nudge box -4.0e4 4.0e4 default 0.0\n"
     "    on_step\n"
     "        drone_1.vel_x = drone_1.vel_x + nudge\n"
     "    end\n"
@@ -862,6 +871,7 @@ int main(void)
         /* The arm's own credibility: the wrong basis it compared
          * against has to actually disagree on this fixture. */
         ASSERT(worst_wrong > 100.0 * NDC_TOL);
+        g_arms++;
         printf("gate 1: %d projected vertices over two bodies at two poses"
                " equal the derived coordinate, worst %.3g, a transposed"
                " basis differing by at least %.3g: OK\n",
@@ -924,6 +934,7 @@ int main(void)
             }
         }
         ASSERT(closest_wrong > 100.0 * NDC_TOL);
+        g_arms++;
         printf("gate 2: the non-symmetric craft at a %.1f degree attitude"
                " projects as position times rotation, worst %.3g; the"
                " inverse rotation and the wrong composition order differ"
@@ -994,6 +1005,7 @@ int main(void)
         ASSERT(za2 > zb2);
         ASSERT(fabs(za - zb) > 1.0e-9);
         ASSERT(fabs(za2 - zb2) > 1.0e-9);
+        g_arms++;
         printf("gate 3: depth orders %.9f before %.9f from one side and"
                " %.9f after %.9f from the other: OK\n", za, zb, za2, zb2);
     }
@@ -1043,6 +1055,7 @@ int main(void)
             drawn_front += segment_drawn_(scene, K, STEP, it, v);
         ASSERT(drawn_behind == 0);
         ASSERT(drawn_front == (int)nseg && nseg > 0);
+        g_arms++;
         printf("gate 4: the body behind the eye has every vertex flagged"
                " and %d of its segments drawn; the body in front has %d of"
                " %u drawn: OK\n", drawn_behind, drawn_front, nseg);
@@ -1086,6 +1099,7 @@ int main(void)
             drawn_front += segment_drawn_(scene, K, STEP, it, v);
         ASSERT(drawn_behind == 0);
         ASSERT(drawn_front == (int)nseg && nseg > 0);
+        g_arms++;
         printf("gate 4: under an orthographic projection, where every clip"
                " w is one, the body behind the eye is still flagged and"
                " still not drawn: OK\n");
@@ -1202,6 +1216,7 @@ int main(void)
             }
         }
         ASSERT(worst_world > 100.0 * NDC_TOL);
+        g_arms++;
         printf("gate 5: %d vertices agree across a %.0f km translation of"
                " the whole scene, worst %.3g; narrowing before the"
                " subtraction would move them by up to %.3g: OK\n",
@@ -1280,6 +1295,7 @@ int main(void)
             ASSERT(other == 0);
             free(scene);
             scene = NULL;
+            g_arms++;
             printf("gate 6: `%s` alone yields %d element(s) of that kind"
                    " and none of any other: OK\n", names[j], present);
         }
@@ -1317,6 +1333,7 @@ int main(void)
             }
             free(scene);
             scene = NULL;
+            g_arms++;
             printf("gate 6: every element off yields an empty scene and"
                    " every element on names all %d: OK\n", n_names);
         }
@@ -1395,6 +1412,7 @@ int main(void)
         ASSERT(strstr(scene, "scene_shading 0 ") != NULL);
         free(scene);
         scene = NULL;
+        g_arms++;
         printf("gate 7: shading is off by default, and on it gives %u faces"
                " with intensities spanning %.3f to %.3f, carrying the"
                " statement that it is a depth cue and not an illumination"
@@ -1428,6 +1446,7 @@ int main(void)
         ASSERT(element_index_(scene, K, STEP, "axes", "chaser") >= 0);
         free(scene);
         scene = NULL;
+        g_arms++;
         printf("gate 8: an asset whose bytes are not the recording's draws"
                " no wireframe, no collider, no port and no thruster, and"
                " the axes are still drawn: OK\n");
@@ -1448,6 +1467,7 @@ int main(void)
         ASSERT(strstr(scene, "declares no mesh") != NULL);
         free(scene);
         scene = NULL;
+        g_arms++;
         printf("gate 8: an assembly with no mesh draws its collider outline"
                " and its axes and the scene says so: OK\n");
     }
@@ -1506,9 +1526,11 @@ int main(void)
             ASSERT(memcmp(a, b, na) == 0);
             free(a);
             free(b);
+            g_arms++;
             printf("gate 9: the recording's %u bytes are unchanged by every"
                    " run above: OK\n", (unsigned)na);
         }
+        g_arms++;
         printf("gate 9: the scene at full and the scene off leave every"
                " other panel's %u bytes identical, the reconstruction"
                " bitwise equal, and two identical runs byte for byte the"
@@ -1529,6 +1551,7 @@ int main(void)
             b_lines = lines_with_(on, "resim");
             ASSERT(strlen(a_lines) > 0);
             ASSERT(strcmp(a_lines, b_lines) == 0);
+            g_arms++;
             printf("gate 9: the re-simulation panel's %u bytes are the same"
                    " with the scene never built and with it built at full:"
                    " OK\n", (unsigned)strlen(a_lines));
@@ -1561,6 +1584,7 @@ int main(void)
             o_lines = lines_with_(only, "scene_vertex");
             ASSERT(strlen(o_lines) > 0);
             ASSERT(strcmp(t_lines, o_lines) == 0);
+            g_arms++;
             printf("gate 9: the scene in a body's frame projects the same"
                    " %u bytes alone and after every other panel has asked"
                    " for the world origin: OK\n", (unsigned)strlen(o_lines));
@@ -1652,6 +1676,7 @@ int main(void)
                 ASSERT(present > 0);
                 ASSERT(other == 0);
                 free(dump);
+                g_arms++;
                 printf("gate 10: `%s` alone on the firing step yields %d"
                        " element(s) of that kind and none of any other:"
                        " OK\n", dyn[dj], present);
@@ -1692,6 +1717,7 @@ int main(void)
             ASSERT(forces == 0);
             ASSERT(spins > 0);
             free(dump);
+            g_arms++;
             printf("gate 10: the coasting step carries no force element"
                    " and keeps its spin element: OK\n");
         }
@@ -1791,6 +1817,7 @@ int main(void)
          * offer arrived on. */
         ASSERT(rf.age_s > 0.0 && rf.age_s < 1.0 / atof(LINK_RATE_S));
         ASSERT(rf.drawn == 1);
+        g_arms++;
         printf("gate 11: the closed pair draws one line from %s to %s at "
                "a margin of %.3f dB and %.6f s since it reached the "
                "receiver, and the pair the other way draws nothing: OK\n",
@@ -1829,6 +1856,7 @@ int main(void)
         ASSERT(rl.age_s == rs.age_s);
         ASSERT(fabs(rl.fade - (1.0 - rl.age_s / SLOW_S)) < 1.0e-12);
         ASSERT(rl.fade > 0.0 && rl.drawn == 1);
+        g_arms++;
         printf("gate 11: at %.6f s since the broadcast reached it, the "
                "line fades to %.4f over a declared %.2f s and is not "
                "drawn, and to %.4f over %.2f s and is: OK\n",
@@ -1857,6 +1885,7 @@ int main(void)
                 ASSERT(atoi(p) == 0);
             }
             free(off);
+            g_arms++;
             printf("gate 11: the element toggled off leaves the scene "
                    "empty and the dump says the toggle is off: OK\n");
         }
@@ -1892,6 +1921,7 @@ int main(void)
                 char *b = slurp_(WORK_DIR "/link.k26epi", &nb);
                 ASSERT(na == nb);
                 ASSERT(memcmp(a, b, na) == 0);
+                g_arms++;
                 printf("gate 11: the recording's %u bytes are unchanged by "
                        "every run above, and every other panel's %u bytes "
                        "are identical with the link lines drawn and with "
@@ -1911,10 +1941,12 @@ int main(void)
          * the surface header from before the getter existed. The
          * viewer says the getter is missing rather than drawing
          * nothing and leaving a reader to guess why. */
+        /* The helper fails this suite on absent history unless it is
+         * stood down by request, in which case it says so and the arm
+         * count below reports one arm fewer. */
         if (!rl_base_build_(LINK_BASE_COMMIT, WORK_DIR)) {
-            printf("gate 11: SKIP: the base commit " LINK_BASE_COMMIT
-                   " is not in this checkout's history, so the absent "
-                   "getter has no artifact to be reported on\n");
+            printf("gate 11: the absence arm is stood down; the arm "
+                   "count below is one short of a full run\n");
         } else {
             char *old;
             const char *msg;
@@ -1959,17 +1991,134 @@ int main(void)
                 free(now);
             }
             free(old);
+            g_arms++;
             printf("gate 11: an artifact at ABI 1.6 draws no link lines "
                    "and the scene says the getter is missing, which an "
                    "artifact carrying it does not: OK\n");
         }
-#undef LINK_CAM
+
+        /* A declared duration at or below nought is no fading at all,
+         * which is the convention the other scale flags already hold
+         * to: none of them is refused and each is taken as written.
+         * The arm states it rather than leaving it to be discovered:
+         * the same step that fades to nothing over three quarters of
+         * a second draws at full over a negative one. */
+        {
+            char *neg;
+            LinkRecord rn;
+            snprintf(lsel, sizeof lsel,
+                     "--dump scene --episode 0 --steps %u:%u --elements "
+                     "datalink --link-fade-seconds -1.0" LINK_CAM
+                     LINK_ART WORK_DIR "/link.k26epi", STALE, STALE + 1);
+            run_viewer_(lsel, WORK_DIR "/g11f.txt");
+            neg = slurp_(WORK_DIR "/g11f.txt", NULL);
+            ASSERT(link_record_(neg, 0, STALE, &rn));
+            ASSERT(rn.age_s == rs.age_s);
+            ASSERT(rn.fade == 1.0 && rn.drawn == 1);
+            free(neg);
+            g_arms++;
+            printf("gate 11: a declared fade duration below nought is no "
+                   "fading: the step that vanished over 0.75 s draws at "
+                   "full strength: OK\n");
+        }
 #undef LINK_ART
+    }
+
+    /* ---- gate 11, the element in motion ----------------------------- *
+     *
+     * Every arm above sits on a pair that is closed at every step, so
+     * a viewer that drew a line for every pair it was handed would
+     * pass all of them. This one drives the separation out past the
+     * range the declared budget closes at and back, records it, and
+     * holds the drawn element against the closure flag the artifact
+     * itself reports at each step: a line where the flag is 1, none at
+     * all where it is 0, which is the element's whole statement. */
+    {
+        static char src[16384];
+        char lsel[1024];
+        void *mso;
+        RlSurface ms;
+        K26RlEnv *menv = NULL;
+        double buf[16];
+        int32_t need;
+        int flags[MOVE_STEPS];
+        int closed = 0, open = 0;
+
+        {
+            /* The moving fixture is the link fixture with the drift
+             * commanded outright rather than accumulated, so a step's
+             * separation is decided by the action alone. */
+            /* The craft are separated along the second axis, so the
+             * drift is commanded there: the fixture's own poke is
+             * along the first and moves them barely at all. */
+            static const char *const OLD =
+                "        drone_1.vel_x = drone_1.vel_x + nudge\n";
+            static const char *const NEW =
+                "        drone_1.vel_y = 7546.0 + nudge";
+            char *p;
+            snprintf(src, sizeof src, "%s", LINK_KFL);
+            p = strstr(src, OLD);
+            ASSERT(p != NULL);
+            ASSERT(strlen(NEW) < strlen(OLD));
+            memset(p, ' ', strlen(OLD) - 1);
+            memcpy(p, NEW, strlen(NEW));
+        }
+        rl_write_file_(WORK_DIR "/moving.kfl", src);
+        rl_compile_(WORK_DIR "/moving.kfl", WORK_DIR "/moving", WORK_DIR);
+        mso = rl_dlopen_(WORK_DIR "/moving.rlenv.so");
+        rl_resolve_surface_(mso, &ms);
+        ASSERT(ms.datalinks != NULL);
+        ASSERT(ms.create(41u, 1u, &menv) == K26RL_OK);
+        ASSERT(ms.output(menv, WORK_DIR "/moving.k26epi") == K26RL_OK);
+        need = ms.datalinks(menv, NULL, 0);
+        ASSERT(need == 2 * 5);
+        for (int k = 0; k < MOVE_STEPS; k++) {
+            double act[1] = { k < 5 ? -40000.0 : 40000.0 };
+            ASSERT(ms.step(menv, act) == K26RL_OK);
+            ASSERT(ms.datalinks(menv, buf, (uint32_t)need) == need);
+            flags[k] = buf[2] == 1.0;
+            if (flags[k])
+                closed++;
+            else
+                open++;
+        }
+        ms.destroy(menv);
+        dlclose(mso);
+        /* The recording has to hold both, or the arm below compares
+         * one thing with itself. */
+        ASSERT(closed > 0 && open > 0);
+
+        snprintf(lsel, sizeof lsel,
+                 "--dump scene --episode 0 --steps 0:%d --elements "
+                 "datalink" LINK_CAM " --artifact " WORK_DIR
+                 "/moving.rlenv.so " WORK_DIR "/moving.k26epi",
+                 MOVE_STEPS);
+        run_viewer_(lsel, WORK_DIR "/g11g.txt");
+        {
+            char *dump = slurp_(WORK_DIR "/g11g.txt", NULL);
+            for (int k = 0; k < MOVE_STEPS; k++) {
+                int drawn = element_index_(dump, 0, (unsigned)k, "datalink",
+                                           "drone_1") >= 0;
+                if (drawn != flags[k]) {
+                    fprintf(stderr, "FAIL: step %d reports closure %d and "
+                            "the scene %s a link line\n", k, flags[k],
+                            drawn ? "draws" : "draws no");
+                    exit(1);
+                }
+            }
+            free(dump);
+        }
+        g_arms++;
+        printf("gate 11: over %d steps driven out past the closure range "
+               "and back, the element follows the flag exactly: a line "
+               "on each of %d closed steps and none on each of %d open "
+               "ones: OK\n", MOVE_STEPS, closed, open);
+#undef LINK_CAM
     }
 
     free(world);
     free(att);
     free(wire);
-    printf("test_rl_scene: 11 gates passed\n");
+    printf("test_rl_scene: %d arm(s) passed over 11 gates\n", g_arms);
     return 0;
 }

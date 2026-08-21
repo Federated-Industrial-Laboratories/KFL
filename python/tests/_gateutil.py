@@ -40,6 +40,11 @@ _INCLUDE_DIRS = [
     # components' shapes, so a fixture that declares actuators on an
     # assembly reaches the collision library's headers.
     "libk26astro_coll/include",
+    # A fixture that declares a payload reaches the information
+    # state's headers, the payload base the tier's kinds are tagged
+    # from, and the kind registry itself.
+    "libk26astro_infostate/include",
+    "common/include",
 ]
 
 _LINK_LIBS = [
@@ -49,6 +54,7 @@ _LINK_LIBS = [
     "libk26astro_rt/libk26astro_rt.a",
     "libk26astro_att/libk26astro_att.a",
     "libk26astro_coll/libk26astro_coll.a",
+    "libk26astro_infostate/libk26astro_infostate.a",
     "libk26astro_vehicle/libk26astro_vehicle.a",
     "libk26astro_atmos/libk26astro_atmos.a",
     "libk26astro_grav/libk26astro_grav.a",

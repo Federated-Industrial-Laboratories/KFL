@@ -953,8 +953,10 @@ Scene scene_build(const SceneInput &in, const SceneOptions &o, uint32_t step)
      * A pair that has closed and whose first offer is still in flight
      * has no arrival to age from, and draws at full: what the line
      * asserts is the closure, and that is this instant's fact. A
-     * declared duration of nought is no fading at all, which is how a
-     * reader asks for every closed link at one strength.
+     * declared duration at or below nought is no fading at all, which
+     * is how a reader asks for every closed link at one strength; the
+     * flag is not refused for it, on the standing terms of the scale
+     * flags beside it, each of which is taken as written.
      *
      * Whether the link closed is the artifact's answer and never this
      * viewer's. Re-deriving it from the positions and the declared

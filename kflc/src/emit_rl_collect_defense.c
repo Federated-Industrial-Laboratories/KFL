@@ -648,6 +648,37 @@ int rl_finish_payloads(RlModel *m, const KflcNode *form,
             }
         }
 
+        /* The closure threshold, on the same ground as the cadence
+         * above. The threshold is the signal-to-noise ratio at which
+         * the receiver recovers the message, and the budget is
+         * compared against it. At or below zero the comparison is met
+         * by every ratio the budget can produce, a ratio of nought
+         * included, so the link would close on every member of its
+         * network at every separation and the budget beside it would
+         * decide nothing: a radio of unlimited reach, in a capability
+         * whose datalink exists to carry a physical cost and a
+         * physical delay. A distribution or an expression cannot be
+         * judged here and is not, so what can be judged is. */
+        if (py->kind == RL_PAY_DATALINK &&
+            py->attr[RL_PAY_LINK_THRESHOLD]) {
+            const char *txt =
+                rl_pay_attr_text(py->attr[RL_PAY_LINK_THRESHOLD]);
+            char *end = NULL;
+            double v = txt ? strtod(txt, &end) : 0.0;
+            if (txt && end && *end == '\0' && !(v > 0.0)) {
+                kflc_diag_errorf(diag,
+                    py->attr[RL_PAY_LINK_THRESHOLD]->line,
+                    "astro_payload `%s`: `snr_threshold=%s` is met by "
+                    "every link budget, including one of nought, so "
+                    "this datalink would close on every member of its "
+                    "network at every range; the threshold is the "
+                    "positive signal-to-noise ratio at which the "
+                    "receiver recovers the message",
+                    py->name, txt);
+                err = 1;
+            }
+        }
+
         /* D7's other half: the history capacity the library documents
          * a minimum for. The library clamps a smaller value silently;
          * a reader who has been told the minimum takes it for a

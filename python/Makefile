@@ -26,8 +26,8 @@
 # The last three cover the getters that postdate the surface's first
 # version: the tap a training host arms to watch a run, the body,
 # actuator and datalink readbacks, and the refusal an artifact too
-# old to carry one of them earns. The tap gate spawns a reader of its own and
-# needs the record library built beside the compiler.
+# old to carry one of them earns. The tap gate spawns a reader of
+# its own and needs the record library built beside the compiler.
 
 PYTHON ?= python3
 

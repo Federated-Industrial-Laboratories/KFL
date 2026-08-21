@@ -498,13 +498,20 @@ int32_t      k26rl_env_actuators(const K26RlEnv *env, double *out,
  * The margin is ten times the base-ten logarithm of the achieved
  * signal-to-noise ratio over the declared threshold, so it is zero
  * exactly at threshold, positive in closure and negative out of it.
- * Where a declaration leaves that ratio undefined the margin is the
- * limit rather than a number chosen to stand in for one: a budget the
- * link kernel makes zero of, which a non-positive declared key or a
- * zero range produces, reports negative infinity against a positive
- * threshold; a threshold at or below zero, which nothing has to beat,
- * reports positive infinity against a positive budget; the two
- * together report zero, that comparison standing exactly at it. The
+ *
+ * Two of the four quadrants of that ratio are degenerate, and both
+ * report the limit rather than a number chosen to stand in for one. A
+ * budget the link kernel makes zero of, which a zero range or a
+ * non-positive declared radio key produces, reports negative
+ * infinity: an unbounded deficit, which is what no received power at
+ * all is. A threshold at or below zero has nothing to be beaten by,
+ * so a positive budget against it reports positive infinity and a
+ * budget of zero against it reports zero, that comparison standing
+ * exactly at the threshold it was made against. A non-positive
+ * threshold is refused where it is written as a literal, since a link
+ * that closes at every range is not a link; it survives compilation
+ * only where the threshold is drawn or computed, which is the one
+ * case the two positive-infinity and zero readings arise in. The
  * closure flag is what the transfer was decided on in every case.
  *
  * The age is the seconds since an offer of a closed broadcast last
@@ -532,10 +539,12 @@ int32_t      k26rl_env_actuators(const K26RlEnv *env, double *out,
  * After a faulted step it reports what the attempted advance left,
  * which the next boundary reset discards, for the body getter's
  * reason: it reads live state rather than a cached output. After a
- * reset and before the first step it reports no closure, the
- * unbounded deficit of a budget nothing has priced, and a negative
- * age, which is what a reset leaves: nothing has been broadcast and
- * nothing has arrived. */
+ * reset and before the first step it reports no closure, a budget of
+ * nought, and a negative age, which is what a reset leaves: nothing
+ * has been broadcast and nothing has arrived. That budget reads as
+ * the unbounded deficit above for every declared threshold this
+ * compiler admits, and as zero for a drawn or computed threshold that
+ * is not positive, which is the same rule stated once. */
 int32_t      k26rl_env_datalinks(const K26RlEnv *env, double *out,
                                  uint32_t capacity);
 

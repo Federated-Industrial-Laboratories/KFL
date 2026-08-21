@@ -30,6 +30,13 @@ The arms:
   each environment's record at its own slot, and a program declaring
   no actuator at all reporting a well-formed empty set rather than
   refusing or returning something of another shape.
+* the datalink readback on a two-member network whose radios differ
+  in transmit power alone: both ordered pairs present in declaration
+  order with the bodies they join, the closure flag following the
+  budget, and the two margins separated by exactly the decibels the
+  power ratio is worth, which no other reading of the pair produces.
+  Beside it a program declaring no datalink, whose readback is an
+  empty set of the getter's own shape.
 
 Skips (77) when the built compiler, the stack archives, or gymnasium
 are absent.
@@ -131,6 +138,46 @@ end
 # Actuator kinds, as the getter's second value reports them.
 KIND_WHEEL = 0.0
 KIND_THRUSTER = 2.0
+
+# Two craft on one network, thirty kilometres apart, whose radios are
+# identical but for the transmit power: the first carries a million
+# times the second's. A link budget is linear in transmit power and
+# both pairs are priced over the same separation, so the two margins
+# differ by exactly ten decibels per decade of power and by nothing
+# else, which is a figure this gate can hold the readback against
+# without recomputing the budget itself.
+LINK_POWER_RATIO = 1.0e6
+LINK_RADIO = (" g_tx_db=3.0 g_rx_db=3.0 freq_hz=2.2e9 loss_sys_db=2.0"
+              " bandwidth_hz=1.0e6 t_sys_k=500.0 noise_figure=2.0"
+              " snr_threshold=6.0")
+
+LINK_KFL = """\
+form RL_G16LINK
+fn world w
+    astro_body earth gm=3.986004418e14 mass=5.972e24
+    astro_body drone_1 assembly="%%s/gate16_box.k26asm" parent=earth pos_x=7.0e6 pos_y=0.0 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=1.0
+    astro_body drone_2 assembly="%%s/gate16_box.k26asm" parent=earth pos_x=7.0e6 pos_y=3.0e4 pos_z=0.0 vel_x=0.0 vel_y=7546.0 vel_z=0.0 quat_w=1.0
+    astro_payload pic1 body=drone_1 kind=infostate history=1024
+    astro_payload pic2 body=drone_2 kind=infostate history=1024
+    astro_payload link1 body=drone_1 kind=datalink network=swarm_a rate_hz=1.0 p_tx_w=2.0%s
+    astro_payload link2 body=drone_2 kind=datalink network=swarm_a rate_hz=1.0 p_tx_w=2.0e-6%s
+    episode
+        control_dt 0.5
+        substeps 1
+        horizon 8
+    end
+    action nudge box -1.0 1.0 default 0.0
+    on_step
+        drone_1.vel_x = drone_1.vel_x + nudge
+    end
+    observe track pic1 of drone_2 as trk1
+    observe track pic2 of drone_1 as trk2
+    objective
+        reward trk1_valid + trk2_valid
+    end
+end
+end
+""" % (LINK_RADIO, LINK_RADIO)
 
 
 def main():
@@ -385,6 +432,87 @@ def main():
             "the empty actuator array's dtype is %r" % (empty.dtype,))
     env.close()
     print("%s: a program with no actuator reports an empty set of the "
+          "getter's own shape" % GATE)
+
+    # ---- the datalink readback ----------------------------------------
+    link_so = g.compile_fixture(
+        "gate16_link", LINK_KFL % (g.WORK, g.WORK),
+        {"gate16_box.k26asm": ACT_ASM})
+    env = K26RlVectorEnv(link_so, seed=SEED, n_envs=N_ENVS)
+    pairs = env.datalinks()
+    g.check(pairs.shape == (N_ENVS, 2, 5),
+            "datalink array shape %r, expected %r"
+            % (pairs.shape, (N_ENVS, 2, 5)))
+    g.check(pairs.dtype == np.float64,
+            "datalink array dtype %r, expected float64" % (pairs.dtype,))
+    # The two ordered pairs of the community, in the transmitters'
+    # declaration order, each naming the bodies its carriers bind. The
+    # bodies are the second and third declared, so 1 and 2.
+    for e in range(N_ENVS):
+        g.check(tuple(pairs[e, 0, 0:2]) == (1.0, 2.0)
+                and tuple(pairs[e, 1, 0:2]) == (2.0, 1.0),
+                "environment %d reports pairs %r, expected the ordered "
+                "pairs of the two bodies"
+                % (e, pairs[e, :, 0:2].tolist()))
+        # A reset leaves no closure and no arrival; the age is
+        # negative because nothing has landed, not zero, which would
+        # say something just had.
+        g.check((pairs[e, :, 2] == 0.0).all(),
+                "environment %d reports a closure before any step: %r"
+                % (e, pairs[e, :, 2]))
+        g.check((pairs[e, :, 4] < 0.0).all(),
+                "environment %d reports an age before any offer: %r"
+                % (e, pairs[e, :, 4]))
+
+    env.step(np.zeros((N_ENVS, 1), dtype=np.float64))
+    after = env.datalinks()
+    decibels = 10.0 * np.log10(LINK_POWER_RATIO)
+    for e in range(N_ENVS):
+        strong, weak = after[e, 0], after[e, 1]
+        # The budget is the transmitter's own, so at one separation
+        # the strong member closes and the weak one does not: the
+        # ordered pair is not a symmetry.
+        g.check(strong[2] == 1.0 and weak[2] == 0.0,
+                "environment %d reports closures %r, expected the "
+                "strong transmitter closed and the weak one not"
+                % (e, (strong[2], weak[2])))
+        g.check(strong[3] > 0.0 > weak[3],
+                "environment %d reports margins %r, expected one above "
+                "the threshold and one below"
+                % (e, (strong[3], weak[3])))
+        gap = strong[3] - weak[3]
+        g.check(abs(gap - decibels) < 1.0e-9,
+                "environment %d separates the two margins by %.9f dB, "
+                "expected %.9f from the power ratio alone"
+                % (e, gap, decibels))
+    print("%s: two ordered pairs of one network, the strong "
+          "transmitter closed and the weak one not, their margins "
+          "%.3f dB apart as the power ratio alone calls for"
+          % (GATE, after[0, 0, 3] - after[0, 1, 3]))
+
+    # The same surface on the single shape, which is the same handle
+    # of one environment.
+    single = K26RlEnv(link_so, seed=SEED)
+    one = single.datalinks()
+    g.check(one.shape == (1, 2, 5),
+            "the single shape's datalink array shape %r" % (one.shape,))
+    g.check((one[0, :, 0:2] == pairs[0, :, 0:2]).all(),
+            "the two shapes report different pairs for one artifact")
+    single.close()
+    env.close()
+
+    # A program declaring no datalink reports an empty set of the
+    # right shape, on the actuator readback's own terms: the body
+    # fixture above declares none.
+    env = K26RlVectorEnv(so, seed=SEED, n_envs=N_ENVS)
+    empty = env.datalinks()
+    g.check(empty.shape == (N_ENVS, 0, 5),
+            "an artifact declaring no datalink reports %r, expected %r"
+            % (empty.shape, (N_ENVS, 0, 5)))
+    g.check(empty.dtype == np.float64,
+            "the empty datalink array's dtype is %r" % (empty.dtype,))
+    env.close()
+    print("%s: a program with no datalink reports an empty set of the "
           "getter's own shape" % GATE)
 
     g.ok(GATE)

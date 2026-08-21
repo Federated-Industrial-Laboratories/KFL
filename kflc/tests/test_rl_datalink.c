@@ -591,6 +591,37 @@ static void gate_refusals_(void)
         must_refuse_("a datalink read as an information state", bad, f);
     }
 
+    /* The closure threshold a budget is compared against. At or below
+     * zero every budget meets it, a budget of nought included, so the
+     * link would close on every member of its network at every range
+     * and the physics beside it would decide nothing. Both spellings
+     * of that, and the positive form beside them: a refusal that
+     * fired on any literal would fail the third arm. */
+    {
+        static const double ZERO[] = { 0.0, -1.0 };
+        for (int i = 0; i < 2; i++) {
+            static char bad[16384];
+            double keys[K_COUNT];
+            char bad_radio[1024], frag[64], what[128];
+
+            for (int q = 0; q < K_COUNT; q++) keys[q] = RADIO_[q];
+            keys[K_THR] = ZERO[i];
+            radio_str_(bad_radio, sizeof bad_radio, keys);
+            dl_world_(bad, sizeof bad, 3.0e4, "6.0", "150.0", "10.0",
+                      bad_radio, "swarm_a", 1);
+            snprintf(frag, sizeof frag, "`snr_threshold=%.17g`", ZERO[i]);
+            {
+                const char *f[] = { "astro_payload `link1`", frag,
+                                    "close on every member of its network "
+                                    "at every range", NULL };
+                snprintf(what, sizeof what,
+                         "a closure threshold of %.17g on a datalink",
+                         ZERO[i]);
+                must_refuse_(what, bad, f);
+            }
+        }
+    }
+
     /* And the whole world as written, so the refusals above are shown
      * to be about what they name rather than about the fixture. */
     must_accept_("the two-member world the arms below are built on", src);
@@ -821,11 +852,23 @@ static void gate_base_identity_(void)
     static char src[16384];
     char cmd[2048];
 
+    /* Absent history is a failure, not a skip, on the rule the arms
+     * against an archived compiler all share: with no witness there is
+     * nothing to compare and nothing has been measured. */
     if (system("git -C .. rev-parse --verify --quiet " BASE_COMMIT
                "^{commit} > /dev/null 2>&1") != 0) {
-        printf("  SKIP: the base commit " BASE_COMMIT " is not in this "
-               "checkout's history, so the ungated form has no witness "
-               "to be compared against\n");
+        if (!getenv("KFLRL_ALLOW_NO_PRIOR")) {
+            fprintf(stderr, "FAIL: the base commit " BASE_COMMIT " is "
+                    "not in this checkout's history, so the ungated "
+                    "form has no witness and this arm has measured "
+                    "nothing. Fetch the history, or set "
+                    "KFLRL_ALLOW_NO_PRIOR to stand it down "
+                    "deliberately.\n");
+            exit(1);
+        }
+        printf("  NOT MEASURED: the base commit " BASE_COMMIT " is not "
+               "in this checkout's history and KFLRL_ALLOW_NO_PRIOR is "
+               "set, so this arm is stood down by request\n");
         return;
     }
     rl_run_or_die_("rm -rf " WORK_DIR "/base && mkdir -p "
@@ -1887,7 +1930,7 @@ static void gate_determinism_(void)
     "        substeps 1\n" \
     "        horizon 12\n" \
     "    end\n" \
-    "    action nudge box -1000.0 1000.0 default 0.0\n" \
+    "    action nudge box -4.0e4 4.0e4 default 0.0\n" \
     "    on_step\n" \
     "        drone_1.vel_y = drone_1.vel_y + nudge\n" \
     "    end\n" \
@@ -2189,6 +2232,262 @@ static void gate_getter_(void)
     dlclose(so);
 }
 
+/* ---- The margin's two degenerate readings --------------------------- *
+ *
+ * The margin is a ratio of the achieved budget to the declared
+ * threshold, and two of that ratio's quadrants are degenerate. One is
+ * reached by every program: a budget of nought against a positive
+ * threshold, which is what a reset leaves and which the arm above
+ * holds at negative infinity. The other two need a threshold that is
+ * not positive, and a literal one is refused, so they are reachable
+ * only through a drawn threshold, which is exactly what this fixture
+ * declares. With it, a budget of nought reads zero, standing exactly
+ * at the threshold it was compared against, and any budget at all
+ * reads positive infinity, there being nothing to beat.
+ *
+ * The arm exists because a decided semantics with no arm is a comment.
+ * Both readings are the header's, and a getter that returned a chosen
+ * stand-in number for either of them fails here. */
+
+static void gate_margin_limits_(void)
+{
+    static char src[16384];
+    double keys[K_COUNT];
+    char radio[1024];
+    void *so;
+    RlSurface s;
+    K26RlEnv *env = NULL;
+    double buf[16];
+    int32_t need;
+
+    for (int i = 0; i < K_COUNT; i++) keys[i] = RADIO_[i];
+    radio_str_(radio, sizeof radio, keys);
+    {
+        /* The threshold as a draw of one value, which the compiler
+         * cannot judge and does not: a run's threshold is decided at
+         * its reset and no diagnostic reaches it there. */
+        char *p = strstr(radio, "snr_threshold=");
+        ASSERT(p != NULL);
+        snprintf(p, sizeof radio - (size_t)(p - radio),
+                 "snr_threshold=uniform(-1.0,-1.0)");
+    }
+    get_world_n_(src, sizeof src, 0);
+    {
+        /* The two-member community again, both members carrying the
+         * drawn threshold, so the reading is the same on both pairs. */
+        char *tail = strstr(src, "    episode\n");
+        ASSERT(tail != NULL);
+        static char head[16384];
+        int n = snprintf(head, sizeof head, "%.*s", (int)(tail - src), src);
+        n += snprintf(head + n, sizeof head - (size_t)n,
+            "    astro_payload link1 body=drone_1 kind=datalink"
+            " network=swarm_a rate_hz=%.17g %s\n"
+            "    astro_payload link2 body=drone_2 kind=datalink"
+            " network=swarm_a rate_hz=%.17g %s\n%s",
+            GET_RATE_HZ, radio, GET_RATE_HZ, radio, tail);
+        ASSERT((size_t)n < sizeof head);
+        snprintf(src, sizeof src, "%s", head);
+    }
+    rl_write_file_(WORK_DIR "/drawnthr.kfl", src);
+    rl_compile_(WORK_DIR "/drawnthr.kfl", WORK_DIR "/drawnthr", WORK_DIR);
+    so = rl_dlopen_(WORK_DIR "/drawnthr.rlenv.so");
+    rl_resolve_surface_(so, &s);
+    ASSERT(s.datalinks != NULL);
+    ASSERT(s.create(37u, 1u, &env) == K26RL_OK);
+    need = s.datalinks(env, NULL, 0);
+    ASSERT(need == 2 * 5);
+
+    /* Before any step: no budget has been priced and the threshold is
+     * not positive, so the comparison stands exactly at it. */
+    ASSERT(s.datalinks(env, buf, (uint32_t)need) == need);
+    for (int p = 0; p < 2; p++) {
+        if (buf[p * 5 + 3] != 0.0 || buf[p * 5 + 2] != 0.0) {
+            fprintf(stderr, "FAIL: a budget of nought against a "
+                    "threshold of nought reads %.17g with closure %.0f, "
+                    "against the zero the header states\n",
+                    buf[p * 5 + 3], buf[p * 5 + 2]);
+            exit(1);
+        }
+    }
+    g_arms++;
+    printf("  a drawn threshold at or below zero, before any broadcast: "
+           "the margin stands exactly at the threshold, at 0 dB, and "
+           "nothing is closed\n");
+
+    /* And after one: a real budget against nothing to beat. */
+    {
+        double act[1] = { 0.0 };
+        ASSERT(s.step(env, act) == K26RL_OK);
+        ASSERT(s.datalinks(env, buf, (uint32_t)need) == need);
+        for (int p = 0; p < 2; p++) {
+            if (!(buf[p * 5 + 3] > 0.0) || !isinf(buf[p * 5 + 3]) ||
+                buf[p * 5 + 2] != 1.0) {
+                fprintf(stderr, "FAIL: a budget against a threshold of "
+                        "nought reads %.17g with closure %.0f, against "
+                        "the unbounded margin the header states\n",
+                        buf[p * 5 + 3], buf[p * 5 + 2]);
+                exit(1);
+            }
+        }
+        g_arms++;
+        printf("  and after one broadcast it is unbounded, both members "
+               "closing at a range neither budget has to reach\n");
+    }
+    s.destroy(env);
+    dlclose(so);
+}
+
+/* ---- The closure flag in motion ------------------------------------- *
+ *
+ * Every arm above sits on a pair that is closed throughout or open
+ * throughout, and a store that latched a closure on first sight would
+ * pass all of them. This one drives the separation out through the
+ * range the declared budget closes at and back, so the flag has to
+ * fall and rise again, and each verdict is held against the budget
+ * computed here at the range the body getter reports for that
+ * broadcast. */
+
+static void gate_closure_transition_(void)
+{
+    static char src[16384];
+    void *so;
+    RlSurface s;
+    K26RlEnv *env = NULL;
+    double buf[16];
+    int32_t need;
+    double closure_m = friis_range_(RADIO_);
+    int seen[2] = { 0, 0 }, falls = 0, rises = 0, prev = -1;
+    int64_t count = 0;
+
+    get_world_n_(src, sizeof src, 2);
+    {
+        /* The action sets the drift outright rather than adding to
+         * it, so a step's separation is this gate's arithmetic and
+         * not an accumulation it would have to track. The replacement
+         * is padded into the line it overwrites, newline untouched. */
+        static const char *const OLD =
+            "        drone_1.vel_y = drone_1.vel_y + nudge\n";
+        static const char *const NEW =
+            "        drone_1.vel_y = 7546.0 + nudge";
+        char *p = strstr(src, OLD);
+        ASSERT(p != NULL);
+        ASSERT(strlen(NEW) < strlen(OLD));
+        memset(p, ' ', strlen(OLD) - 1);
+        memcpy(p, NEW, strlen(NEW));
+    }
+    rl_write_file_(WORK_DIR "/moving.kfl", src);
+    rl_compile_(WORK_DIR "/moving.kfl", WORK_DIR "/moving", WORK_DIR);
+    so = rl_dlopen_(WORK_DIR "/moving.rlenv.so");
+    rl_resolve_surface_(so, &s);
+    ASSERT(s.datalinks != NULL);
+    ASSERT(s.create(41u, 1u, &env) == K26RL_OK);
+    need = s.datalinks(env, NULL, 0);
+    ASSERT(need == 2 * 5);
+
+    printf("    the declared budget closes at %.1f m; the craft start "
+           "%.1f m apart and are driven out past it and back\n",
+           closure_m, 3.0e4);
+    for (int k = 0; k < 12; k++) {
+        /* Out for the first five steps, back for the rest. The craft
+         * are 30 km apart and the drift is 40 km a second, so four
+         * boundaries carry them past the closure range and the
+         * reverse brings them inside it again. */
+        double act[1] = { k < 5 ? -40000.0 : 40000.0 };
+        double now = 0.0;
+        int fired;
+        double range, want;
+
+        ASSERT(s.step(env, act) == K26RL_OK);
+        ASSERT(s.datalinks(env, buf, (uint32_t)need) == need);
+        range = get_range_(&s, env, 1u, 0u);
+        fired = get_broadcasts_(k, &now, &count);
+        want = friis_snr_(RADIO_, range) >= RADIO_[K_THR] ? 1.0 : 0.0;
+        if (fired && buf[2] != want) {
+            fprintf(stderr, "FAIL: step %d broadcasts at %.1f m and "
+                    "reports closure %.0f against the %.0f this gate's "
+                    "own budget calls for\n", k + 1, range, buf[2], want);
+            exit(1);
+        }
+        seen[(int)buf[2]]++;
+        if (prev == 1 && buf[2] == 0.0) falls++;
+        if (prev == 0 && buf[2] == 1.0) rises++;
+        prev = (int)buf[2];
+    }
+    /* The arm's own credibility: a run that never opened, or never
+     * closed again, would prove nothing about a latch. */
+    if (!(seen[0] > 0 && seen[1] > 0 && falls > 0 && rises > 0)) {
+        fprintf(stderr, "FAIL: the flag read %d closed and %d open steps "
+                "with %d fall(s) and %d rise(s), so this run holds no "
+                "transition for the arm to measure\n", seen[1], seen[0],
+                falls, rises);
+        exit(1);
+    }
+    g_arms++;
+    printf("  the closure flag falls and rises with the separation: %d "
+           "closed and %d open steps, %d fall and %d rise, each "
+           "broadcast agreeing with the budget computed here\n",
+           seen[1], seen[0], falls, rises);
+    s.destroy(env);
+    dlclose(so);
+}
+
+/* ---- A closed pair with nothing to carry ---------------------------- *
+ *
+ * The header says a pair whose receiver declares a track over nothing
+ * that transmitter offers reports a negative age for the whole run: no
+ * offer is ever built for it, and an age of zero would say one had
+ * just landed. The world below is the getter fixture with the
+ * receiver's track removed, so the pair closes on every broadcast and
+ * carries nothing. */
+
+static void gate_unheard_(void)
+{
+    static char src[16384];
+    void *so;
+    RlSurface s;
+    K26RlEnv *env = NULL;
+    double buf[16];
+    int32_t need;
+
+    get_world_n_(src, sizeof src, 2);
+    {
+        char *p = strstr(src, "    observe track pic2 of drone_1 as trk2\n");
+        ASSERT(p != NULL);
+        memset(p, ' ', strlen("    observe track pic2 of drone_1 as trk2"));
+        p = strstr(src, "reward trk1_valid + trk2_valid");
+        ASSERT(p != NULL);
+        memcpy(p, "reward trk1_valid             ", 30);
+    }
+    rl_write_file_(WORK_DIR "/unheard.kfl", src);
+    rl_compile_(WORK_DIR "/unheard.kfl", WORK_DIR "/unheard", WORK_DIR);
+    so = rl_dlopen_(WORK_DIR "/unheard.rlenv.so");
+    rl_resolve_surface_(so, &s);
+    ASSERT(s.datalinks != NULL);
+    ASSERT(s.create(43u, 1u, &env) == K26RL_OK);
+    need = s.datalinks(env, NULL, 0);
+    ASSERT(need == 2 * 5);
+    for (int k = 0; k < 6; k++) {
+        double act[1] = { 0.0 };
+        ASSERT(s.step(env, act) == K26RL_OK);
+        ASSERT(s.datalinks(env, buf, (uint32_t)need) == need);
+        /* The strong member closes on every broadcast, and nothing
+         * ever reaches its peer, so the pair is closed and unheard at
+         * once. */
+        ASSERT(buf[2] == 1.0);
+        if (buf[4] >= 0.0) {
+            fprintf(stderr, "FAIL: step %d reports an age of %.17g on a "
+                    "pair no offer is built for, where the header says "
+                    "the age stays negative\n", k + 1, buf[4]);
+            exit(1);
+        }
+    }
+    g_arms++;
+    printf("  a closed pair whose receiver tracks nothing it offers "
+           "carries no offer and reports a negative age throughout\n");
+    s.destroy(env);
+    dlclose(so);
+}
+
 /* The getter records what the transfer decides and the transfer reads
  * none of it, so a run must record what it recorded before the getter
  * existed. The witness is the compiler and the surface header from the
@@ -2200,12 +2499,10 @@ static void gate_getter_identity_(void)
     char radio[1024];
     char cmd[2048];
 
-    if (!rl_base_build_(GETTER_BASE_COMMIT, WORK_DIR)) {
-        printf("  SKIP: the base commit " GETTER_BASE_COMMIT " is not in "
-               "this checkout's history, so the datalink getter has no "
-               "witness to be compared against\n");
+    /* The helper fails the gate on absent history unless it is stood
+     * down by request, in which case it says so and returns. */
+    if (!rl_base_build_(GETTER_BASE_COMMIT, WORK_DIR))
         return;
-    }
     /* The world the behaviour arms above are built on, rather than the
      * getter arm's own: it carries a detection payload, and the base
      * compiler needs one to reach the link kernel's constants at all,
@@ -2300,6 +2597,9 @@ int main(void)
     gate_getter_();
     get_zero_case_("nolink", 0);
     get_zero_case_("lonelink", 1);
+    gate_margin_limits_();
+    gate_closure_transition_();
+    gate_unheard_();
     gate_getter_identity_();
 
     printf("test_rl_datalink: %d arm(s) passed\n", g_arms);

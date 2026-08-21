@@ -167,8 +167,12 @@ static inline void rl_compile_(const char *kfl_path, const char *out_path,
  * addition under test is additive, and the byte-identity arm each
  * caller runs is what says so rather than this comment.
  *
- * Returns 0 when the commit is not in this checkout's history, which
- * is a skip for the caller and never a silent pass. */
+ * A commit that is not in this checkout's history is a failure and not
+ * a skip: an arm that compares against nothing has measured nothing,
+ * and reporting that as green puts a tick beside an unmade
+ * measurement. The only way past it is KFLRL_ALLOW_NO_PRIOR, which
+ * says so loudly in the output and returns 0 for the caller to stand
+ * its arm down on. */
 static inline int rl_base_build_(const char *commit, const char *work)
 {
     char cmd[2048];
@@ -176,8 +180,22 @@ static inline int rl_base_build_(const char *commit, const char *work)
     snprintf(cmd, sizeof cmd,
              "git -C .. rev-parse --verify --quiet %s^{commit} "
              "> /dev/null 2>&1", commit);
-    if (system(cmd) != 0)
+    if (system(cmd) != 0) {
+        if (!getenv("KFLRL_ALLOW_NO_PRIOR")) {
+            fprintf(stderr,
+                "FAIL: %s is not in this checkout's history, so the arm "
+                "that compares against the compiler at that commit has "
+                "nothing to compare against and has measured nothing. "
+                "Fetch the history, or set KFLRL_ALLOW_NO_PRIOR to "
+                "stand the arm down deliberately.\n", commit);
+            exit(1);
+        }
+        printf("  NOT MEASURED: %s is not in this checkout's history "
+               "and KFLRL_ALLOW_NO_PRIOR is set, so this arm is being "
+               "stood down by request. Nothing about the surface before "
+               "that commit has been checked in this run.\n", commit);
         return 0;
+    }
     snprintf(cmd, sizeof cmd, "rm -rf %s/base && mkdir -p %s/base", work,
              work);
     rl_run_or_die_(cmd);
