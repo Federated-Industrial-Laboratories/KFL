@@ -195,6 +195,7 @@ choice at the second call's declaration.
 | `infostate_new`, `infostate_attach`, `infostate_observer` | Create a per-observer info-state and bind it to the observer vehicle. |
 | `infostate_target_push` | Record a target's (epoch, position, velocity) sample. |
 | `infostate_observe` | Resolve a target's retarded-time state at the observer's clock. |
+| `infostate_observe_held` | Return the newest entry at or before the observer's clock, with that entry's age. |
 | `infostate_latest`, `infostate_history_length`, `infostate_history_capacity` | Latest sample and history-buffer queries. |
 
 ## Curve fitting (`libk26astro_fit`)

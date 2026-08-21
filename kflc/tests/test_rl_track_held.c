@@ -100,9 +100,9 @@ static int g_arms;
 #define TH_STR_(x)    TH_STR__(x)
 #define TH_SUB_S      (TH_CONTROL_DT / (double)TH_SUBSTEPS)
 
-/* The broadcast cadence, one a second, which is the Kite worlds' own
- * and is slow against the control period on purpose: a report that
- * arrived every step would make the age hard to tell from nought. */
+/* The broadcast cadence, one a second, slow against the control
+ * period on purpose: a report that arrived every step would make the
+ * age hard to tell from nought. */
 #define TH_RATE_HZ    1.0
 
 /* The geometry. The two craft sit fifty metres apart and the fragment
@@ -114,7 +114,8 @@ static int g_arms;
 /* The radios. Both craft carry the same radar; the wing's transmits a
  * millionth of the lead's power, which is what makes it blind to the
  * fragment at this range rather than a threshold chosen to make it so.
- * The link keys are the Kite worlds' own. */
+ * The link keys are a small craft's short-range radio, two watts at
+ * S band, which closes between these craft with room to spare. */
 #define TH_LEAD_TX "0.5"
 #define TH_WING_TX "5.0e-7"
 #define TH_RADAR_THRESHOLD "20.0"

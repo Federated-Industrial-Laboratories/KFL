@@ -1608,7 +1608,39 @@ Without `source=` the push is truth-fed and the behaviour is what it
 was before the key existed, so no existing program changes. The
 seeding push at an episode epoch is not gated either way: it is what
 allocates each target's history ring, and an episode's first instant is
-where a craft's knowledge is set rather than sensed.
+where a craft's knowledge is set rather than sensed. Three things
+follow for a program that reads a gated payload, and they are stated
+here rather than left to be found.
+
+`<name>_valid` on a gated payload is constant 1.0 and carries no
+information. Every declared target has an entry from the epoch push
+onward, so the channel can never fall; what a policy or a reward wants
+is `<name>_age`, which is what distinguishes a target seen this
+sub-advance from one last seen a minute ago. A term written against
+`_valid` on a gated payload is a constant, and a network given it
+learns nothing from it.
+
+The epoch briefing is a truth snapshot, one entry per declared target,
+handed to every craft whether or not it could have seen that target.
+The gate does not apply to it. So a craft's opening picture covers
+every target it declares a track over, at exact truth, including
+targets its own sensors will never reach, and until the gate first
+opens that briefing is the whole of what the craft holds. Any `sensor`
+chain bound to the track channels still corrupts the published value as
+it does at every other step; what the briefing bypasses is the gate and
+not the imperfection layer. A program measuring what a craft can
+discover for itself should treat the first observation of each target
+as given rather than found.
+
+In a world with no datalink and a gate that has not opened, the picture
+is a frozen snapshot ageing, not an absence. The published position is
+where the target stood at the episode epoch, unmoving, and the age is
+the whole elapsed episode; nothing about that reads as unavailable. A
+reward or a `terminated when` that wants "this craft has learned
+nothing" has to say so on the age, against the elapsed time
+`episode.steps` and the declared control period give it. A policy reads
+no clock, so what it has to go on is the age alone, which is why the
+age is the channel worth giving it.
 
 A `source=` naming no payload of this world, one of a kind that
 publishes no detection verdict, or one carried by another body, is

@@ -179,9 +179,12 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
          * query, with the age of that entry beside it.
          *
          * The two are separate entry points of the library rather
-         * than one entry point with a mode, so what the ungated form
-         * emits, links against and runs is what it was before this
-         * distinction existed. */
+         * than one entry point with a mode, so the block emitted for
+         * an ungated statement is unchanged character for character
+         * and what it computes is what it computed before this
+         * distinction existed. Neither statement is about the
+         * compiled bytes of the library, which an added function may
+         * move for reasons of its own. */
         const char *answer = rl_track_gate_pay(m, p) >= 0
                            ? "observe_held" : "observe";
         fprintf(out,
