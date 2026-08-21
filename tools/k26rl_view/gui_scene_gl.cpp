@@ -367,17 +367,31 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
     if (ui.artifact.empty()) {
         ImGui::TextWrapped("no artifact: the recording carries observation "
                            "channels, not body position or attitude");
-    } else if (!ui.scene_resim_done || ui.scene_resim_ref != o.frame ||
-               ui.scene_resim_ep != ui.episode_index) {
-        /* An artifact named on the command line is a request to see
-         * the flight, so the first rebuild runs unasked; the button
-         * stays for every rebuild after a frame or episode change. */
-        bool go = ImGui::Button("rebuild poses in this frame");
+    }
+    bool mismatch = !ui.scene_resim_done || ui.scene_resim_ref != o.frame ||
+                    ui.scene_resim_ep != ui.episode_index;
+    bool behind = !mismatch && ep.step_count > ui.scene_resim.steps_compared;
+    if (!ui.artifact.empty() && (mismatch || behind)) {
+        /* An artifact on the command line is a request to see the
+         * flight, so the rebuild runs unasked: at once when the frame
+         * or episode changes, and at a bounded pace as a live episode
+         * grows, because each rebuild replays the whole episode from
+         * its first step. The button stays as the manual override. */
+        bool go = ImGui::Button(behind ? "rebuild to the newest step"
+                                       : "rebuild poses in this frame");
         if (ui.scene_auto_resim) {
             go = true;
             ui.scene_auto_resim = false;
         }
+        static double last_follow = -1.0e9;
+        double now = ImGui::GetTime();
+        if (mismatch && now - last_follow >= 1.0)
+            go = true;
+        if (behind && ep.step_count >= ui.scene_resim.steps_compared + 16 &&
+            now - last_follow >= 5.0)
+            go = true;
         if (go) {
+            last_follow = now;
             ui.scene_resim = resimulate(*ui.model, ep, ui.artifact, o.frame);
             ui.scene_resim_done = true;
             ui.scene_resim_ref = o.frame;
@@ -503,8 +517,18 @@ void panel_scene_(Ui &ui, const Episode &ep, SceneGl &gl)
             : "the bytes on disk are not the bytes that flew");
     }
 
-    ui.scene = scene_build(in, o, ui.step);
+    /* A live step past the last rebuild has no pose; showing the
+     * newest rebuilt step with a note beats an empty scene. */
+    uint32_t sstep = ui.step;
+    if (in.resim && in.resim->ran && in.resim->has_bodies &&
+        in.resim->steps_compared && sstep >= in.resim->steps_compared)
+        sstep = in.resim->steps_compared - 1;
+    ui.scene = scene_build(in, o, sstep);
     ui.scene_ready = true;
+    if (sstep != ui.step)
+        ui.scene.message += " (rebuilt to step " + std::to_string(sstep) +
+                            ", the live step is " +
+                            std::to_string(ui.step) + ")";
     ImGui::Separator();
     ImGui::TextWrapped("%s", ui.scene.message.c_str());
     if (ImGui::CollapsingHeader("drawn")) {
