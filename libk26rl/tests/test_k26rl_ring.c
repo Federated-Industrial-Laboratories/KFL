@@ -11,6 +11,11 @@
  *      sizes a 320-byte slot and a 32768-slot ring. The slot floor is
  *      pinned on a geometry whose budget arithmetic would fall below
  *      it, and the size ceiling refuses a geometry no budget can hold.
+ *      The host's ceiling declaration admits that same geometry, a
+ *      declaration one MiB short refuses it again, a declaration
+ *      below the default binds, malformed declarations refuse
+ *      outright, and withdrawing the declaration restores the
+ *      default's exact sizing.
  *   2. Naming and exclusivity: empty, over-long, and separator-bearing
  *      names refused; a second producer on one name refused.
  *   3. Round trip: every frame kind published and read back, its
@@ -102,6 +107,11 @@ static void gate_geometry_(void)
     uint32_t slot = 0, count = 0;
     const char *n = tap_name_(0, "geom");
 
+    /* The arms up to the declaration ones state the default's
+     * behaviour, so the gate establishes its own baseline rather
+     * than inheriting a declaration from the shell it runs in. */
+    ASSERT(unsetenv(K26RL_TAP_CEILING_ENV) == 0);
+
     shm_unlink("/k26rl.unused");
     ASSERT(open_(n, geom_(OBS, ACT, AGENTS, DRMAX), &t) == K26RL_OK);
     ASSERT(k26rl_tap_attach(n, 1, &r) == K26RL_OK);
@@ -134,6 +144,62 @@ static void gate_geometry_(void)
     ASSERT(open_(n, geom_(40000, 0, 1, 0), &t) == K26RL_E_GEOMETRY);
     ASSERT(t == NULL);
     ASSERT(k26rl_tap_attach(n, 1, &r) == K26RL_E_TAP_UNAVAILABLE);
+
+    /* The watcher's declaration moves the ceiling: the geometry the
+     * default refused is admitted at a declared 512 MiB, sized at its
+     * floor, and a consumer attaches to what was mapped. 40000
+     * channels size a 320064-byte slot, so the floor ring wants
+     * 312.56 MiB. */
+    ASSERT(setenv(K26RL_TAP_CEILING_ENV, "512", 1) == 0);
+    n = tap_name_(0, "declared");
+    ASSERT(open_(n, geom_(40000, 0, 1, 0), &t) == K26RL_OK);
+    ASSERT(k26rl_tap_attach(n, 1, &r) == K26RL_OK);
+    ASSERT(k26rl_tap_reader_info(r, &slot, &count) == K26RL_OK);
+    ASSERT(slot == 320064);
+    ASSERT(count == K26RL_TAP_SLOTS_MIN);
+    k26rl_tap_detach(r);
+    k26rl_tap_close(t);
+    t = NULL;
+
+    /* One MiB under the ring's need and the refusal returns, so this
+     * gate can fail on a ceiling that stopped being enforced. */
+    ASSERT(setenv(K26RL_TAP_CEILING_ENV, "312", 1) == 0);
+    ASSERT(open_(n, geom_(40000, 0, 1, 0), &t) == K26RL_E_GEOMETRY);
+    ASSERT(t == NULL);
+
+    /* A declaration below the default binds the same way: the floor
+     * geometry the default admitted in 16.5 MiB is refused under an
+     * 8 MiB word. */
+    ASSERT(setenv(K26RL_TAP_CEILING_ENV, "8", 1) == 0);
+    ASSERT(open_(n, geom_(2100, 0, 1, 0), &t) == K26RL_E_GEOMETRY);
+    ASSERT(t == NULL);
+
+    /* A malformed declaration refuses outright, on a geometry the
+     * default would admit, so the refusal is the declaration's own
+     * and a mistyped word is heard about. */
+    {
+        static const char *const bad[] = {"", "0", "-16", "512M",
+                                          " 512", "sixteen"};
+        size_t b;
+
+        for (b = 0; b < sizeof bad / sizeof bad[0]; b++) {
+            ASSERT(setenv(K26RL_TAP_CEILING_ENV, bad[b], 1) == 0);
+            ASSERT(open_(n, geom_(OBS, ACT, AGENTS, DRMAX), &t) ==
+                   K26RL_E_GEOMETRY);
+            ASSERT(t == NULL);
+        }
+    }
+
+    /* And withdrawing the declaration restores the default exactly:
+     * the worked example sizes as it did at the top of this gate. */
+    ASSERT(unsetenv(K26RL_TAP_CEILING_ENV) == 0);
+    ASSERT(open_(n, geom_(OBS, ACT, AGENTS, DRMAX), &t) == K26RL_OK);
+    ASSERT(k26rl_tap_attach(n, 1, &r) == K26RL_OK);
+    ASSERT(k26rl_tap_reader_info(r, &slot, &count) == K26RL_OK);
+    ASSERT(slot == 320);
+    ASSERT(count == 32768);
+    k26rl_tap_detach(r);
+    k26rl_tap_close(t);
 }
 
 /* ---- Gate 2: naming and exclusivity -------------------------------- */

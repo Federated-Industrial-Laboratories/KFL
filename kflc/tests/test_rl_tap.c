@@ -589,6 +589,28 @@ static void gate_enable_(const RlSurface *s)
     ASSERT(s->tap(env, NULL) == K26RL_OK);
     ASSERT(s->tap(env, n) == K26RL_OK);
 
+    /* The ceiling declaration is read on this surface. Measure the
+     * ring this fixture makes, assert one MiB is genuinely below it,
+     * then watch a one-MiB declaration refuse the same enable, a
+     * malformed one refuse it too, and the withdrawn declaration
+     * admit it again. */
+    {
+        K26RlTapReader *rd = NULL;
+        uint32_t slot = 0, cnt = 0;
+
+        ASSERT(k26rl_tap_attach(n, 1, &rd) == K26RL_OK);
+        ASSERT(k26rl_tap_reader_info(rd, &slot, &cnt) == K26RL_OK);
+        k26rl_tap_detach(rd);
+        ASSERT((uint64_t)slot * cnt > (uint64_t)1 << 20);
+        ASSERT(s->tap(env, NULL) == K26RL_OK);
+        ASSERT(setenv(K26RL_TAP_CEILING_ENV, "1", 1) == 0);
+        ASSERT(s->tap(env, n) == K26RL_E_GEOMETRY);
+        ASSERT(setenv(K26RL_TAP_CEILING_ENV, "512M", 1) == 0);
+        ASSERT(s->tap(env, n) == K26RL_E_GEOMETRY);
+        ASSERT(unsetenv(K26RL_TAP_CEILING_ENV) == 0);
+        ASSERT(s->tap(env, n) == K26RL_OK);
+    }
+
     /* Destroy releases the name and leaves no object behind. */
     before = shm_objects_();
     s->destroy(env);

@@ -72,10 +72,18 @@ extern "C" {
  * product with the slot size fits the budget, floored at
  * K26RL_TAP_SLOTS_MIN so a wide environment still gets a usable ring,
  * and refused with K26RL_E_GEOMETRY when even the floor would exceed
- * K26RL_TAP_BYTES_MAX. */
+ * the ceiling. The ceiling is K26RL_TAP_BYTES_MAX until the host
+ * declares one: the environment variable named by
+ * K26RL_TAP_CEILING_ENV, a whole number of MiB, digits only, read
+ * once at ring creation and never on the stepping path. A set value
+ * is the ceiling, above or below the default alike; a malformed,
+ * empty, or zero value refuses the creation with K26RL_E_GEOMETRY
+ * rather than standing silently on the default, so a mistyped
+ * declaration is heard about rather than quietly ignored. */
 #define K26RL_TAP_BUDGET_DEFAULT ((uint64_t)16 * 1024 * 1024)
 #define K26RL_TAP_SLOTS_MIN      ((uint32_t)1024)
 #define K26RL_TAP_BYTES_MAX      ((uint64_t)256 * 1024 * 1024)
+#define K26RL_TAP_CEILING_ENV    "K26RL_TAP_CEILING_MIB"
 
 /* Control block field offsets, little-endian, from the object start. */
 #define K26RL_TAP_OFF_MAGIC        0    /* 8 bytes */

@@ -58,6 +58,37 @@ static uint64_t round_up_(uint64_t v, uint64_t quantum)
     return r ? v + (quantum - r) : v;
 }
 
+/* The ceiling is the watcher's to move: a digits-only MiB count in
+ * K26RL_TAP_CEILING_ENV replaces the default when set, read here and
+ * nowhere hotter, so a wide world's floor-sized ring can be admitted
+ * on the watcher's own word. A malformed, empty, or zero declaration
+ * refuses the creation rather than standing silently on the default:
+ * a watcher who mistyped it would otherwise meet the default's
+ * refusal with no hint their word was never heard. */
+static K26RlStatus ceiling_(uint64_t *out)
+{
+    const char *s = getenv(K26RL_TAP_CEILING_ENV);
+    uint64_t mib = 0;
+
+    if (!s) {
+        *out = K26RL_TAP_BYTES_MAX;
+        return K26RL_OK;
+    }
+    if (!*s)
+        return K26RL_E_GEOMETRY;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9')
+            return K26RL_E_GEOMETRY;
+        if (mib > (UINT64_MAX - (uint64_t)(*s - '0')) / 10)
+            return K26RL_E_GEOMETRY;
+        mib = mib * 10 + (uint64_t)(*s - '0');
+    }
+    if (mib == 0 || mib > (UINT64_MAX >> 20))
+        return K26RL_E_GEOMETRY;
+    *out = mib << 20;
+    return K26RL_OK;
+}
+
 /* Slot size is the largest frame the declared geometry can produce,
  * so every frame fits one slot and a slot's address is its sequence
  * masked. Slot count is the largest power of two inside the byte
@@ -72,8 +103,11 @@ static K26RlStatus geometry_(const K26RlEpisodeGeom *g, uint32_t *out_slot,
                          (uint64_t)g->dr_max * 12;
     uint64_t end_pay = 20 + (uint64_t)g->agent_count * 8;
     uint64_t max_pay = step_pay;
-    uint64_t slot, count;
+    uint64_t slot, count, ceiling;
+    K26RlStatus st = ceiling_(&ceiling);
 
+    if (st != K26RL_OK)
+        return st;
     if (start_pay > max_pay)
         max_pay = start_pay;
     if (end_pay > max_pay)
@@ -90,7 +124,7 @@ static K26RlStatus geometry_(const K26RlEpisodeGeom *g, uint32_t *out_slot,
         count *= 2;
     if (count < K26RL_TAP_SLOTS_MIN)
         count = K26RL_TAP_SLOTS_MIN;
-    if (count * slot > K26RL_TAP_BYTES_MAX)
+    if (count * slot > ceiling)
         return K26RL_E_GEOMETRY;
 
     *out_slot = (uint32_t)slot;
