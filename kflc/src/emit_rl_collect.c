@@ -1938,6 +1938,14 @@ int rl_collect(RlModel *m, const KflcNode *form,
     if (!err && rl_collect_references(m, arena, diag)) err = 1;
     if (!err && rl_collect_plans(m, arena, diag)) err = 1;
 
+    /* Last, because it indexes the declarations and every pass above
+     * can still add one. */
+    if (!err && rl_build_agent_names(m, arena)) {
+        kflc_diag_errorf(diag, form->line,
+            "out of memory indexing this program's channel names");
+        err = 1;
+    }
+
     return err;
 }
 

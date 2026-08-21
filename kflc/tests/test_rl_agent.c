@@ -18,6 +18,9 @@
  *      absent and those two conditions come apart only there.
  *   2a. An agent with no `objective` publishes an all-zero reward
  *      stream for its own agent, beside one that declares a reward.
+ *   2b. The scope an objective expression is emitted into holds the
+ *      channels the expression reads and nothing else, each declared
+ *      at the index the channel occupies in the observation vector.
  *   3. The agent-name bound. A name of exactly 31 bytes compiles and
  *      one of 32 is refused naming the bound; a combination that
  *      overflows the 96-byte entry is refused naming both parts and
@@ -558,6 +561,186 @@ static void gate_emitted_text_(void)
            "agent count 1\n");
 }
 
+/* ---- The scope an objective expression is emitted into -------------- */
+
+/* Three agents, twenty observation channels and three actions between
+ * them, with each objective expression reading a named few. Every
+ * shape the scope has to get right appears once: a channel read
+ * unqualified by its owner, a channel of another agent read qualified,
+ * an action read unqualified, an expression that reads no channel at
+ * all, an agent with no objective, and the episode's own predicate,
+ * which sits in no block.
+ *
+ * The declared indices are part of what is asserted: `atrk_range` is
+ * the fourth channel of the first observe and `beta.btrk_range` the
+ * fourth of the second, so a scope that computed a channel's place in
+ * the vector by anything other than the widths before it would fail
+ * here rather than in the arithmetic downstream of it. */
+static const char *const SCOPE_KFL =
+    "form SCOPE\n"
+    "fn world w\n"
+    "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+    "    astro_body alpha_craft gm=1.0 parent=earth pos_x=7.0e6"
+    " vel_y=7546.0\n"
+    "    astro_body beta_craft gm=1.0 parent=earth pos_x=1.1e7"
+    " vel_y=6020.0\n"
+    "    astro_body gamma_craft gm=1.0 parent=earth pos_x=1.3e7"
+    " vel_y=5535.0\n"
+    "    episode\n"
+    "        control_dt 10.0\n"
+    "        horizon 6\n"
+    "        terminated when beta.btrk_range > 1.0e9\n"
+    "    end\n"
+    "    agent alpha\n"
+    "        action thrust box -1.0 1.0 default 0.25\n"
+    "        observe alpha_craft from earth mode=geometric as atrk\n"
+    "        objective\n"
+    "            reward atrk_range - beta.btrk_range\n"
+    "            terminal thrust\n"
+    "        end\n"
+    "    end\n"
+    "    agent beta\n"
+    "        action brake box -1.0 1.0 default 0.5\n"
+    "        observe beta_craft from earth mode=geometric as btrk\n"
+    "        observe beta_craft from alpha_craft mode=geometric as brel\n"
+    "        objective\n"
+    "            reward 0.0 - episode.steps\n"
+    "        end\n"
+    "    end\n"
+    "    agent gamma\n"
+    "        action idle box -1.0 1.0 default 0.0\n"
+    "        observe gamma_craft from earth mode=geometric as gtrk\n"
+    "    end\n"
+    "end\n"
+    "end\n";
+
+/* The channel and action declarations one emitted function opens with,
+ * as one line each, in the order they were written. `fn_head` is the
+ * function's own first line; the body runs to the first line that is a
+ * closing brace alone. */
+static int scope_decls_(const char *cc, const char *fn_head,
+                        char decls[][160], int cap)
+{
+    const char *p = strstr(cc, fn_head);
+    if (!p) {
+        fprintf(stderr, "FAIL scope: the emitted source has no `%s`\n",
+                fn_head);
+        exit(1);
+    }
+    int n = 0;
+    for (const char *line = strchr(p, '\n'); line; ) {
+        line++;
+        const char *end = strchr(line, '\n');
+        if (!end) break;
+        if (end - line == 1 && line[0] == '}') break;
+        /* Every scope declaration reads one of the two vectors the
+         * function is handed; nothing else in a body does. */
+        const char *eq = strstr(line, " = _kfl_obs_v[");
+        if (!eq || eq > end) eq = strstr(line, " = _kfl_act_v ?");
+        if (eq && eq < end) {
+            size_t len = (size_t)(end - line);
+            ASSERT(n < cap);
+            ASSERT(len < 160);
+            memcpy(decls[n], line, len);
+            decls[n][len] = '\0';
+            n++;
+        }
+        line = end;
+    }
+    return n;
+}
+
+/* One emitted function's scope, against the exact lines it should
+ * hold. A count alone would pass for a scope that declared the right
+ * number of the wrong channels, so the lines are compared whole:
+ * the name, the vector it reads and the index in it. */
+static void scope_is_(const char *cc, const char *fn_head,
+                      const char *const *want, int n_want)
+{
+    char got[64][160];
+    int n = scope_decls_(cc, fn_head, got, 64);
+    int bad = (n != n_want);
+    for (int i = 0; !bad && i < n; i++) {
+        if (strcmp(got[i], want[i]) != 0) bad = 1;
+    }
+    if (bad) {
+        fprintf(stderr, "FAIL scope: `%s` declares %d channel(s), "
+                "wanted %d\n", fn_head, n, n_want);
+        for (int i = 0; i < n; i++) {
+            fprintf(stderr, "  got  %s\n", got[i]);
+        }
+        for (int i = 0; i < n_want; i++) {
+            fprintf(stderr, "  want %s\n", want[i]);
+        }
+        exit(1);
+    }
+    printf("  %-26s %d declaration(s), each the channel it reads\n",
+           fn_head, n);
+}
+
+/* The scope holds what the expression reads and nothing else.
+ *
+ * What would make this arm vacuous, and how it is ruled out. An arm
+ * that only counted declarations would pass for a scope holding the
+ * right number of the wrong channels; the lines are compared whole. An
+ * arm over one function would pass for an emitter that got one case
+ * right; all seven the fixture produces are named, including the three
+ * that read nothing. And an arm with no figure for the alternative
+ * would not say what it is holding down: the fixture's twenty-three
+ * channels are what a whole-program scope declares in each of the
+ * seven, which is what this arm exists to prevent and what it prints.
+ *
+ * The values these functions return are held by the cross-agent arm
+ * below, which drives the same shape of program and reads the numbers
+ * off the surface. */
+static void gate_scope_holds_what_is_read_(void)
+{
+    rl_write_file_(WORK_DIR "/scope.kfl", SCOPE_KFL);
+    rl_run_or_die_("./bin/kflc --emit " WORK_DIR "/scope.kfl > "
+                   WORK_DIR "/scope.cc 2> " WORK_DIR "/scope.err");
+    FILE *f = fopen(WORK_DIR "/scope.cc", "rb");
+    ASSERT(f != NULL);
+    static char cc[1 << 22];
+    size_t n = fread(cc, 1, sizeof cc - 1, f);
+    ASSERT(n > 0 && n < sizeof cc - 1);
+    cc[n] = '\0';
+    fclose(f);
+
+    printf("the scope an objective is emitted into\n");
+
+    static const char *const r0[] = {
+        "    const double atrk_range = _kfl_obs_v[3]; (void)atrk_range;",
+        "    const double _kfl_q1_btrk_range = _kfl_obs_v[8]; "
+        "(void)_kfl_q1_btrk_range;"
+    };
+    scope_is_(cc, "kflrl_reward_0_", r0, 2);
+
+    static const char *const t0[] = {
+        "    const double thrust = _kfl_act_v ? _kfl_act_v[0] : 0.0; "
+        "(void)thrust;"
+    };
+    scope_is_(cc, "kflrl_terminal_0_", t0, 1);
+
+    /* Beta's reward reads the step count and no channel; gamma
+     * declares no objective at all, so both of its functions take
+     * their documented default. */
+    scope_is_(cc, "kflrl_reward_1_", NULL, 0);
+    scope_is_(cc, "kflrl_terminal_1_", NULL, 0);
+    scope_is_(cc, "kflrl_reward_2_", NULL, 0);
+    scope_is_(cc, "kflrl_terminal_2_", NULL, 0);
+
+    static const char *const tw[] = {
+        "    const double _kfl_q1_btrk_range = _kfl_obs_v[8]; "
+        "(void)_kfl_q1_btrk_range;"
+    };
+    scope_is_(cc, "kflrl_terminated_", tw, 1);
+
+    printf("  the program declares 20 observation channels and 3 "
+           "actions; a scope of the whole program would carry 23 "
+           "declarations in each of these 7 functions\n");
+    g_arms++;
+}
+
 static void gate_name_bound_(void)
 {
     /* Exactly at the bound, with a channel name short enough that the
@@ -1074,6 +1257,7 @@ int main(void)
     gate_observation_only_();
     gate_missing_objective_();
     gate_emitted_text_();
+    gate_scope_holds_what_is_read_();
     gate_name_bound_();
     gate_mixing_and_collisions_();
     gate_block_contents_();

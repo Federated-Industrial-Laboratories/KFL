@@ -205,11 +205,22 @@ int rl_agent_index_of(const RlModel *m, const char *name)
 }
 
 /* Whether agent `ag` declares a channel called `name`: one of its
- * actions, or one component of one of its observation channels. */
+ * actions, or one component of one of its observation channels.
+ *
+ * Every qualified read in every objective expression asks this once,
+ * and the walk below reads every declaration in the program to answer
+ * it, so on a program of many agents and many channels the two counts
+ * multiply. The index the collector builds answers the same question
+ * by lookup, and is filled by the same two loops the walk uses so that
+ * the two agree by construction; the walk remains for a caller that
+ * asks before the declarations are all in. */
 
 int rl_agent_has_channel(const RlModel *m, int ag, const char *name)
 {
     if (!name) return 0;
+    if (m->agent_names_built && ag >= 0 && ag < m->agent_count) {
+        return rl_used_names_has(&m->agent_names[ag], name);
+    }
     for (int i = 0; i < m->n_actions; i++) {
         if (rl_act_agent(m, i) != ag) continue;
         const char *an = m->actions[i]->name;
@@ -225,6 +236,57 @@ int rl_agent_has_channel(const RlModel *m, int ag, const char *name)
             }
         }
     }
+    return 0;
+}
+
+/* The per-agent name index, built once the declarations are all
+ * collected. It holds exactly the names the walk above would match:
+ * each agent's action names and every component name of each of its
+ * observation channels, in the same spelling. Returns 0 on success and
+ * 1 when a table cannot be allocated, which the caller reports.
+ *
+ * Two passes because the tables are sized from what they will hold and
+ * never grow: the first counts each agent's names, the second stores
+ * them. */
+
+int rl_build_agent_names(RlModel *m, KflcArena *arena)
+{
+    long count[RL_MAX_AGENTS];
+    for (int a = 0; a < RL_MAX_AGENTS; a++) count[a] = 0;
+    for (int i = 0; i < m->n_actions; i++) {
+        int ag = rl_act_agent(m, i);
+        if (ag >= 0 && ag < m->agent_count) count[ag]++;
+    }
+    for (int i = 0; i < m->n_observes; i++) {
+        int ag = rl_obs_agent(m, i);
+        if (ag >= 0 && ag < m->agent_count) {
+            count[ag] += rl_observe_width(m->observes[i]);
+        }
+    }
+    for (int a = 0; a < m->agent_count; a++) {
+        if (rl_used_names_reserve(&m->agent_names[a], arena, count[a])) {
+            return 1;
+        }
+    }
+    for (int i = 0; i < m->n_actions; i++) {
+        int ag = rl_act_agent(m, i);
+        const char *an = m->actions[i]->name;
+        if (ag < 0 || ag >= m->agent_count || !an) continue;
+        rl_used_names_add(&m->agent_names[ag], an);
+    }
+    for (int i = 0; i < m->n_observes; i++) {
+        int ag = rl_obs_agent(m, i);
+        if (ag < 0 || ag >= m->agent_count) continue;
+        int width = rl_observe_width(m->observes[i]);
+        for (int c = 0; c < width; c++) {
+            char nb[KFLC_OBS_NAME_MAX];
+            const char *nm = rl_obs_chan_name_(m, i, c, nb, sizeof nb);
+            const char *kept = kflc_arena_strdup(arena, nm);
+            if (!kept) return 1;
+            rl_used_names_add(&m->agent_names[ag], kept);
+        }
+    }
+    m->agent_names_built = 1;
     return 0;
 }
 
@@ -277,6 +339,135 @@ void rl_action_sites(const RlModel *m, const char *name,
  * agent's rather than twice as two expressions a later edit can pull
  * apart. */
 
+/* ---- The names an objective expression reads ------------------------ */
+
+/* FNV-1a over the identifier's bytes. The set holds identifiers, which
+ * are short and share long prefixes with one another, and this mixes
+ * every byte rather than the first few. */
+
+static unsigned rl_name_hash_(const char *s)
+{
+    unsigned h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        h ^= (unsigned)*p;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+/* Size a table for `count` names and take its storage from the arena,
+ * which is what frees it: the sets outlive the walks that fill them
+ * and are released with everything else this compilation allocated.
+ * Twice the count, rounded up to a power of two, so the table is at
+ * most half full and linear probing terminates. Returns 0 on success
+ * and 1 when the storage cannot be taken. */
+
+int rl_used_names_reserve(RlUsedNames *set, KflcArena *arena, long count)
+{
+    set->slot = NULL;
+    set->cap  = 0;
+    set->n    = 0;
+    if (count <= 0) return 0;
+    long cap = 16;
+    while (cap < 2 * count) {
+        if (cap > (long)1 << 28) return 1;
+        cap *= 2;
+    }
+    set->slot = (const char **)kflc_arena_alloc(
+        arena, (size_t)cap * sizeof *set->slot);
+    if (!set->slot) return 1;
+    set->cap = (int)cap;
+    return 0;
+}
+
+/* Store `name`, which is borrowed and must outlive the set. Storing
+ * more names than the table was reserved for would fill it and hang
+ * the probe, so the count the caller reserved for is the count it may
+ * add; a name already present is not stored twice. */
+
+void rl_used_names_add(RlUsedNames *set, const char *name)
+{
+    if (!set->cap || !name) return;
+    unsigned i = rl_name_hash_(name) & (unsigned)(set->cap - 1);
+    while (set->slot[i]) {
+        if (strcmp(set->slot[i], name) == 0) return;
+        i = (i + 1u) & (unsigned)(set->cap - 1);
+    }
+    set->slot[i] = name;
+    set->n++;
+}
+
+/* Whether `name` was stored. An empty set holds nothing, which is the
+ * right answer for an expression that names no identifier and for an
+ * agent that declares no channel. */
+
+int rl_used_names_has(const RlUsedNames *set, const char *name)
+{
+    if (!set || set->cap == 0 || !name) return 0;
+    unsigned i = rl_name_hash_(name) & (unsigned)(set->cap - 1);
+    while (set->slot[i]) {
+        if (strcmp(set->slot[i], name) == 0) return 1;
+        i = (i + 1u) & (unsigned)(set->cap - 1);
+    }
+    return 0;
+}
+
+/* Every identifier in the subtree, counted when `set` is NULL and
+ * inserted when it is not. The two passes walk the same shapes, which
+ * is what makes the count an upper bound on what the insert pass
+ * stores. */
+
+static long rl_walk_idents_(const KflcExpr *e, RlUsedNames *set)
+{
+    if (!e) return 0;
+    switch (e->kind) {
+    case KFLE_IDENT:
+        if (!e->u.ident) return 0;
+        if (set) rl_used_names_add(set, e->u.ident);
+        return 1;
+    case KFLE_UNARY:
+        return rl_walk_idents_(e->u.un.operand, set);
+    case KFLE_BINARY:
+        return rl_walk_idents_(e->u.bin.lhs, set) +
+               rl_walk_idents_(e->u.bin.rhs, set);
+    case KFLE_CALL: {
+        long n = 0;
+        for (int i = 0; i < e->u.call.n_args; i++) {
+            n += rl_walk_idents_(e->u.call.args[i], set);
+        }
+        return n;
+    }
+    case KFLE_VEC_LIT: {
+        long n = 0;
+        for (int i = 0; i < e->u.vec.n_elems; i++) {
+            n += rl_walk_idents_(e->u.vec.elems[i], set);
+        }
+        return n;
+    }
+    case KFLE_INDEX:
+        return rl_walk_idents_(e->u.index.base, set) +
+               rl_walk_idents_(e->u.index.idx, set);
+    default:
+        return 0;
+    }
+}
+
+/* Build the set of identifiers `e` names. Returns 0 on success and 1
+ * when the table cannot be allocated, which the caller reports rather
+ * than emitting a scope that would be missing what the expression
+ * reads. The identifiers are borrowed from the expression, which
+ * outlives the set. The first walk counts them and the second stores
+ * them, so the table is sized from an upper bound on what it holds. */
+
+int rl_used_names_build(RlUsedNames *set, const KflcExpr *e,
+                                KflcArena *arena)
+{
+    long count = rl_walk_idents_(e, NULL);
+    if (rl_used_names_reserve(set, arena, count)) return 1;
+    rl_walk_idents_(e, set);
+    return 0;
+}
+
 /* ---- RL expression scope -------------------------------------------- *
  *
  * The `terminated when`, `reward`, and `terminal` expressions read
@@ -284,17 +475,25 @@ void rl_action_sites(const RlModel *m, const char *name,
  * world scalar bindings, and form arguments. Emission declares one
  * const double local per action, channel component, and captured
  * world scalar so the expression emitter resolves the KFL names as
- * ordinary scalar bindings. */
+ * ordinary scalar bindings.
+ *
+ * `used` holds the identifiers the expression contains. Only the
+ * channels it names are declared: a local the expression cannot
+ * mention changes no emitted arithmetic, and on a program of many
+ * agents the ones it cannot mention are nearly all of them. World
+ * scalars and the step count are declared whatever is read, both being
+ * bounded by a small declared count rather than by the channel
+ * product. */
 
 void rl_emit_scope_prelude(FILE *out, const RlModel *m, int ag,
-                                   int indent)
+                                   int indent, const RlUsedNames *used)
 {
     int have_q   = (m->n_agents > 0);
     int bare_all = (m->agent_count <= 1);
     for (int i = 0; i < m->n_actions; i++) {
         const char *nm = m->actions[i]->name;
         int owner = rl_act_agent(m, i);
-        if (bare_all || owner == ag) {
+        if ((bare_all || owner == ag) && rl_used_names_has(used, nm)) {
             rl_emit_indent_(out, indent);
             fprintf(out,
                 "const double %s = _kfl_act_v ? _kfl_act_v[%d] : 0.0; "
@@ -303,18 +502,25 @@ void rl_emit_scope_prelude(FILE *out, const RlModel *m, int ag,
         if (!have_q) continue;
         char q[KFLC_OBS_NAME_MAX + 32];
         rl_qual_ident(owner, nm, q, sizeof q);
+        if (!rl_used_names_has(used, q)) continue;
         rl_emit_indent_(out, indent);
         fprintf(out,
             "const double %s = _kfl_act_v ? _kfl_act_v[%d] : 0.0; "
             "(void)%s;\n", q, i, q);
     }
+    /* The first channel index of each observe, carried across the walk
+     * rather than recomputed per observe: rl_obs_offset sums the widths
+     * before its argument, so asking it once per channel makes the walk
+     * quadratic in the declaration count. */
+    int base_off = 0;
     for (int i = 0; i < m->n_observes; i++) {
         int owner = rl_obs_agent(m, i);
-        for (int c = 0; c < rl_observe_width(m->observes[i]); c++) {
+        int width = rl_observe_width(m->observes[i]);
+        for (int c = 0; c < width; c++) {
             char nb[KFLC_OBS_NAME_MAX];
             const char *nm = rl_obs_chan_name_(m, i, c, nb, sizeof nb);
-            int off = rl_obs_offset(m->observes, i) + c;
-            if (bare_all || owner == ag) {
+            int off = base_off + c;
+            if ((bare_all || owner == ag) && rl_used_names_has(used, nm)) {
                 rl_emit_indent_(out, indent);
                 fprintf(out,
                     "const double %s = _kfl_obs_v[%d]; (void)%s;\n",
@@ -323,11 +529,13 @@ void rl_emit_scope_prelude(FILE *out, const RlModel *m, int ag,
             if (!have_q) continue;
             char q[KFLC_OBS_NAME_MAX + 32];
             rl_qual_ident(owner, nm, q, sizeof q);
+            if (!rl_used_names_has(used, q)) continue;
             rl_emit_indent_(out, indent);
             fprintf(out,
                 "const double %s = _kfl_obs_v[%d]; (void)%s;\n",
                 q, off, q);
         }
+        base_off += width;
     }
     for (int i = 0; i < m->n_wscal; i++) {
         rl_emit_indent_(out, indent);
@@ -340,41 +548,51 @@ void rl_emit_scope_prelude(FILE *out, const RlModel *m, int ag,
           "(void)_kfl_episode_steps;\n", out);
 }
 
-/* Bindings matching rl_emit_scope_prelude plus form arguments. */
+/* Bindings matching rl_emit_scope_prelude plus form arguments, held
+ * down to the same `used` set for the same reason: a binding the
+ * expression cannot name resolves nothing, and the expression emitter
+ * scans this table for every identifier it emits. Names outside the
+ * set are dropped whole, so the first-match order among the names that
+ * remain is the order they had before. */
 
 void rl_scope_bindings(const RlModel *m, int ag,
                                const KflcNode *form,
                                KflcArena *arena, KflcExprBinding **live,
-                               int *live_n, int *live_cap)
+                               int *live_n, int *live_cap,
+                               const RlUsedNames *used)
 {
     int have_q   = (m->n_agents > 0);
     int bare_all = (m->agent_count <= 1);
     rl_collect_form_args(form, arena, live, live_n, live_cap);
     for (int i = 0; i < m->n_actions; i++) {
         int owner = rl_act_agent(m, i);
-        if (bare_all || owner == ag) {
+        const char *an = m->actions[i]->name;
+        if ((bare_all || owner == ag) && rl_used_names_has(used, an)) {
             rl_push_binding(arena, live, live_n, live_cap,
-                             m->actions[i]->name, KFLT_DOUBLE);
+                             an, KFLT_DOUBLE);
         }
         if (!have_q) continue;
         char q[KFLC_OBS_NAME_MAX + 32];
-        rl_qual_ident(owner, m->actions[i]->name, q, sizeof q);
+        rl_qual_ident(owner, an, q, sizeof q);
+        if (!rl_used_names_has(used, q)) continue;
         rl_push_binding(arena, live, live_n, live_cap,
                          kflc_arena_strdup(arena, q), KFLT_DOUBLE);
     }
     for (int i = 0; i < m->n_observes; i++) {
         if (!rl_observe_as(m->observes[i])) continue;
         int owner = rl_obs_agent(m, i);
-        for (int c = 0; c < rl_observe_width(m->observes[i]); c++) {
+        int width = rl_observe_width(m->observes[i]);
+        for (int c = 0; c < width; c++) {
             char nb[KFLC_OBS_NAME_MAX];
             const char *nm = rl_obs_chan_name_(m, i, c, nb, sizeof nb);
-            if (bare_all || owner == ag) {
+            if ((bare_all || owner == ag) && rl_used_names_has(used, nm)) {
                 rl_push_binding(arena, live, live_n, live_cap,
                                  kflc_arena_strdup(arena, nm), KFLT_DOUBLE);
             }
             if (!have_q) continue;
             char q[KFLC_OBS_NAME_MAX + 32];
             rl_qual_ident(owner, nm, q, sizeof q);
+            if (!rl_used_names_has(used, q)) continue;
             rl_push_binding(arena, live, live_n, live_cap,
                              kflc_arena_strdup(arena, q), KFLT_DOUBLE);
         }

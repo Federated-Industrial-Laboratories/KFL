@@ -1516,17 +1516,6 @@ static int rl_emit_objective_one_(FILE *out, const RlModel *m, int ag,
                                   KflcExprFn *user_fn_arr, int n_user_fns,
                                   KflcDiag *diag)
 {
-    KflcExprBinding *live = NULL;
-    int live_n = 0, live_cap = 0;
-    rl_scope_bindings(m, ag, form, arena, &live, &live_n, &live_cap);
-    KflcExprCtx ctx;
-    memset(&ctx, 0, sizeof ctx);
-    ctx.bindings   = live;
-    ctx.n_bindings = live_n;
-    ctx.fns        = user_fn_arr;
-    ctx.n_fns      = n_user_fns;
-    ctx.form       = form;
-
     fprintf(out,
         "static %s %s(const double *_kfl_obs_v,\n"
         "        const double *_kfl_act_v, uint32_t _kfl_nsteps,\n"
@@ -1535,29 +1524,63 @@ static int rl_emit_objective_one_(FILE *out, const RlModel *m, int ag,
         "    (void)_kfl_obs_v; (void)_kfl_act_v; (void)_kfl_nsteps; "
         "(void)_kfl_world_v;\n",
         ret, name);
-    if (attr && attr->expr) {
-        rl_check_objective_names_(m, ag, form, attr->expr, word,
-                                  attr->line, diag);
-        if (diag->errors) return 1;
-        char what[80];
-        snprintf(what, sizeof what, "the `%s` expression", word);
-        if (rl_reject_impure_(form, attr->expr, what, attr->line, diag)) {
-            return 1;
-        }
-        rl_emit_scope_prelude(out, m, ag, 4);
-        rl_qual_rewrite_expr(m, attr->expr, arena);
-        rl_rewrite_steps(attr->expr, arena);
-        if (strcmp(ret, "int") == 0) {
-            fputs("    return (", out);
-            if (kflc_emit_expr(out, attr->expr, &ctx, diag)) return 1;
-            fputs(") ? 1 : 0;\n", out);
-        } else {
-            fputs("    return (double)(", out);
-            if (kflc_emit_expr(out, attr->expr, &ctx, diag)) return 1;
-            fputs(");\n", out);
-        }
-    } else {
+    if (!attr || !attr->expr) {
+        /* An absent block takes its documented default and reads
+         * nothing, so it needs neither a scope nor the bindings that
+         * would resolve one. */
         fprintf(out, "    return %s;\n", absent);
+        fputs("}\n\n", out);
+        return 0;
+    }
+
+    rl_check_objective_names_(m, ag, form, attr->expr, word,
+                              attr->line, diag);
+    if (diag->errors) return 1;
+    char what[80];
+    snprintf(what, sizeof what, "the `%s` expression", word);
+    if (rl_reject_impure_(form, attr->expr, what, attr->line, diag)) {
+        return 1;
+    }
+
+    /* Both rewrites run before the scope is built, because the scope
+     * is built from the identifiers the expression holds and these
+     * two are what settle their final spelling: a qualified read
+     * becomes the identifier the prelude declares, and `episode.steps`
+     * becomes the step count's own name. The two checks above run
+     * first and are unaffected, reporting the names the source wrote. */
+    rl_qual_rewrite_expr(m, attr->expr, arena);
+    rl_rewrite_steps(attr->expr, arena);
+
+    RlUsedNames used;
+    if (rl_used_names_build(&used, attr->expr, arena)) {
+        kflc_diag_errorf(diag, attr->line,
+            "%s: out of memory collecting the names the `%s` "
+            "expression reads", word, word);
+        return 1;
+    }
+
+    KflcExprBinding *live = NULL;
+    int live_n = 0, live_cap = 0;
+    rl_scope_bindings(m, ag, form, arena, &live, &live_n, &live_cap,
+                      &used);
+    KflcExprCtx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.bindings   = live;
+    ctx.n_bindings = live_n;
+    ctx.fns        = user_fn_arr;
+    ctx.n_fns      = n_user_fns;
+    ctx.form       = form;
+
+    rl_emit_scope_prelude(out, m, ag, 4, &used);
+
+    if (strcmp(ret, "int") == 0) {
+        fputs("    return (", out);
+        if (kflc_emit_expr(out, attr->expr, &ctx, diag)) return 1;
+        fputs(") ? 1 : 0;\n", out);
+    } else {
+        fputs("    return (double)(", out);
+        if (kflc_emit_expr(out, attr->expr, &ctx, diag)) return 1;
+        fputs(");\n", out);
     }
     fputs("}\n\n", out);
     return 0;

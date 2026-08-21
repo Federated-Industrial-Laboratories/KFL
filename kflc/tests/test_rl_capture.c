@@ -39,8 +39,11 @@
  *
  *   A compatibility arm comparing today's binary with itself would
  *   agree with any change. It builds the compiler from the commit
- *   before this work, compiles the same two programs with both, and
- *   compares the episode records byte for byte.
+ *   before this work, compiles the same three programs with both, and
+ *   compares the episode records byte for byte. Two of the three
+ *   declare one agent, and the third declares three that read each
+ *   other's channels by qualified name, so the arm covers the
+ *   qualified scope as well as the bare one.
  */
 #define _GNU_SOURCE
 #include "rl_gate_util.h"
@@ -54,7 +57,7 @@
 /* The commit whose compiler the compatibility arm builds. It is the
  * one before the work this gate covers, so the two binaries differ by
  * exactly that work. */
-#define PRIOR_COMMIT "3308367"
+#define PRIOR_COMMIT "f970cd0"
 
 static int n_pass;
 
@@ -1937,10 +1940,10 @@ int main(void)
     /* ---- 10. the shipped programs, against the prior binary ------- *
      *
      * The compiler from the commit before this work is built here and
-     * both binaries compile the same two programs. The episode records
-     * are compared byte for byte at one seed and one action stream. A
-     * comparison of today's binary with itself would agree with any
-     * change; this one cannot.
+     * both binaries compile the same three programs. The episode
+     * records are compared byte for byte at one seed and one action
+     * stream. A comparison of today's binary with itself would agree
+     * with any change; this one cannot.
      */
     printf("the shipped programs against the compiler before this work\n");
     if (run_("git -C .. rev-parse --verify --quiet " PRIOR_COMMIT
@@ -2054,10 +2057,65 @@ int main(void)
             rl_write_file_(WORK_DIR "/persp.kfl", prog);
         }
 
+        /* Three agents whose objectives read each other's channels by
+         * qualified name, beside one that declares no objective. The
+         * two programs above declare one agent each, so on their own
+         * they say nothing about the qualified scope a multi-agent
+         * program is emitted into; this one is here so that a change
+         * to that scope has a record to be identical to. */
+        rl_write_file_(WORK_DIR "/multi.kfl",
+            "form MULTI\n"
+            "fn world w\n"
+            "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
+            "    astro_body alpha_craft gm=1.0 parent=earth"
+            " pos_x=7.0e6 vel_y=7546.0\n"
+            "    astro_body beta_craft gm=1.0 parent=earth"
+            " pos_x=1.1e7 vel_y=6020.0\n"
+            "    astro_body gamma_craft gm=1.0 parent=earth"
+            " pos_x=1.3e7 vel_y=5535.0\n"
+            "    episode\n"
+            "        control_dt 10.0\n"
+            "        horizon 12\n"
+            "        terminated when gamma.gtrk_range > 1.0e9\n"
+            "    end\n"
+            "    agent alpha\n"
+            "        action thrust box -1.0 1.0 default 0.25\n"
+            "        observe alpha_craft from earth mode=geometric"
+            " as atrk\n"
+            "        objective\n"
+            "            reward atrk_range - beta.btrk_range\n"
+            "            terminal thrust + gamma.gtrk_range_rate\n"
+            "        end\n"
+            "    end\n"
+            "    agent beta\n"
+            "        action brake box -1.0 1.0 default 0.5\n"
+            "        observe beta_craft from earth mode=geometric"
+            " as btrk\n"
+            "        observe beta_craft from alpha_craft"
+            " mode=geometric as brel\n"
+            "        objective\n"
+            "            reward brel_range - alpha.atrk_range\n"
+            "        end\n"
+            "    end\n"
+            "    agent gamma\n"
+            "        action idle box -1.0 1.0 default 0.0\n"
+            "        observe gamma_craft from earth mode=geometric"
+            " as gtrk\n"
+            "    end\n"
+            "    on_step\n"
+            "        alpha_craft.vel_x = alpha_craft.vel_x"
+            " + alpha.thrust\n"
+            "        beta_craft.vel_x = beta_craft.vel_x + beta.brake\n"
+            "    end\n"
+            "end\n"
+            "end\n");
+
         static const struct { const char *tag, *kfl, *args; } SHIPPED_[] = {
             { "the docking benchmark", "examples/docking_benchmark.kfl",
               "--envs 2 --episodes 3 --seed 11" },
             { "the two-statement fixture", WORK_DIR "/persp.kfl",
+              "--envs 2 --episodes 3 --seed 11" },
+            { "the three-agent fixture", WORK_DIR "/multi.kfl",
               "--envs 2 --episodes 3 --seed 11" }
         };
         for (size_t i = 0; i < sizeof SHIPPED_ / sizeof SHIPPED_[0]; i++) {

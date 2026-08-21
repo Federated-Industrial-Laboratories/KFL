@@ -915,6 +915,44 @@ typedef struct {
     int             act_first;
 } RlPlanOut;
 
+/* ---- A set of names ------------------------------------------------- *
+ *
+ * Two questions in this emitter are asked so many times over so many
+ * names that answering either by walking the declarations makes the
+ * work quadratic in the size of the program. Both are answered by a
+ * set of names held here.
+ *
+ * The first is which channels one objective expression reads. A
+ * reward, terminal or termination expression is emitted inside a
+ * function whose scope declares the channels it may read as local
+ * doubles, and declaring every channel of every agent in every one of
+ * those functions costs a line of emitted source per channel per
+ * function, twice over on a multi-agent program, once for the
+ * unqualified name and once for the qualified one. What an expression
+ * can read is the identifiers it contains and nothing else, because an
+ * identifier is the only shape in a KFL expression that names a scalar
+ * binding: a call names a function, a literal names nothing, and there
+ * is no string-keyed lookup anywhere in the expression grammar. The
+ * set is built from the expression after the qualified-name and
+ * `episode.steps` rewrites, so it holds the identifiers as the emitted
+ * code will spell them rather than as the source wrote them.
+ *
+ * The second is whether an agent declares a channel of a given name,
+ * which every qualified read asks once and which is otherwise answered
+ * by reading every declaration in the program.
+ *
+ * Open addressed with linear probing, sized from the count of names it
+ * will be given, which is an upper bound on the number of distinct
+ * ones; the table never grows and never exceeds half full. Its storage
+ * comes from the emission arena and its names are borrowed from
+ * whatever outlives it. */
+
+typedef struct {
+    const char **slot;   /* `cap` entries, NULL where empty */
+    int          cap;    /* a power of two, or 0 for an empty set */
+    int          n;
+} RlUsedNames;
+
 typedef struct {
     const KflcNode *world;
     const KflcNode *episode;
@@ -1040,6 +1078,13 @@ typedef struct {
     const KflcAttr *terminated_when;  /* or NULL */
     const KflcAttr *reward;           /* or NULL */
     const KflcAttr *terminal;         /* or NULL */
+
+    /* Every name each agent declares, its actions and its observation
+     * channel components alike, built once the declarations are all
+     * in. Zero until then, and the walk in rl_agent_has_channel is
+     * what answers meanwhile. */
+    RlUsedNames agent_names[RL_MAX_AGENTS];
+    int         agent_names_built;
 } RlModel;
 
 /* One vehicle's emission data, captured while its body is emitted and
@@ -1217,7 +1262,7 @@ int rl_emit_draw(FILE *out, const KflcExpr *dist,
                          unsigned cls, int channel,
                          const KflcExprCtx *ctx, KflcDiag *diag);
 void rl_emit_scope_prelude(FILE *out, const RlModel *m, int ag,
-                                   int indent);
+                                   int indent, const RlUsedNames *used);
 void rl_emit_string_literal(FILE *out, const char *s);
 int rl_has_relative_observe(const RlModel *m);
 int rl_n_chaff(const RlModel *m);
@@ -1237,7 +1282,15 @@ void rl_rewrite_steps(KflcExpr *e, KflcArena *arena);
 void rl_scope_bindings(const RlModel *m, int ag,
                                const KflcNode *form,
                                KflcArena *arena, KflcExprBinding **live,
-                               int *live_n, int *live_cap);
+                               int *live_n, int *live_cap,
+                               const RlUsedNames *used);
+int rl_used_names_build(RlUsedNames *set, const KflcExpr *e,
+                                KflcArena *arena);
+int rl_used_names_reserve(RlUsedNames *set, KflcArena *arena,
+                                  long count);
+void rl_used_names_add(RlUsedNames *set, const char *name);
+int rl_used_names_has(const RlUsedNames *set, const char *name);
+int rl_build_agent_names(RlModel *m, KflcArena *arena);
 int rl_softkill_reaches(const RlModel *m, int p, int t,
                                 int want_jammer);
 int rl_track_pairs(const RlModel *m, int *pay, int *veh, int cap);
