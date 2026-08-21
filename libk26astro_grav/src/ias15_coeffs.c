@@ -17,6 +17,7 @@
  * pinned, per the determinism contract — -ffp-contract=off, FPU
  * rounding mode pinned). */
 #include "ias15_internal.h"
+#include <stdatomic.h>
 #include "k26astro_grav/ias15.h"
 
 #include <stdlib.h>
@@ -46,7 +47,12 @@ const double k26_ias15_h[8] = {
 static double c_lt[21];
 static double d_lt[21];
 static double r_lt[28];
-static int    matrices_built = 0;
+/* The ready flag is atomic: the release store below pairs with the
+ * acquire load in the guard, so a thread that sees it set also sees
+ * the tables it guards, which matters the day a threaded stepping
+ * path selects this integrator (the crc32c table carries the same
+ * pattern for the same reason). */
+static atomic_int matrices_built;
 
 /* Lower-triangle index helpers.
  *
@@ -60,7 +66,8 @@ static inline int idx_r_(int i, int j)   { return (i * (i - 1)) / 2 + j; }
 
 void k26_ias15_init_matrices(void)
 {
-    if (matrices_built) return;
+    if (atomic_load_explicit(&matrices_built,
+                             memory_order_acquire)) return;
 
     /* r[i,j] = 1 / (h[i] - h[j]) for i > j */
     for (int i = 1; i <= 7; i++) {
@@ -128,7 +135,7 @@ void k26_ias15_init_matrices(void)
         }
     }
 
-    matrices_built = 1;
+    atomic_store_explicit(&matrices_built, 1, memory_order_release);
 }
 
 const double *k26_ias15_c(void)  { return c_lt; }

@@ -46,7 +46,7 @@ typedef struct KflrlThrustCtx {
 
 /* One step's outcome for one environment, written by the compute
  * phase and read by the serial publication phase. The split exists
- * for the worker pool (DB: the internal worker pool): compute may
+ * for the worker pool: compute may
  * run on any worker, publication runs on the caller in environment
  * order, so records and rings are byte-identical at any worker
  * count. */
@@ -124,7 +124,7 @@ struct K26RlEnv {
     double   *dr_vals;           /* n_envs * KFLRL_N_REC */
     double   *wscal;             /* n_envs * KFLRL_N_WSCAL, world
                                   * scalars captured at create */
-    double   *scratch;           /* KFLRL_OBS_TOTAL */
+    double *scratch;      /* n_envs * KFLRL_OBS_TOTAL, per environment */
 #if KFLRL_N_SENSED > 0
     /* The imperfection layer. `sterm` is the resolved model
      * chain, built once at create because the bias walk's two
@@ -275,10 +275,16 @@ struct K26RlEnv {
     uint8_t         pool_stop;
     const double   *pool_actions;
     fenv_t          pool_fenv;      /* the creating thread's FP mode */
+    uint8_t         pool_lost;      /* set in a fork's child: threads
+                                     * are not inherited, so a lost
+                                     * pool steps serially from then
+                                     * on, outputs unchanged */
     KflrlStepNote  *note;
 };
 
 static void *kflrl_pool_worker_(void *arg);
+static int kflrl_pool_register_(K26RlEnv *h);
+static void kflrl_pool_teardown_registerless_(K26RlEnv *h);
 
 static int kflrl_live_(const K26RlEnv *h)
 {
@@ -2102,15 +2108,17 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
     /* The worker pool, opt-in. A value that does not parse as an
      * integer above one is treated as absent rather than refused:
      * create has no diagnostic channel for advice, and a wrong
-     * environment variable must not brick a host (DB: the internal
-     * worker pool records the choice). On any thread-creation
+     * environment variable must not brick a host; the choice is
+     * recorded where the surface documents the variable. On any
+     * thread-creation
      * failure the pool stands down whole and the handle runs
      * serially, degraded but correct. */
     h->pool_n = 1;
     h->pool_threads = NULL;
+    h->pool_lost = 0;
     {
         const char *tv = getenv("K26RL_ENV_THREADS");
-        if (tv && *tv) {
+        if (tv && *tv >= '0' && *tv <= '9') {
             char *endp = NULL;
             unsigned long v = strtoul(tv, &endp, 10);
             if (endp && *endp == '\0' && v > 1ul) {
@@ -2155,6 +2163,9 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
                     h->pool_n = 1;
                 }
                 (void)want;
+            }
+            if (h->pool_n > 1 && !kflrl_pool_register_(h)) {
+                kflrl_pool_teardown_registerless_(h);
             }
         }
     }
@@ -3384,6 +3395,71 @@ static K26RlStatus kflrl_step_publish_(K26RlEnv *h, uint32_t e,
 
 
 
+/* Fork safety. A child inherits a pooled handle's bookkeeping and
+ * none of its threads, so a pooled step there would wait forever for
+ * workers that do not exist. Every pooled handle of this artifact is
+ * registered once, and the atfork child handler marks them lost; a
+ * lost handle steps serially, its outputs unchanged, and its
+ * teardown joins nothing. The registry is bounded: past its capacity
+ * a handle simply does not pool, which is a degraded mode and not an
+ * error, exactly as a failed thread creation is. */
+#define KFLRL_POOL_REG_CAP 64
+static pthread_mutex_t kflrl_pool_reg_mu_ = PTHREAD_MUTEX_INITIALIZER;
+static K26RlEnv *kflrl_pool_reg_[KFLRL_POOL_REG_CAP];
+static int kflrl_pool_reg_n_ = 0;
+static int kflrl_pool_atfork_done_ = 0;
+
+static void kflrl_pool_fork_prepare_(void)
+{
+    pthread_mutex_lock(&kflrl_pool_reg_mu_);
+}
+static void kflrl_pool_fork_parent_(void)
+{
+    pthread_mutex_unlock(&kflrl_pool_reg_mu_);
+}
+static void kflrl_pool_fork_child_(void)
+{
+    for (int i = 0; i < kflrl_pool_reg_n_; i++) {
+        kflrl_pool_reg_[i]->pool_lost = 1;
+    }
+    pthread_mutex_unlock(&kflrl_pool_reg_mu_);
+}
+
+/* Returns nonzero when the handle was registered; zero means the
+ * registry is full and the caller must stand the pool down. */
+static int kflrl_pool_register_(K26RlEnv *h)
+{
+    int ok = 0;
+    pthread_mutex_lock(&kflrl_pool_reg_mu_);
+    if (!kflrl_pool_atfork_done_) {
+        if (pthread_atfork(kflrl_pool_fork_prepare_,
+                           kflrl_pool_fork_parent_,
+                           kflrl_pool_fork_child_) == 0) {
+            kflrl_pool_atfork_done_ = 1;
+        }
+    }
+    if (kflrl_pool_atfork_done_ &&
+        kflrl_pool_reg_n_ < KFLRL_POOL_REG_CAP) {
+        kflrl_pool_reg_[kflrl_pool_reg_n_++] = h;
+        ok = 1;
+    }
+    pthread_mutex_unlock(&kflrl_pool_reg_mu_);
+    return ok;
+}
+
+static void kflrl_pool_deregister_(K26RlEnv *h)
+{
+    pthread_mutex_lock(&kflrl_pool_reg_mu_);
+    for (int i = 0; i < kflrl_pool_reg_n_; i++) {
+        if (kflrl_pool_reg_[i] == h) {
+            kflrl_pool_reg_[i] = kflrl_pool_reg_[kflrl_pool_reg_n_ - 1];
+            kflrl_pool_reg_n_--;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&kflrl_pool_reg_mu_);
+}
+
 /* A pool worker: waits for a generation, claims environment indices
  * under the mutex, computes them, and reports done. The floating
  * point mode is the creating thread's, set once at start, so every
@@ -3441,9 +3517,37 @@ static void kflrl_pool_compute_(K26RlEnv *h, const double *actions)
     pthread_mutex_unlock(&h->pool_mu);
 }
 
+/* Stand a just-built pool down when the fork registry cannot hold
+ * it: stop and join the freshly made threads and run serially. */
+static void kflrl_pool_teardown_registerless_(K26RlEnv *h)
+{
+    pthread_mutex_lock(&h->pool_mu);
+    h->pool_stop = 1;
+    pthread_cond_broadcast(&h->pool_go);
+    pthread_mutex_unlock(&h->pool_mu);
+    for (uint32_t i = 0; i + 1u < h->pool_n; i++) {
+        (void)pthread_join(h->pool_threads[i], NULL);
+    }
+    free(h->pool_threads);
+    h->pool_threads = NULL;
+    pthread_mutex_destroy(&h->pool_mu);
+    pthread_cond_destroy(&h->pool_go);
+    pthread_cond_destroy(&h->pool_done_cv);
+    h->pool_n = 1;
+}
+
 static void kflrl_pool_teardown_(K26RlEnv *h)
 {
     if (h->pool_n <= 1) return;
+    kflrl_pool_deregister_(h);
+    if (h->pool_lost) {
+        /* The threads died with the parent's address space; there is
+         * nothing to signal, join, or destroy safely. */
+        free(h->pool_threads);
+        h->pool_threads = NULL;
+        h->pool_n = 1;
+        return;
+    }
     pthread_mutex_lock(&h->pool_mu);
     h->pool_stop = 1;
     pthread_cond_broadcast(&h->pool_go);
@@ -3474,20 +3578,20 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
     }
     h->at_boundary = 0;
 
-    if (h->pool_n > 1) {
+    if (h->pool_n > 1 && !h->pool_lost) {
         kflrl_pool_compute_(h, actions);
-        K26RlStatus abort_st = K26RL_OK;
+        /* Publication stops at the lowest-indexed abort, so the
+         * record carries exactly the frames the serial path would
+         * have carried to the same failure; what differs is only
+         * that the later environments' state has advanced. */
         for (uint32_t e = 0; e < h->n_envs; e++) {
             if (h->note[e].kind == 3) {
-                if (abort_st == K26RL_OK) {
-                    abort_st = (K26RlStatus)h->note[e].reason;
-                }
-                continue;
+                return (K26RlStatus)h->note[e].reason;
             }
             K26RlStatus pst = kflrl_step_publish_(h, e, actions);
             if (pst != K26RL_OK) return pst;
         }
-        return abort_st;
+        return K26RL_OK;
     }
     for (uint32_t e = 0; e < h->n_envs; e++) {
         kflrl_step_compute_(h, e, actions);
@@ -3499,8 +3603,6 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
     }
     return K26RL_OK;
 }
-
-/* Shared by the two explicit reset calls.
 
 /* Shared by the two explicit reset calls. With output enabled, an
  * episode cut mid-flight records a truncated end (the recording

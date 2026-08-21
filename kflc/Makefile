@@ -847,6 +847,14 @@ test: $(ATT_SUBSTEP_GATES) $(TEST_BIN) $(ASSEMBLY_TEST) $(MANIFEST_TEST) $(BODY_
 	         exit $$rc; \
 	     fi; \
 	 fi
+# The worker pool's suite runs with the other driven gates; its own
+# arms compare pooled records against serial ones, so a build that
+# only ever built it would defend nothing.
+	@if [ ! -x $(RL_POOL_TEST) ]; then \
+	     echo 'test_rl_pool: FAIL (not built)'; exit 1; \
+	 else \
+	     ./$(RL_POOL_TEST) || exit 1; \
+	 fi
 # The live gate's red controls, run where the gate itself has just
 # run: each must be rejected by the arm it is paired with, and a red
 # build that passed would mean that arm measures nothing.

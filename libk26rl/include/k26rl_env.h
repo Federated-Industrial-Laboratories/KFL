@@ -26,6 +26,20 @@
  * unchanged by the presence, count, or activity of its neighbours in
  * the handle, with one bounded exception noted at k26rl_env_step.
  *
+ * Internal worker pool: the environment variable K26RL_ENV_THREADS,
+ * read once inside k26rl_env_create, engages an internal worker pool
+ * of at most that many workers, capped at the environment count, for
+ * the per-environment compute of k26rl_env_step. Outputs are
+ * byte-identical at any worker count. Absent, empty, `1`, or any
+ * value that does not read as an unsigned integer above one leaves
+ * the serial path. Two behaviours differ in failure modes only: a
+ * writer failure or a whole-call abort (out of memory, the mode
+ * race) finds the other environments' state advanced where the
+ * serial path left later ones untouched, the record identical to the
+ * serial one up to the failure; and a handle whose pool outlives a
+ * fork() steps serially in the child from then on, threads not being
+ * inherited across one.
+ *
  * Threading: a handle is single-threaded. Concurrent handles in one
  * process are legal; the runtime's FPU mode-conflict detection
  * applies.

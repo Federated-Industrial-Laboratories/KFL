@@ -266,7 +266,8 @@ int main(int argc, char **argv)
          * libraries it links, between compilers, and between runs of
          * nominally identical binaries. */
         if (!cflags) cflags = "-O2 -g -std=c++11 -Wno-format-truncation "
-                              "-ffp-contract=off -fexcess-precision=standard";
+                              "-ffp-contract=off -fexcess-precision=standard "
+                              "-pthread";
         const char *ldlibs = getenv("KFLC_LDLIBS");
         if (!ldlibs) ldlibs = "-lm -pthread";
 

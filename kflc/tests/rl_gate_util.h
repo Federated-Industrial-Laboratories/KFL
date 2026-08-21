@@ -119,7 +119,7 @@ static inline void rl_compile_(const char *kfl_path, const char *out_path,
     char cflags[4096];
     int n = snprintf(cflags, sizeof cflags,
         "-O2 -g -std=c++11 -Wno-format-truncation "
-        "-ffp-contract=off -fexcess-precision=standard");
+        "-ffp-contract=off -fexcess-precision=standard -pthread");
     for (int i = 0; RL_INCLUDE_DIRS_[i]; i++) {
         n += snprintf(cflags + n, sizeof cflags - (size_t)n, " -I%s",
                       RL_INCLUDE_DIRS_[i]);
