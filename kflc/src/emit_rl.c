@@ -28,9 +28,26 @@ static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
 {
 
     KflcArena *arena = kflc_arena_create();
-    RlModel m;
-    if (rl_collect(&m, form, arena, diag)) {
+    /* The program model is on the heap and not on this frame. It holds
+     * the compiler's scratch tables, so it grows with every bound
+     * raised for a larger program: at the bounds a swarm world needs it
+     * is over a megabyte, and a megabyte of automatic storage fails as
+     * a bare segmentation fault under a small stack rather than as a
+     * diagnostic naming what it could not fit. Every limit in this
+     * compiler is meant to refuse by name; putting the model where the
+     * refusal can happen is part of that. */
+    RlModel *mp = (RlModel *)calloc(1, sizeof *mp);
+    if (!mp) {
+        kflc_diag_errorf(diag, 0,
+            "out of memory building this program's model (%zu bytes)",
+            sizeof *mp);
         kflc_arena_release(arena);
+        return 1;
+    }
+    RlModel *m = mp;
+    if (rl_collect(m, form, arena, diag)) {
+        kflc_arena_release(arena);
+        free(mp);
         return 1;
     }
 
@@ -69,22 +86,27 @@ static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
     arg_ctx.n_fns      = n_user_fns;
     arg_ctx.form       = form;
 
-    if (rl_emit_prologue(out, &m, form, diag)) return 1;
+    if (rl_emit_prologue(out, m, form, diag)) {
+        kflc_arena_release(arena);
+        free(mp);
+        return 1;
+    }
     /* The mass-property tables come before the world is built, not
      * with the actuators: the world prefix installs a vehicle's
      * constructed properties through them, and the actuator block is
      * emitted from inside the per-step body further down. */
-    rl_emit_mass_tables(out, &m);
-    rl_emit_reference_tables(out, &m);
-    rl_emit_plan_tables(out, &m);
+    rl_emit_mass_tables(out, m);
+    rl_emit_reference_tables(out, m);
+    rl_emit_plan_tables(out, m);
     rl_emit_form_args(out, form);
     if (rl_emit_user_fns(out, form, arena, user_fn_arr, n_user_fns,
                           diag) ||
-        rl_emit_params(out, &m, &arg_ctx, diag) ||
-        rl_emit_build_world(out, &m, form, arena, user_fn_arr,
+        rl_emit_params(out, m, &arg_ctx, diag) ||
+        rl_emit_build_world(out, m, form, arena, user_fn_arr,
                              n_user_fns, diag) ||
-        rl_emit_apply_draws(out, &m, &arg_ctx, diag)) {
+        rl_emit_apply_draws(out, m, &arg_ctx, diag)) {
         kflc_arena_release(arena);
+        free(mp);
         return 1;
     }
     /* The datalink's tables and the information state's gates come
@@ -92,24 +114,28 @@ static int kfl_emit_rl_cxx_inner_(FILE *out, const KflcNode *form,
      * and that block reads the body-index table the prefix declares,
      * and before the observation function, because the environment
      * core beneath both walks the tables. */
-    if (rl_emit_link_tables(out, &m, diag)) {
+    if (rl_emit_link_tables(out, m, diag)) {
         kflc_arena_release(arena);
+        free(mp);
         return 1;
     }
-    if (rl_emit_observe(out, &m, diag)) {
+    if (rl_emit_observe(out, m, diag)) {
         kflc_arena_release(arena);
+        free(mp);
         return 1;
     }
-    if (rl_emit_on_step(out, &m, form, arena, user_fn_arr, n_user_fns,
+    if (rl_emit_on_step(out, m, form, arena, user_fn_arr, n_user_fns,
                          diag) ||
-        rl_emit_objective(out, &m, form, arena, user_fn_arr, n_user_fns,
+        rl_emit_objective(out, m, form, arena, user_fn_arr, n_user_fns,
                            diag)) {
         kflc_arena_release(arena);
+        free(mp);
         return 1;
     }
     rl_emit_env_core(out);
     rl_emit_batch_main(out, form);
 
     kflc_arena_release(arena);
+    free(mp);
     return diag->errors ? 1 : 0;
 }

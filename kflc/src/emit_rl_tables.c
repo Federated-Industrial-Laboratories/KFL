@@ -635,10 +635,21 @@ int rl_emit_payload_tables(FILE *out, const RlModel *m)
     fprintf(out, "#define KFLRL_N_PAYLOAD %d\n", m->n_payloads);
     fprintf(out, "#define KFLRL_PAY_NPARAM %d\n",
             m->pay_nparam > 0 ? m->pay_nparam : 1);
-    int tpay[RL_MAX_PAYLOADS * RL_MAX_BODIES];
-    int tveh[RL_MAX_PAYLOADS * RL_MAX_BODIES];
-    int n_pairs = rl_track_pairs(m, tpay, tveh,
-                                  (int)(sizeof tpay / sizeof tpay[0]));
+    /* One track pair is one `observe track` statement, so the bound on
+     * these two is the observe bound and not the product of the payload
+     * and body bounds. That product was 8192 entries here against a
+     * program's real ceiling of RL_MAX_OBSERVES, so most of the array
+     * was unreachable and the sizing said the wrong thing about what
+     * bounds a program. Sized from what actually bounds it, the arrays
+     * are what a program can fill and the walk's own cap is that same
+     * number. */
+    int *tpay = (int *)calloc((size_t)RL_MAX_OBSERVES * 2, sizeof(int));
+    if (!tpay) {
+        fputs("#define KFLRL_N_TRACKPAIR 0\n", out);
+        return 1;
+    }
+    int *tveh = tpay + RL_MAX_OBSERVES;
+    int n_pairs = rl_track_pairs(m, tpay, tveh, RL_MAX_OBSERVES);
     fprintf(out, "#define KFLRL_N_TRACKPAIR %d\n", n_pairs);
     fprintf(out, "#define KFLRL_N_SIG %d\n", m->n_sig);
     fprintf(out, "#define KFLRL_N_EFFECTOR %d\n", rl_n_effector(m));
@@ -650,8 +661,12 @@ int rl_emit_payload_tables(FILE *out, const RlModel *m)
      * program declaring five payloads over four bodies carries sixty
      * doubles per environment. At the limits the grammar admits, 32
      * payloads over 256 bodies, it would be 24576 doubles, which is
-     * 192 kilobytes per environment: worth knowing before a program is
-     * written that large, and not a shape any fixture here reaches. */
+     * 4 megabytes per environment at the current payload and body
+     * bounds of 256 each: worth knowing before a program is written
+     * that large, and not a shape any fixture here reaches. The figure
+     * moves with those two bounds and the arithmetic is written out so
+     * that it can be redone rather than trusted; it was last stated at
+     * 192 kilobytes, when the payload bound was 32. */
     fprintf(out, "#define KFLRL_N_SOFTKILL %d\n",
             rl_n_softkill_engage(m));
     {
@@ -850,6 +865,7 @@ int rl_emit_payload_tables(FILE *out, const RlModel *m)
         for (int i = 0; i < n_pairs; i++) fprintf(out, "    %d,\n", tveh[i]);
         fputs("};\n\n", out);
     }
+    free(tpay);
 
     if (m->n_sig > 0) {
         fputs(

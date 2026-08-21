@@ -88,37 +88,47 @@
  * not the emitted program; a program over a limit gets a diagnostic
  * naming it rather than silent truncation.
  *
- * Four of them were raised when the first swarm program was written
+ * Five macros were raised when the first swarm program was written
  * against this compiler, and the arithmetic is recorded so that the
  * next author can see what the values are headroom over rather than
- * finding a round number. That program declares thirty-two craft, each
- * with eleven actuator channels, a radar, an information state and a
- * datalink, tracking twenty passive objects, its thirty-one peers and
- * three structures; a further block declares the capture and docking
- * pairings, the keep-out ranges and the passive objects' states, and
- * one more craft may be present. What it asks of each bound:
+ * finding a round number. That program declares thirty-three craft:
+ * thirty-two of a swarm, each with eleven actuator channels, a radar,
+ * an information state and a datalink, and one more that manoeuvres.
+ * Each of the thirty-two declares four observes of its own state, a
+ * detection observe of every other body, a track observe of each of
+ * twenty passive objects and a line-of-sight observe of each of them;
+ * a further block declares the capture and docking pairings, the
+ * keep-out and engagement ranges, the propellant the ending vector
+ * reads and each passive object's state. What it asks of each bound:
  *
- *   actions      32 * 11 + 8            = 360    against 1024
- *   observes     32 * 58 + 757          = 2613   against 4096
- *   payloads     32 * 3                 = 96     against 256
- *   drawn keys   20 * 13 + 3            = 263    against 1024
- *   actuators    32 * 11 + 8            = 360    against 1024
+ *   actions      32 * 11 + 8                       = 360    of 1024
+ *   observes     32 * (4 + 55 + 20 + 20) + 820 + 1 = 3989   of 8192
+ *   payloads     32 * 3                            = 96     of 256
+ *   drawn keys   20 * 13 + 3                       = 263    of 1024
+ *   actuators    33 * 11                           = 363    of 1024
+ *
+ * So the observe bound carries 4203 of headroom over that program and
+ * the other four carry between two and four times what it asks.
  *
  * The unchanged bounds are unchanged because that program stays inside
  * them: 57 bodies of 256, 56 assembly-bearing of 128, 174 colliders of
- * 256, 34 agents of 64, five imperfection chains of 32.
+ * 256, 34 agents of 64, six imperfection chains of 32.
  *
  * Every raise here costs compiler memory and nothing else: these
  * tables are scratch, the emitted program's layout is a function of
  * what a source declares rather than of what a table could hold, and
  * the diagnostics that name each bound are unchanged, so a program
- * over one is still refused by name rather than truncated. */
+ * over one is still refused by name rather than truncated. The model
+ * that holds them is allocated on the heap for exactly that reason
+ * (emit_rl.c): at these sizes it is over a megabyte, and a megabyte of
+ * automatic storage fails as a segmentation fault rather than as a
+ * refusal that names anything. */
 
 #define RL_MAX_BODIES   256
 
 #define RL_MAX_ACTIONS  1024
 
-#define RL_MAX_OBSERVES 4096
+#define RL_MAX_OBSERVES 8192
 
 #define RL_MAX_RESETS   256
 

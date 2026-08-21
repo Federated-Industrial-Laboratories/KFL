@@ -1901,6 +1901,36 @@ int main(void)
                "`gr_v_cg` and `gr_joined` compile: OK\n");
         s.destroy(env);
         dlclose(so);
+
+        /* And the other direction, which is what makes the selection a
+         * selection rather than a widening: without the mark those two
+         * names are not published, so an expression reading one is
+         * refused. An arm that only proved the marked form compiles
+         * would pass equally for a pass that admitted the names on
+         * every port observe, which is the defect's mirror image. */
+        char bad[8192];
+        snprintf(bad, sizeof bad,
+            "form RL_MARKNONE\n"
+            "fn world w\n"
+            GRASP_BLOCK
+            ANCHOR_BODY
+            "    astro_body drone assembly=\"%s/d1.k26asm\"" DRIFT
+            " pos_x=0.0 quat_w=1.0\n"
+            "    astro_body rock assembly=\"%s/d2.k26asm\"" DRIFT
+            " pos_x=6.0 quat_w=0.0 quat_y=1.0\n"
+            "    episode\n"
+            "        control_dt 0.5\n"
+            "        horizon 20\n"
+            "    end\n"
+            "    action pd box -1.0 1.0 default 0.0\n"
+            "    observe port grasp of drone against face of rock as gr\n"
+            "    objective\n"
+            "        reward 0.0 - gr_joined\n"
+            "    end\n"
+            "end\n"
+            "end\n", WORK_DIR, WORK_DIR);
+        refuse_("`gr_joined` read without the `full` mark", bad,
+                "gr_joined");
     }
     n_pass++;
 
