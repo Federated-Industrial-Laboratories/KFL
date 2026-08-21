@@ -155,6 +155,35 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
     if (rl_observe_form(s) == RL_OBS_TRK) {
         const char *bad = NULL;
         int mod = rl_track_modality(s, &bad);
+        /* Which of the library's two answering rules this statement
+         * is published through, decided here at compile time from
+         * what feeds the information state's history.
+         *
+         * A state with no `source=` is pushed the target's true state
+         * on every sub-advance, so its history is dense and complete
+         * and the only thing between the observer and it is the light
+         * time: the retarded-time solution is the whole content of
+         * such a picture, and it is what that form has always
+         * published.
+         *
+         * A `source=` gates the push on a detection's verdict, so
+         * entries arrive when the target was seen and not otherwise,
+         * and a peer's report arrives at whatever instant the link
+         * delivered it. Against such a history the retarded-time rule
+         * answers almost nothing: at the ranges craft work at, the
+         * light time is microseconds while the gap between entries is
+         * a control period, so the retarded instant falls past the
+         * newest entry and the observation is unavailable however
+         * good the track is. The gated form therefore publishes the
+         * held last-known answer: the newest entry at or before the
+         * query, with the age of that entry beside it.
+         *
+         * The two are separate entry points of the library rather
+         * than one entry point with a mode, so what the ungated form
+         * emits, links against and runs is what it was before this
+         * distinction existed. */
+        const char *answer = rl_track_gate_pay(m, p) >= 0
+                           ? "observe_held" : "observe";
         fprintf(out,
             "    {\n"
             "        double _kfl_val = 0.0;\n"
@@ -166,7 +195,7 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
             "        K26AstroVehicle *_kfl_tv = veh ? veh[%d] : NULL;\n"
             "        if (_kfl_is && _kfl_tv) {\n"
             "            K26AstroInfostateObservation _kfl_o =\n"
-            "                k26astro_infostate_observe(_kfl_is, _kfl_tv,\n"
+            "                k26astro_infostate_%s(_kfl_is, _kfl_tv,\n"
             "                    kflrl_info_epoch_(t_day, t_info),\n"
             "                    (K26AstroInfostateModality)%d);\n"
             /* The age test is what keeps one episode out of the next.
@@ -182,7 +211,16 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
              * epochs carry separates the two exactly, where comparing
              * the reported age against the elapsed time leaves a band
              * of a few nanoseconds in which the iterate crossed the
-             * epoch and the reported age did not. */
+             * epoch and the reported age did not.
+             *
+             * It bounds the held answer for the same reason and by
+             * the same test: an entry is knowledge of the episode it
+             * was pushed in, and an episode that answered from its
+             * predecessor's entries would be a function of it. The
+             * epoch seeding rule puts an entry of this episode in
+             * every ring before any stepping, so this is what a gated
+             * state falls back to when nothing has been seen, and not
+             * a way past the test. */
             "            if (_kfl_o.valid &&\n"
             "                _kfl_o.t_retarded.days_since_J2000 >= t_day) {\n"
             "                _kfl_val = 1.0;\n"
@@ -206,7 +244,7 @@ static void rl_emit_observe_defense_(FILE *out, const RlModel *m,
             "        out_v[%d] = _kfl_rr;\n"
             "        out_v[%d] = _kfl_ag;\n"
             "    }\n",
-            p, rl_veh_slot_of(m, tgt), mod < 0 ? 0 : mod,
+            p, rl_veh_slot_of(m, tgt), answer, mod < 0 ? 0 : mod,
             off, off + 1, off + 2, off + 3, off + 4, off + 5, off + 6,
             off + 7, off + 8);
         return;

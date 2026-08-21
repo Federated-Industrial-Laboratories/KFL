@@ -1532,26 +1532,34 @@ processing. Nine components:
 | Component | Value |
 |---|---|
 | `<name>_valid` | 1.0 when an observation was produced, 0.0 otherwise. |
-| `<name>_pos_x`, `<name>_pos_y`, `<name>_pos_z` | Target position at the retarded time, world frame, in metres. |
-| `<name>_vel_x`, `<name>_vel_y`, `<name>_vel_z` | Target velocity at the retarded time, in metres per second. |
+| `<name>_pos_x`, `<name>_pos_y`, `<name>_pos_z` | The target position the observation reports, world frame, in metres. |
+| `<name>_vel_x`, `<name>_vel_y`, `<name>_vel_z` | The target velocity the observation reports, in metres per second. |
 | `<name>_range` | Observer-to-target distance at that solution, in metres. |
-| `<name>_age` | The observer's clock time less the retarded time, in seconds. |
+| `<name>_age` | The observer's clock time less the instant the reported state belongs to, in seconds. |
 
 When `_valid` reads 0.0 the other eight read 0.0. The solver's iteration
 count is not published: it is a convergence diagnostic rather than a
 state of the world.
 
+Which instant the reported state belongs to depends on what feeds the
+payload's history, and the two answers are described in turn below. A
+payload with no `source=` is pushed the target's true state every
+sub-advance and answers at the retarded time. A payload with a
+`source=` is pushed only what it saw and what a peer sent it, and
+answers with the newest entry it holds at or before the instant asked
+about, with the age of that entry.
+
 The target's true state is pushed into the payload's history once per
 sub-advance, unless a `source=` gates it as described below, so the
 history is finer than the light-time lag rather than coarser. At the
 start of each episode, before any stepping, one sample is pushed at the
-episode epoch. **The first observation of an episode is
-therefore unavailable**: the only sample is the epoch itself and the
-retarded time is strictly earlier, so the observer would be receiving
-light emitted before the episode began, and no such state is invented to
-supply it. The same holds on any later step whose elapsed time is
-shorter than the light time to the target, which at long ranges is more
-than one step.
+episode epoch. **For a payload with no `source=`, the first observation
+of an episode is therefore unavailable**: the only sample is the epoch
+itself and the retarded time is strictly earlier, so the observer would
+be receiving light emitted before the episode began, and no such state
+is invented to supply it. The same holds on any later step whose elapsed
+time is shorter than the light time to the target, which at long ranges
+is more than one step.
 
 At most 64 targets may be tracked against one information state, which
 is the library's own per-observer limit; a program that names more is
@@ -1567,14 +1575,34 @@ sub-advance only when that detection's verdict for that target at that
 instant meets its declared threshold, which is the same comparison the
 detection's own `_detected` channel publishes.
 
-Between detections the ring keeps its last entries and `observe track`
-keeps publishing them, unchanged in age, for as long as the observer's
-light-time solution still falls inside retained history, that is while
-the gap since the last entry is shorter than the light time to the
-target. The age channel does not grow through the gap: it stays the
-converged light time to the reported position. Once the newest entry is
-older than that light time the channel reads invalid rather than an
-extrapolation being invented.
+**A gated payload answers with its last known state, aged.** It
+publishes the newest entry its history holds at or before the instant
+asked about, exactly as that entry was pushed, and `_age` reports the
+instant asked about less the instant that entry was made. So the age
+reads nought on a sub-advance the gate opened on, grows through a gap
+between detections, and drops back on the entry that ends the gap.
+`_valid` reads 0.0 only where the history holds no entry of this
+episode at or before that instant; since the epoch seeding push below
+puts one in every ring before any stepping, a gated payload publishes a
+state from the first observation onward. Nothing is extrapolated: the
+position published is one the target genuinely occupied, and the age
+says how long ago, which is what a track picture assembled from
+intermittent looks is.
+
+The two answers differ because the two histories differ. A truth-fed
+history is dense and complete, so the only thing between the observer
+and it is the light time, and a retarded-time solution is the whole
+content of the picture. A gated history is not dense: entries arrive
+when the target was seen and when a report landed, and nothing fills
+the gaps. At the ranges craft work at, the light time is microseconds
+while the interval between entries is a control period, so a
+retarded-time solution over a gated history would read unavailable
+almost always, and a peer's report, which is at least one control
+period old when it arrives, could never be used at all. Both forms
+report what the observer can honestly claim to know; they differ in
+what the observer was given to know it from.
+
+Own entries and entries delivered by a datalink are treated alike.
 
 Without `source=` the push is truth-fed and the behaviour is what it
 was before the key existed, so no existing program changes. The

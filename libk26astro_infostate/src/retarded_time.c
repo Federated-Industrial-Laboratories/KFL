@@ -33,6 +33,44 @@
 #include <math.h>
 #include <string.h>
 
+/* ---- Newest-entry-at-or-before helper ------------------------- *
+ *
+ * Returns the most recent history sample whose own instant is at or
+ * before clock time t, with out_valid = 1; out_valid = 0 when the
+ * track holds no such sample, which includes the empty track and a
+ * t earlier than every retained entry.
+ *
+ * Nothing is interpolated and nothing is extrapolated: the sample is
+ * returned as it was pushed, and the caller is expected to publish
+ * its own instant so that the age of the answer is visible. That is
+ * what makes this a held last-known rather than a state solved for.
+ *
+ * Entries are pushed in non-decreasing epoch order (the ring drops a
+ * push older than its newest), so a backwards walk from the head
+ * meets the answer first and stops. The common case is the newest
+ * entry itself, one comparison. */
+K26AstroInfostateHistoryPt_
+k26astro_infostate_track_held_(const K26AstroInfostateTrack_ *track,
+                               K26AstroEpoch t,
+                               int *out_valid)
+{
+    K26AstroInfostateHistoryPt_ result;
+    memset(&result, 0, sizeof(result));
+    if (out_valid) *out_valid = 0;
+
+    if (!track || track->count < 1) return result;
+
+    int idx = (track->head - 1 + track->capacity) % track->capacity;
+    for (int n = 0; n < track->count; n++) {
+        if (k26astro_epoch_diff_seconds(&t, &track->history[idx].t) >= 0.0) {
+            if (out_valid) *out_valid = 1;
+            return track->history[idx];
+        }
+        idx = (idx - 1 + track->capacity) % track->capacity;
+    }
+    return result;
+}
+
 /* ---- Track-at-clock-time helper ------------------------------- *
  *
  * Returns the linearly-interpolated history sample at clock time t.
@@ -209,6 +247,52 @@ k26astro_infostate_observe(K26AstroInfostate *s,
     obs.range_m    = k26m3d_v3_len(k26m3d_v3_sub(pt_retarded.position, x_obs));
     obs.age_s      = tau;
     obs.iters      = iters;
+    obs.valid      = 1;
+    return obs;
+}
+
+/* ---- The held last-known answer ------------------------------- *
+ *
+ * The second of the two answering rules this lib offers, and the one
+ * a track picture assembled from intermittent reports needs. See the
+ * header for which question each answers and why a consumer whose
+ * entries are sensed rather than fed with truth needs this one. */
+
+K26AstroInfostateObservation
+k26astro_infostate_observe_held(K26AstroInfostate *s,
+                                const struct K26AstroVehicle *target,
+                                K26AstroEpoch t,
+                                K26AstroInfostateModality modality)
+{
+    K26AstroInfostateObservation obs;
+    memset(&obs, 0, sizeof(obs));
+    obs.t_observer = t;
+    obs.modality   = modality;
+
+    if (!s || !target) return obs;
+    if (!s->observer) return obs;  /* stale: vehicle-destroy hook nulled observer */
+
+    K26AstroInfostateTrack_ *trk = k26astro_infostate_find_track_(s, target);
+    if (!trk) return obs;
+
+    int valid = 0;
+    K26AstroInfostateHistoryPt_ pt =
+        k26astro_infostate_track_held_(trk, t, &valid);
+    if (!valid) return obs;
+
+    const K26V3 x_obs = observer_position_at_(s->observer);
+
+    /* The range is to the held position from where the observer is
+     * now. It is the range to what the observer believes, which is
+     * the only range a held track can report; the range to where the
+     * target actually is would be a quantity the observer has no way
+     * to know. */
+    obs.t_retarded = pt.t;
+    obs.position   = pt.position;
+    obs.velocity   = pt.velocity;
+    obs.range_m    = k26m3d_v3_len(k26m3d_v3_sub(pt.position, x_obs));
+    obs.age_s      = k26astro_epoch_diff_seconds(&t, &pt.t);
+    obs.iters      = 0;
     obs.valid      = 1;
     return obs;
 }

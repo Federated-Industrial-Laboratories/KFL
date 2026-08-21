@@ -936,15 +936,15 @@ static void kflrl_info_push_(K26RlEnv *h, uint32_t e, int seed)
          * same emitted statements.
          *
          * Between detections the ring keeps its last entries and
-         * `observe track` keeps publishing them, unchanged in age,
-         * for as long as the observer's light-time solution still
-         * falls inside retained history, that is while the gap since
-         * the last entry is shorter than the light time to the
-         * target. The age channel does not grow through the gap: it
-         * stays the converged light time to the reported position.
-         * Once the newest entry is older than that light time the
-         * channel reads invalid rather than an extrapolation being
-         * invented. */
+         * `observe track` keeps publishing the newest of them, with
+         * the age channel reporting how long ago it was pushed. So
+         * the age grows through a gap and drops back on the entry
+         * that ends it, and the channel reads unavailable only where
+         * the ring holds no entry of this episode at or before the
+         * instant asked about. Nothing is extrapolated: what is
+         * published is a position the target genuinely occupied,
+         * with its age beside it, which is what a track picture
+         * assembled from intermittent looks is. */
         if (!seed &&
             !kflrl_track_gate_(h->worlds[e], KFLRL_PAYP(h, e),
                                KFLRL_ENG(h, e), i)) {

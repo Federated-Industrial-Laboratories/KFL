@@ -23,8 +23,14 @@ builtin infostate_destroy            k26astro_infostate_destroy            1
 # ---- Target history --------------------------------------------------
 builtin infostate_target_push        k26astro_infostate_target_push        5
 
-# ---- Retarded-time observation ---------------------------------------
+# ---- Observation ------------------------------------------------------
+# Two answers over one history. The first solves the retarded time and
+# is for a history fed with the target's true state every tick; the
+# second returns the newest entry at or before the clock time asked
+# about, with that entry's age, and is for a history fed by
+# intermittent reports. The header states which suits which.
 builtin infostate_observe            k26astro_infostate_observe            4
+builtin infostate_observe_held       k26astro_infostate_observe_held       4
 
 # ---- Inspection ------------------------------------------------------
 builtin infostate_latest             k26astro_infostate_latest             2

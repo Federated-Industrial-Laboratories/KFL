@@ -86,6 +86,15 @@ k26astro_infostate_track_at_(const K26AstroInfostateTrack_ *track,
                              K26AstroEpoch t,
                              int *out_valid);
 
+/* Returns the newest sample whose own instant is at or before t,
+ * with `out_valid = 1`, and `out_valid = 0` when the track holds no
+ * such sample. Nothing is interpolated between entries and nothing
+ * is extrapolated past one: the sample is returned as pushed. */
+K26AstroInfostateHistoryPt_
+k26astro_infostate_track_held_(const K26AstroInfostateTrack_ *track,
+                               K26AstroEpoch t,
+                               int *out_valid);
+
 #ifdef __cplusplus
 }
 #endif

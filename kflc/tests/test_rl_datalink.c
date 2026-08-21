@@ -7,25 +7,47 @@
  * declared detection's verdict, and the datalink carries what is left
  * to carry, at a physical cost and a physical delay.
  *
+ * How a gated state answers, which every arm below is read against.
+ * A gated information state publishes the newest entry its history
+ * holds at or before the instant asked about, with the age channel
+ * reporting how long ago that entry was pushed. So the age is nought
+ * on a step whose verdict opened the gate at the last sub-advance,
+ * grows through a gap, and drops back on the entry that ends it. The
+ * ungated form keeps the retarded-time rule it has always had, its
+ * history being fed with truth every sub-advance and the light time
+ * being the only thing between the observer and it.
+ *
+ * The epoch seeding rule puts one true entry in every ring before any
+ * stepping, gated or not, so a gated state has something to answer
+ * with from the first instant and its validity channel reads 1.0
+ * throughout. Validity therefore says nothing about where knowledge
+ * came from, and every arm below that used to read it now reads the
+ * age: an observer holding only the seed reports an age equal to the
+ * whole elapsed episode, and one holding a peer's report reports the
+ * few milliseconds since that report was made. The two are five
+ * orders of magnitude apart in these worlds.
+ *
  * Gates:
  *
  *   1. The gate. A `source=`-gated information state's track follows
- *      its named detection's verdict step for step, across two
- *      transitions in each direction, so it neither pushes below the
- *      threshold nor withholds a push at or above it. Beside it, the
- *      same world with a detection that always meets its threshold
- *      records byte for byte what the ungated form records, which is
- *      the other half: a gate that withheld any push whose verdict met
- *      the threshold would move those bytes. And the ungated form
- *      itself is compared byte for byte against the compiler from
- *      before the key existed.
+ *      its named detection's verdict step for step, read on the age:
+ *      nought where the verdict holds, growing by a control period a
+ *      step where it does not, across transitions in both directions.
+ *      Beside it, the two boundary worlds, one whose verdict always
+ *      holds and one whose never does, each at a single sub-advance
+ *      per control step so that every push attempt is a step the arm
+ *      can see. And the ungated form is compared byte for byte
+ *      against the compiler from before the key existed.
  *
  *   2. The value the link makes reachable. A receiver whose own
- *      gated detection has never seen a target reads `_valid` 1.0 with
- *      the shared entry's light-time age after closure, and 0.0 in the
- *      same world with the datalink removed. The age is held against a
- *      light time computed here from the published range, and the
- *      shared position against the transmitter's own published one.
+ *      gated detection has never seen a target holds its peer's
+ *      report: its age is within one sub-advance and one link light
+ *      time of the transmitter's own, and where the two ages are
+ *      equal the two published positions are identical to the bit,
+ *      which is a report that was carried rather than recomputed. In
+ *      the same world with the datalink removed the receiver holds
+ *      only its epoch seed, its age is the whole elapsed episode and
+ *      its published position never moves.
  *
  *   3. The budget. The closure range is solved here from the
  *      declared keys through the one-way Friis relation, and two
@@ -53,10 +75,12 @@
  * reaches a real artifact rather than stopping at the check, the
  * single-generator rule over this surface's own entry points, the one
  * limit it reports rather than refuses, and one arm that measures the
- * propagation delay itself: a peer whose own light time exceeds the target's cannot
- * help, however strong its signal, because its report arrives older
- * than the light from the target and falls outside the history the
- * observer's retarded time has to lie in.
+ * propagation delay itself: the farther a peer is, the older its
+ * report is when it lands, and the age the receiver publishes carries
+ * that delay and nothing else. A peer whose report is older than the
+ * light from the target still helps, because a held last-known state
+ * with an honest age on it is knowledge and the light-time window is
+ * not what bounds it.
  *
  * Red controls, each a substitution inside the compiler rather than a
  * symbol a link line can replace, so each is run by hand and recorded
@@ -219,12 +243,41 @@ static void radio_str_(char *out, size_t cap, const double *v)
     " loss_sys_db=3.0 bandwidth_hz=1.0e6 t_sys_k=290.0" \
     " noise_figure=2.0 snr_threshold=" thr "\n"
 
+/* The episode block every world here declares, and the two numbers
+ * the arms do arithmetic with. They are stringified from the same
+ * macros the block is built out of, so a world and the figures an arm
+ * holds it against cannot say different things about the same
+ * clock. */
+#define DL_CONTROL_DT 0.025
+#define DL_SUBSTEPS   10
+#define DL_STR__(x)   #x
+#define DL_STR_(x)    DL_STR__(x)
+#define DL_SUB_S      (DL_CONTROL_DT / (double)DL_SUBSTEPS)
+
 #define DL_EPISODE \
     "    episode\n" \
-    "        control_dt 0.025\n" \
-    "        substeps 10\n" \
+    "        control_dt " DL_STR_(DL_CONTROL_DT) "\n" \
+    "        substeps " DL_STR_(DL_SUBSTEPS) "\n" \
     "        horizon 60\n" \
     "    end\n"
+
+/* The same world with one sub-advance per control step. Where an arm
+ * has to see every push attempt, a step boundary has to be the only
+ * boundary a push can happen on; with ten of them a gate could open
+ * and close inside a step and the channels would carry only what the
+ * last one did. The rewrite pads rather than moves, so the source
+ * buffer keeps its length. */
+static void dl_one_substep_(char *src)
+{
+    static const char *const OLD = "substeps " DL_STR_(DL_SUBSTEPS);
+    static const char *const NEW = "substeps 1";
+    char *p = strstr(src, OLD);
+
+    ASSERT(p != NULL);
+    ASSERT(strlen(NEW) <= strlen(OLD));
+    memset(p, ' ', strlen(OLD));
+    memcpy(p, NEW, strlen(NEW));
+}
 
 #define DL_AGENTS \
     "    agent alpha\n" \
@@ -350,6 +403,37 @@ static double dl_ch_(const DlRun *r, int step, const char *name)
         exit(1);
     }
     return r->v[step][i];
+}
+
+/* Where a receiver's held entry came from, read off the age it
+ * publishes. A gated ring always holds its epoch seed, so validity
+ * says nothing; but the seed's age is the whole elapsed episode and a
+ * peer's report is at most one broadcast boundary and one link light
+ * time old, and in these worlds the two are orders of magnitude
+ * apart.
+ *
+ * Returns 1 for a peer's report and 0 for the seed. A value that is
+ * neither is not classified: it is a third thing this surface has no
+ * account of, and an arm that quietly filed it under one of the two
+ * would be reporting a verdict it had not reached.
+ *
+ * `sep_m` is the transmitter-to-receiver separation the delivery is
+ * priced on; a tenth of a nanosecond is the allowance against the
+ * elapsed time, which the environment reaches by accumulating
+ * sub-advances and this reaches by multiplying. */
+static int dl_from_peer_(const DlRun *r, int step, const char *age_ch,
+                         double sep_m)
+{
+    double age = dl_ch_(r, step, age_ch);
+    double elapsed = (double)(step + 1) * DL_CONTROL_DT;
+    double bound = DL_SUB_S + sep_m / K26A_C;
+
+    if (age >= 0.0 && age <= bound) return 1;
+    if (fabs(age - elapsed) <= 1.0e-10) return 0;
+    fprintf(stderr, "FAIL: step %d publishes `%s` = %.17g, which is "
+            "neither a delivery (at most %.9g s) nor the epoch seed "
+            "(%.17g s)\n", step + 1, age_ch, age, bound, elapsed);
+    exit(1);
 }
 
 /* ---- Check-only arms ------------------------------------------------ */
@@ -692,12 +776,26 @@ static void gate_cap_(void)
 
 /* ---- 31a: the gate follows the verdict ------------------------------ */
 
+/* The verdict decides whether an entry is pushed, and what the channel
+ * group shows for it is the age. A step whose verdict held at the last
+ * sub-advance publishes an age of exactly nought, because the entry
+ * was pushed at the instant the observation is taken at and the two
+ * epochs are built from the same reading of the same clock. A step
+ * whose verdict did not hold publishes the time since the last one
+ * that did.
+ *
+ * A gate that never withheld a push would read nought on every step,
+ * including the steps its own detection channel calls a miss; a gate
+ * that withheld one whose verdict held would read a sub-advance or
+ * more on a step its own detection channel calls a hit. Both are what
+ * the arm fails on. */
+
 static void gate_verdict_(void)
 {
     static char src[16384];
     char radio[1024];
     DlRun run;
-    int rises = 0, falls = 0, prev = -1;
+    int rises = 0, falls = 0, prev = -1, gaps = 0;
 
     radio_str_(radio, sizeof radio, RADIO_);
     /* The bogey turns, and drone_1's threshold sits inside the band
@@ -710,98 +808,193 @@ static void gate_verdict_(void)
     for (int k = 0; k < run.n_steps; k++) {
         double det = dl_ch_(&run, k, "alpha.see1_detected");
         double val = dl_ch_(&run, k, "alpha.trk1_valid");
-        if (det != val) {
-            fprintf(stderr, "FAIL: step %d publishes verdict %.1f and "
-                    "track validity %.1f\n", k + 1, det, val);
+        double age = dl_ch_(&run, k, "alpha.trk1_age");
+        if (val != 1.0) {
+            fprintf(stderr, "FAIL: step %d publishes validity %.1f on a "
+                    "ring the epoch seeding rule put an entry in\n",
+                    k + 1, val);
             exit(1);
         }
+        if (det > 0.5 && age != 0.0) {
+            fprintf(stderr, "FAIL: step %d publishes verdict 1.0 and an "
+                    "age of %.17g, so the push its own detection "
+                    "channel calls for did not happen\n", k + 1, age);
+            exit(1);
+        }
+        if (det < 0.5 && !(age > 0.0)) {
+            fprintf(stderr, "FAIL: step %d publishes verdict 0.0 and an "
+                    "age of %.17g, so a push happened below the "
+                    "threshold\n", k + 1, age);
+            exit(1);
+        }
+        if (det < 0.5) gaps++;
         if (prev >= 0 && det > 0.5 && prev == 0) rises++;
         if (prev >= 0 && det < 0.5 && prev == 1) falls++;
         prev = det > 0.5 ? 1 : 0;
     }
-    if (rises < 1 || falls < 1) {
+    if (rises < 1 || falls < 1 || gaps < 1) {
         fprintf(stderr, "FAIL: the verdict did not change in both "
-                "directions (%d rises, %d falls)\n", rises, falls);
+                "directions (%d rises, %d falls, %d closed steps)\n",
+                rises, falls, gaps);
         exit(1);
     }
     g_arms++;
-    printf("  the gated track follows its detection's verdict on all "
-           "%d steps (%d rise(s), %d fall(s))\n", run.n_steps, rises,
-           falls);
+    printf("  the gated track's age follows its detection's verdict on "
+           "all %d steps (%d rise(s), %d fall(s), %d closed step(s))\n",
+           run.n_steps, rises, falls, gaps);
 
     /* And the shared half of the same statement: drone_2, which never
-     * sees the bogey itself, holds a track exactly while its peer's
-     * verdict holds. */
+     * sees the bogey itself, holds what its peer holds, one delivery
+     * behind it. The lag has two parts and no third: the offer waits
+     * for a broadcast boundary, and it travels. Where the lag has been
+     * paid and nothing newer has been pushed, the two ages are equal
+     * and the two published positions are the same entry, bit for
+     * bit, which is a report that was carried rather than recomputed
+     * at the receiver. */
+    {
+        double link_lt = 3.0e4 / K26A_C;
+        int equal = 0, behind = 0;
+
+        for (int k = 0; k < run.n_steps; k++) {
+            double own  = dl_ch_(&run, k, "beta.see2_detected");
+            double val  = dl_ch_(&run, k, "beta.trk2_valid");
+            double age1 = dl_ch_(&run, k, "alpha.trk1_age");
+            double age2 = dl_ch_(&run, k, "beta.trk2_age");
+            ASSERT(own == 0.0);
+            ASSERT(val == 1.0);
+            if (age2 < age1 || age2 > age1 + DL_SUB_S + link_lt) {
+                fprintf(stderr, "FAIL: step %d, the transmitter's age is "
+                        "%.17g and the receiver's %.17g, outside the "
+                        "one boundary and one light time (%.9g s) a "
+                        "delivery costs\n", k + 1, age1, age2,
+                        DL_SUB_S + link_lt);
+                exit(1);
+            }
+            if (age2 == age1) {
+                static const char *const XYZ[] = { "x", "y", "z", NULL };
+                for (int i = 0; XYZ[i]; i++) {
+                    char a[64], b[64];
+                    snprintf(a, sizeof a, "alpha.trk1_pos_%s", XYZ[i]);
+                    snprintf(b, sizeof b, "beta.trk2_pos_%s", XYZ[i]);
+                    if (dl_ch_(&run, k, a) != dl_ch_(&run, k, b)) {
+                        fprintf(stderr, "FAIL: step %d, the two craft "
+                                "report one entry at one age and "
+                                "different positions in %s\n",
+                                k + 1, XYZ[i]);
+                        exit(1);
+                    }
+                    snprintf(a, sizeof a, "alpha.trk1_vel_%s", XYZ[i]);
+                    snprintf(b, sizeof b, "beta.trk2_vel_%s", XYZ[i]);
+                    ASSERT(dl_ch_(&run, k, a) == dl_ch_(&run, k, b));
+                }
+                equal++;
+            } else {
+                behind++;
+            }
+        }
+        /* Both cases have to occur, or the arm has measured one of
+         * them and reported both. */
+        if (equal < 1 || behind < 1) {
+            fprintf(stderr, "FAIL: %d step(s) at an equal age and %d "
+                    "behind, so this run does not hold both cases\n",
+                    equal, behind);
+            exit(1);
+        }
+        g_arms++;
+        printf("  the receiver holds the transmitter's own entry, its "
+               "own detection reading 0.0 throughout: %d step(s) at the "
+               "same age with identical positions, %d step(s) still "
+               "paying the delivery\n", equal, behind);
+    }
+}
+
+/* ---- 31a: the gate's two boundaries, every push attempt seen -------- */
+
+/* The verdict arm above reads one step's age against one step's
+ * verdict, and a control step there carries ten sub-advances, so a
+ * gate that opened and closed inside a step leaves only its last
+ * decision in the channels. These two worlds run one sub-advance per
+ * control step, which makes every push attempt a step of its own, and
+ * take the gate to each of its ends.
+ *
+ * With a threshold nothing can fail, every step must push: the age
+ * reads exactly nought on all of them, and a single withheld push
+ * would read one control period instead.
+ *
+ * With a threshold nothing can meet and no datalink, no step may
+ * push: the only entry the ring holds is the epoch seed, so the age
+ * is the whole elapsed episode and the published position never
+ * moves. One push let through below the threshold would drop the age
+ * to nought and move the position.
+ *
+ * The elapsed time is compared to a tenth of a nanosecond rather than
+ * exactly, because the environment's clock reaches a step boundary by
+ * accumulating sub-advances and this arm reaches it by multiplying.
+ * The two quantities the arm has to tell apart differ by five orders
+ * of magnitude, so nothing rests on the last bits. */
+
+static void gate_gate_ends_(void)
+{
+    static char src[16384];
+    char radio[1024];
+    DlRun run;
+    const double tol = 1.0e-10;
+
+    radio_str_(radio, sizeof radio, RADIO_);
+
+    /* No spin and a threshold far below the statistic, so the verdict
+     * holds at every instant of the run. */
+    dl_world_(src, sizeof src, 3.0e4, "0.0", "1.0", "1.0e-30", radio,
+              "swarm_a", 1);
+    dl_one_substep_(src);
+    dl_run_(&run, src, "alwaysopen", 12);
     for (int k = 0; k < run.n_steps; k++) {
         double det = dl_ch_(&run, k, "alpha.see1_detected");
-        double own = dl_ch_(&run, k, "beta.see2_detected");
-        double val = dl_ch_(&run, k, "beta.trk2_valid");
-        ASSERT(own == 0.0);
-        if (det != val) {
-            fprintf(stderr, "FAIL: step %d, the peer's verdict is %.1f "
-                    "and the receiver's track validity %.1f\n",
-                    k + 1, det, val);
+        double age = dl_ch_(&run, k, "alpha.trk1_age");
+        ASSERT(det == 1.0);
+        if (age != 0.0) {
+            fprintf(stderr, "FAIL: step %d of a world whose verdict "
+                    "always holds publishes an age of %.17g, so a push "
+                    "was withheld\n", k + 1, age);
             exit(1);
         }
     }
     g_arms++;
-    printf("  the receiving craft's track follows the transmitter's "
-           "verdict, its own detection reading 0.0 throughout\n");
-}
+    printf("  a verdict that always holds pushes on every one of %d "
+           "single-sub-advance steps, each publishing an age of "
+           "nought\n", run.n_steps);
 
-/* ---- 31a: the ungated form is unchanged ----------------------------- */
-
-/* Two programs that differ only in the `source=` key, with a detection
- * that meets its threshold at every instant, record the same bytes. A
- * gate that withheld any push whose verdict met the threshold would
- * move them; so would a gate that changed the order or the epoch of a
- * push. */
-
-static void gate_ungated_identity_(void)
-{
-    static char gated[16384], plain[16384];
-    char radio[1024];
-    char cmd[1024];
-
-    radio_str_(radio, sizeof radio, RADIO_);
-    /* No spin and a threshold far below the statistic, so the verdict
-     * is 1.0 at every instant of the run. */
-    dl_world_(gated, sizeof gated, 3.0e4, "0.0", "1.0", "1.0e-30",
-              radio, "swarm_a", 1);
-    snprintf(plain, sizeof plain, "%s", gated);
+    /* A threshold no statistic in this world can reach, and no
+     * datalink, so nothing may enter the ring after the seed. */
+    dl_world_(src, sizeof src, 3.0e4, "0.0", "1.0e30", "1.0e30", NULL,
+              "swarm_a", 1);
+    dl_one_substep_(src);
+    dl_run_(&run, src, "neveropen", 12);
     {
-        char *p = strstr(plain, " source=eye1");
-        ASSERT(p != NULL);
-        memset(p, ' ', strlen(" source=eye1"));
-        p = strstr(plain, " source=eye2");
-        ASSERT(p != NULL);
-        memset(p, ' ', strlen(" source=eye2"));
+        double px0 = dl_ch_(&run, 0, "alpha.trk1_pos_x");
+        double py0 = dl_ch_(&run, 0, "alpha.trk1_pos_y");
+        for (int k = 0; k < run.n_steps; k++) {
+            double det = dl_ch_(&run, k, "alpha.see1_detected");
+            double val = dl_ch_(&run, k, "alpha.trk1_valid");
+            double age = dl_ch_(&run, k, "alpha.trk1_age");
+            double want = (double)(k + 1) * DL_CONTROL_DT;
+            ASSERT(det == 0.0);
+            ASSERT(val == 1.0);
+            if (fabs(age - want) > tol) {
+                fprintf(stderr, "FAIL: step %d of a world whose verdict "
+                        "never holds publishes an age of %.17g against "
+                        "an elapsed %.17g, so an entry reached the ring "
+                        "below the threshold\n", k + 1, age, want);
+                exit(1);
+            }
+            ASSERT(dl_ch_(&run, k, "alpha.trk1_pos_x") == px0);
+            ASSERT(dl_ch_(&run, k, "alpha.trk1_pos_y") == py0);
+        }
+        g_arms++;
+        printf("  a verdict that never holds pushes on none of %d "
+               "steps: the age is the elapsed episode throughout and "
+               "the held position never moves\n", run.n_steps);
     }
-
-    rl_write_file_(WORK_DIR "/gated.kfl", gated);
-    rl_write_file_(WORK_DIR "/plain.kfl", plain);
-    rl_compile_(WORK_DIR "/gated.kfl", WORK_DIR "/gated", WORK_DIR);
-    rl_compile_(WORK_DIR "/plain.kfl", WORK_DIR "/plain", WORK_DIR);
-    for (int i = 0; i < 2; i++) {
-        snprintf(cmd, sizeof cmd,
-                 WORK_DIR "/%s --seed 909 --envs 2 --episodes 2 --out "
-                 WORK_DIR "/%s.k26ep > " WORK_DIR "/%s.log 2>&1",
-                 i ? "plain" : "gated", i ? "plain" : "gated",
-                 i ? "plain" : "gated");
-        rl_run_or_die_(cmd);
-    }
-    if (!rl_files_equal_(WORK_DIR "/gated.k26ep",
-                         WORK_DIR "/plain.k26ep")) {
-        fprintf(stderr, "FAIL: a gate whose verdict holds at every "
-                "instant changed what the run recorded\n");
-        exit(1);
-    }
-    struct stat st;
-    ASSERT(stat(WORK_DIR "/gated.k26ep", &st) == 0);
-    g_arms++;
-    printf("  a gate that never closes records what the ungated form "
-           "records, byte for byte (%lld bytes)\n",
-           (long long)st.st_size);
 }
 
 /* ---- 31a: the ungated form against the compiler before the key ------ */
@@ -935,77 +1128,116 @@ static void gate_shared_track_(void)
     dl_run_(&a, with_link, "shared", 8);
     dl_run_(&b, without, "unshared", 8);
 
-    for (int k = 0; k < a.n_steps; k++) {
-        double own = dl_ch_(&a, k, "beta.see2_detected");
-        double val = dl_ch_(&a, k, "beta.trk2_valid");
-        double ctl = dl_ch_(&b, k, "beta.trk2_valid");
-        ASSERT(own == 0.0);
-        if (val != 1.0 || ctl != 0.0) {
-            fprintf(stderr, "FAIL: step %d reads validity %.1f with the "
-                    "link and %.1f without it\n", k + 1, val, ctl);
-            exit(1);
-        }
-        /* The eight channels beside it zero-fill without the link,
-         * which is the form an unavailable observation takes. */
-        static const char *const REST[] = {
-            "beta.trk2_pos_x", "beta.trk2_pos_y", "beta.trk2_pos_z",
-            "beta.trk2_vel_x", "beta.trk2_vel_y", "beta.trk2_vel_z",
-            "beta.trk2_range", "beta.trk2_age", NULL
-        };
-        for (int i = 0; REST[i]; i++) {
-            ASSERT(dl_ch_(&b, k, REST[i]) == 0.0);
-        }
-    }
-    g_arms++;
-    printf("  a target its own detection has never seen reads valid "
-           "with the link and unavailable without it, over %d steps\n",
-           a.n_steps);
+    /* The value the link makes reachable, and the value the same
+     * world publishes without it. Both receivers hold a valid track,
+     * because the epoch seeding rule gives every ring one entry
+     * before any stepping; what tells them apart is what that entry
+     * is. With the link the receiver holds its peer's report, made
+     * milliseconds ago, and its published position follows the target.
+     * Without it the receiver holds nothing but the seed: an age equal
+     * to the whole elapsed episode, and a position that has not moved
+     * since the episode began. */
+    {
+        double link_lt = 3.0e4 / K26A_C;
+        double px0 = dl_ch_(&b, 0, "beta.trk2_pos_x");
+        double py0 = dl_ch_(&b, 0, "beta.trk2_pos_y");
+        double moved = 0.0;
 
-    /* The age against a light time computed here, and the shared
-     * position against the transmitter's own published one. */
-    for (int k = 1; k < a.n_steps; k++) {
-        double range = dl_ch_(&a, k, "beta.trk2_range");
-        double age   = dl_ch_(&a, k, "beta.trk2_age");
-        double want  = range / K26A_C;
-        double err   = fabs(age - want);
-        if (err > 1.0e-12) {
-            fprintf(stderr, "FAIL: step %d publishes age %.17g against "
-                    "a light time of %.17g\n", k + 1, age, want);
+        for (int k = 0; k < a.n_steps; k++) {
+            double own  = dl_ch_(&a, k, "beta.see2_detected");
+            double age  = dl_ch_(&a, k, "beta.trk2_age");
+            double ctl  = dl_ch_(&b, k, "beta.trk2_age");
+            double want = (double)(k + 1) * DL_CONTROL_DT;
+            ASSERT(own == 0.0);
+            ASSERT(dl_ch_(&b, k, "beta.see2_detected") == 0.0);
+            ASSERT(dl_ch_(&a, k, "beta.trk2_valid") == 1.0);
+            ASSERT(dl_ch_(&b, k, "beta.trk2_valid") == 1.0);
+            if (age > DL_SUB_S + link_lt) {
+                fprintf(stderr, "FAIL: step %d publishes an age of "
+                        "%.17g with the link, past the %.9g s a "
+                        "delivery costs\n", k + 1, age,
+                        DL_SUB_S + link_lt);
+                exit(1);
+            }
+            if (fabs(ctl - want) > 1.0e-10) {
+                fprintf(stderr, "FAIL: step %d publishes an age of "
+                        "%.17g without the link, against the elapsed "
+                        "%.17g its epoch seed calls for\n", k + 1, ctl,
+                        want);
+                exit(1);
+            }
+            ASSERT(dl_ch_(&b, k, "beta.trk2_pos_x") == px0);
+            ASSERT(dl_ch_(&b, k, "beta.trk2_pos_y") == py0);
+            {
+                double dx = dl_ch_(&a, k, "beta.trk2_pos_x") - px0;
+                double dy = dl_ch_(&a, k, "beta.trk2_pos_y") - py0;
+                double d  = sqrt(dx * dx + dy * dy);
+                if (d > moved) moved = d;
+            }
+        }
+        if (!(moved > 0.0)) {
+            fprintf(stderr, "FAIL: the linked receiver's published "
+                    "position never left the seed's, so this run holds "
+                    "no difference for the arm to measure\n");
             exit(1);
         }
-        /* The peer's report and the transmitter's own picture are the
-         * same sample of the same target, so the two published
-         * positions agree to the metre at three thousand kilometres.
-         * They are not identical: the two craft solve their own
-         * retarded times from their own positions. */
+        g_arms++;
+        printf("  a target its own detection has never seen is held at "
+               "an age under %.9g s with the link and at the whole "
+               "elapsed episode without it, over %d steps; the linked "
+               "picture moves %.6g m off the seed\n",
+               DL_SUB_S + link_lt, a.n_steps, moved);
+    }
+
+    /* And the report is one of the transmitter's own entries rather
+     * than a quantity worked out at the receiver. This world's verdict
+     * holds at every sub-advance, so the transmitter has always pushed
+     * something newer than the receiver has received and the two
+     * published positions are two entries of one stream: they differ
+     * by the distance the target covered in the age between them and
+     * by nothing else. The verdict arm, whose world has gaps, is where
+     * the two ages meet and the two positions are compared bit for
+     * bit.
+     *
+     * A millimetre is the allowance. The two entries are a
+     * sub-advance apart, over which this orbit's curvature moves the
+     * target about three hundredths of a millimetre, so a report
+     * synthesised at the receiver rather than carried from the
+     * transmitter has nowhere to hide inside it. */
+    for (int k = 1; k < a.n_steps; k++) {
         double dx = dl_ch_(&a, k, "beta.trk2_pos_x")
                   - dl_ch_(&a, k, "alpha.trk1_pos_x");
         double dy = dl_ch_(&a, k, "beta.trk2_pos_y")
                   - dl_ch_(&a, k, "alpha.trk1_pos_y");
-        if (fabs(dx) > 1.0 || fabs(dy) > 1.0) {
-            fprintf(stderr, "FAIL: step %d, the shared position differs "
-                    "from the transmitter's by (%.6g, %.6g) m\n",
-                    k + 1, dx, dy);
+        double dz = dl_ch_(&a, k, "beta.trk2_pos_z")
+                  - dl_ch_(&a, k, "alpha.trk1_pos_z");
+        double vx = dl_ch_(&a, k, "alpha.trk1_vel_x");
+        double vy = dl_ch_(&a, k, "alpha.trk1_vel_y");
+        double vz = dl_ch_(&a, k, "alpha.trk1_vel_z");
+        double gap = dl_ch_(&a, k, "beta.trk2_age")
+                   - dl_ch_(&a, k, "alpha.trk1_age");
+        double sep = sqrt(dx * dx + dy * dy + dz * dz);
+        double want = sqrt(vx * vx + vy * vy + vz * vz) * gap;
+        if (fabs(sep - want) > 1.0e-3) {
+            fprintf(stderr, "FAIL: step %d, the two craft's published "
+                    "positions are %.9g m apart where the %.9g s "
+                    "between their entries accounts for %.9g m\n",
+                    k + 1, sep, gap, want);
             exit(1);
         }
     }
     g_arms++;
-    printf("  the shared age is the light time to the reported "
-           "position, and the reported position is the transmitter's\n");
+    printf("  the shared position is an entry of the transmitter's own "
+           "stream: the two published positions differ by the target's "
+           "motion over the age between them, to the millimetre\n");
 
     /* The entry the receiver holds is older than the transmitter's own
-     * by at least the link's light time, which is what says the report
-     * travelled rather than appearing. The two ages are taken against
-     * the same instant, so their difference is the queue and the
-     * link. */
+     * by the boundary it waited for and the light it travelled on,
+     * which is what says the report travelled rather than appearing. */
     {
         double lt_link = 3.0e4 / K26A_C;
         double age2 = dl_ch_(&a, a.n_steps - 1, "beta.trk2_age");
         double age1 = dl_ch_(&a, a.n_steps - 1, "alpha.trk1_age");
-        /* Both ages are light times to the same target from craft
-         * thirty kilometres apart, so they differ by geometry alone;
-         * what the link costs shows in the sample the receiver holds,
-         * which is one sub-advance and one link light time old. */
         printf("    transmitter age %.9g s, receiver age %.9g s, link "
                "light time %.9g s\n", age1, age2, lt_link);
     }
@@ -1035,19 +1267,21 @@ static void gate_budget_(void)
         dl_world_(src, sizeof src, sep, "0.0", "10.0", "10.0", radio,
                   "swarm_a", 1);
         dl_run_(&run, src, side ? "beyond" : "inside", 6);
-        double val = dl_ch_(&run, run.n_steps - 1, "beta.trk2_valid");
-        double want = side ? 0.0 : 1.0;
-        if (val != want) {
+        int got = dl_from_peer_(&run, run.n_steps - 1, "beta.trk2_age",
+                                sep);
+        int want = side ? 0 : 1;
+        if (got != want) {
             fprintf(stderr, "FAIL: at %.6g m the budget gives %.6g "
                     "against a threshold of %.6g, and the receiver "
-                    "reads validity %.1f\n", sep, snr, RADIO_[K_THR],
-                    val);
+                    "holds %s\n", sep, snr, RADIO_[K_THR],
+                    got ? "a peer's report" : "only its epoch seed");
             exit(1);
         }
         g_arms++;
         printf("  %s the closure range: %.6g m, budget %.6g against "
-               "threshold %.6g, receiver reads %.1f\n",
-               side ? "beyond" : "inside", sep, snr, RADIO_[K_THR], val);
+               "threshold %.6g, receiver holds %s\n",
+               side ? "beyond" : "inside", sep, snr, RADIO_[K_THR],
+               got ? "a peer's report" : "only its epoch seed");
     }
 
     /* One perturbation per declared key. The separation stands two per
@@ -1081,11 +1315,11 @@ static void gate_budget_(void)
             char stem[64];
             snprintf(stem, sizeof stem, "pert%d", key);
             dl_run_(&run, src, stem, 4);
-            double val = dl_ch_(&run, run.n_steps - 1, "beta.trk2_valid");
-            if (val != 0.0) {
+            if (dl_from_peer_(&run, run.n_steps - 1, "beta.trk2_age",
+                              sep)) {
                 fprintf(stderr, "FAIL: %s perturbed to %.17g leaves the "
                         "budget at %.6g against threshold %.6g and the "
-                        "receiver still reads valid\n",
+                        "receiver still holds a peer's report\n",
                         RADIO_KEY_[key], v[key], snr, v[K_THR]);
                 exit(1);
             }
@@ -1099,7 +1333,8 @@ static void gate_budget_(void)
         dl_world_(src, sizeof src, sep, "0.0", "10.0", "10.0", radio,
                   "swarm_a", 1);
         dl_run_(&run, src, "unpert", 4);
-        ASSERT(dl_ch_(&run, run.n_steps - 1, "beta.trk2_valid") == 1.0);
+        ASSERT(dl_from_peer_(&run, run.n_steps - 1, "beta.trk2_age",
+                             sep) == 1);
         g_arms++;
         printf("  the same world with every key as declared closes "
                "(budget %.6g)\n", friis_snr_(RADIO_, sep));
@@ -1171,12 +1406,23 @@ static void gate_two_receivers_(void)
         radio, radio, radio, DL_EPISODE);
     ASSERT((size_t)n < sizeof src);
     dl_run_(&run, src, "pair", 6);
+    /* Both members hold a valid track from their epoch seed, so what
+     * separates the one inside the budget from the one outside it is
+     * the age: the near member's is the delivery it just took, the far
+     * member's is the whole elapsed episode because nothing has
+     * reached it. */
     for (int k = 0; k < run.n_steps; k++) {
-        double near_v = dl_ch_(&run, k, "beta.trk2_valid");
-        double far_v  = dl_ch_(&run, k, "gamma.trk3_valid");
-        if (near_v != 1.0 || far_v != 0.0) {
-            fprintf(stderr, "FAIL: step %d, the near member reads %.1f "
-                    "and the far member %.1f\n", k + 1, near_v, far_v);
+        double near_a = dl_ch_(&run, k, "beta.trk2_age");
+        double far_a  = dl_ch_(&run, k, "gamma.trk3_age");
+        double elapsed = (double)(k + 1) * DL_CONTROL_DT;
+        double bound = DL_SUB_S + near_m / K26A_C;
+        ASSERT(dl_ch_(&run, k, "beta.trk2_valid") == 1.0);
+        ASSERT(dl_ch_(&run, k, "gamma.trk3_valid") == 1.0);
+        if (near_a > bound || fabs(far_a - elapsed) > 1.0e-10) {
+            fprintf(stderr, "FAIL: step %d, the near member's age is "
+                    "%.17g against a delivery cost of %.9g and the far "
+                    "member's %.17g against an elapsed %.17g\n",
+                    k + 1, near_a, bound, far_a, elapsed);
             exit(1);
         }
     }
@@ -1244,13 +1490,21 @@ static void gate_two_receivers_(void)
 
 /* The link's own light time, measured rather than assumed.
  *
- * A shared entry is only usable while it is fresher than the light
- * from the target itself: the retarded time the observer solves for
- * has to fall inside the history it holds, and an entry newer than
- * that time is a report of light that has not arrived yet. So a peer
- * far enough away in light time cannot help, however strong its
- * signal, and that is what says the transfer pays a propagation delay
- * rather than landing where it was sent from.
+ * The delay a transfer pays shows in the age the receiver publishes:
+ * an offer waits for a broadcast boundary and then travels, so the
+ * entry it carries is that much older than the transmitter's own by
+ * the time it can be read. Move the receiver farther out and the age
+ * has to grow by the light time added, which is what says the
+ * transfer propagates rather than landing where it was sent from.
+ *
+ * The far world is also where the answering rule is visible on its
+ * own. At three thousand kilometres from the transmitter the report
+ * lands older than the light from the target itself, which is the
+ * condition a retarded-time answer has no state for: the instant it
+ * would have to read the history at falls past the newest entry
+ * there is. A held last-known answer publishes it with its age, and
+ * the arm asserts exactly that, against the same condition computed
+ * here from the world's own distances.
  *
  * Two worlds differing in one number: the receiver's distance from
  * the transmitter. The target stands still in both, so its own light
@@ -1308,25 +1562,47 @@ static void gate_delay_(void)
             radio, radio, DL_EPISODE);
         ASSERT((size_t)n < sizeof src);
         double link_lt = sep / K26A_C;
+        /* The light time from the target to the receiver, which is
+         * what a retarded-time answer would be bounded by. The target
+         * sits 1.5e6 m off drone_1's track and the receiver is
+         * displaced along a third axis, so the distance is the
+         * hypotenuse of the two. */
+        double target_lt = sqrt(1.5e6 * 1.5e6 + sep * sep) / K26A_C;
         ASSERT(friis_snr_(v, sep) > v[K_THR]);
         dl_run_(&run, src, far ? "delayfar" : "delaynear", 6);
-        double val = dl_ch_(&run, run.n_steps - 1, "beta.trk2_valid");
-        double want = far ? 0.0 : 1.0;
-        if (val != want) {
-            fprintf(stderr, "FAIL: with the peer %.6g m away (link "
-                    "light time %.9g s, budget %.6g) the receiver "
-                    "reads %.1f\n", sep, link_lt, friis_snr_(v, sep),
-                    val);
-            exit(1);
+        {
+            double age = dl_ch_(&run, run.n_steps - 1, "beta.trk2_age");
+            double bound = DL_SUB_S + link_lt;
+            ASSERT(dl_ch_(&run, run.n_steps - 1,
+                          "beta.trk2_valid") == 1.0);
+            if (!(age > 0.0) || age > bound) {
+                fprintf(stderr, "FAIL: with the peer %.6g m away (link "
+                        "light time %.9g s, budget %.6g) the receiver "
+                        "publishes an age of %.17g, outside the %.9g s "
+                        "a delivery there costs\n", sep, link_lt,
+                        friis_snr_(v, sep), age, bound);
+                exit(1);
+            }
+            /* The far world's whole point: the report is older than
+             * the light from the target and is held all the same. */
+            if (far && !(age > target_lt)) {
+                fprintf(stderr, "FAIL: the far world was built so the "
+                        "report would land older than the target's own "
+                        "light time, and it did not (%.9g s against "
+                        "%.9g s), so this arm measures nothing about "
+                        "the answering rule\n", age, target_lt);
+                exit(1);
+            }
+            g_arms++;
+            printf("  peer at %.6g m (link light time %.9g s, budget "
+                   "%.6g): receiver holds a track aged %.9g s, the "
+                   "target's own light time being %.9g s\n", sep,
+                   link_lt, friis_snr_(v, sep), age, target_lt);
         }
-        g_arms++;
-        printf("  peer at %.6g m (link light time %.9g s, budget "
-               "%.6g): receiver reads %.1f\n", sep, link_lt,
-               friis_snr_(v, sep), val);
     }
-    printf("    the far peer's signal closes and its report is still "
-           "useless: it arrives older than the light from the target "
-           "itself\n");
+    printf("    the far peer's report lands older than the light from "
+           "the target itself and is held with its age, which is the "
+           "answer a retarded time has no state for\n");
 }
 
 /* ---- 31d: what may not cross ---------------------------------------- */
@@ -1341,11 +1617,23 @@ static void gate_networks_(void)
     dl_world_(src, sizeof src, 3.0e4, "0.0", "10.0", "10.0", radio,
               "swarm_b", 1);
     dl_run_(&run, src, "twonets", 6);
-    for (int k = 0; k < run.n_steps; k++) {
-        if (dl_ch_(&run, k, "beta.trk2_valid") != 0.0) {
-            fprintf(stderr, "FAIL: step %d, an entry crossed between "
-                    "two communities\n", k + 1);
-            exit(1);
+    /* Nothing crosses, so the receiver's ring holds its epoch seed and
+     * nothing else: an age equal to the whole elapsed episode, and a
+     * held position that never moves. An entry that crossed would drop
+     * the age to the delivery cost, five orders of magnitude below
+     * it. */
+    {
+        double px0 = dl_ch_(&run, 0, "beta.trk2_pos_x");
+        for (int k = 0; k < run.n_steps; k++) {
+            double age = dl_ch_(&run, k, "beta.trk2_age");
+            double want = (double)(k + 1) * DL_CONTROL_DT;
+            if (fabs(age - want) > 1.0e-10 ||
+                dl_ch_(&run, k, "beta.trk2_pos_x") != px0) {
+                fprintf(stderr, "FAIL: step %d, an entry crossed between "
+                        "two communities: age %.17g against the elapsed "
+                        "%.17g\n", k + 1, age, want);
+                exit(1);
+            }
         }
     }
     g_arms++;
@@ -1619,8 +1907,7 @@ static void gate_one_generator_(void)
  * boundary with entries at different instants, which of them the
  * ring's drop-older rule keeps is decided by the order the transfers
  * are applied in, and that order is the program's own declaration
- * order. This is the one place the order rule has a consequence, so it
- * is the one place a gate can measure it.
+ * order.
  *
  * The world: a relay that never sees the target itself, a far peer
  * that broadcasts every boundary and whose offers arrive two
@@ -1631,12 +1918,23 @@ static void gate_one_generator_(void)
  * holds. Applied far first, both are kept; applied near first, the far
  * peer's earlier entry is dropped behind the fresher one.
  *
- * What that changes is the bracket the retarded-time solution
- * interpolates over, and the arm pins it exactly rather than by a
- * magic number: with the far peer's transfer applied first the
- * receiver's history is the far peer's own stream, so the world
- * records what a world with no near peer at all records, byte for
- * byte; with the near peer's applied first it does not. */
+ * What the order decides is therefore which of the older entries
+ * survives beside the newest, and never which entry is the newest:
+ * whichever order two pushes arrive in, the drop-older rule ends with
+ * the later instant on the head of the ring. A held answer reads the
+ * newest entry at or before the instant asked about, so the older
+ * entries are never read and the two orders publish the same channels
+ * and record the same bytes. That is what the arms below assert, and
+ * it is stronger than the alternative rather than weaker: a run whose
+ * record turned on which loop the compiler wrote first is exactly what
+ * the order rule exists to prevent, and here it cannot arise at all.
+ *
+ * The order is still fixed by declaration, and the arm reads it where
+ * it is fixed: in the artifact's own transfer table, which permuting
+ * the two peers reverses. And the world is shown to hold a real
+ * contest rather than a formality, by removing the near peer: with it
+ * gone the relay's picture changes, so both peers were reaching it and
+ * the near one's fresher entries were the ones the ring was keeping. */
 
 #define DL_TIE_RADAR(n, body, p_tx, gain) \
     "    astro_payload eye_" n " body=" body " kind=detect_radar" \
@@ -1737,50 +2035,97 @@ static void gate_tie_(void)
         rl_run_or_die_(cmd);
     }
 
-    /* The receiver holds a track at all, which is what makes the two
-     * comparisons below about the tie rather than about silence. */
+    /* The relay holds its peers' reports rather than its epoch seed,
+     * which is what makes the comparisons below about the tie rather
+     * than about silence. The bound is priced on the farther of the
+     * two peers, the one whose delivery costs more. */
     {
         DlRun run;
         dl_tie_(src, sizeof src, 0);
         dl_run_(&run, src, "tiedrive", 6);
         for (int k = 0; k < run.n_steps; k++) {
             ASSERT(dl_ch_(&run, k, "gamma.trkr_valid") == 1.0);
+            ASSERT(dl_from_peer_(&run, k, "gamma.trkr_age", 1.2e6) == 1);
         }
         g_arms++;
-        printf("  the relay holds a shared track over all %d steps, its "
+        printf("  the relay holds a peer's report on all %d steps, its "
                "own detection never seeing the target\n", run.n_steps);
     }
 
+    /* Both peers reach the relay, and the nearer one's entries are the
+     * ones the ring keeps: take it out and the relay's picture, and
+     * the record built on it, change. Without this the two comparisons
+     * below would be about a world holding no contest at all. */
     if (rl_files_equal_(WORK_DIR "/tiedecl.k26ep",
-                        WORK_DIR "/tieperm.k26ep")) {
-        fprintf(stderr, "FAIL: permuting the two transmitters changed "
-                "nothing, so this world holds no tie for the order rule "
-                "to decide and the arm measures nothing\n");
+                        WORK_DIR "/tiealone.k26ep")) {
+        fprintf(stderr, "FAIL: removing the nearer transmitter changed "
+                "nothing, so its entries never reached the relay and "
+                "this world holds no contest for the order rule to "
+                "decide\n");
         exit(1);
     }
     g_arms++;
-    printf("  two transmitters offering one target on one boundary: "
-           "permuting their declaration changes what the run records\n");
+    printf("  removing the nearer transmitter changes what the run "
+           "records, so both peers reach the relay and the nearer "
+           "one's entries are the ones kept\n");
 
+    /* And the order that contest is resolved in decides which of the
+     * older entries survives beside the newest, never which entry is
+     * the newest, so the two orders publish the same channels. */
     if (!rl_files_equal_(WORK_DIR "/tiedecl.k26ep",
-                         WORK_DIR "/tiealone.k26ep")) {
-        fprintf(stderr, "FAIL: with the farther transmitter declared "
-                "first its own entry was not the one kept\n");
-        exit(1);
-    }
-    if (rl_files_equal_(WORK_DIR "/tieperm.k26ep",
-                        WORK_DIR "/tiealone.k26ep")) {
-        fprintf(stderr, "FAIL: with the nearer transmitter declared "
-                "first the farther one's entry survived anyway\n");
+                         WORK_DIR "/tieperm.k26ep")) {
+        fprintf(stderr, "FAIL: permuting the two transmitters changed "
+                "what the run recorded, so something the order decides "
+                "reached a published channel\n");
         exit(1);
     }
     struct stat st;
     ASSERT(stat(WORK_DIR "/tiedecl.k26ep", &st) == 0);
     g_arms++;
-    printf("  the earlier-declared transmitter's entry is the one kept: "
-           "its world records what a world without the other peer "
-           "records, byte for byte (%lld bytes), and the permuted world "
-           "does not\n", (long long)st.st_size);
+    printf("  permuting the two transmitters records the same bytes "
+           "(%lld): the order decides which older entry survives, and "
+           "a held answer reads the newest\n", (long long)st.st_size);
+
+    /* The order itself, read where the design fixes it. Vehicle slots
+     * are the assembly-bearing bodies in declaration order, so the
+     * relay is 0, the far peer 1 and the near peer 2; the two
+     * programs' transfer tables name the two peers in their own
+     * declaration orders and are each other's reverse. */
+    {
+        static char emitted[4194304];
+        char cmd[1024];
+        int tab[2][8], n[2];
+
+        for (int order = 0; order < 2; order++) {
+            snprintf(cmd, sizeof cmd,
+                     "./bin/kflc --emit " WORK_DIR "/%s.kfl > " WORK_DIR
+                     "/%s.cc 2>/dev/null", STEM[order], STEM[order]);
+            rl_run_or_die_(cmd);
+            snprintf(cmd, sizeof cmd, WORK_DIR "/%s.cc", STEM[order]);
+            FILE *f = fopen(cmd, "rb");
+            ASSERT(f != NULL);
+            size_t len = fread(emitted, 1, sizeof emitted - 1, f);
+            emitted[len] = '\0';
+            fclose(f);
+            n[order] = table_ints_(emitted, "kflrl_link_veh_[]",
+                                   tab[order], 8);
+        }
+        ASSERT(n[0] == 3 && n[1] == 3);
+        if (!(tab[0][0] == 1 && tab[0][1] == 2 &&
+              tab[1][0] == 2 && tab[1][1] == 1 &&
+              tab[0][2] == 0 && tab[1][2] == 0)) {
+            fprintf(stderr, "FAIL: the transfer table is not the "
+                    "program's own declaration order (%d,%d,%d against "
+                    "%d,%d,%d)\n", tab[0][0], tab[0][1], tab[0][2],
+                    tab[1][0], tab[1][1], tab[1][2]);
+            exit(1);
+        }
+        g_arms++;
+        printf("  the transfer order is the declaration order: the "
+               "transmitters are craft %d,%d,%d against %d,%d,%d\n",
+               tab[0][0], tab[0][1], tab[0][2],
+               tab[1][0], tab[1][1], tab[1][2]);
+    }
 }
 
 /* ---- 37a: determinism, and the order the design fixes --------------- */
@@ -2506,10 +2851,24 @@ static void gate_getter_identity_(void)
     /* The world the behaviour arms above are built on, rather than the
      * getter arm's own: it carries a detection payload, and the base
      * compiler needs one to reach the link kernel's constants at all,
-     * which is the defect this work found and fixed beside the getter. */
+     * which is the defect this work found and fixed beside the getter.
+     *
+     * Its information states are the ungated form, because that is
+     * what this arm can hold against an older compiler at all. The
+     * gated form answers on a different rule now, one that arrived
+     * after this commit, so a gated world compiled by both would
+     * differ by that rule and say nothing about the getter. The
+     * ungated form's answering has not moved, so what remains between
+     * the two artifacts is the record the getter added, which is what
+     * the arm is here to price. */
     radio_str_(radio, sizeof radio, RADIO_);
     dl_world_(src, sizeof src, 3.0e4, "0.0", "10.0", "10.0", radio,
-              "swarm_a", 1);
+              "swarm_a", 0);
+    {
+        char *p = strstr(src, " source=eye1");
+        ASSERT(p != NULL);
+        memset(p, ' ', strlen(" source=eye1"));
+    }
     rl_write_file_(WORK_DIR "/gbase.kfl", src);
     /* The version travels in the spec blob and the spec blob is
      * recorded, so the byte comparison is made between two artifacts
@@ -2582,7 +2941,7 @@ int main(void)
         return 77;
     }
     gate_verdict_();
-    gate_ungated_identity_();
+    gate_gate_ends_();
     gate_base_identity_();
     gate_shared_track_();
     gate_budget_();

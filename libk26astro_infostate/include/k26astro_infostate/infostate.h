@@ -21,7 +21,16 @@
  *
  *         |x_target(t - τ) - x_observer(t)| = c · τ
  *
- *     until |Δτ| falls below tolerance. Newton convergence is
+ *     until |Δτ| falls below tolerance, for a history fed with the
+ *     target's true state every tick.
+ *
+ *     Beside it, a held last-known answer
+ *     (k26astro_infostate_observe_held) for a history fed by
+ *     intermittent reports, which returns the newest entry at or
+ *     before the query instant with the age of that entry. The two
+ *     are described together at the second one's declaration below.
+ *
+ *     Newton convergence is
  *     typically reached in 2-3 iterations for engagement-bubble
  *     ranges (mutual ranges 10^4–10^6 m → light-times 30 μs–3 ms);
  *     larger ranges (Earth-Jupiter at 5 AU → 33 minutes) converge
@@ -200,6 +209,47 @@ k26astro_infostate_observe(K26AstroInfostate *s,
                            const struct K26AstroVehicle *target,
                            K26AstroEpoch t,
                            K26AstroInfostateModality modality);
+
+/* ---- Held last-known observation ------------------------------ *
+ *
+ * The other answering rule, for an infostate whose history is fed by
+ * sensor reports rather than by ground truth every tick.
+ *
+ * It answers with the newest entry whose own instant is at or before
+ * t, exactly as pushed. .t_retarded is that entry's instant, .age_s
+ * is t minus it, and .range_m is the distance from the observer's
+ * position at t to the held position. So the age grows through a gap
+ * in the reports and falls back on the next one, and .valid = 0 only
+ * where the history holds no entry at or before t at all.
+ *
+ * Which of the two a consumer wants follows from what feeds the
+ * ring. Where every tick pushes the target's true state, the history
+ * is dense and complete and the only question worth asking is what
+ * the observer can see of it now, which is
+ * k26astro_infostate_observe: the answer is bounded by the light
+ * time and by nothing else, and it is unavailable exactly when the
+ * light has not arrived.
+ *
+ * Where entries arrive intermittently, from a sensor that only
+ * sometimes holds its target or from a report relayed by another
+ * observer, the light-time question has no useful answer. At close
+ * range the light time is microseconds while the gap between entries
+ * is a control period, so the retarded instant almost always falls
+ * past the newest entry and the observation is unavailable however
+ * good the track is. What such a consumer holds is a last-known state
+ * with an age on it, and that is what this call returns. Nothing is
+ * extrapolated forward and no state is invented for the gap: the
+ * reported position is one the target genuinely occupied, and the
+ * age says how long ago.
+ *
+ * The two are independent entry points over one history; a caller
+ * may use either on any infostate, and neither changes what the
+ * other returns. */
+K26AstroInfostateObservation
+k26astro_infostate_observe_held(K26AstroInfostate *s,
+                                const struct K26AstroVehicle *target,
+                                K26AstroEpoch t,
+                                K26AstroInfostateModality modality);
 
 /* ---- Inspection ----------------------------------------------- */
 

@@ -184,6 +184,12 @@ of tracked targets: what an observer at clock-time *t* knows about each
 target is its state at *t − R/c*. A fixed-point light-time solver runs over
 a per-target history ring buffer.
 
+The library offers a second answer over the same history, for observers whose
+entries arrive intermittently rather than every tick: the newest entry at or
+before the clock time asked about, with the age of that entry. Which one a
+consumer wants follows from what feeds the ring, and the header states the
+choice at the second call's declaration.
+
 | Builtin | Purpose |
 |---|---|
 | `infostate_new`, `infostate_attach`, `infostate_observer` | Create a per-observer info-state and bind it to the observer vehicle. |

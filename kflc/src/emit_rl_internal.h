@@ -270,14 +270,17 @@
 
 #define RL_DET_COMPS 7
 
-/* An information-state observe publishes where the target was when
- * the light left it, how far away that was, and how old the picture
- * is, with an explicit validity channel because a history that does
- * not reach back to the retarded time produces no observation at all.
- * The solver's iteration count is deliberately absent: it is a
- * convergence diagnostic rather than a state of the world, and an
- * agent that could see it could learn the shape of the solver rather
- * than the shape of the problem. */
+/* An information-state observe publishes where the target was, how far
+ * away that was, and how old the picture is, with an explicit validity
+ * channel because a history with nothing to answer from produces no
+ * observation at all. A truth-fed payload publishes where the target
+ * was when the light left it; a `source=`-gated one publishes its
+ * newest entry at or before the instant asked about, and the age
+ * channel carries the difference in either case. The solver's
+ * iteration count is deliberately absent: it is a convergence
+ * diagnostic rather than a state of the world, and an agent that could
+ * see it could learn the shape of the solver rather than the shape of
+ * the problem. */
 
 #define RL_TRK_COMPS 9
 

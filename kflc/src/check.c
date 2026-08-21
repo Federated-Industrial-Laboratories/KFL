@@ -466,11 +466,13 @@ static const char *const OBS_SFX_PORT_FULL_[] =
 static const char *const OBS_SFX_DETECT_[] =
     { "_detected", "_snr", "_range", "_dir_x", "_dir_y", "_dir_z",
       "_aspect", NULL };
-/* An information-state observe publishes the target's state at the
- * retarded time, the range and the age of what it is looking at, with
- * an explicit validity channel, which is nine. The solver's iteration
- * count is not among them: it is a convergence diagnostic and not a
- * state of the world. */
+/* An information-state observe publishes the target's state as the
+ * payload knows it, the range and the age of what it is looking at,
+ * with an explicit validity channel, which is nine. Which instant the
+ * state belongs to depends on what feeds the payload's history, and
+ * the two answers are set out where the observation is emitted. The
+ * solver's iteration count is not among them: it is a convergence
+ * diagnostic and not a state of the world. */
 static const char *const OBS_SFX_TRACK_[] =
     { "_valid", "_pos_x", "_pos_y", "_pos_z", "_vel_x", "_vel_y",
       "_vel_z", "_range", "_age", NULL };
