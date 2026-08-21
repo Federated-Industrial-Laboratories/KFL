@@ -129,9 +129,18 @@ void rl_collect_lets(const KflcNode *n, KflcArena *arena,
     }
 }
 
-/* Rewrite `episode.steps` identifiers to a C-compatible name. The
- * expression AST is not reused after emission, so an in-place rename
- * is safe; every other identifier stays untouched. */
+/* Rewrite `episode.steps` identifiers to a C-compatible name, in
+ * place; every other identifier stays untouched.
+ *
+ * The rename is idempotent, so running it twice over one expression
+ * finds nothing the second time. What it is not safe against is the
+ * arena: the new name is taken from the arena one emission creates and
+ * releases, so an expression carried into a second emission holds a
+ * pointer into released storage. One invocation reaches that, asking
+ * for both the emitted source and a compiled output at once
+ * (`--emit` beside `-o` in main.c), and it fails there for that
+ * reason. Keeping the source beside a build is what `-c` is for, and
+ * that path emits once. */
 
 void rl_rewrite_steps(KflcExpr *e, KflcArena *arena)
 {
@@ -163,7 +172,12 @@ void rl_rewrite_steps(KflcExpr *e, KflcArena *arena)
         rl_rewrite_steps(e->u.index.base, arena);
         rl_rewrite_steps(e->u.index.idx, arena);
         return;
-    default:
+    /* Named rather than left to a default, here and in every other
+     * walk of an expression in this emitter, so that a ninth
+     * expression kind is a compile error in each of them rather than
+     * a subtree one of them silently stops descending into. */
+    case KFLE_INT_LIT:
+    case KFLE_FLOAT_LIT:
         return;
     }
 }
@@ -447,9 +461,13 @@ static long rl_walk_idents_(const KflcExpr *e, RlUsedNames *set)
     case KFLE_INDEX:
         return rl_walk_idents_(e->u.index.base, set) +
                rl_walk_idents_(e->u.index.idx, set);
-    default:
+    case KFLE_INT_LIT:
+    case KFLE_FLOAT_LIT:
         return 0;
     }
+    /* The switch above names every kind, but that is not something the
+     * compiler can see, so a return stands after it. */
+    return 0;
 }
 
 /* Build the set of identifiers `e` names. Returns 0 on success and 1
@@ -648,7 +666,8 @@ void rl_qual_rewrite_expr(const RlModel *m, KflcExpr *e,
             rl_qual_rewrite_expr(m, e->u.call.args[i], arena);
         }
         return;
-    default:
+    case KFLE_INT_LIT:
+    case KFLE_FLOAT_LIT:
         return;
     }
 }
@@ -1180,9 +1199,11 @@ static int rl_bs_rewrite_expr_(RlModel *m, KflcExpr *e, int line,
                                     diag)) return 1;
         }
         return 0;
-    default:
+    case KFLE_INT_LIT:
+    case KFLE_FLOAT_LIT:
         return 0;
     }
+    return 0;
 }
 
 /* Rewrite one statement list: dotted reads become accessor calls, and

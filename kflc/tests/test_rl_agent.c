@@ -571,6 +571,13 @@ static void gate_emitted_text_(void)
  * all, an agent with no objective, and the episode's own predicate,
  * which sits in no block.
  *
+ * The world scalar and the form argument are here because they are
+ * what the selection must not touch. A world scalar is declared in
+ * every scope whatever the expression reads, and a form argument
+ * resolves through a binding rather than a declaration; a selection
+ * that reached either would take a name the expression does use, so
+ * alpha's reward reads one of each.
+ *
  * The declared indices are part of what is asserted: `atrk_range` is
  * the fourth channel of the first observe and `beta.btrk_range` the
  * fourth of the second, so a scope that computed a channel's place in
@@ -578,7 +585,9 @@ static void gate_emitted_text_(void)
  * here rather than in the arithmetic downstream of it. */
 static const char *const SCOPE_KFL =
     "form SCOPE\n"
+    "arg gain default 2.0\n"
     "fn world w\n"
+    "    const bias = 0.5\n"
     "    astro_body earth gm=3.986004418e14 mass=5.972e24\n"
     "    astro_body alpha_craft gm=1.0 parent=earth pos_x=7.0e6"
     " vel_y=7546.0\n"
@@ -595,7 +604,7 @@ static const char *const SCOPE_KFL =
     "        action thrust box -1.0 1.0 default 0.25\n"
     "        observe alpha_craft from earth mode=geometric as atrk\n"
     "        objective\n"
-    "            reward atrk_range - beta.btrk_range\n"
+    "            reward atrk_range - beta.btrk_range + bias * gain\n"
     "            terminal thrust\n"
     "        end\n"
     "    end\n"
@@ -614,17 +623,46 @@ static const char *const SCOPE_KFL =
     "end\n"
     "end\n";
 
-/* The channel and action declarations one emitted function opens with,
- * as one line each, in the order they were written. `fn_head` is the
- * function's own first line; the body runs to the first line that is a
- * closing brace alone. */
-static int scope_decls_(const char *cc, const char *fn_head,
+/* Whether `line`, which runs to `end`, is one of the declarations a
+ * scope opens with. Four shapes exist: a channel read out of the
+ * observation vector, an action read out of the action vector, a world
+ * scalar read out of the world vector, and the step count taken from
+ * the step argument. The first two are selected by what the expression
+ * reads and the last two are not, so all four are collected and the
+ * expected lists below say which of them each function should carry. */
+static int scope_is_decl_(const char *line, const char *end)
+{
+    static const char *const shapes[] = {
+        " = _kfl_obs_v[", " = _kfl_act_v ?", " = _kfl_world_v[",
+        " = (double)_kfl_nsteps;", NULL
+    };
+    for (int i = 0; shapes[i]; i++) {
+        const char *at = strstr(line, shapes[i]);
+        if (at && at < end) return 1;
+    }
+    return 0;
+}
+
+/* The declarations one emitted function opens with, as one line each,
+ * in the order they were written.
+ *
+ * `fn_def` is the function's definition head, not its name: a name
+ * alone would match the first mention of it anywhere in the file, and
+ * these functions are named again where they are called. The head must
+ * occur exactly once, which is asserted rather than assumed. The body
+ * runs to the first line that is a closing brace alone. */
+static int scope_decls_(const char *cc, const char *fn_def,
                         char decls[][160], int cap)
 {
-    const char *p = strstr(cc, fn_head);
+    const char *p = strstr(cc, fn_def);
     if (!p) {
         fprintf(stderr, "FAIL scope: the emitted source has no `%s`\n",
-                fn_head);
+                fn_def);
+        exit(1);
+    }
+    if (strstr(p + 1, fn_def) != NULL) {
+        fprintf(stderr, "FAIL scope: `%s` appears more than once, so "
+                "this arm cannot say which one it read\n", fn_def);
         exit(1);
     }
     int n = 0;
@@ -633,11 +671,7 @@ static int scope_decls_(const char *cc, const char *fn_head,
         const char *end = strchr(line, '\n');
         if (!end) break;
         if (end - line == 1 && line[0] == '}') break;
-        /* Every scope declaration reads one of the two vectors the
-         * function is handed; nothing else in a body does. */
-        const char *eq = strstr(line, " = _kfl_obs_v[");
-        if (!eq || eq > end) eq = strstr(line, " = _kfl_act_v ?");
-        if (eq && eq < end) {
+        if (scope_is_decl_(line, end)) {
             size_t len = (size_t)(end - line);
             ASSERT(n < cap);
             ASSERT(len < 160);
@@ -650,22 +684,39 @@ static int scope_decls_(const char *cc, const char *fn_head,
     return n;
 }
 
+/* What a whole-program scope would declare in one of these functions:
+ * every agent's channels under their qualified names, and the reading
+ * agent's own channels unqualified beside them. The fixture declares 3
+ * actions and 20 observation channels between its agents, of which
+ * alpha owns 1 and 5, beta 1 and 10, and gamma 1 and 5; the episode's
+ * own predicate belongs to no agent, so its figure is the qualified
+ * set alone. The world scalar and the step count are declared either
+ * way and are not part of this figure. */
+#define SCOPE_QUALIFIED_ALL (3 + 20)
+
+static int scope_whole_(int own_actions, int own_channels)
+{
+    return SCOPE_QUALIFIED_ALL + own_actions + own_channels;
+}
+
 /* One emitted function's scope, against the exact lines it should
  * hold. A count alone would pass for a scope that declared the right
- * number of the wrong channels, so the lines are compared whole:
- * the name, the vector it reads and the index in it. */
-static void scope_is_(const char *cc, const char *fn_head,
-                      const char *const *want, int n_want)
+ * number of the wrong channels, so the lines are compared whole: the
+ * name, the vector it reads and the index in it. `whole` is what a
+ * scope of the entire program would have put here instead, which is
+ * what this arm exists to prevent and what it prints. */
+static void scope_is_(const char *cc, const char *fn_def,
+                      const char *const *want, int n_want, int whole)
 {
     char got[64][160];
-    int n = scope_decls_(cc, fn_head, got, 64);
+    int n = scope_decls_(cc, fn_def, got, 64);
     int bad = (n != n_want);
     for (int i = 0; !bad && i < n; i++) {
         if (strcmp(got[i], want[i]) != 0) bad = 1;
     }
     if (bad) {
-        fprintf(stderr, "FAIL scope: `%s` declares %d channel(s), "
-                "wanted %d\n", fn_head, n, n_want);
+        fprintf(stderr, "FAIL scope: `%s` declares %d line(s), "
+                "wanted %d\n", fn_def, n, n_want);
         for (int i = 0; i < n; i++) {
             fprintf(stderr, "  got  %s\n", got[i]);
         }
@@ -674,8 +725,9 @@ static void scope_is_(const char *cc, const char *fn_head,
         }
         exit(1);
     }
-    printf("  %-26s %d declaration(s), each the channel it reads\n",
-           fn_head, n);
+    printf("  %-34s %d declaration(s), each the name it reads; a "
+           "whole-program scope would carry %d channel declaration(s) "
+           "here\n", fn_def, n, whole);
 }
 
 /* The scope holds what the expression reads and nothing else.
@@ -686,9 +738,11 @@ static void scope_is_(const char *cc, const char *fn_head,
  * arm over one function would pass for an emitter that got one case
  * right; all seven the fixture produces are named, including the three
  * that read nothing. And an arm with no figure for the alternative
- * would not say what it is holding down: the fixture's twenty-three
- * channels are what a whole-program scope declares in each of the
- * seven, which is what this arm exists to prevent and what it prints.
+ * would not say what it is holding down, so each function prints what
+ * a whole-program scope would have declared in it: 29 channels for
+ * each of alpha's two functions, 34 for each of beta's, 29 for each of
+ * gamma's, and 23 for the episode's predicate, which owns no channels
+ * to declare unqualified.
  *
  * The values these functions return are held by the cross-agent arm
  * below, which drives the same shape of program and reads the numbers
@@ -708,36 +762,64 @@ static void gate_scope_holds_what_is_read_(void)
 
     printf("the scope an objective is emitted into\n");
 
+    /* The two lines every scope that is emitted at all carries: the
+     * world scalar and the step count, neither of them selected by
+     * what the expression reads. */
+#define SCOPE_BIAS \
+    "    const double bias = _kfl_world_v[0]; (void)bias;"
+#define SCOPE_STEPS \
+    "    const double _kfl_episode_steps = (double)_kfl_nsteps; " \
+    "(void)_kfl_episode_steps;"
+
+    /* Alpha's reward: its own channel unqualified, beta's qualified,
+     * and the two unconditional lines. The form argument it also reads
+     * resolves through a binding and is declared nowhere, which is why
+     * no line here names it. */
     static const char *const r0[] = {
         "    const double atrk_range = _kfl_obs_v[3]; (void)atrk_range;",
         "    const double _kfl_q1_btrk_range = _kfl_obs_v[8]; "
-        "(void)_kfl_q1_btrk_range;"
+        "(void)_kfl_q1_btrk_range;",
+        SCOPE_BIAS, SCOPE_STEPS
     };
-    scope_is_(cc, "kflrl_reward_0_", r0, 2);
+    scope_is_(cc, "static double kflrl_reward_0_(", r0, 4,
+              scope_whole_(1, 5));
 
     static const char *const t0[] = {
         "    const double thrust = _kfl_act_v ? _kfl_act_v[0] : 0.0; "
-        "(void)thrust;"
+        "(void)thrust;",
+        SCOPE_BIAS, SCOPE_STEPS
     };
-    scope_is_(cc, "kflrl_terminal_0_", t0, 1);
+    scope_is_(cc, "static double kflrl_terminal_0_(", t0, 3,
+              scope_whole_(1, 5));
 
-    /* Beta's reward reads the step count and no channel; gamma
-     * declares no objective at all, so both of its functions take
-     * their documented default. */
-    scope_is_(cc, "kflrl_reward_1_", NULL, 0);
-    scope_is_(cc, "kflrl_terminal_1_", NULL, 0);
-    scope_is_(cc, "kflrl_reward_2_", NULL, 0);
-    scope_is_(cc, "kflrl_terminal_2_", NULL, 0);
+    /* Beta's reward reads the step count and no channel, so the two
+     * unconditional lines are the whole of its scope. */
+    static const char *const r1[] = { SCOPE_BIAS, SCOPE_STEPS };
+    scope_is_(cc, "static double kflrl_reward_1_(", r1, 2,
+              scope_whole_(1, 10));
+
+    /* Beta declares no terminal and gamma declares no objective at
+     * all, so those three functions take their documented default and
+     * open no scope whatever: not even the two unconditional lines. */
+    scope_is_(cc, "static double kflrl_terminal_1_(", NULL, 0,
+              scope_whole_(1, 10));
+    scope_is_(cc, "static double kflrl_reward_2_(", NULL, 0,
+              scope_whole_(1, 5));
+    scope_is_(cc, "static double kflrl_terminal_2_(", NULL, 0,
+              scope_whole_(1, 5));
 
     static const char *const tw[] = {
         "    const double _kfl_q1_btrk_range = _kfl_obs_v[8]; "
-        "(void)_kfl_q1_btrk_range;"
+        "(void)_kfl_q1_btrk_range;",
+        SCOPE_BIAS, SCOPE_STEPS
     };
-    scope_is_(cc, "kflrl_terminated_", tw, 1);
+    scope_is_(cc, "static int kflrl_terminated_(", tw, 3,
+              scope_whole_(0, 0));
+#undef SCOPE_BIAS
+#undef SCOPE_STEPS
 
     printf("  the program declares 20 observation channels and 3 "
-           "actions; a scope of the whole program would carry 23 "
-           "declarations in each of these 7 functions\n");
+           "actions between 3 agents\n");
     g_arms++;
 }
 

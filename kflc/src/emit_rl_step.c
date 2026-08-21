@@ -224,9 +224,15 @@ static int rl_sweep_expr_(RlSweep *sw, const KflcExpr *e)
         sw->n_chain--;
         return 0;
     }
-    default:
+    /* An identifier reaches nothing this sweep judges, and neither
+     * does a literal. They are named rather than left to a default so
+     * that a ninth expression kind is a compile error here. */
+    case KFLE_IDENT:
+    case KFLE_INT_LIT:
+    case KFLE_FLOAT_LIT:
         return 0;
     }
+    return 0;
 }
 
 static int rl_sweep_stmts_(RlSweep *sw, const KflcNode *stmts)
@@ -615,9 +621,11 @@ static int rl_agent_scan_expr_(const RlModel *m, KflcExpr *e, int line,
                                     diag)) return 1;
         }
         return 0;
-    default:
+    case KFLE_INT_LIT:
+    case KFLE_FLOAT_LIT:
         return 0;
     }
+    return 0;
 }
 
 static int rl_agent_scan_stmts_(const RlModel *m, KflcNode *stmts,
@@ -1499,7 +1507,8 @@ static void rl_check_objective_names_(const RlModel *m, int ag,
         rl_check_objective_names_(m, ag, form, e->u.index.idx, ctx_word,
                                   line, diag);
         return;
-    default:
+    case KFLE_INT_LIT:
+    case KFLE_FLOAT_LIT:
         return;
     }
 }
