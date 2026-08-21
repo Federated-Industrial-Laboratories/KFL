@@ -133,7 +133,7 @@ static inline void rl_compile_(const char *kfl_path, const char *out_path,
                       i ? " " : "", RL_LINK_LIBS_[i]);
     }
     n += snprintf(ldlibs + n, sizeof ldlibs - (size_t)n,
-                  " -lgfortran -lm");
+                  " -lgfortran -lm -pthread");
     ASSERT((size_t)n < sizeof ldlibs);
 
     char cmd[16384];

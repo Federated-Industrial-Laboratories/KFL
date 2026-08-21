@@ -44,6 +44,19 @@ typedef struct KflrlThrustCtx {
     uint32_t         e;
 } KflrlThrustCtx;
 
+/* One step's outcome for one environment, written by the compute
+ * phase and read by the serial publication phase. The split exists
+ * for the worker pool (DB: the internal worker pool): compute may
+ * run on any worker, publication runs on the caller in environment
+ * order, so records and rings are byte-identical at any worker
+ * count. */
+typedef struct {
+    uint8_t  kind;    /* 0 stepped, 1 boundary reset, 2 fault, 3 abort */
+    uint8_t  term;    /* kind 0: terminated (else truncated) when ended */
+    uint16_t reason;  /* kind 2: fault reason; kind 3: whole-call status */
+    double   tadj[KFLRL_N_AGENTS > 0 ? KFLRL_N_AGENTS : 1];
+} KflrlStepNote;
+
 struct K26RlEnv {
     uint32_t magic;
     uint32_t n_envs;
@@ -244,7 +257,28 @@ struct K26RlEnv {
     K26RlEpisodeWriter *writer;
     K26RlTap *tap;               /* the telemetry ring, when enabled */
     uint8_t   at_boundary;
+
+    /* The internal worker pool, opt-in through K26RL_ENV_THREADS at
+     * create. pool_n is the effective worker count including the
+     * caller; below two, everything here is idle and the serial path
+     * runs the same interleaving it always has. The pool, its
+     * stacks, and the outcome notes are made at create and joined at
+     * destroy: the step path allocates nothing. */
+    uint32_t        pool_n;
+    pthread_t      *pool_threads;   /* pool_n - 1 helpers */
+    pthread_mutex_t pool_mu;
+    pthread_cond_t  pool_go;
+    pthread_cond_t  pool_done_cv;
+    uint32_t        pool_gen;
+    uint32_t        pool_next;
+    uint32_t        pool_done;
+    uint8_t         pool_stop;
+    const double   *pool_actions;
+    fenv_t          pool_fenv;      /* the creating thread's FP mode */
+    KflrlStepNote  *note;
 };
+
+static void *kflrl_pool_worker_(void *arg);
 
 static int kflrl_live_(const K26RlEnv *h)
 {
@@ -1533,6 +1567,7 @@ extern "C" uint32_t k26rl_abi_version(void)
 static void kflrl_free_handle_(K26RlEnv *h)
 {
     if (!h) return;
+    free(h->note);
 #if KFLRL_N_PLAN > 0
     free(h->plan_slot);
     free(h->plan_scratch);
@@ -1882,7 +1917,8 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
     }
 #endif
     h->scratch = (double *)calloc(
-        KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1, sizeof(double));
+        (size_t)n_envs * (KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1),
+        sizeof(double));
     if (!h->seen_seeds || !h->worlds || !h->baseline || !h->baseline_t ||
         !h->episode || !h->steps || !h->ended || !h->obs || !h->rew ||
         !h->flags || !h->fault || !h->dr_vals || !h->wscal ||
@@ -2058,6 +2094,70 @@ extern "C" K26RlStatus k26rl_env_create(uint64_t seed, uint32_t n_envs,
                            h->obs + (size_t)e * KFLRL_OBS_TOTAL);
     }
 #endif
+    h->note = (KflrlStepNote *)calloc(n_envs, sizeof(KflrlStepNote));
+    if (!h->note) {
+        kflrl_free_handle_(h);
+        return K26RL_E_INTERNAL;
+    }
+    /* The worker pool, opt-in. A value that does not parse as an
+     * integer above one is treated as absent rather than refused:
+     * create has no diagnostic channel for advice, and a wrong
+     * environment variable must not brick a host (DB: the internal
+     * worker pool records the choice). On any thread-creation
+     * failure the pool stands down whole and the handle runs
+     * serially, degraded but correct. */
+    h->pool_n = 1;
+    h->pool_threads = NULL;
+    {
+        const char *tv = getenv("K26RL_ENV_THREADS");
+        if (tv && *tv) {
+            char *endp = NULL;
+            unsigned long v = strtoul(tv, &endp, 10);
+            if (endp && *endp == '\0' && v > 1ul) {
+                h->pool_n = v < (unsigned long)n_envs
+                          ? (uint32_t)v : n_envs;
+            }
+        }
+    }
+    if (h->pool_n > 1) {
+        (void)fegetenv(&h->pool_fenv);
+        pthread_mutex_init(&h->pool_mu, NULL);
+        pthread_cond_init(&h->pool_go, NULL);
+        pthread_cond_init(&h->pool_done_cv, NULL);
+        h->pool_gen = 0;
+        h->pool_next = 0;
+        h->pool_done = 0;
+        h->pool_stop = 0;
+        h->pool_actions = NULL;
+        h->pool_threads = (pthread_t *)calloc(
+            (size_t)h->pool_n - 1u, sizeof(pthread_t));
+        if (!h->pool_threads) {
+            pthread_mutex_destroy(&h->pool_mu);
+            pthread_cond_destroy(&h->pool_go);
+            pthread_cond_destroy(&h->pool_done_cv);
+            h->pool_n = 1;
+        } else {
+            uint32_t made = 0;
+            for (uint32_t i = 0; i + 1u < h->pool_n; i++) {
+                if (pthread_create(&h->pool_threads[i], NULL,
+                                   kflrl_pool_worker_, h) != 0) break;
+                made++;
+            }
+            if (made + 1u < h->pool_n) {
+                uint32_t want = h->pool_n;
+                h->pool_n = made + 1u;
+                if (made == 0) {
+                    free(h->pool_threads);
+                    h->pool_threads = NULL;
+                    pthread_mutex_destroy(&h->pool_mu);
+                    pthread_cond_destroy(&h->pool_go);
+                    pthread_cond_destroy(&h->pool_done_cv);
+                    h->pool_n = 1;
+                }
+                (void)want;
+            }
+        }
+    }
     h->at_boundary = 1;
     h->magic = KFLRL_MAGIC;
     *out_env = h;
@@ -2245,61 +2345,36 @@ static void kflrl_plan_write_(K26RlEnv *h, uint32_t e,
 #endif
 
 /* An environment's episode ends by fault: no transition completes,
- * the public observation slice keeps the pre-step values, the fault
- * record and episode-end frame travel the file when enabled. */
-static K26RlStatus kflrl_fault_(K26RlEnv *h, uint32_t e,
-                                const double *aslice, uint16_t reason)
+ * the public observation slice keeps the pre-step values, and the
+ * publication phase sends the fault record and episode-end frame
+ * when enabled. Termination is per environment, so a fault ends the
+ * episode for every agent at once and every agent's reward stream
+ * carries the zero the surface documents for a faulted step. */
+static void kflrl_fault_note_(K26RlEnv *h, uint32_t e, uint16_t reason)
 {
-    /* Termination is per environment, so a fault ends the episode
-     * for every agent at once and every agent's reward stream
-     * carries the zero the surface documents for a faulted step. */
-    double zero_reward[KFLRL_N_AGENTS];
-    double zero_adj[KFLRL_N_AGENTS];
     for (int a = 0; a < KFLRL_N_AGENTS; a++) {
         h->rew[(size_t)e * KFLRL_N_AGENTS + a] = 0.0;
-        zero_reward[a] = 0.0;
-        zero_adj[a] = 0.0;
     }
     h->flags[e] = K26RL_FLAG_FAULT;
     h->fault[e] = reason;
     h->ended[e] = 1;
-    if (h->writer) {
-        K26RlStatus st = k26rl_episode_writer_step(
-            h->writer, e, h->obs + (size_t)e * KFLRL_OBS_TOTAL, aslice,
-            zero_reward, K26RL_FLAG_FAULT, 0.0);
-        if (st != K26RL_OK) return K26RL_E_INTERNAL;
-        st = k26rl_episode_writer_end(h->writer, e, K26RL_END_FAULT,
-                                      reason, zero_adj);
-        if (st != K26RL_OK) return K26RL_E_INTERNAL;
-    }
-    if (h->tap) {
-        k26rl_tap_step(h->tap, e, h->obs + (size_t)e * KFLRL_OBS_TOTAL,
-                       aslice, zero_reward, K26RL_FLAG_FAULT, 0.0);
-        k26rl_tap_end(h->tap, e, K26RL_END_FAULT, reason, zero_adj);
-    }
-    return K26RL_OK;
+    h->note[e].kind = 2;
+    h->note[e].reason = reason;
 }
 
-extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
+/* The compute phase for one environment: everything the serial path
+ * did except touching the writer or the tap, which the publication
+ * phase does in environment order. The outcome travels in the note. */
+static void kflrl_step_compute_(K26RlEnv *h, uint32_t e,
+                                const double *actions)
 {
-    if (!h) return K26RL_E_NULL;
-    if (!kflrl_live_(h)) return K26RL_E_USE_AFTER_DESTROY;
-    if (KFLRL_ACT_TOTAL != 0 && !actions) return K26RL_E_NULL;
-
-    /* A boundary reset that would exhaust its episode coordinates
-     * refuses the whole call before anything advances. */
-    for (uint32_t e = 0; e < h->n_envs; e++) {
-        if (h->ended[e] && h->episode[e] == 0xFFFFFFFFu) {
-            return K26RL_E_RNG_EXHAUSTED;
-        }
-    }
-    h->at_boundary = 0;
-
-    for (uint32_t e = 0; e < h->n_envs; e++) {
         const double *aslice = actions
             ? actions + (size_t)e * KFLRL_ACT_TOTAL : NULL;
         const double *wslice = h->wscal + (size_t)e * KFLRL_N_WSCAL;
         (void)wslice;
+        double *scr = h->scratch +
+            (size_t)e * (KFLRL_OBS_TOTAL ? KFLRL_OBS_TOTAL : 1);
+        (void)scr;
 
         if (h->ended[e]) {
             /* Boundary reset: no transition, no time advance, the
@@ -2307,32 +2382,8 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
              * reset-boundary bit. */
             kflrl_reset_env_(h, e, h->episode[e] + 1u);
             h->flags[e] = K26RL_FLAG_RESET_BOUNDARY;
-            if (h->writer) {
-                K26RlStatus st = k26rl_episode_writer_start(
-                    h->writer, e, h->episode[e],
-                    h->obs + (size_t)e * KFLRL_OBS_TOTAL,
-#if KFLRL_N_REC > 0
-                    kflrl_dr_tags_,
-                    h->dr_vals + (size_t)e * KFLRL_N_REC,
-#else
-                    NULL, NULL,
-#endif
-                    KFLRL_N_REC);
-                if (st != K26RL_OK) return K26RL_E_INTERNAL;
-            }
-            if (h->tap) {
-                k26rl_tap_start(
-                    h->tap, e, h->episode[e],
-                    h->obs + (size_t)e * KFLRL_OBS_TOTAL,
-#if KFLRL_N_REC > 0
-                    kflrl_dr_tags_,
-                    h->dr_vals + (size_t)e * KFLRL_N_REC,
-#else
-                    NULL, NULL,
-#endif
-                    KFLRL_N_REC);
-            }
-            continue;
+            h->note[e].kind = 1;
+            return;
         }
 
 #if KFLRL_N_EFFECTOR > 0
@@ -2359,10 +2410,8 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
          * last. Both engagements have already reached the world, so
          * the transition is abandoned rather than committed. */
         if (h->eng[e].fault) {
-            K26RlStatus fst = kflrl_fault_(
-                h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);
-            if (fst != K26RL_OK) return fst;
-            continue;
+            kflrl_fault_note_(h, e, (uint16_t)K26RL_E_ENV_INTERNAL);
+            return;
         }
 #endif
         /* A contact is a fact about one transition, so the latch is
@@ -3119,30 +3168,34 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
          * transmission and letting the link claim a reach it has
          * not got. */
         if (h->link_over[e]) {
-            K26RlStatus fst = kflrl_fault_(
-                h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);
-            if (fst != K26RL_OK) return fst;
-            continue;
+            kflrl_fault_note_(h, e, (uint16_t)K26RL_E_ENV_INTERNAL);
+            return;
         }
 #endif
         if (att_reason != 0) {
-            K26RlStatus fst = kflrl_fault_(h, e, aslice, att_reason);
-            if (fst != K26RL_OK) return fst;
-            continue;
+            kflrl_fault_note_(h, e, att_reason);
+            return;
         }
         if (rc != 0) {
             int code = rc < 0 ? -rc : rc;
-            if (code == K26ASTRO_RT_E_FPU_RACE) return K26RL_E_FPU_RACE;
-            if (code == K26ASTRO_RT_E_OOM) return K26RL_E_INTERNAL;
+            if (code == K26ASTRO_RT_E_FPU_RACE) {
+                h->note[e].kind = 3;
+                h->note[e].reason = (uint16_t)K26RL_E_FPU_RACE;
+                return;
+            }
+            if (code == K26ASTRO_RT_E_OOM) {
+                h->note[e].kind = 3;
+                h->note[e].reason = (uint16_t)K26RL_E_INTERNAL;
+                return;
+            }
             uint16_t reason = (code == K26ASTRO_RT_E_INTEGRATOR)
                 ? (uint16_t)K26RL_E_DIVERGED
                 : (uint16_t)K26RL_E_ENV_INTERNAL;
-            K26RlStatus fst = kflrl_fault_(h, e, aslice, reason);
-            if (fst != K26RL_OK) return fst;
-            continue;
+            kflrl_fault_note_(h, e, reason);
+            return;
         }
 
-        kflrl_observe_(h->worlds[e], h->scratch,
+        kflrl_observe_(h->worlds[e], scr,
                        &h->contact[(size_t)e * KFLRL_N_CONTACT],
                        &h->join[(size_t)e * KFLRL_N_JOINS],
                        &h->plat[(size_t)e * KFLRL_N_PLAT],
@@ -3159,16 +3212,14 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
          * transition, so the first transition of an episode draws at
          * index 0. */
         kflrl_sense_apply_(h, e, h->episode[e], h->steps[e],
-                           h->scratch);
+                           scr);
         int finite = 1;
         for (uint32_t j = 0; j < KFLRL_OBS_TOTAL; j++) {
-            if (!std::isfinite(h->scratch[j])) finite = 0;
+            if (!std::isfinite(scr[j])) finite = 0;
         }
         if (!finite) {
-            K26RlStatus fst = kflrl_fault_(h, e, aslice,
-                                           (uint16_t)K26RL_E_DIVERGED);
-            if (fst != K26RL_OK) return fst;
-            continue;
+            kflrl_fault_note_(h, e, (uint16_t)K26RL_E_DIVERGED);
+            return;
         }
 
         uint32_t ns = h->steps[e] + 1u;
@@ -3178,35 +3229,31 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
          * one agent's episode has ended and another's has not. */
         double r[KFLRL_N_AGENTS];
         int r_finite = 1;
-        kflrl_rewards_(h->scratch, aslice, ns, wslice, r);
+        kflrl_rewards_(scr, aslice, ns, wslice, r);
         for (int a = 0; a < KFLRL_N_AGENTS; a++) {
             if (!std::isfinite(r[a])) r_finite = 0;
         }
         if (!r_finite) {
-            K26RlStatus fst = kflrl_fault_(
-                h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);
-            if (fst != K26RL_OK) return fst;
-            continue;
+            kflrl_fault_note_(h, e, (uint16_t)K26RL_E_ENV_INTERNAL);
+            return;
         }
 
         /* Terminal adjustment on termination only; truncation
          * carries none. Evaluated before the transition commits so
          * a non-finite adjusted reward faults like a non-finite
          * reward, never reaching the recorded stream. */
-        int term = kflrl_terminated_(h->scratch, aslice, ns, wslice);
+        int term = kflrl_terminated_(scr, aslice, ns, wslice);
         double tadj[KFLRL_N_AGENTS];
         for (int a = 0; a < KFLRL_N_AGENTS; a++) tadj[a] = 0.0;
         if (term) {
-            kflrl_terminals_(h->scratch, aslice, ns, wslice, tadj);
+            kflrl_terminals_(scr, aslice, ns, wslice, tadj);
             for (int a = 0; a < KFLRL_N_AGENTS; a++) {
                 r[a] += tadj[a];
                 if (!std::isfinite(r[a])) r_finite = 0;
             }
             if (!r_finite) {
-                K26RlStatus fst = kflrl_fault_(
-                    h, e, aslice, (uint16_t)K26RL_E_ENV_INTERNAL);
-                if (fst != K26RL_OK) return fst;
-                continue;
+                kflrl_fault_note_(h, e, (uint16_t)K26RL_E_ENV_INTERNAL);
+                return;
             }
         }
 
@@ -3215,7 +3262,7 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
          * step, and the flag word agrees in kind with the episode
          * file's end reason. */
         h->steps[e] = ns;
-        memcpy(h->obs + (size_t)e * KFLRL_OBS_TOTAL, h->scratch,
+        memcpy(h->obs + (size_t)e * KFLRL_OBS_TOTAL, scr,
                sizeof(double) * KFLRL_OBS_TOTAL);
         uint32_t f = 0;
         if (term) {
@@ -3231,39 +3278,229 @@ extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
         if (f & (K26RL_FLAG_TERMINATED | K26RL_FLAG_TRUNCATED)) {
             h->ended[e] = 1;
         }
+        h->note[e].kind = 0;
+        h->note[e].term = (uint8_t)(term ? 1 : 0);
+        for (int a = 0; a < KFLRL_N_AGENTS; a++) {
+            h->note[e].tadj[a] = tadj[a];
+        }
+}
+
+/* The publication phase for one environment: exactly the writer and
+ * tap effects the serial path performed for this outcome, in the same
+ * order, reading the state and the note compute left. An abort note
+ * publishes nothing, as the serial path published nothing for it. */
+static K26RlStatus kflrl_step_publish_(K26RlEnv *h, uint32_t e,
+                                       const double *actions)
+{
+    const KflrlStepNote *nt = &h->note[e];
+    const double *aslice = actions
+        ? actions + (size_t)e * KFLRL_ACT_TOTAL : NULL;
+    if (nt->kind == 3) return K26RL_OK;
+    if (nt->kind == 1) {
+        if (h->writer) {
+            K26RlStatus st = k26rl_episode_writer_start(
+                h->writer, e, h->episode[e],
+                h->obs + (size_t)e * KFLRL_OBS_TOTAL,
+#if KFLRL_N_REC > 0
+                kflrl_dr_tags_,
+                h->dr_vals + (size_t)e * KFLRL_N_REC,
+#else
+                NULL, NULL,
+#endif
+                KFLRL_N_REC);
+            if (st != K26RL_OK) return K26RL_E_INTERNAL;
+        }
+        if (h->tap) {
+            k26rl_tap_start(
+                h->tap, e, h->episode[e],
+                h->obs + (size_t)e * KFLRL_OBS_TOTAL,
+#if KFLRL_N_REC > 0
+                kflrl_dr_tags_,
+                h->dr_vals + (size_t)e * KFLRL_N_REC,
+#else
+                NULL, NULL,
+#endif
+                KFLRL_N_REC);
+        }
+        return K26RL_OK;
+    }
+    if (nt->kind == 2) {
+        double zero_reward[KFLRL_N_AGENTS];
+        double zero_adj[KFLRL_N_AGENTS];
+        for (int a = 0; a < KFLRL_N_AGENTS; a++) {
+            zero_reward[a] = 0.0;
+            zero_adj[a] = 0.0;
+        }
         if (h->writer) {
             K26RlStatus st = k26rl_episode_writer_step(
                 h->writer, e, h->obs + (size_t)e * KFLRL_OBS_TOTAL,
-                aslice, h->rew + (size_t)e * KFLRL_N_AGENTS, f,
-                h->control_dt);
+                aslice, zero_reward, K26RL_FLAG_FAULT, 0.0);
             if (st != K26RL_OK) return K26RL_E_INTERNAL;
-            if (h->ended[e]) {
-                st = k26rl_episode_writer_end(
-                    h->writer, e,
-                    term ? K26RL_END_TERMINATED : K26RL_END_TRUNCATED,
-                    0, tadj);
-                if (st != K26RL_OK) return K26RL_E_INTERNAL;
-#if KFLRL_N_PLAN > 0
-                kflrl_plan_write_(h, e, aslice);
-#endif
-            }
+            st = k26rl_episode_writer_end(h->writer, e, K26RL_END_FAULT,
+                                          nt->reason, zero_adj);
+            if (st != K26RL_OK) return K26RL_E_INTERNAL;
         }
         if (h->tap) {
             k26rl_tap_step(h->tap, e,
                            h->obs + (size_t)e * KFLRL_OBS_TOTAL,
-                           aslice,
-                           h->rew + (size_t)e * KFLRL_N_AGENTS, f,
-                           h->control_dt);
-            if (h->ended[e]) {
-                k26rl_tap_end(
-                    h->tap, e,
-                    term ? K26RL_END_TERMINATED : K26RL_END_TRUNCATED,
-                    0, tadj);
-            }
+                           aslice, zero_reward, K26RL_FLAG_FAULT, 0.0);
+            k26rl_tap_end(h->tap, e, K26RL_END_FAULT, nt->reason,
+                          zero_adj);
+        }
+        return K26RL_OK;
+    }
+    if (h->writer) {
+        K26RlStatus st = k26rl_episode_writer_step(
+            h->writer, e, h->obs + (size_t)e * KFLRL_OBS_TOTAL,
+            aslice, h->rew + (size_t)e * KFLRL_N_AGENTS, h->flags[e],
+            h->control_dt);
+        if (st != K26RL_OK) return K26RL_E_INTERNAL;
+        if (h->ended[e]) {
+            st = k26rl_episode_writer_end(
+                h->writer, e,
+                nt->term ? K26RL_END_TERMINATED : K26RL_END_TRUNCATED,
+                0, nt->tadj);
+            if (st != K26RL_OK) return K26RL_E_INTERNAL;
+#if KFLRL_N_PLAN > 0
+            kflrl_plan_write_(h, e, aslice);
+#endif
+        }
+    }
+    if (h->tap) {
+        k26rl_tap_step(h->tap, e,
+                       h->obs + (size_t)e * KFLRL_OBS_TOTAL,
+                       aslice,
+                       h->rew + (size_t)e * KFLRL_N_AGENTS, h->flags[e],
+                       h->control_dt);
+        if (h->ended[e]) {
+            k26rl_tap_end(
+                h->tap, e,
+                nt->term ? K26RL_END_TERMINATED : K26RL_END_TRUNCATED,
+                0, nt->tadj);
         }
     }
     return K26RL_OK;
 }
+
+
+
+/* A pool worker: waits for a generation, claims environment indices
+ * under the mutex, computes them, and reports done. The floating
+ * point mode is the creating thread's, set once at start, so every
+ * worker's arithmetic matches the caller's (the mode-race detection
+ * that already exists applies unchanged). */
+static void *kflrl_pool_worker_(void *arg)
+{
+    K26RlEnv *h = (K26RlEnv *)arg;
+    (void)fesetenv(&h->pool_fenv);
+    pthread_mutex_lock(&h->pool_mu);
+    uint32_t seen = 0;
+    for (;;) {
+        while (!h->pool_stop && h->pool_gen == seen) {
+            pthread_cond_wait(&h->pool_go, &h->pool_mu);
+        }
+        if (h->pool_stop) break;
+        seen = h->pool_gen;
+        for (;;) {
+            uint32_t e = h->pool_next;
+            if (e >= h->n_envs) break;
+            h->pool_next = e + 1u;
+            pthread_mutex_unlock(&h->pool_mu);
+            kflrl_step_compute_(h, e, h->pool_actions);
+            pthread_mutex_lock(&h->pool_mu);
+        }
+        h->pool_done++;
+        pthread_cond_signal(&h->pool_done_cv);
+    }
+    pthread_mutex_unlock(&h->pool_mu);
+    return NULL;
+}
+
+/* One pooled compute phase: every environment through
+ * kflrl_step_compute_, the caller working beside the helpers, the
+ * call returning only when all are done. */
+static void kflrl_pool_compute_(K26RlEnv *h, const double *actions)
+{
+    pthread_mutex_lock(&h->pool_mu);
+    h->pool_actions = actions;
+    h->pool_next = 0;
+    h->pool_done = 0;
+    h->pool_gen++;
+    pthread_cond_broadcast(&h->pool_go);
+    for (;;) {
+        uint32_t e = h->pool_next;
+        if (e >= h->n_envs) break;
+        h->pool_next = e + 1u;
+        pthread_mutex_unlock(&h->pool_mu);
+        kflrl_step_compute_(h, e, actions);
+        pthread_mutex_lock(&h->pool_mu);
+    }
+    while (h->pool_done < h->pool_n - 1u) {
+        pthread_cond_wait(&h->pool_done_cv, &h->pool_mu);
+    }
+    pthread_mutex_unlock(&h->pool_mu);
+}
+
+static void kflrl_pool_teardown_(K26RlEnv *h)
+{
+    if (h->pool_n <= 1) return;
+    pthread_mutex_lock(&h->pool_mu);
+    h->pool_stop = 1;
+    pthread_cond_broadcast(&h->pool_go);
+    pthread_mutex_unlock(&h->pool_mu);
+    for (uint32_t i = 0; i + 1u < h->pool_n; i++) {
+        (void)pthread_join(h->pool_threads[i], NULL);
+    }
+    free(h->pool_threads);
+    h->pool_threads = NULL;
+    pthread_mutex_destroy(&h->pool_mu);
+    pthread_cond_destroy(&h->pool_go);
+    pthread_cond_destroy(&h->pool_done_cv);
+    h->pool_n = 1;
+}
+
+extern "C" K26RlStatus k26rl_env_step(K26RlEnv *h, const double *actions)
+{
+    if (!h) return K26RL_E_NULL;
+    if (!kflrl_live_(h)) return K26RL_E_USE_AFTER_DESTROY;
+    if (KFLRL_ACT_TOTAL != 0 && !actions) return K26RL_E_NULL;
+
+    /* A boundary reset that would exhaust its episode coordinates
+     * refuses the whole call before anything advances. */
+    for (uint32_t e = 0; e < h->n_envs; e++) {
+        if (h->ended[e] && h->episode[e] == 0xFFFFFFFFu) {
+            return K26RL_E_RNG_EXHAUSTED;
+        }
+    }
+    h->at_boundary = 0;
+
+    if (h->pool_n > 1) {
+        kflrl_pool_compute_(h, actions);
+        K26RlStatus abort_st = K26RL_OK;
+        for (uint32_t e = 0; e < h->n_envs; e++) {
+            if (h->note[e].kind == 3) {
+                if (abort_st == K26RL_OK) {
+                    abort_st = (K26RlStatus)h->note[e].reason;
+                }
+                continue;
+            }
+            K26RlStatus pst = kflrl_step_publish_(h, e, actions);
+            if (pst != K26RL_OK) return pst;
+        }
+        return abort_st;
+    }
+    for (uint32_t e = 0; e < h->n_envs; e++) {
+        kflrl_step_compute_(h, e, actions);
+        if (h->note[e].kind == 3) {
+            return (K26RlStatus)h->note[e].reason;
+        }
+        K26RlStatus pst = kflrl_step_publish_(h, e, actions);
+        if (pst != K26RL_OK) return pst;
+    }
+    return K26RL_OK;
+}
+
+/* Shared by the two explicit reset calls.
 
 /* Shared by the two explicit reset calls. With output enabled, an
  * episode cut mid-flight records a truncated end (the recording
@@ -3630,6 +3867,7 @@ extern "C" void k26rl_env_destroy(K26RlEnv *h)
         k26rl_tap_close(h->tap);
         h->tap = NULL;
     }
+    kflrl_pool_teardown_(h);
     h->magic = 0;
     kflrl_free_handle_(h);
 }

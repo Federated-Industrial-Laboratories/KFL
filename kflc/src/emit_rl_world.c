@@ -21,6 +21,8 @@ int rl_emit_prologue(FILE *out, const RlModel *m,
         form->name ? form->name : "FORM");
 
     fputs(
+        "#include <pthread.h>\n"
+        "#include <fenv.h>\n"
         "#include <k26astro_rt/world.h>\n"
         "#include <k26astro_rt/observer.h>\n"
         "#include <k26astro_rt/world_rng.h>\n"

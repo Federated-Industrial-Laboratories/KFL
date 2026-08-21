@@ -744,6 +744,16 @@ $(RL_HELD_TEST): tests/test_rl_track_held.c $(RL_GATE_DEPS) \
 	$(CC) $(CFLAGS) -I../libk26rl/include -I../libk26astro_core/include \
 	    -o $@ $< ../libk26rl/libk26rl.a -ldl -lm
 
+# The worker pool's output-bound claim: records byte-identical at any
+# worker count, faults and boundary resets included, the control's
+# edge readings, and the timing refusals with workers active.
+RL_POOL_TEST = tests/test_rl_pool
+$(RL_POOL_TEST): tests/test_rl_pool.c $(RL_GATE_DEPS) \
+                 ../libk26rl/include/k26rl_env.h \
+                 ../libk26rl/libk26rl.a
+	$(CC) $(CFLAGS) -I../libk26rl/include -o $@ $< \
+	    ../libk26rl/libk26rl.a -ldl -lm -pthread
+
 RL_CTXKW_TEST = tests/test_rl_contextual_keywords
 $(RL_CTXKW_TEST): tests/test_rl_contextual_keywords.c $(RL_GATE_DEPS) \
                   ../libk26rl/include/k26rl_env.h
@@ -771,7 +781,7 @@ $(RL_31_BASE_TEST): tests/test_rl_31_baseline.c $(BIN)
 # gate as skipped instead of dying at link.
 RL_STACK_ARCHIVE = ../libk26rl/libk26rl.a
 ifneq ($(wildcard $(RL_STACK_ARCHIVE)),)
-RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_MAVIEW_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_CAPTURE_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_LINK_TEST) $(RL_HELD_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
+RL_DRIVE_GATES = $(RL_EMIT_TEST) $(RL_DET_TEST) $(RL_FAULT_TEST) $(RL_RESIM_TEST) $(RL_DRAWS_TEST) $(RL_HOTPATH_TEST) $(RL_STATE_TEST) $(RL_TAP_TEST) $(RL_VIEW_TEST) $(RL_SCENE_TEST) $(RL_MAVIEW_TEST) $(RL_LIVE_TEST) $(RL_BODIES_TEST) $(RL_LIVE_RED) $(RL_ATT_TEST) $(RL_ACTUATOR_TEST) $(RL_PROPULSION_TEST) $(RL_REFERENCE_TEST) $(RL_COLL_TEST) $(RL_CONOBS_TEST) $(RL_LIFECYCLE_TEST) $(RL_REL_TEST) $(RL_SENSOR_TEST) $(RL_DOCKING_TEST) $(RL_CAPTURE_TEST) $(RL_AGENT_TEST) $(RL_DEFENSE_TEST) $(RL_EFFECTOR_TEST) $(RL_SOFTKILL_TEST) $(RL_AGENT_ID_TEST) $(RL_LINK_TEST) $(RL_HELD_TEST) $(RL_POOL_TEST) $(RL_POLICY_TEST) $(RL_POLICY_LATENCY_TEST) $(RL_REALTIME_TEST)
 else
 RL_DRIVE_GATES =
 endif

@@ -268,7 +268,7 @@ int main(int argc, char **argv)
         if (!cflags) cflags = "-O2 -g -std=c++11 -Wno-format-truncation "
                               "-ffp-contract=off -fexcess-precision=standard";
         const char *ldlibs = getenv("KFLC_LDLIBS");
-        if (!ldlibs) ldlibs = "-lm";
+        if (!ldlibs) ldlibs = "-lm -pthread";
 
         int compile_failed = 0;
         char cmd[8192];
