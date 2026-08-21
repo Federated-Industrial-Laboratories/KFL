@@ -1908,7 +1908,11 @@ static void gate_determinism_(void)
 #define GET_DT       0.5
 #define GET_WEAK_TX  2.0e-6
 
-static void get_world_(char *out, size_t cap)
+/* `links` is how many of the two datalinks the world declares: two for
+ * the community the getter reports over, one for a transmitter with
+ * nobody on its network, and none at all. The last two are what the
+ * getter's own zero cases are. */
+static void get_world_n_(char *out, size_t cap, int links)
 {
     double weak[K_COUNT];
     char strong_s[1024], weak_s[1024];
@@ -1918,15 +1922,63 @@ static void get_world_(char *out, size_t cap)
     weak[K_P_TX] = GET_WEAK_TX;
     radio_str_(strong_s, sizeof strong_s, RADIO_);
     radio_str_(weak_s, sizeof weak_s, weak);
-    n = snprintf(out, cap,
-        "%s"
-        "    astro_payload link1 body=drone_1 kind=datalink"
-        " network=swarm_a rate_hz=%.17g %s\n"
-        "    astro_payload link2 body=drone_2 kind=datalink"
-        " network=swarm_a rate_hz=%.17g %s\n"
-        "%s", GET_HEAD, GET_RATE_HZ, strong_s, GET_RATE_HZ, weak_s,
-        GET_TAIL);
+    n = snprintf(out, cap, "%s", GET_HEAD);
+    if (links >= 1) {
+        n += snprintf(out + n, cap - (size_t)n,
+            "    astro_payload link1 body=drone_1 kind=datalink"
+            " network=swarm_a rate_hz=%.17g %s\n", GET_RATE_HZ, strong_s);
+    }
+    if (links >= 2) {
+        n += snprintf(out + n, cap - (size_t)n,
+            "    astro_payload link2 body=drone_2 kind=datalink"
+            " network=swarm_a rate_hz=%.17g %s\n", GET_RATE_HZ, weak_s);
+    }
+    n += snprintf(out + n, cap - (size_t)n, "%s", GET_TAIL);
     ASSERT((size_t)n < cap);
+}
+
+static void get_world_(char *out, size_t cap)
+{
+    get_world_n_(out, cap, 2);
+}
+
+/* The getter's two zero cases, each on a world that reaches a real
+ * artifact: a program declaring no datalink, and one declaring a
+ * datalink with no other member on its network. Both have nothing to
+ * report and both must say so by returning a requirement of zero
+ * rather than by refusing or by publishing a pair with nobody at one
+ * end of it. */
+static void get_zero_case_(const char *stem, int links)
+{
+    static char src[16384];
+    void *so;
+    RlSurface s;
+    K26RlEnv *env = NULL;
+    char path[512], out[512], sopath[512];
+
+    snprintf(path, sizeof path, WORK_DIR "/%s.kfl", stem);
+    snprintf(out, sizeof out, WORK_DIR "/%s", stem);
+    snprintf(sopath, sizeof sopath, WORK_DIR "/%s.rlenv.so", stem);
+    get_world_n_(src, sizeof src, links);
+    rl_write_file_(path, src);
+    rl_compile_(path, out, WORK_DIR);
+    so = rl_dlopen_(sopath);
+    rl_resolve_surface_(so, &s);
+    ASSERT(s.datalinks != NULL);
+    ASSERT(s.create(23u, 2u, &env) == K26RL_OK);
+    if (s.datalinks(env, NULL, 0) != 0) {
+        fprintf(stderr, "FAIL: a world with %d datalink(s) sizes the "
+                "getter at %d rather than 0\n", links,
+                s.datalinks(env, NULL, 0));
+        exit(1);
+    }
+    s.destroy(env);
+    dlclose(so);
+    g_arms++;
+    printf("  a world declaring %s reports a datalink requirement of 0, "
+           "the getter present and refusing nothing\n",
+           links ? "one datalink and no peer on its network"
+                 : "no datalink");
 }
 
 /* The separation of the two carriers in one environment, from the body
@@ -2246,6 +2298,8 @@ int main(void)
     gate_tie_();
     gate_determinism_();
     gate_getter_();
+    get_zero_case_("nolink", 0);
+    get_zero_case_("lonelink", 1);
     gate_getter_identity_();
 
     printf("test_rl_datalink: %d arm(s) passed\n", g_arms);
