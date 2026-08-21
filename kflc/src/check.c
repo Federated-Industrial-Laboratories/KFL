@@ -447,6 +447,17 @@ static const char *const OBS_SFX_REF_[] =
 static const char *const OBS_SFX_PORT_[] =
     { "_captured", "_axial", "_lateral", "_pitchyaw", "_roll",
       "_v_axial", "_v_lateral", "_v_pitchyaw", "_v_roll", NULL };
+/* With the `full` mark it publishes two more after those nine: the
+ * rate the envelope's own note binds, carried to the arriving craft's
+ * centre of mass, and whether the pairing's two ports are held by an
+ * active join. The emitter publishes both and the spec names both, so
+ * this pass has to know them: without the second list a reward or a
+ * termination predicate reading either name is refused as unknown,
+ * and the two channels exist for exactly those expressions to read. */
+static const char *const OBS_SFX_PORT_FULL_[] =
+    { "_captured", "_axial", "_lateral", "_pitchyaw", "_roll",
+      "_v_axial", "_v_lateral", "_v_pitchyaw", "_v_roll",
+      "_v_cg", "_joined", NULL };
 /* A detection observe publishes whether the target was seen, the
  * continuous quantity the decision was taken on, and the geometry it
  * was taken from, which is seven. The aspect cosine is among them
@@ -545,7 +556,10 @@ static const char *const *observe_suffixes_(const KflcNode *world,
         if (k && strcmp(k, "decoy") == 0)    return OBS_SFX_EFF_DECOY_;
         return OBS_SFX_EFF_LASER_;
     }
-    if (observe_marker_(n, "port"))     return OBS_SFX_PORT_;
+    if (observe_marker_(n, "port")) {
+        return observe_marker_(n, "full") ? OBS_SFX_PORT_FULL_
+                                          : OBS_SFX_PORT_;
+    }
     if (observe_marker_(n, "contact"))  return OBS_SFX_CON_;
     if (observe_marker_(n, "attitude")) return OBS_SFX_ATT_;
     if (observe_marker_(n, "propulsion")) return OBS_SFX_PROP_;
@@ -592,7 +606,8 @@ static size_t observe_as_bound_(void)
     const char *const *lists[] = { OBS_SFX_LOS_, OBS_SFX_ATT_,
                                    OBS_SFX_CON_, OBS_SFX_REL_,
                                    OBS_SFX_PROP_, OBS_SFX_REF_,
-                                   OBS_SFX_PORT_, OBS_SFX_DETECT_,
+                                   OBS_SFX_PORT_, OBS_SFX_PORT_FULL_,
+                                   OBS_SFX_DETECT_,
                                    OBS_SFX_TRACK_, OBS_SFX_EFF_LASER_,
                                    OBS_SFX_EFF_IMPACTOR_,
                                    OBS_SFX_EFF_JAMMER_,

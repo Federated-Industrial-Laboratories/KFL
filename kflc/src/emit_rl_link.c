@@ -225,13 +225,34 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
         n++;
     }
 
-    int ent_veh[RL_LINK_MAX_ENT];
-    int ent_self[RL_LINK_MAX_ENT];
-    int ent_edge0[RL_LINK_MAX_ENT];
-    int ent_nedge[RL_LINK_MAX_ENT];
-    int edge_rx[RL_LINK_MAX_EDGE];
-    int edge_ent[RL_LINK_MAX_EDGE];
-    int edge_pair[RL_LINK_MAX_EDGE];
+    /* The entry and edge tables come from the heap, and the reason is
+     * arithmetic rather than taste. An edge is one entry offered to
+     * one other member of a community, so the edge bound is the entry
+     * bound times the payload bound, and at the sizes a swarm needs
+     * that product is over a million: three tables of it are tens of
+     * megabytes, which is not a stack frame. The bounds themselves are
+     * unchanged and so are the two refusals that name them, so a
+     * program over either is still refused by name. */
+    size_t ent_cap  = (size_t)RL_LINK_MAX_ENT;
+    size_t edge_cap = (size_t)RL_LINK_MAX_EDGE;
+    size_t pair_cap = (size_t)RL_MAX_PAYLOADS * (size_t)RL_MAX_PAYLOADS;
+    int *link_store = (int *)calloc(
+        4 * ent_cap + 3 * edge_cap + 3 * pair_cap, sizeof(int));
+    if (!link_store) {
+        kflc_diag_errorf(diag, 0,
+            "out of memory building this program's datalink tables");
+        return 1;
+    }
+    int *ent_veh   = link_store;
+    int *ent_self  = ent_veh + ent_cap;
+    int *ent_edge0 = ent_self + ent_cap;
+    int *ent_nedge = ent_edge0 + ent_cap;
+    int *edge_rx   = ent_nedge + ent_cap;
+    int *edge_ent  = edge_rx + edge_cap;
+    int *edge_pair = edge_ent + edge_cap;
+    int *pair_tx   = edge_pair + edge_cap;
+    int *pair_rx   = pair_tx + pair_cap;
+    int *pair_of   = pair_rx + pair_cap;
     int link_ent0[RL_MAX_PAYLOADS], link_nent[RL_MAX_PAYLOADS];
     int n_ent = 0, n_edge = 0;
 
@@ -247,14 +268,13 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
      * Contiguous per transmitter and in declaration order within it,
      * so the transfer pass writes a transmitter's records with one
      * bounded walk and the getter's order is the program's. */
-    int pair_tx[RL_MAX_PAYLOADS * RL_MAX_PAYLOADS];
-    int pair_rx[RL_MAX_PAYLOADS * RL_MAX_PAYLOADS];
-    int pair_of[RL_MAX_PAYLOADS][RL_MAX_PAYLOADS];
     int link_pair0[RL_MAX_PAYLOADS], link_npair[RL_MAX_PAYLOADS];
     int n_pair = 0;
 
     for (int i = 0; i < n; i++) {
-        for (int r = 0; r < n; r++) pair_of[i][r] = -1;
+        for (int r = 0; r < n; r++) {
+            pair_of[(size_t)i * RL_MAX_PAYLOADS + (size_t)r] = -1;
+        }
     }
     for (int i = 0; i < n; i++) {
         link_pair0[i] = n_pair;
@@ -264,7 +284,7 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
             if (lnet[r] < 0 || lnet[r] != lnet[i]) continue;
             pair_tx[n_pair] = i;
             pair_rx[n_pair] = r;
-            pair_of[i][r] = n_pair;
+            pair_of[(size_t)i * RL_MAX_PAYLOADS + (size_t)r] = n_pair;
             n_pair++;
             link_npair[i]++;
         }
@@ -281,6 +301,7 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
                 kflc_diag_errorf(diag, m->payloads[lpay[i]].line,
                     "more than %d datalink entries in this program",
                     RL_LINK_MAX_ENT);
+                free(link_store);
                 return 1;
             }
             ent_veh[n_ent]   = veh[j];
@@ -298,11 +319,13 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
                     kflc_diag_errorf(diag, m->payloads[lpay[i]].line,
                         "more than %d datalink transfers in this "
                         "program", RL_LINK_MAX_EDGE);
+                    free(link_store);
                     return 1;
                 }
                 edge_rx[n_edge]   = r;
                 edge_ent[n_edge]  = n_ent;
-                edge_pair[n_edge] = pair_of[i][r];
+                edge_pair[n_edge] =
+                    pair_of[(size_t)i * RL_MAX_PAYLOADS + (size_t)r];
                 n_edge++;
                 ent_nedge[n_ent]++;
             }
@@ -365,5 +388,6 @@ int rl_emit_link_tables(FILE *out, const RlModel *m, KflcDiag *diag)
             fprintf(out, "    %d,\n", edge_pair[k]);
         fputs("};\n\n", out);
     }
+    free(link_store);
     return 0;
 }

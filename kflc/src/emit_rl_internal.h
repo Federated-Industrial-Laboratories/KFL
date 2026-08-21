@@ -86,17 +86,43 @@
 
 /* Emit-time model sizes. These bound compiler-side scratch tables,
  * not the emitted program; a program over a limit gets a diagnostic
- * naming it rather than silent truncation. */
+ * naming it rather than silent truncation.
+ *
+ * Four of them were raised when the first swarm program was written
+ * against this compiler, and the arithmetic is recorded so that the
+ * next author can see what the values are headroom over rather than
+ * finding a round number. That program declares thirty-two craft, each
+ * with eleven actuator channels, a radar, an information state and a
+ * datalink, tracking twenty passive objects, its thirty-one peers and
+ * three structures; a further block declares the capture and docking
+ * pairings, the keep-out ranges and the passive objects' states, and
+ * one more craft may be present. What it asks of each bound:
+ *
+ *   actions      32 * 11 + 8            = 360    against 1024
+ *   observes     32 * 58 + 757          = 2613   against 4096
+ *   payloads     32 * 3                 = 96     against 256
+ *   drawn keys   20 * 13 + 3            = 263    against 1024
+ *   actuators    32 * 11 + 8            = 360    against 1024
+ *
+ * The unchanged bounds are unchanged because that program stays inside
+ * them: 57 bodies of 256, 56 assembly-bearing of 128, 174 colliders of
+ * 256, 34 agents of 64, five imperfection chains of 32.
+ *
+ * Every raise here costs compiler memory and nothing else: these
+ * tables are scratch, the emitted program's layout is a function of
+ * what a source declares rather than of what a table could hold, and
+ * the diagnostics that name each bound are unchanged, so a program
+ * over one is still refused by name rather than truncated. */
 
 #define RL_MAX_BODIES   256
 
-#define RL_MAX_ACTIONS  256
+#define RL_MAX_ACTIONS  1024
 
-#define RL_MAX_OBSERVES 256
+#define RL_MAX_OBSERVES 4096
 
 #define RL_MAX_RESETS   256
 
-#define RL_MAX_DR       256
+#define RL_MAX_DR       1024
 
 #define RL_MAX_WSCAL    256
 
@@ -354,7 +380,14 @@ typedef struct {
  * `body` is the model body index; `name` is what a program commands
  * it by. */
 
-#define RL_MAX_ACT 64
+/* This one counts across the whole program rather than per craft, so
+ * a swarm reaches it long before any one craft does: thirty-two of the
+ * craft described at the head of this file carry 264 thrusters, 99
+ * wheels and 118 ports between them, and the step body names 360
+ * actuators. The bound is the arithmetic at the head of this file with
+ * headroom of about three. */
+
+#define RL_MAX_ACT 1024
 
 /* The bound on assembly-bearing bodies, which is separate from the
  * actuator bound above because the two count different things. It was
@@ -449,7 +482,14 @@ typedef struct {
 
 #define RL_PAY_MAXP     20
 
-#define RL_MAX_PAYLOADS 32
+/* Payloads are per craft, so a swarm multiplies them: the program at
+ * the head of this file carries three on each of thirty-two craft.
+ * This bound also sizes the datalink's own tables, which is why
+ * emit_rl_link.c takes its working store from the heap rather than the
+ * stack: an entry table of this bound and an edge table of its square
+ * are megabytes and a stack frame is not. */
+
+#define RL_MAX_PAYLOADS 256
 
 /* A key whose value is a word rather than a number, and the constant
  * the word stands for. Two of the tier's constructor parameters are

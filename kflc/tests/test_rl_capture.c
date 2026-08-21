@@ -1843,6 +1843,67 @@ int main(void)
     }
     n_pass++;
 
+    /* ---- 9a. the two the mark adds are readable where they matter - *
+     *
+     * Publishing a channel and admitting it into an expression are two
+     * different acts, and this arm exists because they had come apart:
+     * the emitter published `_v_cg` and `_joined` and the spec named
+     * both, while the pass that decides which names an expression may
+     * read carried the nine-channel list for every port observe, mark
+     * or no mark. Every program reading either name in a reward, a
+     * terminal or a termination predicate was refused as naming
+     * something the world does not publish, which is the one thing
+     * those two channels exist for.
+     *
+     * What makes this arm able to fail: the fixture reads both names in
+     * all three positions and asserts the compile succeeds. Against the
+     * defect it named, the compile is refused and the arm stops here.
+     * An arm that only compiled a program declaring the mark would have
+     * passed throughout.
+     */
+    printf("the mark's two channels are readable in an expression\n");
+    {
+        char prog[8192];
+        snprintf(prog, sizeof prog,
+            "form RL_MARKREAD\n"
+            "fn world w\n"
+            GRASP_BLOCK
+            ANCHOR_BODY
+            "    astro_body drone assembly=\"%s/d1.k26asm\"" DRIFT
+            " pos_x=0.0 quat_w=1.0\n"
+            "    astro_body rock assembly=\"%s/d2.k26asm\"" DRIFT
+            " pos_x=6.0 quat_w=0.0 quat_y=1.0\n"
+            "    episode\n"
+            "        control_dt 0.5\n"
+            "        horizon 20\n"
+            "        terminated when gr_joined > 0.5\n"
+            "    end\n"
+            "    action pd box -1.0 1.0 default 0.0\n"
+            "    observe port grasp of drone against face of rock full "
+            "as gr\n"
+            "    objective\n"
+            "        reward 0.0 - gr_v_cg\n"
+            "        terminal 10.0 * gr_joined\n"
+            "    end\n"
+            "end\n"
+            "end\n", WORK_DIR, WORK_DIR);
+        compile_("markread", prog);
+        RlSurface s;
+        void *so = open_("markread", &s);
+        K26RlEnv *env = NULL;
+        ASSERT(s.create(29u, 1u, &env) == K26RL_OK);
+        uint8_t blob[16384];
+        int32_t len = s.spec(env, blob, sizeof blob);
+        ASSERT(len > 0);
+        ASSERT(find_channel_(blob, (uint32_t)len, "gr_v_cg") >= 0);
+        ASSERT(find_channel_(blob, (uint32_t)len, "gr_joined") >= 0);
+        printf("  a reward, a terminal and a termination predicate over "
+               "`gr_v_cg` and `gr_joined` compile: OK\n");
+        s.destroy(env);
+        dlclose(so);
+    }
+    n_pass++;
+
     /* ---- 10. the shipped programs, against the prior binary ------- *
      *
      * The compiler from the commit before this work is built here and
